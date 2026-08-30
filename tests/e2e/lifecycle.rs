@@ -2249,11 +2249,13 @@ fn a_merge_path_that_never_answers_settles_the_node_saying_where_the_work_is() {
 /// than reads differently. The pin is carried by `Cargo.toml`'s `onevcs`
 /// requirement, and the reason is with it.
 ///
-/// Best-effort is not silent, which this journey is also the one place to hold:
-/// the refusal names a session still holding a worktree and the verb that
-/// releases it, and an operator who is never told has a session nothing will
-/// ever close. This is the only journey where a close is refused for a reason
-/// the world states, so it is where the refusal is read.
+/// It is also the one journey where a close is **refused for a reason the world
+/// states**, so it is where the ask that follows the refusal is held. `onevcs`
+/// copies the stray ref out *before* it declines to reap the worktree, so the
+/// second ask has nothing left to refuse over — and the terminator in the merged
+/// store is the only evidence that ask was made at all. Held here rather than
+/// left to the close's own return value, because a run that stopped at the first
+/// refusal leaves a session holding a worktree on the host and settles green.
 ///
 /// The dispatch's own work is published as it always is — the side branch is cut
 /// and left before the worker writes anything on the session's branch — so this
@@ -2272,10 +2274,7 @@ fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
     world.script("service.work", "the worker wrote this\n");
 
     let (run, launched) = driven(&world, "straywork", vec![lifecycle("service", &[])]);
-    launched
-        .settled()
-        .err_has("was not released")
-        .err_has("onevcs recoverable");
+    launched.settled();
     let result = world.run_json(&run, "result.json");
     let node = result["nodes"][0].clone();
     // The node did its own job: the session's branch published and landed, which
@@ -2295,6 +2294,16 @@ fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
         git(&world, &repo.checkout, &["log", "--format=%s", "-1", CUT]).trim(),
         "chore: work the session's branch does not carry",
         "the branch handed back is not the one the worker committed on"
+    );
+
+    // And the session was released anyway. Its first close is the refused one
+    // above; the terminator says the ask was made again once the stray work was
+    // reachable outside the worktree, and answered. Without it the node settles
+    // green having left a worktree on the host that nothing will ever reap.
+    assert!(
+        !world.events_of(&run, "session-closed").is_empty(),
+        "the session whose first close was refused was never released\n{}",
+        why(&world, &run)
     );
 }
 
