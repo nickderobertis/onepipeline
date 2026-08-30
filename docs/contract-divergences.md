@@ -2398,9 +2398,11 @@ are unchanged.
 is a *name* and a normalised *category*, a `project copy` carries both, and a
 destination refuses a pair it would read differently — so a name outside that
 seven-word vocabulary can only be written where the destination normalises it the
-same way this shadow does. Four of these six words *are* the category and are
-unaffected. The other four are names the vocabulary has none of: a store that does
-not know one reads it as the `unknown` category and keeps the name, which is what
+same way this shadow does. Four of the eight words this projection writes *are* a
+category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected. The
+other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
+vocabulary has none of: a store that does not know one reads it as the `unknown`
+category and keeps the name, which is what
 the shadow source's own default mapping produces, so the copy is accepted and the
 word arrives. The alternative — writing `failed` under the `done` category —
 requires the operator's own store to declare that mapping first, and until it did,
@@ -2426,10 +2428,10 @@ run settled identically either way. A failed projection now also raises a
 non-blocking planner surface naming the project, the items it was carrying and the
 reason. It still changes no ruling, no settlement and no scheduling decision.
 
-What diverges is the projected vocabulary — six words where the contract names
-four — and the two reserved keys beside the settlement. Everything else the
-sentence promises is unchanged.
+What diverges is the projected vocabulary — 8 words where the contract names 4 —
+and the 3 reserved keys beside the settlement. Everything else the sentence
+promises is unchanged.
 
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
-`store::a_landed_node_is_closed_carrying_the_change_that_closed_it`, and
+`store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
 `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.

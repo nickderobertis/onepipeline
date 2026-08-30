@@ -92,14 +92,14 @@ struct Snapshot {
     dir: PathBuf,
     nodes: BTreeMap<String, Node>,
     statuses: BTreeMap<String, NodeStatus>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] these three are copies of
-    // `RunState`'s own fields, each of which records there why it is the plain string
-    // every identifier in this crate is: an outcome is the *harness's* open vocabulary
-    // and a set declared here would refuse a classification that layer added, a landing
-    // commit is checked where it enters by `vcs::landing_commit_of`, and a change URL is
-    // the sibling's own and never minted here. Narrowing a copy of a field the crate
-    // holds unnarrowed would put a type on this side of a boundary the other side does
-    // not have.
+    // llmlint: ignore-block[invalid_states_unrepresentable] the string-keyed maps below are
+    // copies of `RunState`'s own fields, each of which records there why its value is the
+    // plain string every identifier in this crate is: an outcome is the *harness's* open
+    // vocabulary and a set declared here would refuse a classification that layer added, a
+    // landing commit is checked where it enters by `vcs::landing_commit_of`, and a change
+    // URL is the sibling's own and never minted here. Narrowing a copy of a field the crate
+    // holds unnarrowed would put a type on this side of a boundary the other side does not
+    // have.
     /// The named outcome each settled node carries, which is what tells a
     /// provider death from a task the agent failed. Both settle `failed`.
     outcomes: BTreeMap<String, String>,
@@ -1070,16 +1070,30 @@ mod tests {
     #[test]
     fn every_word_and_key_this_projection_writes_is_named_by_the_divergence() {
         let divergence = include_str!("../docs/contract-divergences.md");
-        for word in every_projected_word() {
+        let words = every_projected_word();
+        for word in &words {
             assert!(
                 divergence.contains(&format!("`{word}`")),
                 "docs/contract-divergences.md does not name the projected status `{word}`"
             );
         }
-        for key in [LANDING_KEY, LANDING_COMMIT_KEY, CHANGE_URL_KEY] {
+        let keys = [LANDING_KEY, LANDING_COMMIT_KEY, CHANGE_URL_KEY];
+        for key in keys {
             assert!(
                 divergence.contains(&format!("`{key}`")),
                 "docs/contract-divergences.md does not name the reserved key `{key}`"
+            );
+        }
+        // And how many of each, because naming them all is not the same as
+        // counting them: a document that lists eight words and then says six has
+        // one sentence a reader trusts and one that is wrong.
+        for stated in [
+            format!("{} words where the contract names 4", words.len()),
+            format!("the {} reserved keys beside the settlement", keys.len()),
+        ] {
+            assert!(
+                divergence.contains(&stated),
+                "docs/contract-divergences.md does not say \"{stated}\""
             );
         }
     }
