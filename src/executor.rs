@@ -656,7 +656,7 @@ mod tests {
     /// Every dispatch is given a directory of its own, and no two are given one.
     ///
     /// The end-to-end halves are `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`
-    /// and `scratch::two_dispatches_of_one_node_are_given_two_directories_and_neither_is_taken_away`,
+    /// and `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`,
     /// which read the value out of a real dispatch's own environment. What is held
     /// here is the promise itself, against the real filesystem: two dispatches of
     /// one node — the pair a retry produces, and the pair that agree on every name
