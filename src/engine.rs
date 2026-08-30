@@ -2923,19 +2923,11 @@ fn report_unprojected(
     journal: &mut Journal,
     writeback: &crate::writeback::Writeback,
 ) -> Result<()> {
-    for failure in writeback.unprojected() {
+    for failure in writeback.take_unprojected() {
         raise(paths, journal, unprojected_surface(&failure))?;
     }
     Ok(())
 }
-
-/// How many of a failed projection's items one surface names before it counts
-/// the rest.
-///
-/// A plan is a whole project's worth of nodes and the planner reads this in a
-/// terminal, so the list is bounded here rather than by [`bounded`] truncating
-/// the sentence that follows it.
-const ITEMS_NAMED: usize = 20;
 
 /// One line of whatever a producer said, with its own runs of whitespace closed
 /// up.
@@ -2945,17 +2937,7 @@ fn one_line(said: &str) -> String {
 
 /// The finding one failed projection raises.
 fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
-    let named: Vec<&str> = failure
-        .items
-        .iter()
-        .take(ITEMS_NAMED)
-        .map(String::as_str)
-        .collect();
-    let rest = failure.items.len().saturating_sub(named.len());
-    let items = match rest {
-        0 => named.join(", "),
-        rest => format!("{}, and {rest} more", named.join(", ")),
-    };
+    let items = failure.items.join(", ");
     Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::Finding.as_str().into(),
@@ -2965,7 +2947,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
              reason: {reason}\n\
              The run itself is unaffected — nothing was settled, scheduled or failed on \
              this — but the project is behind what the run recorded until it is fixed.",
-            project = bounded(&failure.project),
+            project = bounded(failure.project.as_str()),
             items = bounded(&items),
             // On one line, because the line above it is what a reader scans: a
             // sibling's refusal is several lines of its own and one of them is

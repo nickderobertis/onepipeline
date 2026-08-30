@@ -80,6 +80,14 @@ struct Snapshot {
     dir: PathBuf,
     nodes: BTreeMap<String, Node>,
     statuses: BTreeMap<String, NodeStatus>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] these three are copies of
+    // `RunState`'s own fields, each of which records there why it is the plain string
+    // every identifier in this crate is: an outcome is the *harness's* open vocabulary
+    // and a set declared here would refuse a classification that layer added, a landing
+    // commit is checked where it enters by `vcs::landing_commit_of`, and a change URL is
+    // the sibling's own and never minted here. Narrowing a copy of a field the crate
+    // holds unnarrowed would put a type on this side of a boundary the other side does
+    // not have.
     /// The named outcome each settled node carries, which is what tells a
     /// provider death from a task the agent failed. Both settle `failed`.
     outcomes: BTreeMap<String, String>,
@@ -89,6 +97,7 @@ struct Snapshot {
     landing_commits: BTreeMap<String, String>,
     /// Where a person reads the change a node published.
     change_urls: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     settlements: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,
 }
@@ -104,7 +113,11 @@ struct Snapshot {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Unprojected {
     /// The onetaskgraph project the projection could not reach.
-    pub project: String,
+    pub project: QualifiedId,
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain string every
+    // identifier in this crate is, for the reason `NodeResult::superseded_by` records: these
+    // are the ids of the plan this run is executing, read straight off the snapshot the
+    // worker was projecting, and the only thing done with them is naming them on a surface.
     /// The items it was carrying, by plan node id.
     pub items: Vec<String>,
     /// What the sibling, or this worker, said went wrong.
@@ -222,12 +235,12 @@ impl Writeback {
         }
     }
 
-    /// Take the projections that failed since this was last asked.
+    /// Take the projections that failed since this was last asked, clearing them.
     ///
     /// Draining rather than reading: each failure is the planner's to hear once,
     /// and the caller raises it. A worker that recovers does not withdraw one —
     /// what it says is that the board was behind, which stays true.
-    pub fn unprojected(&self) -> Vec<Unprojected> {
+    pub fn take_unprojected(&self) -> Vec<Unprojected> {
         let (lock, _) = &*self.pending;
         lock.lock()
             .map(|mut pending| std::mem::take(&mut pending.unprojected))
@@ -328,7 +341,7 @@ fn worker(
                 let Ok(mut state) = lock.lock() else { return };
                 if first {
                     state.unprojected.push(Unprojected {
-                        project: snapshot.project.as_str().to_owned(),
+                        project: snapshot.project.clone(),
                         items: snapshot.nodes.keys().cloned().collect(),
                         reason: error,
                     });
@@ -866,16 +879,9 @@ fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
 /// The word one node's state is written onto its destination item's status.
 ///
 /// A onetaskgraph status is a **name** and a normalised **category**, and this is
-/// the name. Four of these are the category's own word, which is what makes them
-/// the categories `docs/contract.md` names; the rest are words that vocabulary
-/// has none of, and a store that does not know one reads it as the `unknown`
-/// category and keeps the name. That is the trade this makes, and
-/// `docs/contract-divergences.md` records it: a copy carries the name and the
-/// category together and the destination refuses a pair it would read
-/// differently, so a distinct word can only be one the destination normalises
-/// the same way this shadow does — and every projection after a node failed
-/// would otherwise be refused outright. The alternative is what this replaces,
-/// where `done` covered a node whose work was thrown away.
+/// the name — four of these are a category's own word and the rest are words that
+/// vocabulary has none of. `docs/contract-divergences.md` records what that costs
+/// and why it is the cheaper of the two.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 enum ProjectedStatus {
     #[serde(rename = "in progress")]

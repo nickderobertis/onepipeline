@@ -117,7 +117,7 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
         // The title a person gave the board, which is not the identifier the store holds
         // it under and is not derivable from it.
         let titled = format!("Ship {name}, as a person titled it");
-        let identifier = crate::harness::project_file(name);
+        let identifier = crate::harness::project_id(name);
         let path = world
             .store()
             .join("projects")
@@ -301,7 +301,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
         &world
             .store()
             .join("projects")
-            .join(format!("{}.md", crate::harness::project_file(name))),
+            .join(format!("{}.md", crate::harness::project_id(name))),
         &["roadmap"],
     );
     for file in ["000-work.md", "001-later.md"] {
@@ -309,14 +309,14 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
             &world
                 .store()
                 .join("tasks")
-                .join(crate::harness::project_file(name))
+                .join(crate::harness::project_id(name))
                 .join(file),
             &["needs-review"],
         );
     }
     // The same folder of Markdown, reached through the strict destination rather than
     // directly, which is the project this run launches from.
-    let project = format!("strict:{}", crate::harness::project_file(name));
+    let project = format!("strict:{}", crate::harness::project_id(name));
     let before = world.store_project(&project)["items"][0]["item"].clone();
     let labels_before = world.store_task_labels(&project);
     assert_eq!(
@@ -602,6 +602,31 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
         world.events_of("writeback-retry", "node-dispatched").len(),
         2,
         "recovering terminal write-back changed execution"
+    );
+
+    // Each outage reached the planner **once**, not once per retry: the worker retries
+    // until the store returns, and a surface for every attempt would bury the first. Held
+    // against the driver's own report of the same episodes rather than against a number,
+    // so an outage this journey did not arrange still has to agree.
+    let log = std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+        .expect("the driver log is readable");
+    let episodes = log.matches("onetaskgraph write-back failed").count();
+    let raised = world
+        .events_of("writeback-retry", "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("did not take this run's projection"))
+        })
+        .count();
+    assert!(
+        episodes >= 2,
+        "the journey arranged no second outage:\n{log}"
+    );
+    assert_eq!(
+        raised, episodes,
+        "the planner heard {raised} times about {episodes} outages:\n{log}"
     );
 }
 
@@ -1837,11 +1862,7 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
 }
 
 /// The word each node reached the board under, by node id, read back through the real
-/// store binary.
-///
-/// The status **name** rather than its normalised category: four of the six words this
-/// projection writes are names onetaskgraph's seven-word vocabulary has none of, and
-/// `docs/contract-divergences.md` records why the name is what carries the distinction.
+/// store binary: the status **name** rather than its normalised category.
 fn projected_words(world: &World, project: &str) -> BTreeMap<String, String> {
     world
         .store_tasks(project)
@@ -2027,12 +2048,21 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
             "the surface does not name the item {item}: {message}"
         );
     }
+    // The reason, on **one** line. What the sibling refused with is several lines of its
+    // own and the last of them is the `next:` it ends with, which read as this surface's
+    // own advice — so the whole message is four lines, one of which is the reason.
+    let reason = message
+        .lines()
+        .find_map(|line| line.strip_prefix("reason: "))
+        .unwrap_or_else(|| panic!("the surface names no reason: {message}"));
+    assert_eq!(
+        message.lines().count(),
+        4,
+        "a multi-line refusal was carried onto the surface as it was spelled: {message}"
+    );
     assert!(
-        message.contains("reason:")
-            && message
-                .lines()
-                .any(|line| line.starts_with("reason: ") && line.len() > "reason: ".len()),
-        "the surface names no reason: {message}"
+        reason.contains("next:"),
+        "the surface dropped what the store said rather than carrying it on one line: {reason}"
     );
 
     // And it is on the queue the planner actually reads, not only in the journal.
@@ -2068,6 +2098,11 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
 /// whose native id was its own title, a right answer and a wrong answer were the same
 /// bytes. A check that passed such a fixture would be the thing it exists to prevent, so
 /// each degenerate shape is stated here and the check has to name it.
+// llmlint: ignore[tests_mirror_real_usage] there is no user-facing command behind this and
+// deliberately so: what it holds is the rule the *fixtures* of this suite are built to, and
+// the only way to prove that rule can fail is to hand it a fixture that breaks it. Driving
+// the CLI here would exercise the projection this rule exists to make checkable, which
+// every journey above already does.
 #[test]
 fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refused() {
     let world = World::new("store-fixture-rule");
@@ -2118,7 +2153,7 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
     named(
         &world.root.join("nothing-here"),
         "nothing-here",
-        "holds no projects directory",
+        "its projects directory could not be read",
     );
 }
 
@@ -2145,6 +2180,10 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
 /// Waiting for a projection to arrive is a different thing and stays allowed: a predicate
 /// handed to `until_store` is a condition to wait on, and the assertions follow it. So
 /// what is checked is the assertion macros alone, and this names any that remain.
+// llmlint: ignore[tests_mirror_real_usage] the subject here is this file's own assertions,
+// which is the only place the defect lives: an assertion that passes whatever the projection
+// wrote cannot be caught by running anything, because it passes. Nothing about the crate
+// under test is asserted, and nothing about it could be.
 #[test]
 fn no_write_back_assertion_is_a_bare_presence_check_over_projected_metadata() {
     let source = include_str!("store.rs");
