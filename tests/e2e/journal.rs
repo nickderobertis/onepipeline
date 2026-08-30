@@ -218,14 +218,19 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
     assert_eq!(status("after"), "done");
     // The superseded node left the graph with the same edit that replaced it —
     // left in, it would hold the run in `waiting` for work nothing will ever
-    // dispatch again. What became of it is in the journal, where the edit is.
-    assert!(
+    // dispatch again, and the run below settled `complete` instead. What became
+    // of it is reported all the same, as the supersession it was rather than as
+    // the failure its last dispatch scored.
+    assert_eq!(status("flaky"), "cancelled", "{executed}");
+    assert_eq!(
         executed["nodes"]
             .as_array()
             .expect("nodes")
             .iter()
-            .all(|node| node["id"] != "flaky"),
-        "the superseded node is still in the graph: {executed}"
+            .find(|node| node["id"] == "flaky")
+            .expect("the run's result says what became of the node it superseded")["superseded_by"],
+        "flaky-2",
+        "{executed}"
     );
     let superseded = world
         .events_of("record", "node-settled")

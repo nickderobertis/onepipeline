@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "run_id": "golden",
   "state": "complete",
   "ok": true,
@@ -30,6 +30,13 @@
     {
       "id": "built",
       "status": "done"
+    },
+    {
+      "id": "replaced",
+      "status": "cancelled",
+      "outcome": "task-failed",
+      "branch": "onepipeline/replaced",
+      "superseded_by": "replaced-2"
     }
   ]
 }

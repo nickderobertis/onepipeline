@@ -184,17 +184,20 @@ const POLL: Duration = Duration::from_millis(25);
 /// back**, so the number is a statement to its consumers rather than to a reader
 /// here.
 ///
-/// `4` is this document: `3` plus every node's [`cause`](NodeResult::cause) and
-/// [`head`](NodeResult::head), the two a settlement carries when a dispatch ended
-/// for a reason that is not the agent's verdict on its task. Both are omitted
-/// when they are empty, so a `4` node states nothing extra to a consumer whose
-/// nodes carry neither — but the number moves anyway, because the document now
-/// states something a `3` reader has no field for. `3` was one result per run,
-/// carrying no round and every node's [`landing`](NodeResult::landing). `2` and
-/// `1` were the per-round `round-NN/result.json` — `1` unversioned and saying
-/// only that a node had settled, `2` where a landing was first recorded — and
-/// both named a round that continuous execution does not have.
-pub const RUN_RESULT_SCHEMA_VERSION: u32 = 4;
+/// `5` is this document: `4` plus the nodes a `retry` superseded, each carrying
+/// the replacement that took its place as
+/// [`superseded_by`](NodeResult::superseded_by). Those nodes were in no earlier
+/// version at all — a supersession takes the node out of the graph and the
+/// document was built from the graph — so the number moves for what the document
+/// now *holds* as much as for the key it added. `4` was `3` plus every node's
+/// [`cause`](NodeResult::cause) and [`head`](NodeResult::head), the two a
+/// settlement carries when a dispatch ended for a reason that is not the agent's
+/// verdict on its task. `3` was one result per run, carrying no round and every
+/// node's [`landing`](NodeResult::landing). `2` and `1` were the per-round
+/// `round-NN/result.json` — `1` unversioned and saying only that a node had
+/// settled, `2` where a landing was first recorded — and both named a round that
+/// continuous execution does not have.
+pub const RUN_RESULT_SCHEMA_VERSION: u32 = 5;
 
 /// Read the version, refusing every number this build did not write.
 ///
@@ -364,6 +367,26 @@ pub struct NodeResult {
     /// produced no branch at all, and one whose branch nothing committed to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain string
+    // every identifier on this record already is — `id` above all — for the reason the
+    // block above states of `cause` and `head`: this is the *wire* shape of a document
+    // builds other than this one parse. The value is not unchecked either: it is a
+    // replacement id the reconciler validated against the live graph — non-blank, and not
+    // already taken — before it committed the retry that produced it.
+    /// The node that was retried in this one's place, when a `retry` superseded
+    /// it.
+    ///
+    /// The one field on this record that says a node is **not** the run's to act
+    /// on — see [`crate::projection::RunState::superseded`] for what it reads as
+    /// without one. [`status`](Self::status) is `cancelled` beside it, which is
+    /// what happened to the *dispatch*, while this is what happened to the
+    /// *node*. Absent on every node nothing superseded, and omitted when absent
+    /// so a consumer branches on the key rather than on a field that is there for
+    /// every node and meaningless for most. This field is what
+    /// [`RUN_RESULT_SCHEMA_VERSION`] `5` records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -2637,7 +2660,8 @@ fn watch_for_quiet(
 /// has got to rather than what one round did.
 fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Result<RunResult> {
     let statuses = state.statuses();
-    let nodes = state
+    let landings = landings_after_asking_again(state);
+    let mut nodes: Vec<NodeResult> = state
         .graph
         .iter()
         .map(|node| {
@@ -2649,7 +2673,7 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
                 id: node.id.clone(),
                 status,
                 outcome: state.outcomes.get(&node.id).cloned(),
-                landing: state.landings.get(&node.id).copied(),
+                landing: landings.get(&node.id).copied(),
                 action: (status == NodeStatus::Waiting)
                     .then(|| node.task.clone())
                     .flatten(),
@@ -2674,9 +2698,14 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
                 change_url: state.change_urls.get(&node.id).cloned(),
                 cause: state.causes.get(&node.id).cloned(),
                 head: state.heads.get(&node.id).cloned(),
+                // Every node the graph still holds is one nothing superseded:
+                // the supersession removes the node it replaced in the same
+                // edit, so the two lists cannot overlap.
+                superseded_by: None,
             }
         })
         .collect();
+    nodes.extend(superseded_results(state, &landings));
 
     let result = RunResult {
         run_id: paths.run.clone(),
@@ -2685,6 +2714,71 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
     };
     ledger::write_json(&paths.result(), &result)?;
     Ok(result)
+}
+
+/// Every node's landing after the run has asked again about the ones that had
+/// not landed.
+///
+/// Named for the asking rather than for the answer: a change
+/// [`crate::vcs::proved_landed`] shows nothing about keeps the claim its
+/// settlement made, so the map is not uniformly fresh and a name promising "now"
+/// would say otherwise of it.
+///
+/// A settlement's `landing` is an observation of a moment, and the run neither
+/// blocks nor polls for a merge somebody else owns — so a change merged while the
+/// run was still going was reported at the end as work that had reached nobody.
+/// This is the last thing the run will ever say about the node, and the reader
+/// acts on it.
+///
+/// **Asked only of the changes that had not landed**, and only where the run
+/// recorded the branch to ask about, so a run whose every change merged asks
+/// nothing.
+fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
+    let mut landings = state.landings.clone();
+    let unlanded: Vec<String> = landings
+        .iter()
+        .filter(|(_, landing)| **landing == Landing::Unlanded)
+        .map(|(node, _)| node.clone())
+        .collect();
+    for node in unlanded {
+        let Some(branch) = state.branches.get(&node) else {
+            continue;
+        };
+        if crate::vcs::proved_landed(branch) {
+            landings.insert(node, Landing::Landed);
+        }
+    }
+    landings
+}
+
+/// The nodes a `retry` replaced, as the run's own result records them.
+///
+/// **After the graph's own nodes, because they are no longer in it** — see
+/// [`crate::projection::RunState::superseded`] for what a document built from
+/// the graph alone therefore said about them. Everything each node left behind
+/// rides along unchanged; the status is `cancelled`, which is what the retry's
+/// own stop has always recorded, and
+/// [`superseded_by`](NodeResult::superseded_by) is what separates it from a
+/// `drop`, which leaves the same word.
+fn superseded_results(state: &RunState, landings: &BTreeMap<String, Landing>) -> Vec<NodeResult> {
+    state
+        .superseded
+        .iter()
+        .map(|(id, replacement)| NodeResult {
+            id: id.clone(),
+            status: NodeStatus::Cancelled,
+            outcome: state.outcomes.get(id).cloned(),
+            landing: landings.get(id).copied(),
+            action: None,
+            unblocks: Vec::new(),
+            blocked_by: Vec::new(),
+            branch: state.branches.get(id).cloned(),
+            change_url: state.change_urls.get(id).cloned(),
+            cause: state.causes.get(id).cloned(),
+            head: state.heads.get(id).cloned(),
+            superseded_by: Some(replacement.clone()),
+        })
+        .collect()
 }
 
 /// The ready human references a blocked node is transitively gated by.
@@ -3121,8 +3215,8 @@ mod tests {
         }
     }
 
-    /// The checked-in shape of a schema-4 run result.
-    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v4.json");
+    /// The checked-in shape of a schema-5 run result.
+    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v5.json");
 
     use serde_json::Value;
 
@@ -3140,18 +3234,21 @@ mod tests {
             change_url: None,
             cause: None,
             head: None,
+            superseded_by: None,
         }
     }
 
     /// The document the golden pins, built through the types.
     ///
-    /// Four nodes because each pins a case the wire has and the others do not.
+    /// Five nodes because each pins a case the wire has and the others do not.
     /// The landing has three — a change observed on its base, one that had not
     /// reached it, and a node with no change of its own, which carries no
     /// `landing` key at all — and a golden carrying one of them would pin a third
     /// of that change. The fourth is a dispatch that died: the one node carrying a
-    /// `cause` and a `head`, which is what schema `4` added and what every other
-    /// node here omits.
+    /// `cause` and a `head`, which is what schema `4` added. The fifth is a node a
+    /// `retry` superseded, which is what schema `5` added — the one node here that
+    /// is not in the run's graph at all, and the one carrying `superseded_by`,
+    /// which every other node omits.
     fn run_result_golden() -> RunResult {
         RunResult {
             run_id: "golden".into(),
@@ -3184,19 +3281,27 @@ mod tests {
                     ..settled("died")
                 },
                 settled("built"),
+                NodeResult {
+                    id: "replaced".into(),
+                    status: NodeStatus::Cancelled,
+                    outcome: Some(TASK_FAILED.into()),
+                    branch: Some("onepipeline/replaced".into()),
+                    superseded_by: Some("replaced-2".into()),
+                    ..settled("replaced")
+                },
             ],
         }
     }
 
     /// The shape a run result is written as, pinned to the checked-in golden.
     #[test]
-    fn a_schema_4_run_result_is_the_shape_the_golden_pins() {
+    fn a_schema_5_run_result_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&run_result_golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             RUN_RESULT_GOLDEN.trim(),
             "the run result changed shape. If that was deliberate, bump \
-             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v4.json together"
+             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v5.json together"
         );
     }
 
@@ -3208,7 +3313,7 @@ mod tests {
     /// published nothing would have every consumer branching on a field that is
     /// always present and usually meaningless.
     #[test]
-    fn a_schema_4_run_result_round_trips_and_omits_what_it_does_not_have() {
+    fn a_schema_5_run_result_round_trips_and_omits_what_it_does_not_have() {
         let value = run_result_golden();
         let read: RunResult =
             serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden reads back into the types");
@@ -3228,13 +3333,25 @@ mod tests {
             "a node with no change to land carries a landing key anyway: {}",
             document["nodes"][2]
         );
+        // And the same for the key schema `5` added: it is on the one node a
+        // retry replaced and on none of the four the graph still holds, so a
+        // consumer branches on its presence rather than on a field that is there
+        // for every node and meaningless for most.
+        assert_eq!(document["nodes"][4]["superseded_by"], json!("replaced-2"));
+        for at in 0..4 {
+            assert!(
+                document["nodes"][at].get("superseded_by").is_none(),
+                "a node nothing superseded carries a superseded_by key anyway: {}",
+                document["nodes"][at]
+            );
+        }
     }
 
     /// The version is a decision, not an accident: it moves when the shape does,
     /// and the golden is named for the one it pins.
     #[test]
     fn the_run_result_schema_version_and_the_golden_name_the_same_number() {
-        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 4);
+        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 5);
         let document: Value = serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden is JSON");
         assert_eq!(document["schema_version"], RUN_RESULT_SCHEMA_VERSION);
         assert!(
@@ -3266,11 +3383,12 @@ mod tests {
             copy
         };
 
-        // Above is a build that knows more than this one. `3` is this document
-        // before it carried a cause, `2` and `1` the per-round document that shape
-        // replaced, and `0` a number this crate has never written, so each came
-        // from somewhere that is not this contract.
-        for outside in [RUN_RESULT_SCHEMA_VERSION + 1, 3, 2, 1, 0] {
+        // Above is a build that knows more than this one. `4` is this document
+        // before it carried the nodes a retry superseded, `3` before it carried a
+        // cause, `2` and `1` the per-round document that shape replaced, and `0` a
+        // number this crate has never written, so each came from somewhere that is
+        // not this contract.
+        for outside in [RUN_RESULT_SCHEMA_VERSION + 1, 4, 3, 2, 1, 0] {
             let claimed = edit(&document, &|object| {
                 object.insert("schema_version".into(), json!(outside));
             });
