@@ -1,6 +1,7 @@
 ---
-title: "single-node"
+title: "Cover the report failures"
 metadata:
+  "onepipeline.name": "single-node"
   "onepipeline.schema_version": 3
   "onepipeline.goal":
     "text": "Close one coverage gap in the reporting service"

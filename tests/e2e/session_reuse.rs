@@ -538,7 +538,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     // It continued the branch the stopped run left its work on, rather than
     // cutting one beside it. Not that run's own session: the launch's concurrency
     // interlock forgets the record `open_session` would have taken up, which
-    // divergence entry 50 raises with `onevcs`.
+    // divergence entry 51 raises with `onevcs`.
     let taken = opened(&world, "retry");
     assert!(
         taken["payload"]["token"].is_string(),

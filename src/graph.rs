@@ -1033,7 +1033,7 @@ mod tests {
     ///
     /// A node status and a publication outcome, and both are private vocabulary —
     /// `graph` and `vcs` are engine modules, so `tests/contract.rs`, which drives
-    /// the published surface, cannot reach either and entry 50 is the only place
+    /// the published surface, cannot reach either and entry 51 is the only place
     /// they are written down. Held both directions, and against the contract as
     /// well: a word this build grows without a line in that entry fails here, one
     /// the entry names that this build no longer spells fails here, and one the
@@ -1045,19 +1045,19 @@ mod tests {
             .expect("the divergence record ships");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("50."))
-            .expect("the record still carries entry 50");
+            .find(|entry| entry.starts_with("51."))
+            .expect("the record still carries entry 51");
         let block: serde_json::Value = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .and_then(|block| serde_json::from_str(block).ok())
-            .expect("entry 50 carries the json block this test drives");
+            .expect("entry 51 carries the json block this test drives");
         let contract =
             std::fs::read_to_string(docs.join("contract.md")).expect("the contract ships");
 
         let statuses: Vec<String> = serde_json::from_value(block["node_statuses"].clone())
-            .expect("entry 50 names the node statuses it adds");
+            .expect("entry 51 names the node statuses it adds");
         // Every status this build spells that the contract does not mention **at
         // all** — read off the enum through the same `parse`/`as_str` pair the
         // journal is written and read back with, so a word only one of the two
@@ -1073,7 +1073,7 @@ mod tests {
         assert_eq!(
             undocumented, statuses,
             "the statuses this build carries that docs/contract.md does not name are not entry \
-             50's"
+             51's"
         );
         for word in &statuses {
             assert_eq!(
@@ -1084,11 +1084,11 @@ mod tests {
         }
 
         let outcomes: Vec<String> = serde_json::from_value(block["outcomes"].clone())
-            .expect("entry 50 names the outcome it adds");
+            .expect("entry 51 names the outcome it adds");
         assert_eq!(
             outcomes,
             vec![crate::vcs::DRAFTED.to_string()],
-            "entry 50 names a different outcome than a drafted publication settles on"
+            "entry 51 names a different outcome than a drafted publication settles on"
         );
         for word in &outcomes {
             assert!(

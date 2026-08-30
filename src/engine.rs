@@ -704,6 +704,7 @@ fn converge(
         reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)?;
         if let Some(writeback) = &writeback {
             writeback.publish(paths, launch, state);
+            report_unprojected(paths, journal, writeback)?;
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
@@ -896,10 +897,23 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
+    // terminal projection failing and the surface reaching the planner before the run
+    // settles. What it cannot drive is a projection *slow* enough to outlast this bounded
+    // window without failing: that needs the real sibling suspended mid-command, which is
+    // host-level process control rather than an input either CLI exposes, and the window
+    // itself is the best-effort boundary the contract already fixes — a store that has not
+    // answered has said nothing to report.
     if let Some(writeback) = &writeback {
         writeback.publish(paths, launch, state);
         writeback.wait_briefly();
+        // The last thing this loop does, and the reason it is here rather than
+        // only at the top: a run whose *terminal* projection failed is exactly
+        // the run that settles and is read as the record of what happened, so
+        // the failure has to reach the planner before this driver stops.
+        report_unprojected(paths, journal, writeback)?;
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(graph::state_of(&state.statuses()))
 }
 
@@ -2929,6 +2943,62 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         workstream: Some(checked.node.as_str().to_owned()),
+    }
+}
+
+/// Raise every projection that failed since this was last asked.
+///
+/// What it raises is **non-blocking**: a board that is behind holds no dependents
+/// back, because the projection is best effort by contract and a store that
+/// refused a write is not a node settlement and not a scheduling decision. What
+/// it *is* is a board that no longer says what happened, which nothing else tells
+/// anybody — the worker's own report is one line on the driver's standard error,
+/// and a detached run writes that to a log nobody opens.
+///
+/// A [`raise`] that *fails* is propagated, exactly as every other one in this
+/// loop is: that is the run's own ledger refusing a write, which is not this
+/// worker's news arriving badly but the record this driver holds the lock on
+/// being unwritable.
+fn report_unprojected(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    writeback: &crate::writeback::Writeback,
+) -> Result<()> {
+    for failure in writeback.take_unprojected() {
+        raise(paths, journal, unprojected_surface(&failure))?;
+    }
+    Ok(())
+}
+
+/// One line of whatever a producer said, with its own runs of whitespace closed
+/// up.
+fn one_line(said: &str) -> String {
+    said.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The finding one failed projection raises.
+fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
+    let items = failure.items.join(", ");
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: format!(
+            "the onetaskgraph project '{project}' did not take this run's projection.\n\
+             items: {items}\n\
+             reason: {reason}\n\
+             The run itself is unaffected — nothing was settled, scheduled or failed on \
+             this — but the project is behind what the run recorded until it is fixed.",
+            project = bounded(failure.project.as_str()),
+            items = bounded(&items),
+            // On one line, because the line above it is what a reader scans: a
+            // sibling's refusal is several lines of its own and one of them is
+            // the `next:` it ends with, which read as this surface's own advice.
+            reason = bounded(&one_line(&failure.reason)),
+        ),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: None,
     }
 }
 
