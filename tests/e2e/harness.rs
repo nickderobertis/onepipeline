@@ -2779,34 +2779,11 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let document = match std::fs::read_to_string(&path) {
-            Ok(document) => document,
-            Err(error) => {
-                return Some(format!(
-                    "fixture '{identifier}': its project document could not be read ({error})"
-                ))
-            }
-        };
-        let front = document
-            .strip_prefix("---\n")
-            .and_then(|rest| rest.split_once("---\n"))
-            .map(|(front, _)| front)
-            .ok_or_else(|| "its project document has no front matter".to_owned())
-            .and_then(|front| {
-                serde_norway::from_str::<serde_json::Map<String, Value>>(front)
-                    .map_err(|error| format!("its front matter is not a mapping ({error})"))
-            });
-        let front = match front {
-            Ok(front) => front,
+        let title = match settled_title(&path) {
+            Ok(title) => title,
             Err(why) => return Some(format!("fixture '{identifier}': {why}")),
         };
-        let Some(title) = front.get("title").and_then(Value::as_str) else {
-            return Some(format!(
-                "fixture '{identifier}': its project states no title, so there is nothing for \
-                 an identifier to differ from"
-            ));
-        };
-        projects.push((identifier, title.to_owned()));
+        projects.push((identifier, title));
     }
     if projects.len() < 2 {
         return Some(format!(
@@ -2824,6 +2801,67 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// One project document's title, read once the store has finished writing it.
+///
+/// **Read again rather than believed the first time**, because the store this reads is
+/// one live runs write to. A run projects its nodes back onto the store it launched
+/// from by handing `onetaskgraph` a `project copy`, and that store's writer replaces a
+/// document in place — it truncates the file and then writes it again — so a read taken
+/// between those two halves is an empty document with no front matter on it. Every
+/// journey that launches a second run against a store an earlier run of the same
+/// journey is still settling can take one, and read once, a sound fixture is reported
+/// as one that could prove nothing: the failure names the *previous* run's board and
+/// looks nothing like the timing it is.
+///
+/// A document that never settles is still a defect, and is still named by the same four
+/// reasons — the wait only decides how long "never" is. It costs nothing in the ordinary
+/// case, where the first read answers, and the budget once for a fixture that really is
+/// malformed.
+fn settled_title(path: &Path) -> Result<String, String> {
+    let mut settled = None;
+    let mut last = "its project document was never read".to_owned();
+    waited_for(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+        || match title_of(path) {
+            Ok(title) => {
+                settled = Some(title);
+                true
+            }
+            Err(why) => {
+                last = why;
+                false
+            }
+        },
+    );
+    settled.ok_or(last)
+}
+
+/// The four ways one read of a project document answers with no title.
+///
+/// Each is both a way a fixture is malformed *and* a state the store's writer passes
+/// through mid-replacement, which is why [`settled_title`] cannot tell them apart by
+/// shape and asks again instead.
+fn title_of(path: &Path) -> Result<String, String> {
+    let document = std::fs::read_to_string(path)
+        .map_err(|error| format!("its project document could not be read ({error})"))?;
+    let front = document
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("---\n"))
+        .map(|(front, _)| front)
+        .ok_or_else(|| "its project document has no front matter".to_owned())?;
+    let front = serde_norway::from_str::<serde_json::Map<String, Value>>(front)
+        .map_err(|error| format!("its front matter is not a mapping ({error})"))?;
+    front
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            "its project states no title, so there is nothing for an identifier to differ from"
+                .to_owned()
+        })
 }
 
 /// The reserved metadata key one plan field rides on.

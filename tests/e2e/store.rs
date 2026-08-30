@@ -2150,6 +2150,70 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The rule reads a store **live runs are writing to**, and a document caught between
+/// the two halves of a replacement is not a fixture that could prove nothing.
+///
+/// A run projects its nodes back onto the store it launched from by handing
+/// `onetaskgraph` a `project copy`, and that store's writer replaces a document in
+/// place — `fs::write`, which truncates the file and then writes it again. Every
+/// journey here that launches a second run against a store an earlier run of the same
+/// journey is still settling therefore reads its project documents while something
+/// else is halfway through rewriting one, and read once, that lands as
+/// `has no front matter` against a fixture that is perfectly sound.
+///
+/// So the writer's own two halves are what this drives: a thread that alternates the
+/// empty file the truncate leaves behind with the whole document that follows it,
+/// while the rule is asked over and over. The rule has to answer for the document,
+/// not for the instant it was asked in.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the fixture rule itself
+// and the only way to show it can be asked mid-write is to write underneath it. The
+// projection this stands in for is driven for real by the journeys above.
+#[test]
+fn a_project_document_being_rewritten_underneath_the_rule_is_not_a_fixture_defect() {
+    let world = World::new("store-fixture-rule-mid-write");
+    world.plan("sound", &plan_of("sound", vec![agent("work", &[])]));
+    let store = world.store();
+
+    // The document an earlier run of the same journey is projecting onto, and the two
+    // states the store's writer leaves it in: empty, then whole.
+    let rewritten = store.join("projects").join("sound-board.md");
+    let whole = std::fs::read_to_string(&rewritten).expect("the fixture project is readable");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writing = {
+        let (rewritten, whole, stop) = (rewritten.clone(), whole.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(&rewritten, "").expect("the truncate half of a replacement");
+                std::fs::write(&rewritten, &whole).expect("the write half of a replacement");
+            }
+        })
+    };
+
+    let asked: Vec<String> = (0..200)
+        .filter_map(|_| crate::harness::undiscriminating(&store))
+        .collect();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writing.join().expect("the writer ends");
+
+    // The count and the distinct reasons: 200 copies of one reason says nothing 1 does
+    // not, and the failure is read in a CI log.
+    let distinct: std::collections::BTreeSet<&String> = asked.iter().collect();
+    assert!(
+        asked.is_empty(),
+        "a sound fixture was called a defect {} of 200 times because its store was \
+         mid-write: {distinct:?}",
+        asked.len()
+    );
+    // And the rule still has its teeth over the store it was just asked about.
+    assert_eq!(
+        crate::harness::undiscriminating(&store),
+        None,
+        "the store did not survive being rewritten"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// One project document, written straight rather than through [`World::plan`]: what is
 /// being checked here is the rule, so the fixture has to be able to break it.
 fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
