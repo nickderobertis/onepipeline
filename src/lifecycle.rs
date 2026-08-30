@@ -955,17 +955,10 @@ fn drafted(
     let mut handle = match dispatch {
         Ok(handle) => handle,
         Err(error) => {
-            // Said out loud, because a launch that named a drafting graph and
-            // silently drafted nothing is indistinguishable from one that named
-            // none — and the change request it opens carries no sign of it.
-            eprintln!(
-                "onepipeline: node '{}': the drafting dispatch could not start, \
-                 so it publishes with no body: {error}",
-                node.id
-            );
-            return Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
-                "the drafting dispatch could not start: {error}"
-            ))));
+            return Some(undrafted(
+                &node.id,
+                format!("the drafting dispatch could not start: {error}"),
+            ))
         }
     };
     let mut retained = Vec::new();
@@ -1022,14 +1015,35 @@ fn drafted(
                 crate::report::Drafted::Bodyless => Drafted::Undrafted(Undrafted::Bodyless),
             })
         }
-        Ok(outcome) => Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
-            "the drafting dispatch settled without succeeding: {}",
-            first_line(&outcome.detail)
-        )))),
-        Err(error) => Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
-            "the drafting dispatch could not be waited on: {error}"
-        )))),
+        Ok(outcome) => Some(undrafted(
+            &node.id,
+            format!(
+                "the drafting dispatch settled without succeeding: {}",
+                first_line(&outcome.detail)
+            ),
+        )),
+        Err(error) => Some(undrafted(
+            &node.id,
+            format!("the drafting dispatch could not be waited on: {error}"),
+        )),
     } // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// A drafting dispatch that produced no body because the **dispatch** failed,
+/// said out loud and then recorded.
+///
+/// Out loud for every one of those endings rather than one of them, because the
+/// reason does not distinguish between them: a launch that named a drafting graph
+/// and silently drafted nothing is indistinguishable from one that named none,
+/// and the change request it opens carries no sign of it either way. Which
+/// ending a given failure takes depends on where the dispatch runs — a graph the
+/// runner refuses is a refusal to the caller that launched it in its own process
+/// and a settlement to the one that gave it a process of its own — and an
+/// operator reading stderr must not be told only on the arms one deployment
+/// happens to reach.
+fn undrafted(node: &str, why: String) -> Drafted {
+    eprintln!("onepipeline: node '{node}': {why}, so it publishes with no body");
+    Drafted::Undrafted(Undrafted::Dispatch(why))
 }
 
 /// A dispatch's own words, as one bounded line of a settlement detail.

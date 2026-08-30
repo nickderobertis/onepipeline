@@ -217,27 +217,38 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // Empty for the observer graph's turns, which are not node dispatches and are
     // promised nothing; anything else is held to the whole promise here, where the
     // turn is.
-    let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
-    if !scratch.is_empty() {
-        let at = std::path::Path::new(&scratch);
-        if !at.is_absolute() || !at.is_dir() {
-            fake::fail(&format!(
-                "this turn was given the scratch directory {scratch:?}, which is not an \
-                 absolute path to a directory that exists"
-            ));
-        }
-        if let Err(error) = std::fs::write(at.join("turn"), &prompt) {
-            fake::fail(&format!(
-                "this turn cannot write to the scratch directory {scratch:?} it was given: \
-                 {error}"
-            ));
-        }
-    }
+    let scratch = usable_scratch(&prompt, "entered");
     fake::record(
         dir,
         "claude-turn",
-        &[prompt.clone(), cwd.display().to_string(), member, scratch],
+        &[
+            prompt.clone(),
+            cwd.display().to_string(),
+            member,
+            scratch.clone(),
+        ],
     );
+
+    // `turn.concurrent` holds every worker turn until the number of them it names
+    // are all inside their own dispatch, and then makes each one look again. A
+    // hold cannot say this: released from outside it proves only that a turn was
+    // somewhere, while a barrier releases when every party is running, so the
+    // second reading below is taken at an instant when all of them were. That is
+    // the whole of "throughout its dispatch" — a per-dispatch value that another
+    // dispatch could overwrite would be overwritten by then.
+    if !scratch.is_empty() {
+        if let Some(parties) = fake::node_script(dir, "turn", "concurrent") {
+            let parties = parties.trim().parse::<usize>().unwrap_or_else(|error| {
+                fake::fail(&format!("turn.concurrent is not a party count: {error}"))
+            });
+            // The party is the scratch directory itself, so what the barrier
+            // file holds afterwards is the set of directories that were live at
+            // one instant — the fact under test, recorded by the turns rather
+            // than inferred from them.
+            fake::barrier(&dir.join("turn.concurrent.arrived"), &scratch, parties);
+            usable_scratch(&prompt, "beside the others");
+        }
+    }
 
     // Stamp a process to the graph-run root, above this member's scratch. The
     // member's own teardown therefore leaves it alone and the graph's final
@@ -334,6 +345,44 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     result(outcome, &prompt, args, dir);
     outcome.exit_code()
+}
+
+/// The scratch directory this turn holds right now, having proved it usable.
+///
+/// A *use* rather than a look, at the moment it is called: the promise is a
+/// directory that is there and writable while the dispatch runs, and writing is
+/// the only way to find out. Each reading is recorded under the phase it was
+/// taken in, so a journey can compare two readings of one turn as well as two
+/// turns' readings of their own.
+///
+/// The empty string for a turn that was promised nothing — the observer graph's,
+/// which is not a node dispatch — and that is a reading too, recorded as one.
+fn usable_scratch(prompt: &str, phase: &str) -> String {
+    let dir = fake::script_dir();
+    let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
+    if !scratch.is_empty() {
+        let at = std::path::Path::new(&scratch);
+        if !at.is_absolute() || !at.is_dir() {
+            fake::fail(&format!(
+                "this turn was given the scratch directory {scratch:?}, which is not an \
+                 absolute path to a directory that exists"
+            ));
+        }
+        if let Err(error) =
+            std::fs::write(at.join(format!("turn-{}", fake::segment(phase))), prompt)
+        {
+            fake::fail(&format!(
+                "this turn cannot write to the scratch directory {scratch:?} it was given: \
+                 {error}"
+            ));
+        }
+    }
+    fake::record(
+        &dir,
+        "claude-scratch",
+        &[prompt.to_owned(), phase.to_owned(), scratch.clone()],
+    );
+    scratch
 }
 
 /// The prompt this turn was given.

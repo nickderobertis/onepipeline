@@ -896,6 +896,10 @@ fn launch_graph(
                 ledger::runs_root().to_string_lossy().into_owned(),
             ),
         ],
+        // Both pairs are the run's, and one driver drives one run, so one
+        // process-wide copy is this launch's own answer as well as everyone
+        // else's — which is what lets the observer stay in the driver.
+        environment: agentgraph::Environment::Shared,
         sets: &record.dag_sets,
         // The observer graph is an `oneagentgraph` launch this run starts, so
         // the run's own say over that source reaches it like any other: the

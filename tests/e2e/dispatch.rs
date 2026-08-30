@@ -717,11 +717,10 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
 /// The scratch directory a node dispatch is promised reaches the turn the
 /// **library backend** runs.
 ///
-/// The backend production takes, and the one divergence 47 says a per-dispatch
-/// pair is hard on. Read off the turn process itself, the harness child at the
-/// bottom of the stack, so what is asserted is what an agent would hold. No
-/// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, because its absence is what selects this
-/// backend.
+/// The stack production takes. Read off the turn process itself, the harness
+/// child at the bottom of it, so what is asserted is what an agent would hold.
+/// No `ONEPIPELINE_ONEAGENTGRAPH_BIN`, because its absence is what makes the
+/// graph under the dispatch this build's own rather than an installed sibling's.
 #[test]
 fn a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs() {
     let world = World::new("real-scratch");
@@ -761,6 +760,148 @@ fn a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs() {
         "by a journey standing where the turn stood",
     )
     .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+}
+
+/// Every reading a turn took of the scratch directory it was given, as
+/// `(job, phase, path)`, in the order the turns took them.
+fn scratch_readings(world: &World) -> Vec<(String, String, String)> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "claude-scratch")
+        .map(|call| {
+            let at = |n: usize| {
+                call["args"][n]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a scratch reading is three strings: {call}"))
+                    .to_string()
+            };
+            (at(0), at(1), at(2))
+        })
+        .collect()
+}
+
+/// Two dispatches running at once each hold their **own** scratch directory, and
+/// hold it for as long as they run.
+///
+/// The promise is per *dispatch*, and the only thing that can break it is another
+/// dispatch — so the scenario has to be two of them alive at the same instant.
+/// Both turns are held at a barrier that releases when both have arrived, so each
+/// one's second reading is taken while the other is demonstrably inside its own
+/// dispatch. A value the two shared, or one either could overwrite, is a value
+/// that has been overwritten by then.
+///
+/// Both halves are asserted, because either alone proves nothing: that the two
+/// turns hold *different* directories, and that neither turn's own value moved
+/// between its two readings. And each directory is written to at both readings,
+/// so "exists and is writable" is a fact about the whole dispatch rather than
+/// about the moment it started.
+///
+/// Driven against the real `oneagentgraph` — no `ONEPIPELINE_ONEAGENTGRAPH_BIN` —
+/// because the sharing this closes was the sibling's library path composing a
+/// member's environment from the hosting process's.
+#[test]
+fn concurrent_dispatches_each_hold_their_own_scratch_directory_throughout() {
+    let world = World::new("real-scratch-concurrent");
+    world.write_graphs();
+    // Two parties: the two nodes below, which have nothing between them and so
+    // are ready on the same pass.
+    world.script("turn.concurrent", "2");
+    let path = world.plan(
+        "concurrent",
+        &plan_of(
+            "concurrent",
+            vec![agent("first", &[]), agent("second", &[])],
+        ),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0)
+        .settled();
+
+    // The barrier released, so both dispatches really were in flight together —
+    // a journey where one ran after the other would have failed in the double —
+    // and each party is the directory it was holding when it arrived, so this
+    // file *is* the set of directories that were live at one instant.
+    let arrived = std::fs::read_to_string(world.fakes.join("turn.concurrent.arrived"))
+        .unwrap_or_else(|error| panic!("no barrier was reached: {error}\n{}", world.dump()));
+    let live: std::collections::BTreeSet<&str> = arrived
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        live.len(),
+        2,
+        "two dispatches in flight at one instant were not holding two directories: \
+         {arrived:?}\n{}",
+        world.dump()
+    );
+
+    let readings = scratch_readings(&world);
+    let held = |job: &str| -> Vec<(String, String)> {
+        readings
+            .iter()
+            .filter(|(prompt, _, _)| prompt.contains(job))
+            .map(|(_, phase, at)| (phase.clone(), at.clone()))
+            .collect()
+    };
+
+    let mut each = Vec::new();
+    for job in ["Do first.", "Do second."] {
+        let taken = held(job);
+        assert_eq!(
+            taken.len(),
+            2,
+            "{job} did not read its scratch directory on both sides of the barrier: \
+             {readings:?}\n{}",
+            world.dump()
+        );
+        assert_eq!(taken[0].0, "entered");
+        assert_eq!(taken[1].0, "beside the others");
+        assert_eq!(
+            taken[0].1, taken[1].1,
+            "{job} was holding one scratch directory when it started and another while \
+             its sibling dispatch ran: {taken:?}"
+        );
+        let at = std::path::PathBuf::from(&taken[1].1);
+        assert!(
+            at.is_absolute(),
+            "{job} was given {at:?}, which is not absolute"
+        );
+        assert!(
+            at.is_dir(),
+            "{job}'s scratch directory {} is gone\n{}",
+            at.display(),
+            world.dump()
+        );
+        std::fs::write(at.join("read-back"), job)
+            .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+        each.push(at);
+    }
+    assert_ne!(
+        each[0], each[1],
+        "two dispatches running at once were handed one directory between them: {each:?}"
+    );
+    // And they are the two the barrier saw live together, so the readings above
+    // are of the same instant this journey proved was concurrent.
+    assert_eq!(
+        each.iter()
+            .map(|at| at.display().to_string())
+            .collect::<std::collections::BTreeSet<String>>(),
+        live.iter().map(|at| (*at).to_owned()).collect(),
+    );
+
+    // And both nodes really ran to a settlement, so none of the above is a
+    // property of a dispatch that never happened.
+    let settled = world.events_of("concurrent", "node-settled");
+    assert_eq!(settled.len(), 2, "{settled:?}\n{}", world.dump());
 }
 
 /// A whole run, dispatched through the real sibling: the plan is launched, its
@@ -889,9 +1030,13 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
 
 /// A terminal graph event settles its node without waiting for graph-final
 /// process reaping to disconnect the sibling's event channel.
+///
+/// The library run is still where it always was — one process further down, in
+/// the `drive` child a dispatch is retained with — so what this reaches is the
+/// same channel it always reached, through the pipe that child writes on.
 #[cfg(unix)]
 #[test]
-fn a_library_dispatch_settles_while_the_graphs_final_reaper_is_still_running() {
+fn a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_reaper_runs() {
     let world = World::new("real-terminal-before-reap");
     world.write_graphs();
     world.script("harness.outlives-graph", "");
@@ -958,23 +1103,23 @@ fn events_reported(status: &str, node: &str) -> u64 {
         .unwrap_or_else(|e| panic!("`{line}` carries no readable count: {e}"))
 }
 
-/// Two dispatches running **inside one driver** are two registrations, and a
-/// stop over them is a clean stop.
+/// Two dispatches of one run are two registrations, and a stop over them is a
+/// clean stop.
 ///
-/// The shape a real run has: node-scope dispatches go through the sibling as a
-/// library call, so a run at any concurrency above one has several live
-/// dispatches sharing the driver's process. A registry keyed by that pid alone
-/// held one entry for both of them — the second overwrote the first, and the
-/// first to end took the survivor's registration away — and the two of them
-/// racing one temporary would leave an entry no reader could parse, which is now
-/// a `stop` that refuses a perfectly healthy run.
+/// A registry keyed by pid alone held one entry for both of them — the second
+/// overwrote the first, and the first to end took the survivor's registration
+/// away — and the two of them racing one temporary would leave an entry no
+/// reader could parse, which is now a `stop` that refuses a perfectly healthy
+/// run. The key is a pid **and** a claim for that reason, and the claim is what
+/// still separates two dispatches that do share a process: a launch whose
+/// environment is the driver's own stays in it, and so does every dispatch a
+/// consumer that linked this crate makes without going through its command line.
 ///
 /// The second dispatch is released by an attestation rather than started beside
-/// the first, and that is not only about this suite: the sibling names a library
-/// run's state directory from the clock and the process, so two started inside
-/// one millisecond ask for the same directory and the second is refused. A run
-/// reaches this state the way a real one does — a node becoming ready while
-/// another is already in flight.
+/// the first, which is how a real run reaches this state — a node becoming ready
+/// while another is already in flight — and it also keeps this journey clear of
+/// the sibling's own naming of a library run's state directory, which is the
+/// clock and the process.
 ///
 /// `#[cfg(unix)]` because of what it reads the registry *through*: a `stop`
 /// reporting `signalled` over the roots this run holds, which is
@@ -985,7 +1130,7 @@ fn events_reported(status: &str, node: &str) -> u64 {
 /// never been run on Windows, so it is not claimed for that platform either.
 #[cfg(unix)]
 #[test]
-fn two_dispatches_running_in_one_driver_are_stopped_as_one_run() {
+fn two_dispatches_of_one_run_are_stopped_as_one_run() {
     let world = World::new("real-shared-process");
     world.write_graphs();
     world.script("turn.hold", "hold");
@@ -1312,14 +1457,21 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
         world.dump()
     );
     // And it is not silent: a launch that named a drafting graph and drafted
-    // nothing reads exactly like one that named none.
-    assert!(
-        launched
-            .stderr
-            .contains("the drafting dispatch could not start"),
-        "the refusal never reached the operator:\n{}",
-        launched.stderr
-    );
+    // nothing reads exactly like one that named none. The drafting dispatch is
+    // given a process of its own — its environment is its own — so the runner's
+    // refusal is that process's settlement rather than a refusal to this one,
+    // and the operator is told either way.
+    for said in [
+        "node 'service'",
+        "the drafting dispatch settled without succeeding",
+        "so it publishes with no body",
+    ] {
+        assert!(
+            launched.stderr.contains(said),
+            "the refusal never reached the operator, which lacks {said:?}:\n{}",
+            launched.stderr
+        );
+    }
     // And it reaches the run's own record too, where a reader who was not
     // watching stderr finds it: the sibling's refusal, under the ending that
     // says the dispatch is what failed rather than its answer.
@@ -1331,8 +1483,12 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        detail.contains("the drafting dispatch could not start"),
+        detail.contains("the drafting dispatch settled without succeeding"),
         "the recorded ending does not carry the sibling's refusal: {detail}"
+    );
+    assert!(
+        detail.contains("nonesuch") || detail.contains("kind"),
+        "the recorded ending does not carry the runner's own words: {detail}"
     );
     // The node settled on its publication, and its detail says the same thing.
     let settled = world.events_of("refuseddraft", "node-settled");

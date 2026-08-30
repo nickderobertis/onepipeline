@@ -2114,29 +2114,70 @@ process can create is one no other dispatch was given — which a name minted fr
 pid and a counter would not be, because a host reissues pids and a counter starts
 again in every process.
 
+**Where the pair lives, because that decided where the dispatch runs.** An
+environment is per *process*, and `oneagentgraph` 0.2.18 onwards composes a
+member's from the **hosting** process's rather than from the launch it was given —
+`crate::agentgraph::export` says so, and says a per-node value must never come
+through it. So a per-dispatch pair and the library backend cannot both be had: a
+driver running two dispatches in one process would export one value over the
+other, and each turn would read whichever dispatch wrote last. Measured, on the
+journey below with the isolation removed: three concurrent turns, one directory
+between them, and it was not the directory of the dispatch that had been given it.
+
+There is no per-launch seam upstream to reach for — `run::start`'s `env` map
+expands a graph's `env:` block and is then exported process-wide too, `--set`
+reaches only the graph document, and neither `GraphConfig` nor `OneharnessMember`
+carries a per-member environment, at 0.3.13 or at 0.3.14. Asking for one is a
+proposal to *that* producer, and this entry still carries it: a per-member
+environment on the sibling's launch request would let a dispatch stay in the
+driver.
+
+Until then the pair gets what an environment needs, which is a process. A
+`Launch` declares whose its pairs are — `Environment::Shared` for the run id and
+the ledger root, which are constant for a driver, and `Environment::OwnProcess`
+for a dispatch's own — and `GraphRun::start` sends the second down the subprocess
+backend, which sets the pairs on the command it spawns. That process is **this
+executable** at `drive`, not an installed sibling, so nothing about the
+composition changes: the graph under the dispatch is still this build's own
+`oneagentgraph`, running in-library one process further down. What it costs is one
+child process per dispatch, and what it buys is a value no concurrent dispatch can
+read or overwrite. The observer graph keeps `Shared` and stays in the driver.
+
+Two things follow that are worth stating, because both were observed rather than
+predicted. A launch the runner **refuses** is now that child's settlement rather
+than a refusal to the caller, so `lifecycle`'s drafting path says every one of its
+dispatch endings out loud rather than only the arm one deployment reached. And two
+dispatches started on the same pass no longer collide on the sibling's own naming
+of a library run's state directory, which is the clock and the process.
+
+**The residual, and it is the consumer rather than the product.** Retaining a
+process means knowing which file answers this crate's command line, and
+`current_exe` cannot say: this crate is a library as well as a binary, so a
+consumer that linked it and reached the executor seam directly would have had its
+*own* program spawned with a verb it has never heard of. `crate::run` is what
+knows — parsing this crate's `Cli` is what makes a process one that speaks it —
+and it records it there. A consumer that never goes through it, and names no
+sibling at `ONEPIPELINE_ONEAGENTGRAPH_BIN`, has no process to be given and its
+dispatches stay in its own, sharing the pair exactly as before. That is the
+contract's own example — a dispatch built outside a run — and
+`contract::a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch`
+is what drives it, refusal and all. Every dispatch the `onepipeline` binary makes
+is on the first side of that line.
+
 Driven end to end by
 `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`, which
 reads the value out of the run's own store and the directory off the filesystem,
 by
 `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`,
 which is the requeue — the one set of dispatches that agree on every name a path
-could have been derived from — and by
+could have been derived from — by
 `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`,
-which reads it off the harness child at the bottom of the *library* backend's
-stack, where a per-dispatch pair is hard.
-
-**What could not be compiled exactly as written: the library backend has no
-per-launch environment.** The subprocess backend sets the pair on the command it
-spawns and the promise holds exactly. `oneagentgraph` 0.2.18 onwards composes a
-member's environment from the *hosting* process's, so `crate::agentgraph::export`
-puts a launch's pairs on this process — which is why that function's note says a
-per-node value must never come through it, and this is the first one that does.
-A driver running two dispatches concurrently **in-process** therefore shares one
-value between them: each still gets a directory of its own made for it, so nothing
-is destroyed, but the second may read a path naming its sibling's. Closing it
-needs a per-member environment on the sibling's launch request, which is that
-producer's contract rather than this one's, and is the proposal this entry carries
-to them.
+which reads it off the harness child at the bottom of the real stack, and by
+`dispatch::concurrent_dispatches_each_hold_their_own_scratch_directory_throughout`,
+which holds two dispatches at a barrier that releases only when both are inside
+their own dispatch, and asserts there that each holds its own directory, that
+neither's value moved between its two readings, and that both directories are
+still there and writable.
 
 ## 48. A node its provider killed settles under the word for work that failed — OPEN
 

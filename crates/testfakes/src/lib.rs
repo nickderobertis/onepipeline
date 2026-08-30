@@ -366,6 +366,52 @@ fn rendezvous_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
+/// Hold this party at a point until `parties` of them have reached it.
+///
+/// What a scenario about *concurrency* needs and no hold can give: a rendezvous
+/// one side releases proves only that the other was somewhere, while a barrier
+/// releases when every party is inside, so each party knows the others are
+/// running at that instant. Every assertion after it is about a moment when they
+/// all were.
+///
+/// Bounded exactly as [`wait_for`] is, and for the same reason — a barrier the
+/// last party never reaches ends the process rather than hanging the suite — and
+/// it names how many arrived, because "one party never started" and "one party
+/// started late" are different scenarios failing.
+///
+/// One arrival is one **line**, so `party` is flattened onto one: arrivals are
+/// counted by line, and a party whose name carried a newline would be counted as
+/// two and release a barrier nobody else had reached.
+pub fn barrier(path: &Path, party: &str, parties: usize) {
+    let arrived = |path: &Path| {
+        std::fs::read_to_string(path)
+            .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+            .unwrap_or(0)
+    };
+    let party = &party.replace(['\n', '\r'], " ");
+    append(path, party);
+    let timeout = rendezvous_timeout();
+    let deadline = match std::time::Instant::now().checked_add(timeout) {
+        Some(deadline) => deadline,
+        None => fail(&format!(
+            "a barrier of {} seconds is further ahead than this clock can represent",
+            timeout.as_secs()
+        )),
+    };
+    while std::time::Instant::now() < deadline {
+        if arrived(path) >= parties {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    fail(&format!(
+        "{party}: only {} of {parties} parties reached {} within {}s",
+        arrived(path),
+        path.display(),
+        timeout.as_secs()
+    ));
+}
+
 /// An RFC 3339 millisecond UTC timestamp, in the envelope's one format.
 pub fn now() -> String {
     let millis = std::time::SystemTime::now()

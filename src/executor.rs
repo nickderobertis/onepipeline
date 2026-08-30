@@ -31,7 +31,7 @@ use std::sync::Arc;
 use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
-use crate::agentgraph::{GraphOutput, GraphRun, Launch};
+use crate::agentgraph::{Environment, GraphOutput, GraphRun, Launch};
 use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -246,6 +246,11 @@ impl Executor for LocalExecutor {
             dir: &dir,
             labels: &req.labels,
             env: &env,
+            // The scratch directory in `env` is this dispatch's and no other's,
+            // so the launch is given a process to hold it in: the library
+            // backend has nowhere per-launch to put a pair, and two dispatches
+            // sharing one driver would read and overwrite each other's.
+            environment: Environment::OwnProcess,
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
@@ -307,21 +312,16 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 ///
 /// The **run id** is what the operator's `ask-manager` wrapper addresses a
 /// manager by, and a dispatch outside a run carries none for the same reason it
-/// registers nothing. It is constant for the life of a driver, which is the case
-/// [`export`](crate::agentgraph) allows. The **scratch directory** is per
-/// dispatch, which that same note says a pair coming through here must never be;
-/// divergence 47's closing paragraph is what carrying it anyway costs.
+/// registers nothing. The **scratch directory** is this dispatch's alone, which
+/// is why the launch below declares [`Environment::OwnProcess`]: the pair has to
+/// live somewhere no sibling dispatch can read or overwrite, and that is a
+/// process rather than a map.
 ///
 /// # Errors
 ///
 /// [`Error::Ledger`] where the scratch directory cannot be made: a promised
 /// directory that is not there would fail the agent's writes one at a time, and
 /// those failures read as the agent's own work going wrong.
-// llmlint: ignore-block[changed_behavior_has_e2e] the journeys in `tests/e2e/scratch.rs`
-// and `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`
-// drive both backends. The one case with no journey is two *concurrent* library-backend
-// dispatches, where what a test would assert is divergence 47's shortfall rather than
-// anything this crate promises.
 fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id
@@ -333,7 +333,7 @@ fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
         node_scratch_dir(labels)?.display().to_string(),
     ));
     Ok(env)
-} // llmlint: ignore-end[changed_behavior_has_e2e]
+}
 
 /// Make this dispatch's own scratch directory, and answer where it is.
 ///
