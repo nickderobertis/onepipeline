@@ -305,6 +305,7 @@ fn attempt_once(
         paths,
         launch,
         node,
+        references,
         worktree.as_deref(),
         base.as_deref(),
         cancel,
@@ -367,6 +368,7 @@ fn publish(
     paths: &RunPaths,
     launch: &Launch,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     worktree: Option<&std::path::Path>,
     base: Option<&str>,
     cancel: &crate::executor::CancellationToken,
@@ -427,7 +429,14 @@ fn publish(
         })
     };
 
-    let publication = publish_rereading_the_merge_path(node, token, body.as_deref(), cancel);
+    // Whether this node's temporary git pin is still temporary, asked at the one
+    // moment it decides anything. A node with no reference block — every node that
+    // is not fast-adoption, and every fast one whose dependencies land where it
+    // does — has nothing to ask about and gets `None`, which is the publication
+    // this crate has always made.
+    let draft = crate::release::draft_reason(references);
+    let publication =
+        publish_rereading_the_merge_path(node, token, body.as_deref(), draft.as_ref(), cancel);
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
@@ -495,10 +504,20 @@ fn publish(
                 }),
                 _ => None,
             };
+            // A change the host is holding as a draft says why, on the line a
+            // settlement is read back on. It leads whatever else the settlement
+            // had to say for the reason a publication's own reason leads a
+            // drafting failure: this is what the node settled as.
+            let drafted = matches!(published.outcome, onevcs::PublishOutcome::ChangeDraft(_))
+                .then(|| draft.as_ref().map(crate::release::drafted_detail))
+                .flatten();
             Attempt::Settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
-                detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
+                detail: drafted
+                    .or(compared)
+                    .map(&with_undrafted)
+                    .or_else(|| undrafted.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -516,7 +535,14 @@ fn publish(
                 // it ran under: an identity that asks the host to merge
                 // immediately still has to be observed doing it.
                 landing: crate::vcs::landing_of(&published.outcome),
-                ..Settlement::plain(&node.id, NodeStatus::Done, None)
+                // **Complete, and not `done`.** Every step ran and the branch is
+                // published, so nothing here failed and nothing is left for this
+                // run to ask a worker for; what is left is a release outside it.
+                // Settled `done`, the node's dependents would start on work that
+                // cannot land and the run would report finished with the git pin
+                // it launched against sitting in an open change — which is the
+                // one ending fast adoption must not have.
+                ..Settlement::plain(&node.id, drafted_status(&published.outcome), None)
             })
         }
         // llmlint: ignore[changed_behavior_has_e2e] this arm is `onevcs` refusing the
@@ -529,6 +555,21 @@ fn publish(
         // `a_publication_its_merge_path_refuses_settles_the_node_failed_by_name` drives
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
+    }
+}
+
+/// The status a publication settles its node at.
+///
+/// One line, and the whole of the difference this makes to the graph: a change the
+/// host is holding as a draft is a node whose work is complete and whose run is
+/// not finished with it. Read off what the publication **answered** rather than
+/// off the reason that was asked for, because the two can differ — a host that
+/// would not draft the change is a change that can land, and reporting it as held
+/// back would leave a landable pin reported as safe.
+fn drafted_status(outcome: &onevcs::PublishOutcome) -> NodeStatus {
+    match outcome {
+        onevcs::PublishOutcome::ChangeDraft(_) => NodeStatus::CompleteDraft,
+        _ => NodeStatus::Done,
     }
 }
 
@@ -562,9 +603,11 @@ fn publish_rereading_the_merge_path(
     node: &Node,
     token: &onevcs::SessionToken,
     body: Option<&str>,
+    draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
 ) -> Published {
-    let publish = || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body);
+    let publish =
+        || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body, draft);
     let budget = engine::merge_path_reads();
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;

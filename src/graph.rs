@@ -84,6 +84,23 @@ pub enum NodeStatus {
     Cancelled,
     /// It executed and completed.
     Done,
+    /// It executed and completed, and the change it published is a **draft**
+    /// because a release it adopted early has not happened yet.
+    ///
+    /// The one status that is neither *settled* nor *running*. The node's work is
+    /// finished — every step ran, the branch is verified, the change request is
+    /// open — and the one thing left is outside this run: the release the node
+    /// was launched against a git pin of. Merging it now would make that pin
+    /// permanent in a base branch, so the change is held as a draft and the node
+    /// says why.
+    ///
+    /// It is not [`Done`](Self::Done), because a dependent started on it would be
+    /// built on work that cannot land; it is not [`Failed`](Self::Failed), because
+    /// nothing failed; and it is not [`Waiting`](Self::Waiting), because no person
+    /// clears it. What clears it is the release arriving, which puts a new worker
+    /// on the branch this node already has — so the loop is **not** finished with
+    /// it and a run holding one has not settled.
+    CompleteDraft,
     /// It executed and failed.
     Failed,
     /// A failed dependency made execution unsafe.
@@ -102,6 +119,7 @@ impl NodeStatus {
             Self::Parked => "parked",
             Self::Cancelled => "cancelled",
             Self::Done => "done",
+            Self::CompleteDraft => "complete-but-draft",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
         }
@@ -118,6 +136,7 @@ impl NodeStatus {
             "parked" => Self::Parked,
             "cancelled" => Self::Cancelled,
             "done" => Self::Done,
+            "complete-but-draft" => Self::CompleteDraft,
             "failed" => Self::Failed,
             "skipped" => Self::Skipped,
             _ => return None,
@@ -125,6 +144,11 @@ impl NodeStatus {
     }
 
     /// Whether the loop is finished with the node.
+    ///
+    /// [`CompleteDraft`](Self::CompleteDraft) is deliberately not one: the node
+    /// has finished its work and the run has not finished with it, because the
+    /// release it is waiting on lifts the draft and dispatches it once more. A
+    /// run whose nodes are all draft-complete is **waiting**, not settled.
     pub fn is_settled(self) -> bool {
         matches!(
             self,
@@ -140,7 +164,8 @@ impl NodeStatus {
 
     /// Whether a later pass may still dispatch the node.
     ///
-    /// A `done` node is never rescheduled; a parked one waits for a `requeue`.
+    /// A `done` node is never rescheduled; a parked one waits for a `requeue`. A
+    /// draft-complete one is dispatched again by the release it awaits arriving.
     pub fn is_dispatchable(self) -> bool {
         !matches!(self, Self::Done | Self::Parked)
     }

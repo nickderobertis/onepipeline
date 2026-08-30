@@ -1161,6 +1161,24 @@ pub fn status(survey: &Survey) -> String {
                 ));
             }
         }
+        // The nodes this run has deliberately stopped short of merging. Said
+        // here because this is the view somebody reads when a run has gone quiet
+        // and they are deciding whether it is stuck: a run holding one of these
+        // is **waiting on a release**, not stalled and not finished, and nothing
+        // else on this screen distinguishes the two. The line names what each is
+        // waiting on, so the decision — keep waiting, or go and cut the release —
+        // is made from here rather than from the store.
+        let drafted = drafted_nodes(view);
+        if !drafted.is_empty() {
+            out.push_str(&format!(
+                "  {} node(s) complete and held as a draft: the run is waiting on the \
+                 release(s) each names, and is neither stalled nor finished\n",
+                drafted.len()
+            ));
+            for (id, awaiting) in &drafted {
+                out.push_str(&format!("  {id}: complete-but-draft — {awaiting}\n"));
+            }
+        }
         // The settled nodes whose work has not reached anyone. This view
         // otherwise reports only what is in flight, so a planner reading it saw
         // a run go quiet and took that for a run whose work had landed. Named
@@ -1534,12 +1552,56 @@ fn attested_after_failing(view: &RunView, node: &str) -> bool {
 /// [the divergence record](../../../docs/contract-divergences.md) for the half
 /// that still cannot be reached.
 fn unlanded_nodes(view: &RunView) -> Vec<String> {
+    let statuses = view.state.statuses();
     view.state
         .landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
+        // A node whose change is held as a draft has not landed and is not one of
+        // these: this list is work an operator has to *decide* about — a change
+        // sitting open that nobody merged — and a draft is a change this run is
+        // deliberately holding and will lift itself. It has a line of its own,
+        // which says what it is waiting on.
+        .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
         .map(|(node, _)| node.clone())
         .collect()
+}
+
+/// The nodes whose work is complete and whose change is held back as a draft,
+/// with what each is waiting on.
+///
+/// The reason is the settlement's own detail — the same sentence `results` prints
+/// and the same one the host is holding the change under — so a reader meeting
+/// this line and a reader opening `results` are told the same thing.
+fn drafted_nodes(view: &RunView) -> Vec<(String, String)> {
+    view.state
+        .statuses()
+        .into_iter()
+        .filter(|(_, status)| *status == NodeStatus::CompleteDraft)
+        .map(|(node, _)| {
+            let awaiting = settled_detail(view, &node)
+                .map(|detail| one_line(&detail))
+                .unwrap_or_else(|| "awaiting a release this run recorded nothing about".to_owned());
+            (node, awaiting)
+        })
+        .collect()
+}
+
+/// The `detail` the newest `node-settled` for one node carried.
+///
+/// One read for the two views that print it, so a settlement cannot be quoted two
+/// ways.
+fn settled_detail(view: &RunView, node: &str) -> Option<String> {
+    view.events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind.0 == PipelineKind::NodeSettled.as_str()
+                && event.labels.node.as_deref() == Some(node)
+        })
+        .and_then(|event| event.payload.get("detail"))
+        .and_then(|detail| detail.as_str())
+        .map(str::to_owned)
 }
 
 /// What a ready node is waiting on, as far as this host can tell.
@@ -2085,18 +2147,8 @@ pub fn results(view: &RunView) -> String {
         if let Some(died) = death_phrase(&view.state, &node.id, branch.as_deref()) {
             out.push_str(&format!("      died: {died}\n"));
         }
-        if let Some(detail) = view
-            .events
-            .iter()
-            .rev()
-            .find(|event| {
-                event.kind.0 == PipelineKind::NodeSettled.as_str()
-                    && event.labels.node.as_deref() == Some(node.id.as_str())
-            })
-            .and_then(|event| event.payload.get("detail"))
-            .and_then(|detail| detail.as_str())
-        {
-            out.push_str(&format!("      detail: {}\n", one_line(detail)));
+        if let Some(detail) = settled_detail(view, &node.id) {
+            out.push_str(&format!("      detail: {}\n", one_line(&detail)));
         }
         // What this node is judged against beyond its own task prose. Under the
         // node rather than beside it, because it is prose rather than a word,

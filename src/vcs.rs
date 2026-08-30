@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use onevcs::{
-    EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome, PublishRequest,
-    Session, SessionRequest, SessionToken, Subject,
+    DraftReason, EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome,
+    PublishRequest, Session, SessionRequest, SessionToken, Subject,
 };
 
 use crate::error::{Error, Result};
@@ -98,10 +98,17 @@ pub fn publish(
     policy: Option<MergePolicy>,
     title: Option<&str>,
     body: Option<&str>,
+    draft: Option<&DraftReason>,
 ) -> Result<Publication> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
         .transpose()?;
+    // Held to the sibling's own rule where it is composed rather than where it
+    // arrives, for [`Subject`]'s reason: a reason that would not render as itself
+    // is refused before a session's work is committed against it.
+    if let Some(reason) = draft {
+        reason.checked().map_err(refusal)?;
+    }
     onevcs::publish(
         &providers(),
         token,
@@ -109,10 +116,21 @@ pub fn publish(
             policy,
             title,
             body: body.map(str::to_owned),
+            draft: draft.cloned(),
         },
     )
     .map_err(refusal)
 }
+
+/// The word a node whose change request is held open as a **draft** settles on.
+///
+/// Its own outcome beside `change-open` rather than a shade of it, because the
+/// two differ in the one fact every reader of a settlement acts on: an open change
+/// can land and a draft cannot. Folded together, a fast-adoption node that stopped
+/// short of merging its temporary git pin would report exactly as one that
+/// published a change somebody is reviewing — which is the reading that let a git
+/// pin become permanent in a base branch in the first place.
+pub const DRAFTED: &str = "change-draft";
 
 /// How a publication settles the node that made it.
 ///
@@ -124,6 +142,9 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     match outcome {
         PublishOutcome::Merged(_) => "merged",
         PublishOutcome::ChangeOpen(_) => "change-open",
+        // Its own word and not `change-open`'s, because the two differ in the one
+        // thing a reader acts on: a draft cannot land. See [`DRAFTED`].
+        PublishOutcome::ChangeDraft(_) => DRAFTED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -335,7 +356,9 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     use crate::graph::Landing;
     match outcome {
         PublishOutcome::Merged(_) => Some(Landing::Landed),
-        PublishOutcome::ChangeOpen(_) | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
+        PublishOutcome::ChangeOpen(_)
+        | PublishOutcome::ChangeDraft(_)
+        | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
@@ -384,7 +407,9 @@ pub fn proved_landed(branch: &str) -> bool {
 /// than the URL — see the `onevcs` proposal in `docs/contract-divergences.md`.
 pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
     match outcome {
-        PublishOutcome::ChangeOpen(url) | PublishOutcome::Queued(url) => Some(url.to_string()),
+        PublishOutcome::ChangeOpen(url)
+        | PublishOutcome::ChangeDraft(url)
+        | PublishOutcome::Queued(url) => Some(url.to_string()),
         _ => None,
     }
 }

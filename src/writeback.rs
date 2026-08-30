@@ -787,7 +787,11 @@ enum TaskCategory {
 
 fn category(status: NodeStatus) -> TaskCategory {
     match status {
-        NodeStatus::Running => TaskCategory::InProgress,
+        // A draft-complete node is `in progress` and not `done`: the store's own
+        // reader is a person deciding what is left to do, and its work is not
+        // finished until the release it is waiting on lets the change land. The
+        // detail on the reserved metadata is where *why* it is still open lives.
+        NodeStatus::Running | NodeStatus::CompleteDraft => TaskCategory::InProgress,
         NodeStatus::Done | NodeStatus::Failed => TaskCategory::Done,
         NodeStatus::Parked | NodeStatus::Cancelled | NodeStatus::Skipped => TaskCategory::Cancelled,
         NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Waiting | NodeStatus::Blocked => {

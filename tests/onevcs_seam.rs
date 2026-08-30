@@ -61,6 +61,12 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             repo_type: RepoType::SingleOwner,
             gate: "true".to_owned(),
         }],
+        // `change-auto` is the repository's own, so section 5's draft is held
+        // under the one policy that would otherwise have armed the host's merge
+        // on it — which is what "a draft is unmergeable, and this crate keeps it
+        // so" has to be proven against. Section 3 narrows to `change-open`, which
+        // a per-run policy may do.
+        policy: Some(MergePolicy::ChangeAuto),
         ..VcsState::default()
     });
     let host = MemoryHost::seeded(HostState::default());
@@ -116,6 +122,9 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             // it was drafted: nothing here composes or validates one, so this is
             // the whole of what the host is given.
             body: Some(DRAFTED.to_owned()),
+            // Not a draft: this publication is the ordinary one, and section 5
+            // below is where a reason is carried.
+            draft: None,
         },
     )
     .expect("the seam publishes a session it opened");
@@ -177,6 +186,84 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             .expect("a closed session is still addressable")
             .lifecycle,
         Lifecycle::Closed
+    );
+
+    // 5. `src/vcs.rs::publish`'s draft half, which is what a fast-adoption node
+    //    settling complete-but-draft crosses this seam with. The whole of it is
+    //    one field, and it decides three things a caller acts on: the outcome is
+    //    `ChangeDraft` and not `ChangeOpen`, the host is holding the change, and
+    //    **nothing merged it** — under `change-auto`, which is the policy that
+    //    would otherwise have armed the host's own merge on it.
+    let drafting = vcs
+        .open_session(SessionRequest {
+            repo: "owner/repo".to_owned(),
+            branch: Some("adopts-early".to_owned()),
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+        })
+        .expect("the seam opens a second session");
+    let reason = onevcs::DraftReason {
+        awaiting: "github.com/owner/engine".to_owned(),
+        target: "crate".parse().expect("a target name"),
+        reference: "onevcs/s-1".to_owned(),
+        because: "pinned to a branch until the engine releases".to_owned(),
+    };
+    let held = onevcs::publish(
+        &providers,
+        &drafting.token,
+        &PublishRequest {
+            policy: Some(MergePolicy::ChangeAuto),
+            title: Some("feat: adopt early".parse().expect("a usable subject")),
+            body: None,
+            draft: Some(reason.clone()),
+        },
+    )
+    .expect("the seam publishes a draft");
+    let PublishOutcome::ChangeDraft(drafted_url) = &held.outcome else {
+        panic!("a drafted publication ended as {:?}", held.outcome);
+    };
+    let holding = host.state();
+    let drafted_id = holding
+        .changes
+        .iter()
+        .find(|change| change.url == *drafted_url)
+        .map(|change| change.id.clone())
+        .expect("the host opened the change this publication reports");
+    assert_eq!(
+        holding.drafts.get(&drafted_id),
+        Some(&reason),
+        "the host was not given the reason the change is not ready: {:?}",
+        holding.drafts
+    );
+    assert!(
+        holding.merges.get(&drafted_id).is_none() && holding.made_ready.is_empty(),
+        "a change held as a draft was merged or made ready: {:?} {:?}",
+        holding.merges,
+        holding.made_ready
+    );
+
+    // And a publication of the same branch carrying **no** reason is what lifts
+    // it — there is no second verb, because the caller that republishes with the
+    // pin moved is the one saying the reason no longer holds.
+    let lifted = onevcs::publish(
+        &providers,
+        &drafting.token,
+        &PublishRequest {
+            policy: Some(MergePolicy::ChangeAuto),
+            title: Some("feat: adopt early".parse().expect("a usable subject")),
+            body: None,
+            draft: None,
+        },
+    )
+    .expect("the seam lifts the draft it held");
+    assert!(
+        !matches!(lifted.outcome, PublishOutcome::ChangeDraft(_)),
+        "the change is still reported as a draft after the reason was withdrawn: {:?}",
+        lifted.outcome
+    );
+    assert!(
+        host.state().made_ready.contains(&drafted_id),
+        "the host was never asked to take the change out of its draft state"
     );
 
     let _ = std::fs::remove_dir_all(&root);

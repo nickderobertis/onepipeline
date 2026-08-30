@@ -835,6 +835,22 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
             }
+            // And for a node whose change this run held back, the note is what
+            // ends the hold: the release it was waiting on is out, so the
+            // settlement that said "complete, and a draft" is no longer what the
+            // node is. Clearing the record returns it to the frontier — on the
+            // branch its own settlement pinned it to, so the dispatch that takes
+            // this note is a worker continuing the published branch rather than
+            // one cutting a fresh one beside the draft nothing would then lift.
+            //
+            // Only that status. A node that was running when it was told settled
+            // on whatever it went on to do, and clearing *that* would dispatch a
+            // node whose work is finished all over again.
+            if state.recorded.get(node).copied().map(Recorded::status)
+                == Some(NodeStatus::CompleteDraft)
+            {
+                state.recorded.remove(node);
+            }
         }
         // Reports, both: what a run is waiting on and what has arrived are
         // derived afresh by whatever is driving it, so neither changes the graph.
@@ -1064,7 +1080,15 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
 fn preserves_its_branch(status: NodeStatus) -> bool {
     matches!(
         status,
-        NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Parked
+        NodeStatus::Failed
+            | NodeStatus::Cancelled
+            | NodeStatus::Parked
+            // A draft-complete node is the one of these that is *coming back*
+            // rather than waiting to be sent back: the release it awaits lifts
+            // the draft and puts a worker on the branch again to move the pin.
+            // Unpinned, that worker would cut a fresh branch and republish it
+            // beside the draft change request nobody would then ever lift.
+            | NodeStatus::CompleteDraft
     )
 }
 
