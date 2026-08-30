@@ -24,14 +24,14 @@
 // `{ slots_free, load1, mem_free_bytes }`, where the probe already refuses a negative or
 // NaN load by never producing one).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
-use crate::agentgraph::{GraphOutput, GraphRun, Launch};
+use crate::agentgraph::{Environment, GraphOutput, GraphRun, Launch};
 use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -239,13 +239,18 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
-        let env = dispatch_env(&req.labels);
+        let env = prepare_dispatch_env(&req.labels)?;
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
             dir: &dir,
             labels: &req.labels,
             env: &env,
+            // The scratch directory in `env` is this dispatch's and no other's,
+            // so the launch is given a process to hold it in: the library
+            // backend has nowhere per-launch to put a pair, and two dispatches
+            // sharing one driver would read and overwrite each other's.
+            environment: Environment::PerLaunch,
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
@@ -288,25 +293,110 @@ impl Executor for LocalExecutor {
     }
 }
 
-/// The run's own identity, in the environment of every dispatch it makes.
+/// Where one dispatch may write whatever it likes.
 ///
-/// A dispatched agent's one supported way to put a blocking question to its
-/// manager is the operator's `ask-manager` wrapper, which reads this variable out
-/// of its own environment and refuses without one. Declared here so every
-/// dispatch carries it, rather than left to what the driver process happens to
-/// hold: only a run launched with an observer graph ever put it there.
+/// An **absolute** path to a directory this crate created, that exists and is
+/// writable before the dispatch's first turn, that is unique to that dispatch —
+/// a retry, a requeue and a resumed pin of the same node each get their own — and
+/// that nothing here removes while the dispatch is running. Nothing more is
+/// promised: the spelling below is not a contract and no consumer may derive one
+/// path from another.
 ///
-/// The run id and nothing else: it is constant for the life of a driver, which is
-/// the case [`export`](crate::agentgraph) allows on the process the library
-/// backend runs in. A dispatch outside a run carries no pair, for the same reason
-/// it registers nothing — there is no run for the wrapper to address.
-fn dispatch_env(labels: &Labels) -> Vec<(String, String)> {
-    labels
+/// Divergence 48 in
+/// [the divergence record](../../../docs/contract-divergences.md) is why, and the
+/// proposal this answers.
+pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
+
+/// Compose what every dispatch this executor makes carries in its own
+/// environment, **making** the scratch directory one of those pairs names.
+///
+/// The **run id** is what the operator's `ask-manager` wrapper addresses a
+/// manager by, and a dispatch outside a run carries none for the same reason it
+/// registers nothing. The **scratch directory** is this dispatch's alone, which
+/// is why the launch below declares [`Environment::PerLaunch`]: the pair has to
+/// live somewhere no sibling dispatch can read or overwrite, and that is a
+/// process rather than a map.
+///
+/// # Errors
+///
+/// [`Error::Ledger`] where the scratch directory cannot be made: a promised
+/// directory that is not there would fail the agent's writes one at a time, and
+/// those failures read as the agent's own work going wrong.
+fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
+    let mut env: Vec<(String, String)> = labels
         .run_id
         .iter()
         .map(|run| (crate::agentgraph::RUN_ID_ENV.to_string(), run.clone()))
-        .collect()
+        .collect();
+    env.push((
+        NODE_SCRATCH_DIR_ENV.to_string(),
+        make_node_scratch_dir(labels)?.display().to_string(),
+    ));
+    Ok(env)
 }
+
+/// Make this dispatch's own scratch directory, and answer where it is.
+///
+/// Named for the making, because that is the whole of it: this mints a number no
+/// caller has had, creates a directory under it, and answers the path — so two
+/// calls with identical arguments answer differently, and neither answer existed
+/// before the call.
+///
+/// Under the run's own directory, so a run's scratch is thrown away with the run.
+///
+/// Uniqueness is the directory's *creation*, not its name: `create_dir` refuses
+/// one that is already there, which a name minted from a pid and a counter would
+/// not — a host reissues pids and a counter starts again in every process.
+// llmlint: ignore-block[changed_behavior_has_e2e] no command reaches the two arms below:
+// every dispatch a run makes carries its id, and a `scratch` that will not be created
+// needs a run directory that exists holding a file by that name. Both are driven against
+// the real filesystem by
+// `tests::every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one`.
+fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
+    /// Enough numbers that walking past every directory a run has already made is
+    /// never the reason a dispatch fails, and few enough that a base directory
+    /// nothing can be created in fails rather than spinning.
+    const TRIES: u64 = 4096;
+    static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let base = match labels.run_id.as_deref() {
+        Some(run) => crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run)
+            .dir
+            .join("scratch"),
+        None => std::env::temp_dir().join("onepipeline-scratch"),
+    };
+    let ledger = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source: std::io::Error| Error::Ledger { path, source }
+    };
+    std::fs::create_dir_all(&base).map_err(ledger(&base))?;
+    let pid = crate::sys::pid();
+    for _ in 0..TRIES {
+        let at = base.join(format!(
+            "{pid}-{}",
+            MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&at) {
+            // Absolute, because the value is read by a program whose working
+            // directory is its own business: a relative runs root — the default
+            // is one — would name a different place from the workspace a
+            // dispatch runs in.
+            Ok(()) => return std::fs::canonicalize(&at).map_err(ledger(&at)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(ledger(&at)(error)),
+        }
+    }
+    Err(Error::Ledger {
+        path: base.clone(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "no scratch directory under {} could be created",
+                base.display()
+            ),
+        ),
+    })
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Record this dispatch in its run's registry, and hold the entry open.
 ///
@@ -559,6 +649,71 @@ mod tests {
                 "members.worker.persona=engineer".to_string(),
             ]
         );
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every dispatch is given a directory of its own, and no two are given one.
+    ///
+    /// The end-to-end halves are `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`
+    /// and `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`,
+    /// which read the value out of a real dispatch's own environment. What is held
+    /// here is the promise itself, against the real filesystem: two dispatches of
+    /// one node — the pair a retry produces, and the pair that agree on every name
+    /// a path could have been derived from — and a run root that cannot hold a
+    /// scratch directory at all.
+    #[test]
+    fn every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one() {
+        let root = std::env::temp_dir().join(format!("onepipeline-scratch-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            node: Some("build".into()),
+            ..Labels::default()
+        };
+
+        let scratch = |labels: &Labels| {
+            let env = prepare_dispatch_env(labels).expect("the dispatch's environment is composed");
+            let (_, value) = env
+                .iter()
+                .find(|(key, _)| key == NODE_SCRATCH_DIR_ENV)
+                .expect("every dispatch carries a scratch directory")
+                .clone();
+            PathBuf::from(value)
+        };
+
+        // The same node, twice, which is what a retry is.
+        let first = scratch(&labels);
+        let second = scratch(&labels);
+        assert_ne!(
+            first, second,
+            "a node asked again was handed the directory its first attempt had"
+        );
+        for at in [&first, &second] {
+            assert!(at.is_absolute(), "{} is not absolute", at.display());
+            assert!(at.is_dir(), "{} was not created", at.display());
+            std::fs::write(at.join("written"), "by the dispatch")
+                .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+        }
+        // And the first is untouched by the second, which is the whole of what
+        // "unique to that dispatch" buys.
+        assert!(first.join("written").is_file());
+
+        // A dispatch outside a run has no run directory to sit in and is given one
+        // anyway: the contract's own example carries no `run_id`.
+        assert!(scratch(&Labels::default()).is_dir());
+
+        // A run root that is a file holds no scratch directory, and the dispatch is
+        // refused rather than handed a path to nothing.
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, "not a directory").expect("the blocking file is written");
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &blocked);
+        assert!(matches!(
+            prepare_dispatch_env(&labels),
+            Err(Error::Ledger { .. })
+        ));
+
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);
     }

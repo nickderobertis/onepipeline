@@ -98,5 +98,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// journey a user can reach is reachable from a test that drives the same
 /// entry point the binary does.
 pub fn run(cli: cli::Cli) -> Result<i32> {
+    // Reaching here *is* the proof that this process's executable answers this
+    // crate's command line, which is what a dispatch given a process of its own
+    // is retained with. Nothing else can know it: `current_exe` names whatever
+    // program is running, and this crate is linked into programs that are not
+    // this one.
+    if let Ok(exe) = std::env::current_exe() {
+        agentgraph::speaks_this_cli(exe);
+    }
     driver::dispatch(cli)
 }

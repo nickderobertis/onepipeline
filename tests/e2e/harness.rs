@@ -281,6 +281,10 @@ pub struct Turn {
     /// The member it was, from its own config's `[env]`. Empty for a turn whose
     /// config a journey wrote itself and did not stamp.
     pub member: String,
+    /// The scratch directory the dispatch this turn belongs to was given, out of
+    /// the turn process's own environment. Empty for a turn the engine started
+    /// nothing for.
+    pub scratch: String,
 }
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
@@ -1654,8 +1658,15 @@ impl World {
             metadata.insert(reserved(key), value.clone());
         }
         let title = plan.get("name").and_then(Value::as_str).unwrap_or(name);
+        let identifier = project_id(name);
+        // A second project, so that "which project did it read?" is a question a
+        // fixture can answer. Only once per world.
+        self.decoy_project();
         self.write_item(
-            &self.store().join("projects").join(format!("{name}.md")),
+            &self
+                .store()
+                .join("projects")
+                .join(format!("{identifier}.md")),
             &[("title", json!(title)), ("metadata", json!(metadata))],
             "",
         );
@@ -1685,9 +1696,51 @@ impl World {
             .filter_map(|(node, file)| Some((node.get("id")?.as_str()?, file.as_str())))
             .collect();
         for (node, file) in nodes.iter().zip(&files) {
-            self.task(name, node, file, &named);
+            self.task(&identifier, node, file, &named);
         }
-        format!("{STORE_SOURCE}:{name}")
+        if let Some(missing) = undiscriminating(&self.store()) {
+            panic!("{missing}");
+        }
+        format!("{STORE_SOURCE}:{identifier}")
+    }
+
+    /// The project a run must never touch, and the reason every store fixture
+    /// here holds one.
+    ///
+    /// Its task carries the node id this suite's plans use most, so a read that
+    /// dropped `--project` does not quietly succeed: it comes back holding two
+    /// tasks for one node, which is a refusal rather than a silent extra.
+    fn decoy_project(&self) {
+        let path = self
+            .store()
+            .join("projects")
+            .join(format!("{DECOY_PROJECT}.md"));
+        if path.exists() {
+            return;
+        }
+        self.write_item(
+            &path,
+            &[
+                ("title", json!("A board this run must not touch")),
+                ("metadata", json!({"authored.note": "not this run's board"})),
+            ],
+            "",
+        );
+        for (file, node) in [("000-work", "work"), ("001-elsewhere", "elsewhere")] {
+            self.write_item(
+                &self
+                    .store()
+                    .join("tasks")
+                    .join(DECOY_PROJECT)
+                    .join(format!("{file}.md")),
+                &[
+                    ("title", json!(format!("chore: {node}, on another board"))),
+                    ("project", json!(DECOY_PROJECT)),
+                    ("metadata", json!({"onepipeline.id": node})),
+                ],
+                "",
+            );
+        }
     }
 
     /// One node of a plan, as the task carrying it.
@@ -1800,7 +1853,7 @@ impl World {
             &self
                 .store()
                 .join("tasks")
-                .join(project)
+                .join(project_id(project))
                 .join(format!("{file}.md")),
             &[
                 ("title", json!("a task of another plan")),
@@ -1961,6 +2014,7 @@ impl World {
                 prompt: Self::recorded(&call, 0, "the prompt"),
                 cwd: Self::recorded(&call, 1, "the working directory"),
                 member: Self::recorded(&call, 2, "the member"),
+                scratch: Self::recorded(&call, 3, "the scratch directory"),
             })
             .collect()
     }
@@ -2714,6 +2768,117 @@ pub fn oneagentgraph_binary() -> PathBuf {
         ])
     });
     held_alias(held, "oneagentgraph")
+}
+
+/// The project every store fixture here holds beside the plan under test.
+pub const DECOY_PROJECT: &str = "not-this-runs-board";
+
+/// The identifier a store holds the plan named `name` under.
+///
+/// Deliberately not the plan's own name, which is the project's *title*: a store
+/// item's id is the store's and a heading is a person's, and the two coincide
+/// only in a fixture that could not tell them apart.
+pub fn project_id(name: &str) -> String {
+    format!("{name}-board")
+}
+
+/// Why a store fixture could not tell a right answer from a wrong one, or `None`
+/// when it can.
+///
+/// Two rules, checked where the fixture is built rather than trusted to be
+/// remembered per journey, because each is a defect that shipped through a
+/// worker, a judge, a monitor and a manager:
+///
+/// 1. **A destination whose identifier differs from its title.** Every fixture
+///    here used to hold a project whose native id *was* its file stem *was* its
+///    title, so writing the id as the title was byte-identical to correct.
+/// 2. **Two of what the code under test filters on.** Every fixture held one
+///    project, so an ignored `--project` was indistinguishable from an honoured
+///    one.
+///
+/// Named for the failure rather than for the property, so the answer that means
+/// "this is fine" is the falsy one and a caller cannot forget to negate it.
+///
+/// A store this cannot *read* is refused too, and by name. A rule that answered
+/// "fine" for a directory entry it could not stat, a document it could not open,
+/// or front matter it could not parse would pass exactly the fixtures nobody can
+/// check.
+pub fn undiscriminating(store: &Path) -> Option<String> {
+    let fixture = store
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| store.display().to_string());
+    let entries = match std::fs::read_dir(store.join("projects")) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Some(format!(
+                "fixture '{fixture}': its projects directory could not be read ({error}), so it \
+                 is not a store at all"
+            ))
+        }
+    };
+    let mut projects: Vec<(String, String)> = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                return Some(format!(
+                    "fixture '{fixture}': one of its project entries could not be read ({error})"
+                ))
+            }
+        };
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            continue;
+        }
+        let identifier = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let document = match std::fs::read_to_string(&path) {
+            Ok(document) => document,
+            Err(error) => {
+                return Some(format!(
+                    "fixture '{identifier}': its project document could not be read ({error})"
+                ))
+            }
+        };
+        let front = document
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("---\n"))
+            .map(|(front, _)| front)
+            .ok_or_else(|| "its project document has no front matter".to_owned())
+            .and_then(|front| {
+                serde_norway::from_str::<serde_json::Map<String, Value>>(front)
+                    .map_err(|error| format!("its front matter is not a mapping ({error})"))
+            });
+        let front = match front {
+            Ok(front) => front,
+            Err(why) => return Some(format!("fixture '{identifier}': {why}")),
+        };
+        let Some(title) = front.get("title").and_then(Value::as_str) else {
+            return Some(format!(
+                "fixture '{identifier}': its project states no title, so there is nothing for \
+                 an identifier to differ from"
+            ));
+        };
+        projects.push((identifier, title.to_owned()));
+    }
+    if projects.len() < 2 {
+        return Some(format!(
+            "fixture '{fixture}': holds {} project, so a read that ignored the project filter \
+             cannot be told from one that honoured it",
+            projects.len()
+        ));
+    }
+    for (identifier, title) in &projects {
+        if identifier == title {
+            return Some(format!(
+                "fixture '{identifier}': its identifier is its own title, so writing the \
+                 identifier and preserving a person's heading are the same bytes"
+            ));
+        }
+    }
+    None
 }
 
 /// The reserved metadata key one plan field rides on.

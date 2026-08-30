@@ -86,7 +86,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     );
 
     world.until_store("the accepted graph edit to reach the project", |world| {
-        world.store_tasks("plans:applied").iter().any(|task| {
+        world.store_tasks("plans:applied-board").iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "extra"
                 && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
                 && task["item"]["metadata"]["onepipeline.max_turns"] == 2
@@ -95,7 +95,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         })
     });
     let extra = world
-        .store_tasks("plans:applied")
+        .store_tasks("plans:applied-board")
         .into_iter()
         .find(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
         .expect("the added task is in the store");
@@ -127,7 +127,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     assert!(task.contains("adds no acceptance criteria"), "{task}");
 
     world.until("settlement to reach the project", |world| {
-        world.store_tasks("plans:applied").iter().all(|task| {
+        world.store_tasks("plans:applied-board").iter().all(|task| {
             task["item"]["status"]["category"] == "done"
                 && task["item"]["metadata"]["onepipeline.settlement"].is_object()
         })
@@ -165,7 +165,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
     world.until_store(
         "the remaining accepted edits to reach the project",
         |world| {
-            let tasks = world.store_tasks("plans:remaining");
+            let tasks = world.store_tasks("plans:remaining-board");
             let task = |id: &str| {
                 tasks
                     .iter()

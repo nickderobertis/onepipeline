@@ -32,6 +32,20 @@
 //!
 //! What the destination alone owns — its native id, URL and timestamps — is never written
 //! by anybody, so it is neither replaced nor carried.
+//!
+//! # The status a node is projected under is the settlement's own word
+//!
+//! A settled run is read as the record of what happened, so the word on the board is the
+//! word the settlement used: `done` for a node that is done, `failed` for a task failure,
+//! `provider-failed` for the provider death that is not the work's fault, `cancelled` for a
+//! cancel, `parked` for a planner's own idle, and `skipped` for a node a failed dependency
+//! made unsafe. See [`ProjectedStatus`] for why that is a *name* rather than one of
+//! onetaskgraph's seven normalised categories.
+//!
+//! Beside it, the **change that closed the node**: the commit its change landed at, or the
+//! change request a person reads it in. A status alone cannot say which of those happened,
+//! and a reader closing work on the status would close it on a change that reached nobody.
+//! Both are absent for a node with no change of its own, which is most of them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,13 +58,25 @@ use serde_json::{json, Map, Value};
 
 use crate::edits::Operation;
 use crate::event::Source;
-use crate::graph::NodeStatus;
+use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
 use crate::projection::RunState;
 use crate::taskgraph::{QualifiedId, BINARY_ENV};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
+/// The reserved key saying whether the change a node published reached its base.
+///
+/// Named once, and held against the document that records them by
+/// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
+/// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so
+/// what these three and the words below are reconciled against is
+/// `docs/contract-divergences.md`, where that departure is recorded.
+const LANDING_KEY: &str = "onepipeline.landing";
+/// The reserved key naming the commit a landed change reached its base at.
+const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
+/// The reserved key naming where a person reads the change a node published.
+const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // Cross-platform runners have measured real sibling commands taking longer than ten seconds
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs.
@@ -66,8 +92,47 @@ struct Snapshot {
     dir: PathBuf,
     nodes: BTreeMap<String, Node>,
     statuses: BTreeMap<String, NodeStatus>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the string-keyed maps below are
+    // copies of `RunState`'s own fields, each of which records there why its value is the
+    // plain string every identifier in this crate is: an outcome is the *harness's* open
+    // vocabulary and a set declared here would refuse a classification that layer added, a
+    // landing commit is checked where it enters by `vcs::landing_commit_of`, and a change
+    // URL is the sibling's own and never minted here. Narrowing a copy of a field the crate
+    // holds unnarrowed would put a type on this side of a boundary the other side does not
+    // have.
+    /// The named outcome each settled node carries, which is what tells a
+    /// provider death from a task the agent failed. Both settle `failed`.
+    outcomes: BTreeMap<String, String>,
+    /// Whether each published node's change reached its base branch.
+    landings: BTreeMap<String, Landing>,
+    /// The commit each landed change reached its base at.
+    landing_commits: BTreeMap<String, String>,
+    /// Where a person reads the change a node published.
+    change_urls: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     settlements: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,
+}
+
+/// One projection that failed, as the planner is told about it.
+///
+/// Carried out of the worker rather than raised there: the worker runs on a
+/// thread of its own and the journal has one writer, so what it produces is this
+/// record and the reconcile loop raises the surface.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Unprojected {
+    /// The onetaskgraph project the projection could not reach.
+    pub project: QualifiedId,
+    /// The items it was carrying, by plan node id.
+    // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain string
+    // every identifier in this crate is, for the reason `NodeResult::superseded_by` records:
+    // these are the ids of the plan this run is executing, read straight off the snapshot
+    // the worker was projecting, and the only thing done with them is naming them on a
+    // surface.
+    pub items: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// What the sibling, or this worker, said went wrong.
+    pub reason: String,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -83,6 +148,11 @@ struct Pending {
     latest: Option<Snapshot>,
     last_success: Option<Snapshot>,
     worker: WorkerState,
+    /// Projections that failed and have not yet been raised with the planner.
+    ///
+    /// One entry per outage rather than one per retry: the worker retries until
+    /// the store returns, and a surface for every attempt would bury the first.
+    unprojected: Vec<Unprojected>,
 }
 
 impl Pending {
@@ -142,6 +212,10 @@ impl Writeback {
             dir: paths.dir.join("writeback"),
             nodes: all_nodes(paths, state),
             statuses: state.statuses(),
+            outcomes: state.outcomes.clone(),
+            landings: state.landings.clone(),
+            landing_commits: state.landing_commits.clone(),
+            change_urls: state.change_urls.clone(),
             settlements: settlements(paths),
             project_metadata: state
                 .plan
@@ -170,6 +244,18 @@ impl Writeback {
                 ready.notify_one();
             }
         }
+    }
+
+    /// Take the projections that failed since this was last asked, clearing them.
+    ///
+    /// Draining rather than reading: each failure is the planner's to hear once,
+    /// and the caller raises it. A worker that recovers does not withdraw one —
+    /// what it says is that the board was behind, which stays true.
+    pub fn take_unprojected(&self) -> Vec<Unprojected> {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .map(|mut pending| std::mem::take(&mut pending.unprojected))
+            .unwrap_or_default()
     }
 
     /// Give the active worker a bounded closeout window for the terminal snapshot.
@@ -253,7 +339,8 @@ fn worker(
                 }
             }
             Err(error) => {
-                if !failing {
+                let first = !failing;
+                if first {
                     eprintln!(
                         "onetaskgraph write-back failed for '{}': {error}; retrying",
                         snapshot.project
@@ -263,6 +350,13 @@ fn worker(
                 std::thread::sleep(RETRY_AFTER);
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
+                if first {
+                    state.unprojected.push(Unprojected {
+                        project: snapshot.project.clone(),
+                        items: snapshot.nodes.keys().cloned().collect(),
+                        reason: error,
+                    });
+                }
                 if state.worker == WorkerState::StopRequested {
                     return;
                 }
@@ -720,6 +814,20 @@ fn write_shadow(
         if let Some(settlement) = snapshot.settlements.get(id) {
             metadata.insert(crate::taskgraph::SETTLEMENT_KEY.into(), settlement.clone());
         }
+        // What closed the node, beside the word that says it closed. Each is
+        // written only where the run *observed* one, so a node with no change of
+        // its own — a direct agent node, a human action, a branch its base
+        // already carried — carries none of these keys at all rather than an
+        // empty value a reader would have to interpret.
+        if let Some(landing) = snapshot.landings.get(id) {
+            metadata.insert(LANDING_KEY.into(), json!(landing.as_str()));
+        }
+        if let Some(commit) = snapshot.landing_commits.get(id) {
+            metadata.insert(LANDING_COMMIT_KEY.into(), json!(commit));
+        }
+        if let Some(url) = snapshot.change_urls.get(id) {
+            metadata.insert(CHANGE_URL_KEY.into(), json!(url));
+        }
         let local_deps: Vec<String> = deps
             .iter()
             .filter_map(Value::as_str)
@@ -743,7 +851,13 @@ fn write_shadow(
         let mut front = Map::new();
         front.insert("title".into(), json!(title));
         front.insert("project".into(), json!(project_file(&snapshot.project)));
-        front.insert("status".into(), json!(category(status)));
+        front.insert(
+            "status".into(),
+            json!(projected(
+                status,
+                snapshot.outcomes.get(id).map(String::as_str)
+            )),
+        );
         // A node the plan has just added has no destination item yet, so there is nothing
         // to preserve and the created task starts with none.
         front.insert(
@@ -773,25 +887,51 @@ fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
     std::fs::write(path, format!("---\n{yaml}---\n{body}")).map_err(|e| e.to_string())
 }
 
-#[derive(Serialize)]
-enum TaskCategory {
+/// The word one node's state is written onto its destination item's status.
+///
+/// A onetaskgraph status is a **name** and a normalised **category**, and this is
+/// the name — four of these are a category's own word and the rest are words that
+/// vocabulary has none of. `docs/contract-divergences.md` records what that costs
+/// and why it is the cheaper of the two.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+enum ProjectedStatus {
     #[serde(rename = "in progress")]
     InProgress,
     #[serde(rename = "done")]
     Done,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "provider-failed")]
+    ProviderFailed,
     #[serde(rename = "cancelled")]
     Cancelled,
+    #[serde(rename = "parked")]
+    Parked,
+    #[serde(rename = "skipped")]
+    Skipped,
     #[serde(rename = "todo")]
     Todo,
 }
 
-fn category(status: NodeStatus) -> TaskCategory {
+/// Mirror one node's settlement onto the word its destination item reads under.
+///
+/// The outcome is read for one distinction alone, and it is the one no status
+/// carries: a dispatch its provider killed and a task its agent failed both
+/// settle [`NodeStatus::Failed`], and a reader who cannot tell them apart goes
+/// looking for what the work got wrong when nothing was wrong with the work.
+fn projected(status: NodeStatus, outcome: Option<&str>) -> ProjectedStatus {
     match status {
-        NodeStatus::Running => TaskCategory::InProgress,
-        NodeStatus::Done | NodeStatus::Failed => TaskCategory::Done,
-        NodeStatus::Parked | NodeStatus::Cancelled | NodeStatus::Skipped => TaskCategory::Cancelled,
+        NodeStatus::Running => ProjectedStatus::InProgress,
+        NodeStatus::Done => ProjectedStatus::Done,
+        NodeStatus::Failed if outcome == Some(crate::engine::PROVIDER_FAILED) => {
+            ProjectedStatus::ProviderFailed
+        }
+        NodeStatus::Failed => ProjectedStatus::Failed,
+        NodeStatus::Cancelled => ProjectedStatus::Cancelled,
+        NodeStatus::Parked => ProjectedStatus::Parked,
+        NodeStatus::Skipped => ProjectedStatus::Skipped,
         NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Waiting | NodeStatus::Blocked => {
-            TaskCategory::Todo
+            ProjectedStatus::Todo
         }
     }
 }
@@ -860,23 +1000,22 @@ fn encoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        write_shadow, DestinationProjectItem, Origin, Pending, Snapshot, TaskCategory, WorkerState,
+        projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
+        Pending, ProjectedStatus, Snapshot, WorkerState, CHANGE_URL_KEY, LANDING_COMMIT_KEY,
+        LANDING_KEY,
     };
     use crate::graph::NodeStatus;
     use crate::plan::Node;
-    use serde_json::{json, Value};
+    use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
     fn snapshot(status: NodeStatus) -> Snapshot {
-        Snapshot {
-            project: "plans:deduplication".parse().expect("a qualified project"),
-            dir: PathBuf::from("writeback"),
-            nodes: BTreeMap::new(),
-            statuses: BTreeMap::from([("node".to_owned(), status)]),
-            settlements: BTreeMap::new(),
-            project_metadata: BTreeMap::new(),
-        }
+        Fixture::new("queue").snapshot_with(|snapshot| {
+            snapshot.project = "plans:deduplication".parse().expect("a qualified project");
+            snapshot.dir = PathBuf::from("writeback");
+            snapshot.statuses = BTreeMap::from([("node".to_owned(), status)]);
+        })
     }
 
     #[test]
@@ -887,30 +1026,143 @@ mod tests {
             latest: Some(superseded),
             last_success: Some(first.clone()),
             worker: WorkerState::Working,
+            unprojected: Vec::new(),
         };
 
         assert!(pending.queue(first.clone()));
         assert!(pending.latest.as_ref() == Some(&first));
     }
 
+    /// Every word this projection writes, in the one arrangement that states them:
+    /// the list, and an exhaustive match over it, so a ninth status stops this
+    /// compiling until it is named here too.
+    fn every_projected_word() -> Vec<String> {
+        [
+            ProjectedStatus::Todo,
+            ProjectedStatus::InProgress,
+            ProjectedStatus::Done,
+            ProjectedStatus::Failed,
+            ProjectedStatus::ProviderFailed,
+            ProjectedStatus::Cancelled,
+            ProjectedStatus::Parked,
+            ProjectedStatus::Skipped,
+        ]
+        .into_iter()
+        .inspect(|status| match status {
+            ProjectedStatus::Todo
+            | ProjectedStatus::InProgress
+            | ProjectedStatus::Done
+            | ProjectedStatus::Failed
+            | ProjectedStatus::ProviderFailed
+            | ProjectedStatus::Cancelled
+            | ProjectedStatus::Parked
+            | ProjectedStatus::Skipped => {}
+        })
+        .map(word)
+        .collect()
+    }
+
+    /// The projection writes a vocabulary wider than the approved contract fixes,
+    /// and three reserved keys beside the settlement it already carried. Both are
+    /// recorded as a divergence, and this is the gate that keeps the record and
+    /// the code from parting: a word or a key the document does not name is one
+    /// nobody proposed.
     #[test]
-    fn task_categories_remain_named_by_the_approved_contract() {
-        let contract = include_str!("../docs/contract.md");
-        for category in [
-            TaskCategory::Todo,
-            TaskCategory::InProgress,
-            TaskCategory::Done,
-            TaskCategory::Cancelled,
+    fn every_word_and_key_this_projection_writes_is_named_by_the_divergence() {
+        let divergence = include_str!("../docs/contract-divergences.md");
+        let words = every_projected_word();
+        for word in &words {
+            assert!(
+                divergence.contains(&format!("`{word}`")),
+                "docs/contract-divergences.md does not name the projected status `{word}`"
+            );
+        }
+        let keys = [LANDING_KEY, LANDING_COMMIT_KEY, CHANGE_URL_KEY];
+        for key in keys {
+            assert!(
+                divergence.contains(&format!("`{key}`")),
+                "docs/contract-divergences.md does not name the reserved key `{key}`"
+            );
+        }
+        // And how many of each, because naming them all is not the same as
+        // counting them: a document that lists eight words and then says six has
+        // one sentence a reader trusts and one that is wrong.
+        for stated in [
+            format!("{} words where the contract names 4", words.len()),
+            format!("the {} reserved keys beside the settlement", keys.len()),
         ] {
-            let native = serde_json::to_value(category)
-                .expect("a task category serializes")
-                .as_str()
-                .expect("a task category is a string")
-                .replace(' ', "-");
+            assert!(
+                divergence.contains(&stated),
+                "docs/contract-divergences.md does not say \"{stated}\""
+            );
+        }
+    }
+
+    /// The four words that *are* onetaskgraph's own normalised categories stay
+    /// the words the approved contract names them with.
+    ///
+    /// The other four are deliberately not here: they are names that vocabulary
+    /// has none of, which `docs/contract-divergences.md` records as a divergence
+    /// rather than the contract naming them.
+    #[test]
+    fn the_projected_categories_remain_named_by_the_approved_contract() {
+        let contract = include_str!("../docs/contract.md");
+        for status in [
+            ProjectedStatus::Todo,
+            ProjectedStatus::InProgress,
+            ProjectedStatus::Done,
+            ProjectedStatus::Cancelled,
+        ] {
+            let native = word(status).replace(' ', "-");
             assert!(
                 contract.contains(&format!("`{native}`")),
                 "docs/contract.md no longer names the projected status category `{native}`"
             );
+        }
+    }
+
+    /// Each settlement is projected under a word of its own.
+    ///
+    /// The defect this replaces put `done` on a node whose work was thrown away
+    /// — the same word a merged node got, with only a nested `outcome` to
+    /// disagree — and made a parked node indistinguishable from a cancelled one.
+    /// So the assertion is that no two of these share a word, which is a
+    /// property a mapping that collapsed any pair could not have.
+    #[test]
+    fn every_settlement_is_projected_under_a_word_of_its_own() {
+        let settlements = [
+            ("done", NodeStatus::Done, None),
+            ("a task the agent failed", NodeStatus::Failed, None),
+            (
+                "a dispatch its provider killed",
+                NodeStatus::Failed,
+                Some(crate::engine::PROVIDER_FAILED),
+            ),
+            ("cancelled", NodeStatus::Cancelled, None),
+            ("parked", NodeStatus::Parked, None),
+        ];
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for (settlement, status, outcome) in settlements {
+            let projected = word(projected(status, outcome));
+            if let Some(shared) = seen.insert(projected.clone(), settlement) {
+                panic!(
+                    "'{settlement}' and '{shared}' are both projected as `{projected}`, so a \
+                     board cannot tell them apart"
+                );
+            }
+        }
+        assert_eq!(
+            seen.keys().cloned().collect::<Vec<_>>(),
+            ["cancelled", "done", "failed", "parked", "provider-failed"],
+        );
+    }
+
+    /// The word one projected status is written as, taken through the
+    /// serializer that writes it rather than restated beside it.
+    fn word(status: ProjectedStatus) -> String {
+        match serde_json::to_value(status).expect("a projected status serializes") {
+            Value::String(word) => word,
+            other => panic!("a projected status is a string, not {other}"),
         }
     }
 
@@ -924,27 +1176,52 @@ mod tests {
         dir
     }
 
-    /// The destination project a projection is written against.
+    /// The reserved keys this worker owns and overwrites on a projected item.
     ///
-    /// Built out of the sibling's own machine response rather than by naming fields, so
-    /// the shape this projection reads is the shape `project show --json` answers in.
-    fn destination(title: &str, labels: &[&str]) -> DestinationProjectItem {
-        serde_json::from_value(json!({
-            "id": "board",
-            "title": title,
-            "content": "A person's own description.",
-            "status": {"category": "backlog", "name": "backlog"},
-            "labels": labels
-                .iter()
-                .map(|name| json!({"id": name, "name": name, "color": null}))
-                .collect::<Vec<_>>(),
-            "url": null,
-            "created_at": null,
-            "updated_at": null,
-            "metadata": {"authored.note": "keep this value"},
-            "repositories": [],
-        }))
-        .expect("the sibling's own project response")
+    /// Everything else on a destination item is the complement — what the
+    /// projection has to carry through unchanged — and [`preserved`] is that
+    /// complement read off either side of the write.
+    fn owned(key: &str) -> bool {
+        key.starts_with("onepipeline.") || key.starts_with("onetaskgraph.")
+    }
+
+    /// Everything on a projected document that the writer does **not** own.
+    ///
+    /// The complement of what it declares, taken as one value rather than field
+    /// by field: "did the new thing arrive?" and "did anything else leave?" are
+    /// different questions, and only an assertion shaped like this one can fail
+    /// on the second.
+    fn preserved(front: &Value, body: &str) -> Value {
+        let metadata: Map<String, Value> = front["metadata"]
+            .as_object()
+            .expect("a projected document carries metadata")
+            .iter()
+            .filter(|(key, _)| !owned(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        json!({
+            "title": front["title"],
+            "labels": front["labels"],
+            "metadata": metadata,
+            "body": body,
+        })
+    }
+
+    /// The same complement, read off the destination the projection was written
+    /// against.
+    fn preserved_of(destination: &DestinationProjectItem) -> Value {
+        let metadata: Map<String, Value> = destination
+            .metadata
+            .iter()
+            .filter(|(key, _)| !owned(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        json!({
+            "title": destination.title,
+            "labels": destination.labels,
+            "metadata": metadata,
+            "body": destination.content.clone().unwrap_or_default(),
+        })
     }
 
     fn written(path: &Path) -> (Value, String) {
@@ -961,158 +1238,261 @@ mod tests {
         )
     }
 
-    fn projection(dir: &Path, status: NodeStatus) -> Snapshot {
-        let node: Node = serde_json::from_value(json!({
-            "id": "build",
-            "title": "feat: build it",
-            "task": "## What\nBuild it.",
-            "persona": "engineer",
-            "deps": ["design"],
-        }))
-        .expect("a plan node");
-        Snapshot {
-            project: "plans:board".parse().expect("a qualified project"),
-            dir: dir.to_path_buf(),
-            nodes: BTreeMap::from([("build".to_owned(), node)]),
-            statuses: BTreeMap::from([("build".to_owned(), status)]),
-            settlements: BTreeMap::new(),
-            project_metadata: BTreeMap::from([("onepipeline.concurrency".into(), json!(4))]),
+    /// One store fixture: a destination project, the snapshot projected onto it,
+    /// and what that destination already holds for each node.
+    ///
+    /// Held together rather than assembled per test because the properties that
+    /// make it able to fail are properties of the three *together* — see
+    /// [`undiscriminating`].
+    struct Fixture {
+        name: &'static str,
+        dir: PathBuf,
+        snapshot: Snapshot,
+        origins: BTreeMap<String, Origin>,
+        destination: DestinationProjectItem,
+    }
+
+    impl Fixture {
+        /// Two nodes, of which exactly one has a destination task; a project
+        /// whose title is not the identifier the store holds it under; and
+        /// authored labels, content and metadata on both sides.
+        fn new(name: &'static str) -> Self {
+            let dir = scratch(name);
+            let node = |id: &str, deps: &[&str]| -> Node {
+                serde_json::from_value(json!({
+                    "id": id,
+                    "title": format!("feat: {id} it"),
+                    "task": format!("## What\n{id} it."),
+                    "persona": "engineer",
+                    "deps": deps,
+                }))
+                .expect("a plan node")
+            };
+            Self {
+                name,
+                snapshot: Snapshot {
+                    project: "plans:board".parse().expect("a qualified project"),
+                    dir: dir.clone(),
+                    nodes: BTreeMap::from([
+                        ("build".to_owned(), node("build", &["design"])),
+                        ("design".to_owned(), node("design", &[])),
+                    ]),
+                    statuses: BTreeMap::from([
+                        ("build".to_owned(), NodeStatus::Done),
+                        ("design".to_owned(), NodeStatus::Done),
+                    ]),
+                    outcomes: BTreeMap::new(),
+                    landings: BTreeMap::new(),
+                    landing_commits: BTreeMap::new(),
+                    change_urls: BTreeMap::new(),
+                    settlements: BTreeMap::new(),
+                    project_metadata: BTreeMap::from([(
+                        "onepipeline.concurrency".into(),
+                        json!(4),
+                    )]),
+                },
+                // Only `build`. A node the plan has just added has no destination
+                // task at all, and holding both kinds in one fixture is what makes
+                // "carried through" and "invented none" separable answers.
+                origins: BTreeMap::from([(
+                    "build".to_owned(),
+                    Origin {
+                        id: "plans:board/002-build".parse().expect("a qualified task"),
+                        labels: labels(&[("needs-review", Some("d73a4a"))]),
+                    },
+                )]),
+                destination: destination("A person's own board", &["planning", "q3"]),
+                dir,
+            }
+        }
+
+        /// The same fixture with one field of the snapshot restated.
+        fn snapshot_with(mut self, edit: impl FnOnce(&mut Snapshot)) -> Snapshot {
+            edit(&mut self.snapshot);
+            self.snapshot.clone()
+        }
+
+        /// Project it, refusing a fixture that could not tell a right answer from
+        /// a wrong one.
+        fn project(&self) {
+            if let Some(missing) =
+                undiscriminating(self.name, &self.destination, &self.snapshot, &self.origins)
+            {
+                panic!("{missing}");
+            }
+            write_shadow(&self.snapshot, &self.origins, &self.destination)
+                .expect("the shadow project is written");
+        }
+
+        /// The project document and one node's task document, as written.
+        fn project_document(&self) -> (Value, String) {
+            written(&self.dir.join("projects").join(format!(
+                "{}.md",
+                super::project_file(&self.snapshot.project)
+            )))
+        }
+
+        fn task_document(&self, node: &str) -> (Value, String) {
+            written(
+                &self
+                    .dir
+                    .join("tasks")
+                    .join(super::project_file(&self.snapshot.project))
+                    .join(format!("{}.md", super::task_file(node))),
+            )
         }
     }
 
-    fn documents(dir: &Path) -> (PathBuf, PathBuf) {
-        let project = super::project_file(&"plans:board".parse().expect("a qualified project"));
-        (
-            dir.join("projects").join(format!("{project}.md")),
-            dir.join("tasks")
-                .join(&project)
-                .join(format!("{}.md", super::task_file("build"))),
-        )
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
-    /// The rule's second consequence: a project's title is not a plan's to state, so the
-    /// destination's own title is what the projection writes back.
+    /// Why a fixture standing in for a store could not fail, or `None` when it
+    /// can.
     ///
-    /// A store whose native identifier *is* its title cannot tell this apart from writing
-    /// the identifier, so the destination here is one where the two differ.
-    #[test]
-    fn a_projection_writes_back_the_destination_projects_own_title() {
-        let dir = scratch("project-title");
-        let snapshot = projection(&dir, NodeStatus::Done);
-        write_shadow(
-            &snapshot,
-            &BTreeMap::new(),
-            &destination("A person's own board", &[]),
-        )
-        .expect("the shadow project is written");
-
-        let (front, body) = written(&documents(&dir).0);
-        assert_eq!(
-            front["title"], "A person's own board",
-            "the projection renamed the destination project"
-        );
-        assert_ne!(
-            front["title"],
-            json!(snapshot.project.native()),
-            "the projection wrote the project's native identifier as its title"
-        );
-        assert_eq!(
-            body, "A person's own description.",
-            "the projection replaced the destination's description"
-        );
-        assert_eq!(
-            front["metadata"]["authored.note"], "keep this value",
-            "the projection dropped metadata no plan declares"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    /// Two rules, enforced where the fixture is built rather than trusted to be
+    /// remembered per test, because each of them is a defect that shipped
+    /// through a worker, a judge, a monitor and a manager. Under a store whose
+    /// project's native id *is* its title, writing the identifier as the title
+    /// was byte-identical to preserving it; under a fixture holding one of
+    /// everything the code filters on, an ignored filter and an honoured one
+    /// produced the same bytes.
+    fn undiscriminating(
+        fixture: &str,
+        destination: &DestinationProjectItem,
+        snapshot: &Snapshot,
+        origins: &BTreeMap<String, Origin>,
+    ) -> Option<String> {
+        let missing = if destination._id == destination.title {
+            "its destination project's identifier is its own title, so writing the \
+             identifier and preserving the title are the same bytes"
+        } else if snapshot.nodes.len() < 2 {
+            "it holds one node, so a projection that wrote the wrong one is \
+             indistinguishable from one that wrote the right one"
+        } else if !snapshot.nodes.keys().any(|id| origins.contains_key(id))
+            || !snapshot.nodes.keys().any(|id| !origins.contains_key(id))
+        {
+            "every node has a destination task or none does, so a projection that \
+             ignored what the destination already holds cannot be told from one that \
+             read it"
+        } else {
+            return None;
+        };
+        Some(format!("fixture '{fixture}': {missing}"))
     }
 
-    /// The rule's fourth consequence, for a project: labels are not modelled by a plan, so
-    /// the destination's own are carried through whole rather than dropped.
+    /// The rule the fixtures are built to, held against fixtures that break it.
+    ///
+    /// A check that passed a one-project, id-equals-title fixture would be the
+    /// thing it exists to prevent, so each degenerate shape is stated here and
+    /// the check has to name it.
     #[test]
-    fn a_projection_carries_the_destination_projects_labels_through_whole() {
-        let dir = scratch("project-labels");
-        write_shadow(
-            &projection(&dir, NodeStatus::Done),
-            &BTreeMap::new(),
-            &destination("A person's own board", &["planning", "q3"]),
-        )
-        .expect("the shadow project is written");
-
-        let (front, _) = written(&documents(&dir).0);
+    fn a_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refused() {
+        let sound = Fixture::new("discrimination");
         assert_eq!(
-            front["labels"],
-            json!([
-                {"id": "planning", "name": "planning", "color": null},
-                {"id": "q3", "name": "q3", "color": null},
-            ]),
-            "the projection dropped the destination project's labels"
+            undiscriminating(
+                sound.name,
+                &sound.destination,
+                &sound.snapshot,
+                &sound.origins
+            ),
+            None,
+            "the fixture every test here is built from does not meet its own rule"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+
+        let named = |missing: Option<String>, property: &str| {
+            let said = missing.unwrap_or_else(|| {
+                panic!("a fixture whose {property} could prove nothing was accepted")
+            });
+            assert!(
+                said.contains("fixture 'degenerate'"),
+                "the refusal does not name the fixture: {said}"
+            );
+            assert!(
+                said.contains(property),
+                "the refusal does not name the missing property: {said}"
+            );
+        };
+
+        // A project whose title is the store's own identifier for it.
+        named(
+            undiscriminating(
+                "degenerate",
+                &destination("board", &[]),
+                &sound.snapshot,
+                &sound.origins,
+            ),
+            "identifier is its own title",
+        );
+        // One node, so an ignored project or node filter is invisible.
+        let one = Fixture::new("one-node").snapshot_with(|snapshot| {
+            snapshot.nodes.retain(|id, _| id == "build");
+        });
+        named(
+            undiscriminating("degenerate", &sound.destination, &one, &sound.origins),
+            "holds one node",
+        );
+        // Every node already known to the destination, so a projection that never
+        // read it looks the same.
+        named(
+            undiscriminating(
+                "degenerate",
+                &sound.destination,
+                &sound.snapshot,
+                &BTreeMap::new(),
+            ),
+            "every node has a destination task or none does",
+        );
     }
 
-    /// The same consequence for a task, read off the destination task the node projects
-    /// onto — and nothing at all for a node the destination has no task for yet.
-    #[test]
-    fn a_projection_carries_a_destination_tasks_labels_through_and_invents_none() {
-        let dir = scratch("task-labels");
-        write_shadow(
-            &projection(&dir, NodeStatus::Done),
-            &BTreeMap::from([(
-                "build".to_owned(),
-                Origin {
-                    id: "plans:board/002-build".parse().expect("a qualified task"),
-                    labels: serde_json::from_value(json!([
-                        {"id": "needs-review", "name": "needs-review", "color": "d73a4a"}
-                    ]))
-                    .expect("the sibling's own labels"),
-                },
-            )]),
-            &destination("A person's own board", &[]),
-        )
-        .expect("the shadow project is written");
-        let (front, _) = written(&documents(&dir).1);
-        assert_eq!(
-            front["labels"],
-            json!([{"id": "needs-review", "name": "needs-review", "color": "d73a4a"}]),
-            "the projection dropped the destination task's labels"
-        );
-        assert_eq!(
-            front["metadata"]["onetaskgraph.origin"], "plans:board/002-build",
-            "the projection lost the destination task it writes onto"
-        );
-
-        write_shadow(
-            &projection(&dir, NodeStatus::Done),
-            &BTreeMap::new(),
-            &destination("A person's own board", &[]),
-        )
-        .expect("the shadow project is written for a node with no destination task");
-        let (front, _) = written(&documents(&dir).1);
-        assert_eq!(
-            front["labels"],
-            json!([]),
-            "the projection invented labels for a task the destination does not hold"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    /// The destination project a projection is written against.
+    ///
+    /// Built out of the sibling's own machine response rather than by naming
+    /// fields, so the shape this projection reads is the shape `project show
+    /// --json` answers in.
+    fn destination(title: &str, labels: &[&str]) -> DestinationProjectItem {
+        serde_json::from_value(json!({
+            "id": "board",
+            "title": title,
+            "content": "A person's own description.",
+            "status": {"category": "backlog", "name": "backlog"},
+            "labels": labels
+                .iter()
+                .map(|name| json!({"id": name, "name": name, "color": null}))
+                .collect::<Vec<_>>(),
+            "url": null,
+            "created_at": null,
+            "updated_at": null,
+            "metadata": {"authored.note": "keep this value", "authored.owner": "a person"},
+            "repositories": [],
+        }))
+        .expect("the sibling's own project response")
     }
 
-    /// The rule's first consequence: everything a plan *does* declare is replaced, which is
-    /// what the projection is for. Held beside the preservation tests so neither can be
-    /// satisfied by writing less.
+    fn labels(named: &[(&str, Option<&str>)]) -> Vec<DestinationLabel> {
+        serde_json::from_value(json!(named
+            .iter()
+            .map(|(name, color)| json!({"id": name, "name": name, "color": color}))
+            .collect::<Vec<_>>()))
+        .expect("the sibling's own labels")
+    }
+
+    /// The rule's first consequence: everything a plan declares is replaced,
+    /// which is what the projection is for.
     #[test]
     fn a_projection_replaces_every_field_the_plan_declares() {
-        let dir = scratch("declared");
-        write_shadow(
-            &projection(&dir, NodeStatus::Running),
-            &BTreeMap::new(),
-            &destination("A person's own board", &[]),
-        )
-        .expect("the shadow project is written");
+        let mut fixture = Fixture::new("declared");
+        fixture
+            .snapshot
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Running);
+        fixture.project();
 
-        let (front, body) = written(&documents(&dir).1);
+        let (front, body) = fixture.task_document("build");
         assert_eq!(front["title"], "feat: build it");
-        assert_eq!(body, "## What\nBuild it.");
+        assert_eq!(body, "## What\nbuild it.");
         assert_eq!(front["status"], "in progress");
         assert_eq!(
             front["depends_on"],
@@ -1121,6 +1501,184 @@ mod tests {
         );
         assert_eq!(front["metadata"]["onepipeline.id"], "build");
         assert_eq!(front["metadata"]["onepipeline.persona"], "engineer");
-        let _ = std::fs::remove_dir_all(&dir);
+        // And the node the destination has no task for is written too, under its
+        // own title rather than the other node's.
+        let (design, _) = fixture.task_document("design");
+        assert_eq!(design["title"], "feat: design it");
+        assert_eq!(design["metadata"]["onepipeline.id"], "design");
+    }
+
+    /// The rule's second, third and fourth consequences at once, as one
+    /// complement: the projection is a total replacement of the destination
+    /// item, so everything it does not own has to come back unchanged.
+    ///
+    /// Asserted as the whole complement rather than field by field, and held
+    /// against a destination missing one of those fields: an assertion that
+    /// could not fail on a deletion is the defect this replaces.
+    #[test]
+    fn a_projection_carries_through_everything_the_plan_does_not_declare() {
+        let fixture = Fixture::new("preserved");
+        fixture.project();
+
+        let (front, body) = fixture.project_document();
+        assert_eq!(
+            preserved(&front, &body),
+            preserved_of(&fixture.destination),
+            "the projection changed something the plan does not declare"
+        );
+        assert_ne!(
+            front["title"],
+            json!(fixture.snapshot.project.native()),
+            "the projection wrote the project's native identifier as its title"
+        );
+        assert_eq!(
+            front["metadata"]["onetaskgraph.origin"],
+            json!(fixture.snapshot.project.as_str()),
+            "the projection lost the destination project it writes onto"
+        );
+
+        // The same assertion, against a destination one unowned field lighter.
+        // It has to fail, or it was never asking whether anything left.
+        let mut deleted = destination("A person's own board", &["planning", "q3"]);
+        deleted.metadata.remove("authored.note");
+        assert_ne!(
+            preserved(&front, &body),
+            preserved_of(&deleted),
+            "the complement assertion cannot fail on a deleted field, so it proves nothing"
+        );
+        let mut unlabelled = destination("A person's own board", &["planning"]);
+        unlabelled.metadata = fixture.destination.metadata.clone();
+        assert_ne!(
+            preserved(&front, &body),
+            preserved_of(&unlabelled),
+            "the complement assertion cannot fail on a dropped label, so it proves nothing"
+        );
+    }
+
+    /// The same consequence for a task: labels are read off the destination task
+    /// the node projects onto, and a node the destination has no task for gets
+    /// none invented for it.
+    #[test]
+    fn a_projection_carries_a_destination_tasks_labels_through_and_invents_none() {
+        let fixture = Fixture::new("task-labels");
+        fixture.project();
+
+        let (build, _) = fixture.task_document("build");
+        assert_eq!(
+            build["labels"],
+            json!([{"id": "needs-review", "name": "needs-review", "color": "d73a4a"}]),
+            "the projection dropped the destination task's labels"
+        );
+        assert_eq!(
+            build["metadata"]["onetaskgraph.origin"], "plans:board/002-build",
+            "the projection lost the destination task it writes onto"
+        );
+
+        let (design, _) = fixture.task_document("design");
+        assert_eq!(
+            design["labels"],
+            json!([]),
+            "the projection invented labels for a task the destination does not hold"
+        );
+        assert_eq!(
+            design["metadata"].get("onetaskgraph.origin"),
+            None,
+            "the projection claimed a destination task for a node the destination has none for"
+        );
+    }
+
+    /// A settled node's item says which settlement closed it, and what the
+    /// change that closed it was.
+    ///
+    /// The two halves are one fact: a status alone cannot say whether the work
+    /// reached anybody, and a reader closing work on the word `done` would close
+    /// it on a change request nobody has merged.
+    #[test]
+    fn a_settled_node_carries_the_change_that_closed_it_and_a_node_without_one_carries_none() {
+        let mut fixture = Fixture::new("landing");
+        fixture
+            .snapshot
+            .landings
+            .insert("build".to_owned(), Landing::Landed);
+        fixture
+            .snapshot
+            .landing_commits
+            .insert("build".to_owned(), "d3adb33f".to_owned());
+        fixture.snapshot.change_urls.insert(
+            "build".to_owned(),
+            "https://example.invalid/pull/7".to_owned(),
+        );
+        fixture.project();
+
+        let (build, _) = fixture.task_document("build");
+        assert_eq!(build["status"], "done", "a node that landed is not closed");
+        assert_eq!(build["metadata"]["onepipeline.landing"], "landed");
+        assert_eq!(build["metadata"]["onepipeline.landing_commit"], "d3adb33f");
+        assert_eq!(
+            build["metadata"]["onepipeline.change_url"],
+            "https://example.invalid/pull/7"
+        );
+
+        // A node with no change of its own claims none, rather than claiming one
+        // with an empty value a reader would have to interpret.
+        let (design, _) = fixture.task_document("design");
+        for absent in [
+            "onepipeline.landing",
+            "onepipeline.landing_commit",
+            "onepipeline.change_url",
+        ] {
+            assert_eq!(
+                design["metadata"].get(absent),
+                None,
+                "a node with no change of its own was recorded as having {absent}"
+            );
+        }
+    }
+
+    /// Each settlement reaches the destination document under its own word, and
+    /// the settlement itself is beside it.
+    #[test]
+    fn each_settlement_reaches_the_document_under_its_own_word() {
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for (settlement, status, outcome) in [
+            ("done", NodeStatus::Done, None),
+            ("failed", NodeStatus::Failed, None),
+            (
+                "provider-failed",
+                NodeStatus::Failed,
+                Some(crate::engine::PROVIDER_FAILED),
+            ),
+            ("cancelled", NodeStatus::Cancelled, None),
+            ("parked", NodeStatus::Parked, None),
+        ] {
+            let mut fixture = Fixture::new("settlement-words");
+            fixture.snapshot.statuses.insert("build".to_owned(), status);
+            if let Some(outcome) = outcome {
+                fixture
+                    .snapshot
+                    .outcomes
+                    .insert("build".to_owned(), outcome.to_owned());
+            }
+            fixture.snapshot.settlements.insert(
+                "build".to_owned(),
+                json!({"status": status.as_str(), "outcome": outcome}),
+            );
+            fixture.project();
+
+            let (build, _) = fixture.task_document("build");
+            let word = build["status"]
+                .as_str()
+                .expect("a projected status is a string")
+                .to_owned();
+            assert_eq!(
+                build["metadata"][crate::taskgraph::SETTLEMENT_KEY]["status"],
+                json!(status.as_str()),
+                "the settlement did not reach the item beside its word"
+            );
+            if let Some(shared) = seen.insert(word.clone(), settlement) {
+                panic!("'{settlement}' and '{shared}' both reached the board as `{word}`");
+            }
+        }
+        assert_eq!(seen.len(), 5, "two settlements shared a word: {seen:?}");
     }
 }

@@ -1809,29 +1809,35 @@ fn started_at_of(pid: u32) -> String {
 }
 
 /// A live process this run never started, standing in for whatever the host gave
-/// a reissued pid to — and one this host describes differently from `stamp`.
+/// a reissued pid to — and one this host describes differently from **every**
+/// `stamp` a record it is about to be planted into carries.
 ///
 /// `lstart` is reported to the **second**, so a process started inside the same
-/// second as the driver carries the driver's own stamp and would be a pid the
-/// record still proves rather than a stranger. Retried until the host's clock has
-/// left that second behind, so the stand-in is a stranger by construction rather
+/// second as a recorded one carries that record's own stamp and would be a pid
+/// the record still proves rather than a stranger. Every stamp is passed rather
+/// than the launch record's alone, because a dispatch runs in a process of its
+/// own: its registry entry carries that child's start, the child was started
+/// moments before the stand-in, and a host whose resolution is a second describes
+/// the two identically. Retried until the host's clock has left every one of
+/// those seconds behind, so the stand-in is a stranger by construction rather
 /// than by luck.
 #[cfg(unix)]
-fn stranger_started_after(stamp: &str) -> std::process::Child {
+fn stranger_started_after(stamps: &[String]) -> std::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let mut child = std::process::Command::new("sleep")
             .arg("300")
             .spawn()
             .expect("this host starts a process of its own");
-        if started_at_of(child.id()) != stamp {
+        let started = started_at_of(child.id());
+        if !stamps.contains(&started) {
             return child;
         }
         child.kill().expect("this test ends its own process");
         child.wait().expect("it is reaped");
         assert!(
             std::time::Instant::now() < deadline,
-            "this host kept starting processes inside the second {stamp:?} names"
+            "this host kept starting processes inside a second one of {stamps:?} names"
         );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -2275,7 +2281,7 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
         .as_str()
         .expect("a driver records the stamp that proves its pid")
         .to_string();
-    let mut stranger = stranger_started_after(&recorded);
+    let mut stranger = stranger_started_after(std::slice::from_ref(&recorded));
     let taken = stranger.id();
     assert!(
         !tree.contains(&taken),
@@ -2407,12 +2413,6 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
         },
     );
 
-    let recorded = world.run_json(&run, "launch.json")["started"]
-        .as_str()
-        .expect("the launch record carries its driver's identity")
-        .to_string();
-    let mut stranger = stranger_started_after(&recorded);
-    let stranger_pid = stranger.id();
     let mut paths = vec![
         world.run_file(&run, "launch.json"),
         world.run_file(&run, "owner.lock"),
@@ -2431,13 +2431,36 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
         "the in-flight node recorded no live dispatch claim"
     );
     paths.extend(dispatches);
-    for path in paths {
-        let mut claim: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&path).expect("the live process claim is readable"),
-        )
-        .expect("the live process claim is JSON");
+    // Each claim proves its pid against the stamp beside it, and the three are
+    // not one stamp: the driver wrote the first two and the dispatch's own
+    // process wrote the third. So the stand-in has to be a stranger to all of
+    // them, and every stamp is read before it is started.
+    let mut claims: Vec<(PathBuf, serde_json::Value)> = paths
+        .into_iter()
+        .map(|path| {
+            let claim: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&path).expect("the live process claim is readable"),
+            )
+            .expect("the live process claim is JSON");
+            (path, claim)
+        })
+        .collect();
+    let stamps: Vec<String> = claims
+        .iter()
+        .map(|(path, claim)| {
+            claim["started"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("{} carries the stamp that proves its pid", path.display())
+                })
+                .to_string()
+        })
+        .collect();
+    let mut stranger = stranger_started_after(&stamps);
+    let stranger_pid = stranger.id();
+    for (path, claim) in &mut claims {
         claim["pid"] = json!(stranger_pid);
-        std::fs::write(&path, claim.to_string()).expect("the reissued pid is planted");
+        std::fs::write(path, claim.to_string()).expect("the reissued pid is planted");
     }
 
     let refused = world.run(&["stop", &run]);

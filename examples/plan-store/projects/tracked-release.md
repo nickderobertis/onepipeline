@@ -1,6 +1,7 @@
 ---
-title: "tracked-release"
+title: "Deliver the tracked release"
 metadata:
+  "onepipeline.name": "tracked-release"
   "onepipeline.schema_version": 3
   "onepipeline.goal":
     "text": "Deliver the tracked release safely across its target projects"
