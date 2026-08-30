@@ -1141,13 +1141,17 @@ pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
 
 /// Close the session, and collect what its stream said.
 ///
-/// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record: closing marks the session closed before it emits
-/// `session-closed`, and the follow ends as soon as it reads a session closed. A
-/// follow can therefore end cleanly having relayed everything but the tail — so
-/// the stream is always read once more afterwards, from the point the follow
-/// reached. A gap in the merged store is what makes a later reader think nothing
-/// happened.
+/// **The follow ends first, and the close comes after it.** `onevcs` refuses to
+/// release a session while any live process is working inside its run root, and
+/// the follow's own poll asks the library whether the session closed — a call
+/// that shells out to `git` in that session's clone. Closed first, as this once
+/// was, the close raced the follow's own children and lost intermittently: the
+/// refusal reached nobody, the session stayed open, and `session-closed` never
+/// reached the merged store.
+///
+/// Closing still writes the session's last record, so the stream is always read
+/// once more afterwards, from the point the follow reached. A gap in the merged
+/// store is what makes a later reader think nothing happened.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -1155,10 +1159,10 @@ fn end_session(
     node: &Labels,
     filter: Option<&EventFilter>,
 ) {
-    close(token);
     // Empty from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    close(token);
     relay_session_events(tx, token, node, &followed_through, filter);
 }
 
@@ -1207,9 +1211,15 @@ fn beyond(envelopes: Vec<Envelope>, followed_through: &crate::vcs::Watermarks) -
 
 fn close(token: Option<&onevcs::SessionToken>) {
     // Best effort: a node that already failed must not be reported as a
-    // different failure because its cleanup also failed.
+    // different failure because its cleanup also failed. Said out loud all the
+    // same, because the refusal names a session still holding a worktree and
+    // what to do about it — and swallowed, it is a defect nothing reports: this
+    // ordering was wrong for a whole release with the only symptom a record
+    // missing from a stream.
     if let Some(token) = token {
-        let _ = crate::vcs::session_close(token);
+        if let Err(error) = crate::vcs::session_close(token) {
+            eprintln!("onepipeline: session {} was not released: {error}", token.0);
+        }
     }
 }
 

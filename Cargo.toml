@@ -216,13 +216,19 @@ resolver = "2"
 #   reports the stale holder an operator can act on and says nothing about the one
 #   it cannot. A **requirement**, because `^0.16` admits no 0.17.x — pre-1.0 the
 #   minor is the breaking position.
-#   Two further promises of that release reach this crate. `session close`
+#   Three further promises of that release reach this crate. `session close`
 #   **commits an incomplete step's uncommitted tree** rather than letting
 #   `git worktree remove` delete it, so a preserved branch carries a provenance
 #   commit — and a publication of such a branch that states no title of its own is
-#   refused, because a provenance record describes no change. And the merge path
+#   refused, because a provenance record describes no change. The merge path
 #   reads `isDraft` off the host before it asks a change request to merge, which
-#   `crates/testfakes`'s `gh` double answers.
+#   `crates/testfakes`'s `gh` double answers. And `session close` now **refuses a
+#   session any live process is working inside**, which decided an ordering here:
+#   asking whether a session is closed shells out to `git` in its clone, so a
+#   follow still polling at the moment of the close is such a process. The follow
+#   is stopped first for that reason — `lifecycle::end_session` says so, and
+#   `lifecycle::a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs`
+#   is what reads `session-closed` back out of the merged store.
 # - `onevcs` 0.18.0 moves the release-declaration schema to **version 3**, which
 #   adds a target's own `adoption_instructions`. This repository is a producer, so
 #   the resolution decides the number `release-targets.toml` states; nothing here

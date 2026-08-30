@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use onevcs::{
     EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome, PublishRequest,
@@ -737,13 +737,6 @@ fn labels_of(labels: onevcs::Labels) -> crate::event::Labels {
     }
 }
 
-/// How long a follow may keep reading after its session was closed.
-///
-/// The reader ends itself on a session it reads as closed, so this only covers
-/// the case where the close itself failed and nothing will ever mark it: a node
-/// that has already settled must not hang on its own cleanup.
-const FOLLOW_GRACE: Duration = Duration::from_secs(5);
-
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
@@ -898,31 +891,24 @@ impl Drop for Follower {
 impl Follower {
     /// Stop following, and say how far into the stream it got.
     ///
-    /// Called *after* `session close`, which is what ends the follow: the reader
-    /// relays everything appended since its last pass and only then asks whether
-    /// the session closed, so waiting for it loses nothing.
+    /// Called *before* `session close`, and the flag rather than the close is
+    /// what ends it. `onevcs` refuses to release a session any live process is
+    /// working inside its run root, and asking whether the session closed is a
+    /// library call that shells out to `git` in that session's clone — so a
+    /// follow still polling at the moment of the close is, a fraction of the
+    /// time, exactly such a process, and the close fails. Waiting here is what
+    /// makes it not one: the reader relays one last batch and the join is what
+    /// says its last `git` child has been reaped.
     ///
     /// The answer is a **floor, never a promise that the rest is not there**.
-    /// Closing a session marks the record closed and only then writes the
-    /// `session-closed` event, while the follow relays what the stream holds and
-    /// *then* asks whether the session closed — so a follow can end cleanly,
-    /// successfully, with the last record of the session still unwritten.
-    /// Treating a clean end as "everything was relayed" is what dropped that
-    /// record out of the merged store; the caller reads the stream once more
-    /// from this point instead.
+    /// Everything the close itself writes — the `session-closed` record among it
+    /// — is appended after this returns, so the caller reads the stream once
+    /// more from this point instead. Treating a clean end as "everything was
+    /// relayed" is what dropped that record out of the merged store.
     ///
     /// Empty when it relayed nothing at all, which is the whole stream still to
     /// read rather than a stream that held nothing.
     pub fn finish(mut self) -> Watermarks {
-        let deadline = Instant::now() + FOLLOW_GRACE;
-        while self
-            .reader
-            .as_ref()
-            .is_some_and(|reader| !reader.is_finished())
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(FOLLOW_POLL);
-        }
         self.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
