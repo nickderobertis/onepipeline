@@ -113,32 +113,6 @@ fn engine() -> Value {
     node
 }
 
-/// The same, declaring what a consumer of **its** release has to do about one.
-///
-/// The producer knows it and the consumer cannot: which manifest the pin is in,
-/// and what is re-run beside it. Guarded on the version, because the same
-/// template is rendered at a fast node's first dispatch — where no release has
-/// happened — and again once one has.
-fn engine_declaring() -> Value {
-    let mut node = engine();
-    node["release_instruction"] = json!(PIN_RULE);
-    node
-}
-
-/// The engine repository's own pinning rule, as its node declares it.
-const PIN_RULE: &str = "{{#version}}Bump the {{target}} pin for {{repository}} to {{version}} in \
-                        Cargo.toml, then re-run `cargo update`.{{/version}}\
-                        {{^version}}Pin {{repository}} at the branch {{branch}} in Cargo.toml \
-                        with a `git` dependency.{{/version}}";
-
-/// What the rule renders to once the release named here has arrived.
-fn bump_to(version: &str) -> String {
-    format!(
-        "Bump the crate pin for github.com/owner/engine to {version} in Cargo.toml, then \
-         re-run `cargo update`."
-    )
-}
-
 /// Say what the probe answers from now on.
 ///
 /// Whole or not at all, because the probe reads this file while a journey writes
@@ -1231,30 +1205,6 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
     name.to_string()
 }
 
-/// The same, for a launch whose **plan** declares what a consumer of its nodes
-/// is told — the second rung, under a producing node's own declaration.
-///
-/// It goes onto the project as `onepipeline.release_instruction`, the way every
-/// plan-level field reaches a run, so what is exercised is the mapping a planner
-/// would actually write rather than a value handed straight to the types.
-fn start_declaring(world: &World, name: &str, nodes: Vec<Value>, instruction: &str) -> String {
-    for node in &nodes {
-        let id = node["id"].as_str().expect("every node has an id");
-        world.script(&format!("{id}.work"), &format!("{id} did its work\n"));
-    }
-    let mut plan = plan_of(name, nodes);
-    plan["release_instruction"] = json!(instruction);
-    let path = world.plan(name, &plan);
-    world.run(&["start", &path, "--detach"]).exited(0);
-    name.to_string()
-}
-
-/// The rule the **upstream plan** states, for a producer whose node declares
-/// none of its own.
-const PLAN_RULE: &str = "{{#version}}Take {{repository}} at {{version}} from the registry.\
-                         {{/version}}{{^version}}Take {{repository}} from the branch \
-                         {{branch}}.{{/version}}";
-
 /// How often a journey here lets this host run **one** release's probe.
 ///
 /// [`watching`] is what sets it, from here rather than beside it: a journey that
@@ -1370,7 +1320,7 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     let run = start(
         &world,
         "adoption-fast",
-        vec![engine_declaring(), consumer(Some("fast"))],
+        vec![engine(), consumer(Some("fast"))],
     );
     world.until("the consumer's turn to open", |world| {
         world
@@ -1403,23 +1353,9 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
         "the commit cell is not the landing the run observed: {row}"
     );
     assert_eq!(cells[4], "crate", "row: {row}");
-    assert_eq!(
-        cells[5], "",
-        "a version was asserted before one existed: {row}"
-    );
     assert!(
         task.contains("Pin against the git references below rather than against a version"),
         "the block does not say what it is for:\n{task}"
-    );
-    // And the producer's own instruction, rendered for the state this node is
-    // actually in: no release has happened, so the rule's unreleased branch is
-    // what a worker is told to do.
-    assert!(
-        block.contains(&format!(
-            "Pin github.com/owner/engine at the branch {} in Cargo.toml with a `git` dependency.",
-            branch_of(&world, &run, "engine")
-        )),
-        "the block does not carry the producer's own instruction:\n{block}"
     );
 
     // Nothing has arrived yet: the probe answers exactly the baseline.
@@ -1456,17 +1392,7 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     );
     assert_eq!(
         adopted[0]["payload"]["versions"],
-        json!([{
-            "identity": "github.com/owner/engine",
-            "target": "crate",
-            "version": "0.2.0",
-            "dep": "engine",
-            "branch": branch_of(&world, &run, "engine"),
-            "commit": landing_commit(&world, &run, "engine"),
-            // The producer's template rather than what it rendered to, so a note
-            // replayed off this record renders the same note it was sent.
-            "instruction": PIN_RULE,
-        }])
+        json!([{"identity": "github.com/owner/engine", "target": "crate", "version": "0.2.0"}])
     );
 
     // The lever really was pulled, and the sibling's own record of it reached the
@@ -1496,29 +1422,12 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     // release existed — so the redirection is the only way it got there.
     let note = redirected(&world, &run, "consumer");
     assert!(
-        note.contains("github.com/owner/engine — crate 0.2.0"),
+        note.contains("github.com/owner/engine — crate 0.2.0")
+            && note.contains("Move from the git pin to that released version"),
         "the running turn was not told which version arrived:\n{note}"
     );
-    // The **producer's own** instruction, rendered with the version that arrived
-    // — not the sentence this engine composes for a producer that declares none.
     assert!(
-        note.contains(&bump_to("0.2.0")),
-        "the note does not carry the producer's own instruction:\n{note}"
-    );
-    assert!(
-        !note.contains("Move from the git pin to that released version"),
-        "the producer declared an instruction and got the engine's default:\n{note}"
-    );
-    // It still adds no bar: the one place the phrase appears is the frame that
-    // disclaims it, which the note carries itself because nothing wraps a note
-    // delivered into a running turn.
-    assert!(
-        note.contains("This reports observed state and adds no acceptance criteria."),
-        "the arrival note is not framed as observed state:\n{note}"
-    );
-    assert_eq!(
-        note.to_lowercase().matches("acceptance criteria").count(),
-        1,
+        !note.to_lowercase().contains("acceptance criteria"),
         "the arrival note reads as a new bar:\n{note}"
     );
 }
@@ -1634,12 +1543,8 @@ fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_led
     world.releases(&automated(&script));
     releases_at(&answer, "0.1.0");
 
-    // The upstream lands the engine's work in a run of its own, and settles. Its
-    // **plan** states the pinning rule; its node states none, so what reaches the
-    // consumer below can only have come from the rung under the node — and from
-    // the *upstream's* plan rather than from the consuming run's, which states
-    // nothing at all.
-    let upstream = start_declaring(&world, "adoption-upstream", vec![engine()], PLAN_RULE);
+    // The upstream lands the engine's work in a run of its own, and settles.
+    let upstream = start(&world, "adoption-upstream", vec![engine()]);
     world.until("the upstream to settle", |world| {
         world.run_file(&upstream, "result.json").is_file()
     });
@@ -1676,19 +1581,6 @@ fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_led
         "the commit cell is not the landing the upstream observed: {row}"
     );
     assert_eq!(cells[4], "crate", "row: {row}");
-    assert_eq!(
-        cells[5], "",
-        "a version was asserted before one existed: {row}"
-    );
-    // The instruction resolved through the **upstream** run: its plan's rung,
-    // rendered with the cells this run read out of that run's ledger.
-    assert!(
-        task.contains(&format!(
-            "Take github.com/owner/engine from the branch {}.",
-            branch_of(&world, &upstream, "engine")
-        )),
-        "the block did not resolve the upstream plan's instruction:\n{task}"
-    );
 
     // And the release it is waiting on reaches it, named by the dependency the
     // plan wrote rather than by a node this graph has.
@@ -1703,18 +1595,11 @@ fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_led
         json!(format!("run:{upstream}#engine"))
     );
     assert_eq!(arrived[0]["payload"]["version"], json!("0.2.0"));
+
     world.release("consumer.go");
     world.until("the run to settle", |world| {
         !world.events_of(&run, "node-settled").is_empty()
     });
-
-    // And the same rung answers the note its running turn was redirected with,
-    // rendered the other way now that a version is out.
-    let note = redirected(&world, &run, "consumer");
-    assert!(
-        note.contains("Take github.com/owner/engine at 0.2.0 from the registry."),
-        "the note did not resolve the upstream plan's instruction:\n{note}"
-    );
 }
 
 /// A delivery that was attempted and **broke** leaves the note owed rather than
@@ -1810,11 +1695,7 @@ fn a_deferred_arrival_note_rides_the_next_dispatch_and_is_consumed_by_it() {
     let run = start(
         &world,
         "adoption-carried",
-        vec![
-            engine_declaring(),
-            carried,
-            crate::harness::agent("keeper", &[]),
-        ],
+        vec![engine(), carried, crate::harness::agent("keeper", &[])],
     );
 
     world.until("the consumer's turn to open", |world| {
@@ -1858,35 +1739,15 @@ fn a_deferred_arrival_note_rides_the_next_dispatch_and_is_consumed_by_it() {
     let dispatched = tasks_of(&world, "consumer");
     assert!(
         dispatched[1].contains("## Planner context")
-            && dispatched[1].contains("github.com/owner/engine — crate 0.2.0"),
+            && dispatched[1].contains("github.com/owner/engine — crate 0.2.0")
+            && dispatched[1].contains("Move from the git pin to that released version"),
         "the next dispatch was not handed the note it was owed:\n{}",
         dispatched[1]
     );
-    // The note this dispatch is handed was **rebuilt from the record**, by the
-    // same function that composed the one that was owed — so the producer's own
-    // instruction had to survive the journal to be here.
     assert!(
-        dispatched[1].contains(&bump_to("0.2.0")),
-        "the producer's instruction did not survive the record:\n{}",
+        dispatched[1].contains("adds no acceptance criteria"),
+        "the carried note did not disclaim itself:\n{}",
         dispatched[1]
-    );
-    assert!(
-        !dispatched[1].contains("Move from the git pin to that released version"),
-        "a declared instruction replayed as the engine's default:\n{}",
-        dispatched[1]
-    );
-    // It disclaims itself exactly once *in the section it is carried in*: the
-    // note states the frame because a note delivered live has nothing around it,
-    // and the section it is rendered under does not state it a second time. The
-    // reference block beside it states its own, which is a different block.
-    let carried = dispatched[1]
-        .split_once("## Planner context")
-        .map(|(_, rest)| rest.split("\n## ").next().unwrap_or(rest).to_owned())
-        .unwrap_or_default();
-    assert_eq!(
-        carried.matches("adds no acceptance criteria").count(),
-        1,
-        "the carried note did not disclaim itself, or did it twice:\n{carried}"
     );
     assert!(
         !dispatched[0].contains("0.2.0"),
@@ -1979,7 +1840,7 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     let run = start(
         &world,
         "adoption-published",
-        vec![engine_declaring(), consumer(Some("published"))],
+        vec![engine(), consumer(Some("published"))],
     );
     world.until("the engine to settle", |world| {
         world
@@ -2044,44 +1905,12 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
         world.events_of(&run, "node-settled").len() == 2
     });
     assert!(dispatched(&world, &run, "consumer"));
-    // It launched *after* the release, and the block is the only place the
-    // version it launched against ever appears — this node is never sent an
-    // arrival note, because it never held a git pin to move off.
+    // It launched *after* the release, so it has a version to pin against and no
+    // git reference block telling it otherwise.
     let task = task_of(&world, "consumer");
-    let block = task
-        .split_once(CROSS_REPO_REFERENCES_HEADING)
-        .map(|(_, rest)| rest.to_owned())
-        .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
-    let row = block
-        .lines()
-        .find(|line| line.starts_with("| engine |"))
-        .unwrap_or_else(|| panic!("no row for the engine dependency:\n{block}"))
-        .to_owned();
-    let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
-    assert_eq!(cells[1], "github.com/owner/engine", "row: {row}");
-    assert_eq!(cells[4], "crate", "row: {row}");
-    assert_eq!(
-        cells[5], "0.2.0",
-        "the block does not carry the version this node launched against: {row}"
-    );
     assert!(
-        block.contains("The work this node depends on is released, at the versions below."),
-        "a node that waited for the release was told it had launched without one:\n{block}"
-    );
-    // The producer's own instruction reaches it here, rendered with the version
-    // that is out, inside the frame that says the block reports observed state.
-    assert!(
-        block.contains(&bump_to("0.2.0")),
-        "the block does not carry the producer's own instruction:\n{block}"
-    );
-    assert!(
-        block.find("This reports observed state and adds no acceptance criteria.")
-            < block.find(&bump_to("0.2.0")),
-        "the instruction is rendered outside the observed-state frame:\n{block}"
-    );
-    assert!(
-        world.events_of(&run, "release-adopted").is_empty(),
-        "a published node was sent a note about a git pin it never held"
+        !task.contains(CROSS_REPO_REFERENCES_HEADING),
+        "a node that waited for the release was told it had launched without one:\n{task}"
     );
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {

@@ -32,11 +32,9 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
     LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
-use onepipeline::instruction::{InstructionTemplate, DEFAULT_INSTRUCTION, VARIABLES};
 use onepipeline::plan::{
     Node, NodeKind, Plan, Resume, Step, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
-    OBSERVED_STATE_FRAMING, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION,
-    PLAN_SCHEMA_VERSIONS_READ,
+    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -890,7 +888,6 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         goal: Some(onepipeline::plan::Goal { text: "why".into() }),
         name: Some("named".into()),
         concurrency: 2,
-        release_instruction: Some("Bump the pin.".to_owned().try_into().expect("a template")),
         tasks: Vec::new(),
     })
     .expect("a plan serialises");
@@ -926,7 +923,6 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         adoption: Some(Adoption::Published),
         amendment: Some("changed requirements".into()),
         consumes: std::collections::BTreeMap::new(),
-        release_instruction: Some("Bump the pin.".to_owned().try_into().expect("a template")),
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -1584,76 +1580,6 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
-}
-
-/// The templated release instruction this build carries **beyond** the contract
-/// is exactly what the divergence record proposes.
-///
-/// The contract is committed as approved and names none of it, so entry 51 is the
-/// only place it is written down — and a divergence nothing gates quietly stops
-/// being true. The entry's own block is the source: what parses here is what a
-/// planner would write in a plan.
-#[test]
-fn the_release_instruction_surface_is_what_the_divergence_record_names() {
-    let block = divergence_block("51.");
-
-    // The plan shape, exactly as the entry writes it, at schema 3.
-    let written = block["plan"].clone();
-    let plan: Plan = serde_json::from_value(written.clone()).expect("entry 51's plan parses");
-    assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
-    assert_eq!(
-        serde_json::to_value(&plan).expect("serializes"),
-        written,
-        "entry 51's plan does not round-trip as written"
-    );
-    // Both rungs a plan states: the producing node's own, and the plan's.
-    let declared = plan.tasks[0]
-        .release_instruction
-        .as_ref()
-        .expect("the producing node declares one");
-    assert!(
-        declared.as_str().contains("{{#version}}"),
-        "the node's template guards on nothing: {declared}"
-    );
-    assert!(plan.release_instruction.is_some(), "the plan rung is unset");
-
-    // Optional at both: a document naming neither is the document it always was,
-    // and round-trips without either appearing.
-    let plain = json!({"schema_version": PLAN_SCHEMA_VERSION, "concurrency": 4, "tasks": []});
-    let bare: Plan = serde_json::from_value(plain.clone()).expect("a plan naming neither parses");
-    assert!(bare.release_instruction.is_none());
-    assert_eq!(
-        serde_json::to_value(&bare).expect("serializes"),
-        plain,
-        "a plan naming no instruction gained one on the way out"
-    );
-
-    // The variables, the default, and the frame: each is a constant this crate
-    // publishes, because a test proving an instruction cannot be read as a new
-    // bar has to name the frame it is inside of.
-    let variables: Vec<String> =
-        serde_json::from_value(block["variables"].clone()).expect("entry 51 names its variables");
-    assert_eq!(variables, VARIABLES, "entry 51 names other variables");
-    assert_eq!(
-        block["default_instruction"].as_str(),
-        Some(DEFAULT_INSTRUCTION)
-    );
-    assert_eq!(
-        InstructionTemplate::default().as_str(),
-        DEFAULT_INSTRUCTION,
-        "the fallback is composed rather than stated in one place"
-    );
-    assert_eq!(block["framing"].as_str(), Some(OBSERVED_STATE_FRAMING));
-    assert_eq!(
-        block["heading"].as_str(),
-        Some(CROSS_REPO_REFERENCES_HEADING),
-        "entry 51 names a different heading than this crate publishes"
-    );
-    // A template is external input, refused by what is wrong with it rather than
-    // rendered as itself in a worker's task.
-    let refused = InstructionTemplate::try_from("Bump {{verison}}.".to_owned())
-        .expect_err("an unknown variable is refused");
-    assert!(refused.contains("verison"), "{refused}");
 }
 
 /// The amendment lever and the node-validator hook this build carries **beyond**

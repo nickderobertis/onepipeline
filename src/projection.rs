@@ -830,7 +830,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if released.is_empty() {
                 return;
             }
-            let note = crate::instruction::arrival_note(&released);
+            let note = crate::release::arrival_note(&released);
             state.pending_context.insert(node.clone(), note.clone());
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
@@ -1367,7 +1367,6 @@ mod tests {
             goal: None,
             name: Some("demo".into()),
             concurrency: 4,
-            release_instruction: None,
             tasks: nodes,
         }
     }

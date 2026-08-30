@@ -272,7 +272,6 @@ pub fn compile_with(
             goal: None,
             name: None,
             concurrency: candidate.concurrency,
-            release_instruction: None,
             tasks: Vec::new(),
         });
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
@@ -610,7 +609,6 @@ pub(crate) fn offer_envelope_to_reviewer(
         goal: None,
         name: None,
         concurrency: edited.concurrency,
-        release_instruction: None,
         tasks: Vec::new(),
     });
     let under_review = EnvelopeUnderReview {
@@ -1422,7 +1420,6 @@ mod tests {
             goal: None,
             name: None,
             concurrency: 4,
-            release_instruction: None,
             tasks: nodes,
         })
     }
@@ -2534,7 +2531,6 @@ mod tests {
             }),
             name: Some("cover".into()),
             concurrency: 4,
-            release_instruction: None,
             tasks: vec![agent("build", &[])],
         };
         let mut graph = Graph::from_plan(&launched_with);

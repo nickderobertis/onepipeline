@@ -277,11 +277,6 @@ impl Graph {
             goal: source.goal.clone(),
             name: source.name.clone(),
             concurrency: self.concurrency,
-            // Carried like the goal and the name, and for the same reason: it is
-            // the launching plan's and a graph does not hold one, so a write-back
-            // that dropped it would retire a producer's instruction the first
-            // time anything edited the run.
-            release_instruction: source.release_instruction.clone(),
             tasks: self.iter().cloned().collect(),
         }
     }
@@ -1024,7 +1019,6 @@ mod tests {
             schema_version: PLAN_SCHEMA_VERSION,
             name: Some("blank".into()),
             concurrency: 1,
-            release_instruction: None,
             goal: None,
             tasks: vec![Node {
                 id: " ".into(),
@@ -1106,7 +1100,6 @@ mod tests {
             goal: None,
             name: Some("test".into()),
             concurrency: 4,
-            release_instruction: None,
             tasks,
         }
     }

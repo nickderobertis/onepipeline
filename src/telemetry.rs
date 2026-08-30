@@ -828,7 +828,6 @@ mod tests {
             goal: None,
             name: Some("demo".into()),
             concurrency: 4,
-            release_instruction: None,
             tasks: vec![Node {
                 id: "build".into(),
                 persona: Some("engineer".into()),
