@@ -173,22 +173,17 @@ fn opens_a_section(line: &str) -> bool {
     underline('=') || underline('-')
 }
 
-/// One piece of a parsed template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
-    /// Text, rendered as itself.
     Literal(String),
-    /// `{{name}}`, rendered as that variable's value.
+    /// `{{name}}`.
     Variable(&'static str),
     /// `{{#name}}…{{/name}}` and `{{^name}}…{{/name}}`: the guard a template
     /// needs to say one thing where a version is known and another where it is
     /// not.
     Section {
-        /// The variable the guard is on.
         name: &'static str,
-        /// Which way round the guard reads.
         guard: Guard,
-        /// What renders when it holds.
         inner: Vec<Segment>,
     },
 }
@@ -235,7 +230,6 @@ fn variable(name: &str) -> std::result::Result<&'static str, String> {
         })
 }
 
-/// Read one template's segments, or say why it is not one.
 fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
     let mut done: Vec<Segment> = Vec::new();
     let mut open: Vec<(&'static str, Guard, Vec<Segment>)> = Vec::new();
@@ -294,7 +288,8 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
     Ok(done)
 }
 
-/// Add one segment to whatever is being read: the open section, or the template.
+/// A segment read inside an open section belongs to **that** section rather than
+/// to the template, which is the whole of what makes a guard nest.
 fn push(
     segment: Segment,
     done: &mut Vec<Segment>,
@@ -306,7 +301,8 @@ fn push(
     }
 }
 
-/// Add the literal read so far, if there is any, and start the next one.
+/// The text between two tags, which is a segment only where there is any: an
+/// empty one between adjacent tags would render the same and compare unequal.
 fn flush(
     literal: &mut String,
     done: &mut Vec<Segment>,
