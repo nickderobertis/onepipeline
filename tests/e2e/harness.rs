@@ -1893,13 +1893,11 @@ impl World {
     /// bare assertion with no evidence, which is a whole debugging session per
     /// platform-only defect.
     ///
-    /// **Enumerated, never named.** A dump that opened `events.jsonl` and a list
-    /// of four write-back captures showed nothing of the artifact beside them:
-    /// three consecutive dispatches proposed causes for one publication failure
-    /// and not one of them read the write-back's own error text, which exists
-    /// only on a runner and only in a file this list had never heard of. So the
-    /// run directory is walked instead, and a file a later change drops into it
-    /// reaches the reader without this function being edited.
+    /// **Enumerated, never named.** A dump that opens a fixed list of files is
+    /// blind to whatever a later change records beside them, and a diagnostic
+    /// that hides the one artifact naming a cause is how a reader spends the
+    /// session guessing. Walking the directory is what makes the next artifact
+    /// arrive without this function being edited.
     pub fn dump(&self) -> String {
         let mut out = String::new();
         match std::fs::read_dir(&self.runs) {

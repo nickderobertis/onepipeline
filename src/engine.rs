@@ -368,34 +368,26 @@ pub struct NodeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain string
+    // every identifier on this record already is — `id` above all — for the reason the
+    // block above states of `cause` and `head`: this is the *wire* shape of a document
+    // builds other than this one parse. The value is not unchecked either: it is a
+    // replacement id the reconciler validated against the live graph — non-blank, and not
+    // already taken — before it committed the retry that produced it.
     /// The node that was retried in this one's place, when a `retry` superseded
     /// it.
     ///
     /// The one field on this record that says a node is **not** the run's to act
-    /// on. A superseded node leaves the graph in the same edit that adds its
-    /// replacement, so it used to leave the results altogether — while its
-    /// `node-settled` sat in the store reading `failed`, which is the only thing
-    /// a reader who went looking would find. Eleven entries on one run read
-    /// `failed` and not one was a node anybody could retry; three of them had
-    /// their work merged, by the replacement named here.
-    ///
-    /// [`status`](Self::status) is `cancelled` beside it — the word a retry's own
-    /// stop has always had — because that is what happened to the *dispatch*, and
-    /// this is what happened to the *node*. Absent on every node nothing
-    /// superseded, which is all of them but these, and omitted when absent so a
-    /// consumer branches on the key rather than on a field that is there for
+    /// on — see [`crate::projection::RunState::superseded`] for what it reads as
+    /// without one. [`status`](Self::status) is `cancelled` beside it, which is
+    /// what happened to the *dispatch*, while this is what happened to the
+    /// *node*. Absent on every node nothing superseded, and omitted when absent
+    /// so a consumer branches on the key rather than on a field that is there for
     /// every node and meaningless for most. This field is what
     /// [`RUN_RESULT_SCHEMA_VERSION`] `5` records.
-    //
-    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain string every
-    // identifier on this record already is — `id` beside it above all — for the reason the
-    // block above states of `cause` and `head`: this is the *wire* shape of a document
-    // builds other than this one parse, and a newtype here would put a type of this
-    // crate's on it. The value is not unchecked either: it is a replacement id the
-    // reconciler validated against the live graph — non-blank, and not already taken —
-    // before it committed the retry that produced it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// How one node settled, as its dispatch reports it.
@@ -2727,24 +2719,20 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// Every node's landing after the run has asked again about the ones that had
 /// not landed.
 ///
-/// Named for the asking rather than for the answer, because the answer is not
-/// uniformly fresh: a change the sibling would not answer about keeps the claim
-/// its settlement made, and a name promising "now" would say otherwise of it.
+/// Named for the asking rather than for the answer: a change
+/// [`crate::vcs::proved_landed`] shows nothing about keeps the claim its
+/// settlement made, so the map is not uniformly fresh and a name promising "now"
+/// would say otherwise of it.
 ///
-/// A `landing` is an observation of a moment. `onevcs publish` answers
-/// `ChangeOpen` or `Queued`, this crate records `unlanded`, and the run neither
-/// blocks nor polls for a merge somebody else owns — so a change a person merged
-/// an hour into the run was still being reported as work that had reached nobody
-/// when the run finished, and `just runs` counted it against the run. Reading it
-/// again here is the difference between "where this was at settlement" and
-/// "where this is now": the run is finishing, this is the last thing it will ever
-/// say about the node, and the reader acts on it.
+/// A settlement's `landing` is an observation of a moment, and the run neither
+/// blocks nor polls for a merge somebody else owns — so a change merged while the
+/// run was still going was reported at the end as work that had reached nobody.
+/// This is the last thing the run will ever say about the node, and the reader
+/// acts on it.
 ///
 /// **Asked only of the changes that had not landed**, and only where the run
 /// recorded the branch to ask about, so a run whose every change merged asks
-/// nothing. An answer the sibling will not give leaves the settlement's own
-/// claim standing — see [`crate::vcs::landed_now`], which is where the reading
-/// is.
+/// nothing.
 fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     let unlanded: Vec<String> = landings
@@ -2756,8 +2744,8 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
         let Some(branch) = state.branches.get(&node) else {
             continue;
         };
-        if let Some(landed) = crate::vcs::landed_now(branch) {
-            landings.insert(node, landed);
+        if crate::vcs::proved_landed(branch) {
+            landings.insert(node, Landing::Landed);
         }
     }
     landings
@@ -2765,19 +2753,13 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
 
 /// The nodes a `retry` replaced, as the run's own result records them.
 ///
-/// **After the graph's own nodes, because they are no longer in it.** A
-/// supersession takes the node out of the graph in the same edit that adds its
-/// replacement, so a document built from the graph alone said nothing whatever
-/// about it — while the run's store still carried its `node-settled` reading
-/// `failed`, which is the only account a reader could find. Eleven entries on
-/// one run read `failed` and not one was a node anybody could retry.
-///
-/// `cancelled` is the status, which is what the retry's own stop has always
-/// recorded, and [`NodeResult::superseded_by`] is what separates it from every
-/// other `cancelled` node: a `drop` leaves the same word and the two take
-/// opposite actions. What the node left behind rides along unchanged — the
-/// branch above all, because the replacement continues it, which is exactly why
-/// re-dispatching this node is the wrong move.
+/// **After the graph's own nodes, because they are no longer in it** — see
+/// [`crate::projection::RunState::superseded`] for what a document built from
+/// the graph alone therefore said about them. Everything each node left behind
+/// rides along unchanged; the status is `cancelled`, which is what the retry's
+/// own stop has always recorded, and
+/// [`superseded_by`](NodeResult::superseded_by) is what separates it from a
+/// `drop`, which leaves the same word.
 fn superseded_results(state: &RunState, landings: &BTreeMap<String, Landing>) -> Vec<NodeResult> {
     state
         .superseded

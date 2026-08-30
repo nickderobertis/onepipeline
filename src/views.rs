@@ -253,18 +253,15 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 /// Take the landings the run's **own settled report** recorded, where they say
 /// more than its journal does.
 ///
-/// The journal's answer is each node's settlement, which is an observation of a
-/// moment; `result.json` is what the run said as it closed out, and a driver
-/// re-reads every unlanded change there before it writes one — see `engine`'s
-/// `landings_after_asking_again`. Without this the two disagreed about one run:
-/// the report a consumer parses said `landed` and the view an operator opens
-/// said `NOT landed`, which is the same reader confusion in a new place.
+/// A driver re-reads every unlanded change as it closes out — `engine`'s
+/// `landings_after_asking_again` — and writes what it found there; without this
+/// the report a consumer parses said `landed` while the view an operator opens
+/// said `NOT landed`.
 ///
-/// **Only ever `unlanded` → `landed`.** A change that reached its base has
-/// reached it and a base does not stop carrying what it carries, so taking the
-/// later answer only in that direction cannot un-land anything — which matters
-/// because a report written at an earlier close-out is older than the journal
-/// beside it, and a run still going has one.
+/// **Only ever `unlanded` → `landed`.** A report written at an earlier close-out
+/// is older than the journal beside it, and a run still going has one — but a
+/// base does not stop carrying what it carries, so taking the later answer in
+/// that direction alone cannot un-land anything.
 fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
     // Read leniently: a report this build cannot parse — one a newer build
     // wrote, at a version this one refuses — leaves the view exactly as the
@@ -549,13 +546,10 @@ const MAX_NAMED_SKIPS: usize = 3;
 ///
 /// **One line: a count, and as many reasons as fit on it.** A count alone tells
 /// a reader something is wrong and not which directory to look at, so a few
-/// roots are still named with the reason `results` prints for the same refusal —
-/// but a line each is what buried the answer. On one host 141 of 433 run roots
-/// were unreadable, and the 141 lines this used to print pushed the live verdict
-/// off the top of the view an operator opens to see what is running. The refusal
-/// is one fact about the root and the count is the whole of its size; which
-/// directory to open is answered by naming a few and by the count saying how
-/// many more there are.
+/// roots are named with the reason `results` prints for the same refusal — and a
+/// line each is what buried the answer, because a third of the roots on a host
+/// can be unreadable and the live verdict is what a reader opened the view
+/// for.
 fn skipped_lines(skipped: &[Skipped]) -> String {
     if skipped.is_empty() {
         return String::new();
@@ -1652,19 +1646,18 @@ enum Proof {
 
 /// What a run's own dispatch registry says about the processes its work is in.
 ///
-/// The registry, and not the ownership lock. Both name a pid, and only one of
-/// them names *the work*: the lock names the **driver**, and a driver is not the
-/// dispatch — it starts the dispatch and the dispatch outlives it. Reading the
-/// lock made this view answer about the wrong process twice over. A run that was
-/// stopped and then adopted carries its stop for ever, so every one of its fresh
-/// dispatches read as ended; and an adoption replaces the process holding the
-/// lock by definition, so the pid the row was judged against was never the pid
-/// the work was in. Three dispatches were live on one host while this view said
-/// `no live dispatches` and listed all three as stale.
-///
-/// [`ledger::DispatchRecord`] is what the run itself writes for each process its
-/// work is running in, and what a `stop` aims at — so a row here and the teardown
-/// an operator runs after reading it are decided from one record.
+/// The registry, and not the ownership lock: the lock names the **driver**, which
+/// starts the dispatch and does not outlive it, and judging a row by it answered
+/// about the wrong process — a run stopped and then adopted carries its stop for
+/// ever, so its fresh dispatches all read as ended. [`ledger::DispatchRecord`] is
+/// what the run writes for each process its work is in, and what a `stop` aims
+/// at, so a row here and the teardown an operator runs after reading it are
+/// decided from one record.
+// llmlint: ignore-block[invalid_states_unrepresentable] the key is the node id
+// `DispatchRecord::node` carries, and a node id is the plain `String` every identifier in
+// this crate is, for the reason `src/error.rs`'s file-level suppression states. The value
+// is not this reader's to check either: it comes back from `ledger::dispatches_of`, which
+// is the boundary that refuses an entry nothing may be acted on.
 enum Registry {
     /// What the registry holds, by the node each entry names.
     Read(BTreeMap<String, Vec<ledger::DispatchRecord>>),
@@ -1675,6 +1668,7 @@ enum Registry {
     /// stop being made.
     Unreadable(String),
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Registry {
     /// Read one run's registry, keeping the refusal where there is one.
@@ -1891,18 +1885,14 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
 /// What a line about a superseded node says beyond the event itself, or nothing
 /// for every other line.
 ///
-/// The stream is the one place a supersession is invisible. A `retry` takes the
-/// node out of the graph, so nothing below the stream shows it again — but its
-/// `node-settled` stays in the store reading `failed`, and this stream is what
-/// the run's own monitor persona reads. Twice on one run that monitor met such a
-/// settlement and began composing a retry for work its replacement had already
-/// redone and merged, and across that run eleven entries read `failed` with not
-/// one of them a node anybody could retry.
+/// The stream keeps the `node-settled` that failed the node, and it is what the
+/// run's own monitor persona reads — see
+/// [`crate::projection::RunState::superseded`] for what that monitor did with an
+/// unqualified one.
 ///
-/// Only the records *about the node* carry it, which is what keeps it a
-/// qualification rather than a banner: a relayed envelope of a sibling's is
-/// about the dispatch that ran, and the supersession is this crate's own answer
-/// about the node.
+/// Only the records *about the node* carry it, which keeps it a qualification
+/// rather than a banner: a relayed envelope of a sibling's is about the dispatch
+/// that ran, and the supersession is this crate's own answer about the node.
 fn superseded_suffix(view: &RunView, event: &Envelope) -> String {
     if event.source != Source::Pipeline {
         return String::new();
@@ -2157,20 +2147,12 @@ pub fn results(view: &RunView) -> String {
 /// What the run's results say about the nodes a `retry` replaced, or nothing
 /// where it replaced none.
 ///
-/// **Under the graph, because they are not in it.** A superseded node leaves the
-/// graph in the same edit that adds its replacement, so every line above is a
-/// node the run is still executing — and the node that was replaced vanished
-/// from the results entirely while its `node-settled` sat in the store saying
-/// `failed`. A reader who met that settlement and nothing else read a failure
-/// nobody had answered: on one run eleven ledger entries read `failed` and not
-/// one was a node anybody could retry, and the run's own monitor twice built a
-/// proposal to redo work that had already been redone and merged.
-///
-/// So the account is here, and it says what became of the node rather than what
-/// its last dispatch scored. The replacement is named because it is where the
-/// work went: a supersession inherits the superseded node's branch, so the line
-/// above for that node is where the work is — which is exactly why re-dispatching
-/// this one is the wrong move.
+/// **Under the graph, because they are not in it** — every line above is a node
+/// the run is still executing, and these vanished from the results altogether;
+/// [`crate::projection::RunState::superseded`] is what that cost. The line says
+/// what became of the node rather than what its last dispatch scored, and names
+/// the replacement because that is where the work went: a supersession inherits
+/// the branch, so the replacement's own line above is where the work is.
 fn superseded_lines(view: &RunView) -> String {
     let mut out = String::new();
     for (node, replacement) in &view.state.superseded {
