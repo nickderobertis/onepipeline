@@ -101,8 +101,15 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     // is retained with. Nothing else can know it: `current_exe` names whatever
     // program is running, and this crate is linked into programs that are not
     // this one.
+    //
+    // A process that cannot name itself says nothing and carries on: that is
+    // `retainable` false, which is the library backend an embedding consumer
+    // already takes rather than a degraded arm invented here.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no supported platform fails
+    // `current_exe`; the state its failure would leave is driven by
+    // `contract::a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch`.
     if let Ok(exe) = std::env::current_exe() {
         agentgraph::speaks_this_cli(exe);
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
     driver::dispatch(cli)
 }
