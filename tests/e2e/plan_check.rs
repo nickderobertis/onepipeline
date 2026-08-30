@@ -25,21 +25,88 @@ const HAS_REFUSALS: i32 = 1;
 /// A real program, spawned by the binary under test: a journey that handed the
 /// verb a closure would be proving this suite rather than the seam.
 fn check_script(world: &World, name: &str, body: &str) -> PathBuf {
-    let path = world.root.join(format!("{name}.sh"));
+    check_in(&world.root, name, body)
+}
+
+/// One check written into `directory` — which is the world's own root for every
+/// journey but the one that registers a check by a path relative to the
+/// directory the verb runs in.
+#[cfg(unix)]
+fn check_in(directory: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = directory.join(format!("{name}.sh"));
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the check is written");
-    make_executable(&path);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the check is executable");
     path
 }
 
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("the check is executable");
+/// One check written into `directory`, in this platform's spelling.
+///
+/// Windows starts no `#!` script, so what the `--check` flag names here is a
+/// batch file and the POSIX body sits beside it: the batch hands it to the
+/// `bash` git for Windows installs, which is the same shell every `just` recipe
+/// on this platform already runs through, and the check's stdin, stdout, stderr
+/// and exit status all reach it through `cmd` unchanged. One body per check
+/// rather than two, so a journey states what its check does once and neither
+/// spelling can drift from the other.
+///
+/// Written with **CRLF**, for the reason `harness::write_hook_script` records:
+/// `cmd.exe` seeks by byte offset between commands and the arithmetic assumes
+/// two bytes end a line, so an LF batch file is executed from the middles of
+/// words.
+#[cfg(windows)]
+fn check_in(directory: &Path, name: &str, body: &str) -> PathBuf {
+    let posix = directory.join(format!("{name}.sh"));
+    std::fs::write(&posix, format!("#!/bin/sh\n{body}\n")).expect("the check is written");
+    let path = directory.join(format!("{name}.bat"));
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\n\"{}\" \"{}\"\r\nexit /b %ERRORLEVEL%\r\n",
+            bash().display(),
+            shell_path(&posix)
+        ),
+    )
+    .expect("the check is written");
+    path
 }
 
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
+/// The `bash` this platform's checks are read by, as an absolute path.
+///
+/// Resolved here rather than left as a bare name in the batch file, so a host
+/// without one fails naming what was looked for instead of leaving every check
+/// reported as one that could not be run.
+#[cfg(windows)]
+fn bash() -> PathBuf {
+    let on_path = std::env::var_os("PATH").unwrap_or_default();
+    let installed = PathBuf::from(
+        std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into()),
+    )
+    .join(r"Git\bin");
+    std::env::split_paths(&on_path)
+        .chain([installed])
+        .map(|dir| dir.join("bash.exe"))
+        .find(|candidate| candidate.is_file())
+        .expect("git for windows installs the bash these checks are written in")
+}
+
+/// A path as the shell that reads these bodies spells it.
+///
+/// The bodies are POSIX on both platforms, and that shell reads `\` as an escape
+/// rather than as a separator, so a native path reaches it spelled with the one
+/// separator both sides accept.
+#[cfg(windows)]
+fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// A path as the shell that reads these bodies spells it.
+#[cfg(not(windows))]
+fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
 
 /// A check that accepts, and records what it was handed.
 fn recording_check(world: &World, name: &str, capture: &Path) -> PathBuf {
@@ -47,11 +114,9 @@ fn recording_check(world: &World, name: &str, capture: &Path) -> PathBuf {
         world,
         name,
         &format!(
-            "cat > '{}'\nprintf '%s' \"$ONEPIPELINE_PLAN_CHECK_SCHEMA\" > '{}.schema'\n\
-             printf '%s' \"$PWD\" > '{}.pwd'\nprintf '{{\"refusals\": []}}'",
-            capture.display(),
-            capture.display(),
-            capture.display()
+            "cat > '{capture}'\nprintf '%s' \"$ONEPIPELINE_PLAN_CHECK_SCHEMA\" > \
+             '{capture}.schema'\nprintf '{{\"refusals\": []}}'",
+            capture = shell_path(capture)
         ),
     )
 }
@@ -449,7 +514,9 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
             json!({"refusals": [{"node": null, "field": null, "reason": "   "}]})
         ),
     );
-    // Written, and deliberately not made executable.
+    // Written, and deliberately not made a program: no executable bit where a
+    // host asks for one, and an extension no host starts a file by where the
+    // extension is what decides.
     let unopenable = world.root.join("unopenable.sh");
     std::fs::write(&unopenable, "#!/bin/sh\nprintf '{\"refusals\": []}'\n")
         .expect("the check is written");
@@ -651,7 +718,14 @@ fn check_refusals_follow_the_order_of_their_flags() {
     ordered(&record, &appendix);
 }
 
-/// A relative `--check` is resolved against the directory the verb ran in.
+/// A relative `--check` is resolved against the directory the verb ran in, and
+/// the check itself runs in that same directory.
+///
+/// Both halves are asserted by **relative names alone**: the flag names the
+/// check by one, and the check writes and reads by ones. Nothing here spells an
+/// absolute path, so neither half can pass against a directory that merely
+/// happens to hold the same files — which is the whole of what a consumer
+/// registering a check beside its plan depends on.
 #[test]
 fn a_check_path_is_resolved_against_the_directory_the_verb_ran_from() {
     let world = World::new("plancheck-cwd");
@@ -661,31 +735,37 @@ fn a_check_path_is_resolved_against_the_directory_the_verb_ran_from() {
     );
     let here = world.root.join("checks");
     std::fs::create_dir_all(&here).expect("a directory for the check");
-    let capture = here.join("handed.json");
-    let check = check_script(
-        &world,
+    // The file a check reads beside its plan, and which only this directory has.
+    std::fs::write(here.join("beside.txt"), "beside the plan").expect("the file is written");
+    let check = check_in(
+        &here,
         "relative",
-        &format!(
-            "cat > '{}'\nprintf '%s' \"$PWD\" > '{}.pwd'\nprintf '{{\"refusals\": []}}'",
-            capture.display(),
-            capture.display()
-        ),
+        "cat > 'handed.json'\ncat 'beside.txt' > 'beside.seen'\nprintf '{\"refusals\": []}'",
     );
-    std::fs::rename(&check, here.join("relative.sh")).expect("the check moves beside the plan");
+    let named = format!(
+        "./{}",
+        check
+            .file_name()
+            .expect("the check has a name")
+            .to_string_lossy()
+    );
 
     world
-        .run_from(
-            &here,
-            &["plan", "check", &project, "--check", "./relative.sh"],
-        )
+        .run_from(&here, &["plan", "check", &project, "--check", &named])
         .exited(0);
-    assert!(capture.exists(), "the check beside the plan never ran");
+    let handed = here.join("handed.json");
+    assert!(handed.is_file(), "the check beside the plan never ran");
+    let document: Value = serde_json::from_str(
+        &std::fs::read_to_string(&handed).expect("the check wrote what it was handed"),
+    )
+    .expect("the document on the check's stdin is JSON");
+    assert!(document["schema_version"].is_i64(), "{document}");
     // And it ran in that same directory, which is what a check reading a file
     // beside the plan depends on.
     assert_eq!(
-        std::fs::read_to_string(format!("{}.pwd", capture.display()))
-            .expect("the check recorded its directory"),
-        crate::harness::resolved(&here).to_string_lossy()
+        std::fs::read_to_string(here.join("beside.seen"))
+            .expect("the check read the file beside the plan"),
+        "beside the plan"
     );
 }
 
