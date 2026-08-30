@@ -371,13 +371,11 @@ impl Answered {
     }
 }
 
-/// Print the answer and say what the status is.
 fn report(args: &PlanCheckArgs, answered: &Answered) -> i32 {
     print(args, answered);
     answered.exit_code()
 }
 
-/// Write the answer, as one JSON object or as a line per refusal.
 fn print(args: &PlanCheckArgs, answered: &Answered) {
     let accepted = answered.accepted();
     let refusals = answered.refusals();

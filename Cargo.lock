@@ -881,11 +881,6 @@ dependencies = [
  "windows-sys 0.61.2",
 ]
 
-# llmlint: ignore-block[changed_behavior_has_e2e] `oneharness-core` is
-# test-support only in this crate: it arrives through the llmlint toolchain the
-# judged tier runs, and nothing this crate publishes links it. No behaviour of
-# the shipped library or binary moves with this entry, so there is no journey a
-# test could drive to prove one.
 [[package]]
 name = "oneharness-core"
 version = "0.12.2"
@@ -906,7 +901,6 @@ dependencies = [
  "which",
  "windows-sys 0.61.2",
 ]
-# llmlint: ignore-end[changed_behavior_has_e2e]
 
 [[package]]
 name = "onejudge"

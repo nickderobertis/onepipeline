@@ -315,8 +315,10 @@ oneagentgraph = "0.3.13"
 # refused `has no commit that describes a change`, stranding work the branch
 # already carried. Measured on the lock alone:
 # `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
-# passes here and fails there. The repair is `onevcs`'s; this pin takes the
-# release carrying it.
+# passes here and fails there. The repair is `onevcs`'s and is not published yet
+# — 0.17.0 is a different change — so every release above this one is worse here
+# than this one, and the pin moves when the repair ships rather than when the
+# check goes green.
 onevcs = "0.16.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
