@@ -416,6 +416,15 @@ fn is_unset(path: &Path) -> bool {
     path.as_os_str().is_empty()
 }
 
+/// What a launch record naming no launcher launched under.
+///
+/// The same word [`sys::launcher`] answers when this host's environment says
+/// nothing, so a record that predates the key and one written where nothing
+/// could attribute the launch read alike — which is what they are.
+fn unattributed_launcher() -> String {
+    sys::UNKNOWN_LAUNCHER.to_string()
+}
+
 /// What `start` recorded about a run, and what `adopt` replays it from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaunchRecord {
@@ -514,6 +523,17 @@ pub struct LaunchRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub envelope_reviewer: String,
     /// The launcher, as the environment reported it.
+    ///
+    /// Defaulted to [`sys::UNKNOWN_LAUNCHER`] on a record that carries no such
+    /// key, which is the answer a record carrying an *empty* one already gives:
+    /// an unattributed launch. **Always written**, unlike every optional field
+    /// above — this build knows its own launcher — so the default is a
+    /// concession to what somebody else wrote rather than a shape this crate
+    /// produces. Refusing it cost a whole view: a third of the run roots on one
+    /// host had been written before this key existed, and every one of them read
+    /// as `missing field \`launcher\`` on the view an operator opens to see what
+    /// is running — 141 refusals burying the live verdict under them.
+    #[serde(default = "unattributed_launcher")]
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
     /// [`sys::session_digest`], never by this value.

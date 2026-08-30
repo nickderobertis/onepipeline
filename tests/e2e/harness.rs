@@ -1892,57 +1892,32 @@ impl World {
         );
     }
 
-    /// Every run's journal, as the kinds it recorded, and what each observer the
-    /// launcher started found. What a failure needs to say *why* it failed — the
-    /// alternative is a bare assertion with no evidence, which is a whole
-    /// debugging session per platform-only defect.
+    /// Every run's whole directory, and what each observer the launcher started
+    /// found. What a failure needs to say *why* it failed — the alternative is a
+    /// bare assertion with no evidence, which is a whole debugging session per
+    /// platform-only defect.
+    ///
+    /// **Enumerated, never named.** A dump that opens a fixed list of files is
+    /// blind to whatever a later change records beside them, and a diagnostic
+    /// that hides the one artifact naming a cause is how a reader spends the
+    /// session guessing. Walking the directory is what makes the next artifact
+    /// arrive without this function being edited.
     pub fn dump(&self) -> String {
         let mut out = String::new();
         match std::fs::read_dir(&self.runs) {
             Err(_) => out.push_str("  (no runs root)\n"),
             Ok(entries) => {
-                for entry in entries.flatten() {
-                    let run = entry.file_name().to_string_lossy().to_string();
+                // Sorted, because a directory listing is in whatever order the
+                // filesystem answers in: two dumps of one run would otherwise be
+                // a diff of the ordering rather than of what the run recorded.
+                let mut runs: Vec<String> = entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect();
+                runs.sort();
+                for run in runs {
                     out.push_str(&format!("  {run}:\n"));
-                    // Read leniently, unlike every assertion below: a dump is
-                    // the diagnostic a failing journey prints, and one journey
-                    // is *about* a store holding a line no reader can parse.
-                    // Panicking here would replace that journey's own failure
-                    // with this one's, on every command it runs.
-                    for line in std::fs::read_to_string(self.runs.join(&run).join("events.jsonl"))
-                        .unwrap_or_default()
-                        .lines()
-                        .filter(|line| !line.trim().is_empty())
-                    {
-                        out.push_str(&format!("    {line}\n"));
-                    }
-                    for name in [
-                        "writeback-task-list.stdout",
-                        "writeback-task-list.stderr",
-                        "writeback-project-copy.stdout",
-                        "writeback-project-copy.stderr",
-                    ] {
-                        let path = self.runs.join(&run).join(name);
-                        out.push_str(&format!("    {name}:\n"));
-                        match std::fs::read(&path) {
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                out.push_str("      (missing)\n");
-                            }
-                            Err(error) => out.push_str(&format!("      (unreadable: {error})\n")),
-                            Ok(bytes) if bytes.is_empty() => out.push_str("      (empty)\n"),
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(held) => {
-                                    for line in held.lines() {
-                                        out.push_str(&format!("      {line}\n"));
-                                    }
-                                }
-                                Err(error) => out.push_str(&format!(
-                                    "      (not UTF-8: {})\n",
-                                    error.utf8_error()
-                                )),
-                            },
-                        }
-                    }
+                    dump_into(&mut out, &self.runs.join(&run), "    ");
                 }
             }
         }
@@ -2138,6 +2113,23 @@ impl World {
         self.runs.join(run).join(relative)
     }
 
+    /// Every entry in a run's dispatch registry, by the file it is in.
+    ///
+    /// The registry is what says which process each of a run's dispatches is
+    /// running in, and it is what the host view decides a row's liveness from —
+    /// so a journey about that decision reaches for these rather than for the
+    /// run's ownership lock, which names the driver and not the work.
+    pub fn dispatch_records(&self, run: &str) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(self.run_file(run, "dispatches"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        found.sort();
+        found
+    }
+
     /// A JSON document inside a run's directory.
     pub fn run_json(&self, run: &str, relative: &str) -> Value {
         let path = self.run_file(run, relative);
@@ -2301,6 +2293,56 @@ fn a_worlds_teardown_ends_a_run_that_is_still_working() {
         serde_json::json!("signalled"),
         "the teardown found no live tree where the run was still holding a dispatch: {}",
         stopped[0]
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A dump carries what the run directory holds, including a file nothing in
+/// this suite names.
+///
+/// The defect this pins is an absence a reader cannot see: the dump opened
+/// `events.jsonl` and four write-back captures by name, so an artifact recorded
+/// beside them was invisible — three consecutive dispatches proposed causes for
+/// one failure and not one of them read the write-back's own error text, which
+/// exists only on a runner. Enumerating the directory is what makes a later
+/// artifact reach a reader without this suite being edited for it, so the file
+/// written here is deliberately one no code in this repository knows about.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own
+// diagnostic, and the only way to prove it carries what it has never heard of is to put
+// something there it has never heard of. The run under it is a real one, started through
+// the binary, and the dump reads the directory that run wrote.
+#[test]
+fn a_dump_carries_a_file_it_has_never_heard_of_from_the_run_directory() {
+    let world = World::new("dump-enumerates");
+    let run = "dumpenumerates";
+    let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &plan, "--attach"]).exited(0).settled();
+
+    // Whatever a producer drops beside the run's own records — here, the shape
+    // of a capture a later change might add and this function would not know to
+    // open.
+    let artifact = "publication-writeback.stderr";
+    let text = "onevcs: the write-back refused: no such identity 'origin'";
+    std::fs::write(world.runs.join(run).join(artifact), format!("{text}\n"))
+        .expect("the run directory takes a file beside its own records");
+
+    let dumped = world.dump();
+    assert!(
+        dumped.contains(artifact),
+        "the dump named no artifact it had not been told about:\n{dumped}"
+    );
+    assert!(
+        dumped.contains(text),
+        "the dump named the artifact and carried none of what it holds:\n{dumped}"
+    );
+    // And the records it always carried are still there, including the ones in
+    // the run's own subdirectories.
+    assert!(
+        dumped.contains("events.jsonl") && dumped.contains("node-settled"),
+        "the dump lost the run's own event store:\n{dumped}"
+    );
+    assert!(
+        dumped.contains("launch.json"),
+        "the dump lost the record that says who owns the run:\n{dumped}"
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -3889,6 +3931,68 @@ fn probe_script() -> (&'static str, String) {
 /// A file shipped in the repository.
 pub fn repo_file(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+/// How many lines of one file a dump prints before it says how many it left.
+///
+/// The remainder is counted out loud rather than dropped: a silently truncated
+/// file reads as the whole of what was recorded. Generous, because the thing a
+/// dump exists to carry is a producer's own error text and those run to tens of
+/// lines — and bounded anyway, because a run directory also holds retained
+/// agent reports, and a suite that printed every one of those on every failure
+/// buries the assertion that failed.
+const DUMP_LINE_CEILING: usize = 200;
+
+/// Everything one directory holds, recursively, as a diagnostic reads it.
+///
+/// Read leniently, unlike every assertion in this suite: a dump is what a
+/// failing journey prints, and one journey is *about* a store holding a line no
+/// reader can parse. Panicking here would replace that journey's own failure
+/// with this one's, on every command it runs — so an unreadable entry is
+/// reported as unreadable and the walk carries on.
+fn dump_into(out: &mut String, dir: &Path, indent: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        out.push_str(&format!("{indent}(unreadable directory)\n"));
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    for name in names {
+        let path = dir.join(&name);
+        if path.is_dir() {
+            out.push_str(&format!("{indent}{name}/\n"));
+            dump_into(out, &path, &format!("{indent}  "));
+            continue;
+        }
+        out.push_str(&format!("{indent}{name}:\n"));
+        let held = format!("{indent}  ");
+        match std::fs::read(&path) {
+            Err(error) => out.push_str(&format!("{held}(unreadable: {error})\n")),
+            Ok(bytes) if bytes.is_empty() => out.push_str(&format!("{held}(empty)\n")),
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => {
+                    let lines: Vec<&str> = text
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .collect();
+                    for line in lines.iter().take(DUMP_LINE_CEILING) {
+                        out.push_str(&format!("{held}{line}\n"));
+                    }
+                    if let Some(left) = lines.len().checked_sub(DUMP_LINE_CEILING) {
+                        if left > 0 {
+                            out.push_str(&format!("{held}(and {left} more line(s))\n"));
+                        }
+                    }
+                }
+                Err(error) => {
+                    out.push_str(&format!("{held}(not UTF-8: {})\n", error.utf8_error()));
+                }
+            },
+        }
+    }
 }
 
 /// Read a JSONL file the code under test wrote.

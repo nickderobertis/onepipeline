@@ -193,7 +193,7 @@ the reader looking for what the work got wrong. That classification is reconcile
 against the record of the turn it names before anything acts on it — a turn that
 opened, closed, and was billed says the dispatch produced what the death says it
 did not, and where the two disagree the record wins and the node is not settled as
-a provider death. Not in the approved contract yet: open divergence 48.
+a provider death. Not in the approved contract yet: open divergence 49.
 
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
@@ -201,7 +201,7 @@ the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 47.
+yet either: open divergence 48.
 
 The planner supervises over the channel:
 

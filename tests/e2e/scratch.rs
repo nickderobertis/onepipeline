@@ -1,7 +1,7 @@
 //! `ONEPIPELINE_NODE_SCRATCH_DIR`: the directory each node dispatch is given.
 //!
 //! The promise these journeys hold is in the module documentation of
-//! [`onepipeline::executor`] and recorded as divergence 47: an absolute path to a
+//! [`onepipeline::executor`] and recorded as divergence 48: an absolute path to a
 //! directory that exists and is writable before the dispatch's first turn, unique
 //! to that dispatch, and not removed while it runs. The spelling of the path is
 //! not promised, so nothing here asserts one.
