@@ -1007,6 +1007,97 @@ pub fn unblocks(graph: &Graph, id: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Every status a node can settle or wait at, for the gate below.
+    ///
+    /// Written out because the enum offers no enumeration of itself, exactly as
+    /// `vcs::tests::EVERY_KIND` is. It does not stand alone: [`NodeStatus::as_str`]
+    /// matches arm by arm, so a variant added there fails *that* to compile, and
+    /// this list is what makes the same addition fail the divergence gate rather
+    /// than pass it silently.
+    const EVERY_STATUS: &[NodeStatus] = &[
+        NodeStatus::Pending,
+        NodeStatus::Ready,
+        NodeStatus::Running,
+        NodeStatus::Waiting,
+        NodeStatus::Blocked,
+        NodeStatus::Parked,
+        NodeStatus::Cancelled,
+        NodeStatus::Done,
+        NodeStatus::CompleteDraft,
+        NodeStatus::Failed,
+        NodeStatus::Skipped,
+    ];
+
+
+    /// The draft settlement vocabulary this build carries is exactly what the
+    /// divergence record proposes, and `docs/contract.md` names none of it.
+    ///
+    /// A node status and a publication outcome, and both are private vocabulary —
+    /// `graph` and `vcs` are engine modules, so `tests/contract.rs`, which drives
+    /// the published surface, cannot reach either and entry 50 is the only place
+    /// they are written down. Held both directions, and against the contract as
+    /// well: a word this build grows without a line in that entry fails here, one
+    /// the entry names that this build no longer spells fails here, and one the
+    /// approved contract has since taken up is no divergence and fails here too.
+    #[test]
+    fn the_draft_settlement_vocabulary_is_what_the_divergence_record_names() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let record = std::fs::read_to_string(docs.join("contract-divergences.md"))
+            .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("50."))
+            .expect("the record still carries entry 50");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 50 carries the json block this test drives");
+        let contract =
+            std::fs::read_to_string(docs.join("contract.md")).expect("the contract ships");
+
+        let statuses: Vec<String> = serde_json::from_value(block["node_statuses"].clone())
+            .expect("entry 50 names the node statuses it adds");
+        // Every status this build spells that the contract does not mention **at
+        // all** — read off the enum through the same `parse`/`as_str` pair the
+        // journal is written and read back with, so a word only one of the two
+        // knows fails here. The contract writes most of these in prose rather
+        // than in backticks (`a ready human action`, `blocked, never failed`), so
+        // the search is for the word and not for a rendering of it: what is being
+        // asked is whether the document has ever heard of it.
+        let undocumented: Vec<String> = EVERY_STATUS
+            .iter()
+            .map(|status| status.as_str().to_string())
+            .filter(|word| !contract.contains(word.as_str()))
+            .collect();
+        assert_eq!(
+            undocumented, statuses,
+            "the statuses this build carries that docs/contract.md does not name are not entry \
+             50's"
+        );
+        for word in &statuses {
+            assert_eq!(
+                NodeStatus::parse(word).map(NodeStatus::as_str),
+                Some(word.as_str()),
+                "`{word}` does not round-trip through the status this build writes"
+            );
+        }
+
+        let outcomes: Vec<String> = serde_json::from_value(block["outcomes"].clone())
+            .expect("entry 50 names the outcome it adds");
+        assert_eq!(
+            outcomes,
+            vec![crate::vcs::DRAFTED.to_string()],
+            "entry 50 names a different outcome than a drafted publication settles on"
+        );
+        for word in &outcomes {
+            assert!(
+                !contract.contains(word.as_str()),
+                "the contract names `{word}`, so it is no divergence"
+            );
+        }
+    }
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
 

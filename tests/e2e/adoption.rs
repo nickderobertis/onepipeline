@@ -2393,6 +2393,10 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     // that is out when the consumer publishes: the same one. Nothing has been
     // released since, which is the whole condition.
     releases_at(&answer, "0.1.0");
+    // The host lands whatever it is handed. Scripted so that the counterfactual
+    // this journey is about is reachable: without the draft the change merges and
+    // the node goes green, which is the failure — a success — this closes.
+    world.script("gh.merged", "");
 
     let run = start(
         &world,
@@ -2630,4 +2634,129 @@ fn settled_status(world: &World, run: &str, node: &str) -> Option<String> {
         .get("status")?
         .as_str()
         .map(str::to_string)
+}
+
+/// A fast-adoption node whose dependency **had already released** when it
+/// launched settles `done` directly: no draft, nothing held, and a change the
+/// host lands.
+///
+/// The other end of the same decision, and the one that says the draft is a
+/// judgement rather than a mode: fast adoption did not become "always hold". Two
+/// runs, because "already released when it launched" is a fact about the moment
+/// the node starts — the upstream lands its work and settles in a run of its own,
+/// the release goes out, and only then is the consumer launched, pinned to that
+/// work by a cross-DAG reference.
+#[test]
+fn a_fast_node_whose_release_was_already_out_settles_done_with_no_draft() {
+    let world = watching("adoption-draft-not-needed");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+    world.script("gh.merged", "");
+
+    // The upstream lands the engine's work, and the release carrying it goes out.
+    let upstream = start(&world, "adoption-already-released", vec![engine()]);
+    world.until("the upstream to settle", |world| {
+        world.run_file(&upstream, "result.json").is_file()
+    });
+    releases_at(&answer, "0.2.0");
+    let landed = branch_of(&world, &upstream, "engine");
+    world.until("the release to be out before anything launches", |world| {
+        matches!(
+            world.on_onevcs(|| onevcs::release_status(&landed, None)),
+            Ok(onevcs::ReleaseStatus::Released { .. })
+        )
+    });
+
+    // Only now is the consumer launched, against a version that already exists.
+    let mut across = consumer(Some("fast"));
+    across["deps"] = json!([format!("run:{upstream}#engine")]);
+    across["consumes"] = json!({format!("run:{upstream}#engine"): "crate"});
+    let run = start(&world, "adoption-draft-not-needed", vec![across]);
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"],
+        json!("done"),
+        "a node whose release was already out was held anyway: {settled}"
+    );
+    assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
+    let calls = gh_calls(&world);
+    assert!(
+        !calls.iter().any(|call| call.iter().any(|arg| arg == "--draft")),
+        "the host was asked to hold a change whose release is out: {calls:?}"
+    );
+    assert!(
+        world.events_of(&run, "change-drafted").is_empty(),
+        "a draft was recorded for a node that never needed one"
+    );
+    // And it was dispatched exactly once: there was nothing to come back for.
+    assert_eq!(tasks_of(&world, "consumer").len(), 1);
+}
+
+/// A **published**-adoption node never enters the draft state: it is held until
+/// its dependency's release answers, and then settles `done` like any other node.
+///
+/// The draft belongs to fast adoption alone, and the reason is what the two modes
+/// each buy. A `published` node is not scheduled until the release is out, so it
+/// launches against a version rather than a git pin and has no temporary pin for
+/// a draft to hold back — drafting it would hold a change nothing was wrong with.
+#[test]
+fn a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release() {
+    let world = watching("adoption-published-undrafted");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+    world.script("gh.merged", "");
+
+    let run = start(
+        &world,
+        "adoption-published-undrafted",
+        vec![engine(), consumer(Some("published"))],
+    );
+    // Held: the release has not moved, and the node is not dispatched.
+    world.until("the wait to carry its own answer", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // The release answers, and that is the only thing that starts it.
+    releases_at(&answer, "0.2.0");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"],
+        json!("done"),
+        "a published-adoption node reported a state that belongs to fast adoption: {settled}"
+    );
+    assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
+    // Never, at any point in the run: not in a settlement, not at the host, and
+    // not in the sibling's own record of what it published.
+    assert!(
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .all(|event| event["payload"]["status"] != json!("complete-but-draft")),
+        "a published-adoption node settled as a draft at some point: {:?}",
+        world.events_of(&run, "node-settled")
+    );
+    assert!(
+        world.events_of(&run, "change-drafted").is_empty(),
+        "a published-adoption node's change was opened as a draft"
+    );
+    let calls = gh_calls(&world);
+    assert!(
+        !calls.iter().any(|call| call.iter().any(|arg| arg == "--draft")),
+        "the host was asked to draft a published-adoption node's change: {calls:?}"
+    );
 }
