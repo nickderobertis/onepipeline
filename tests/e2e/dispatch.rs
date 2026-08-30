@@ -616,19 +616,41 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
         "the node's member never ran: {turns:?}"
     );
 
-    let records: Vec<Value> = std::fs::read_dir(world.root.join("graph-state"))
-        .expect("oneagentgraph wrote its state root")
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("record.json")).ok())
-        .filter_map(|text| serde_json::from_str(&text).ok())
-        .collect();
+    // Read until the record says so, rather than once. The sibling publishes
+    // `graph-settled` *before* it writes the run record's final copy, and that
+    // write truncates `record.json` in place — so the launch this journey drove
+    // can be back with the file momentarily empty. A single read taken here
+    // then parses nothing at all, and an empty list reads exactly like a
+    // persona that was never resolved: that is how this journey failed on a
+    // loaded runner while the persona had in fact reached the member. The
+    // assertion below is the same one either way, over whatever was last
+    // readable, so a persona that really never arrives still fails with the
+    // records that prove it.
+    let records = || -> Vec<Value> {
+        std::fs::read_dir(world.root.join("graph-state"))
+            .expect("oneagentgraph wrote its state root")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("record.json")).ok())
+            .filter_map(|text| serde_json::from_str(&text).ok())
+            .collect()
+    };
+    let resolved = |records: &[Value]| {
+        records.iter().any(|record| {
+            record["refs"].as_array().is_some_and(|refs| {
+                refs.iter()
+                    .any(|reference| reference["origin"] == "./requested-reviewer.yaml")
+            })
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut seen = records();
+    while !resolved(&seen) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        seen = records();
+    }
     assert!(
-        records
-            .iter()
-            .any(|record| record["refs"].as_array().is_some_and(|refs| refs
-                .iter()
-                .any(|reference| { reference["origin"] == "./requested-reviewer.yaml" }))),
-        "the graph that dispatched the member did not resolve the plan's persona: {records:?}"
+        resolved(&seen),
+        "the graph that dispatched the member did not resolve the plan's persona: {seen:?}"
     );
 }
 
