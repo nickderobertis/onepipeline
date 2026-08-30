@@ -12,14 +12,11 @@
 //! third answer of its own; and a mismatch never changes what the node settled
 //! on. See `docs/contract-divergences.md` entry 47.
 
-// llmlint: ignore-file[e2e_not_mocked] the same substitution every journey in this suite
-// makes and no other: `oneagentgraph` stands in at its subprocess boundary so a dispatch
-// states what it wrote instead of paying for a model turn, and GitHub stands in at
-// `onevcs`'s own `ONEVCS_GH` override. The crate under test is the compiled binary, and
-// the branch these journeys read is a real git branch in a real session worktree — which
-// is the whole point of them. `harness.rs` carries the full rationale.
+// llmlint: ignore-file[e2e_not_mocked] this suite's stand-ins are `harness.rs`'s, whose
+// suppression states them and why. Suite-specific: the branch these journeys read is a
+// real git branch in a real session worktree, which is the whole point of them.
 
-use crate::harness::{git, plan_of, Repository, World};
+use crate::harness::{git, plan_of, Repository, World, CANCEL_GRACE_ENV};
 use serde_json::{json, Value};
 
 /// The file the scripted dispatch writes into the node's worktree.
@@ -681,6 +678,64 @@ fn a_node_redispatched_after_a_failed_publication_is_read_once_at_its_settlement
     // where the node settles: one comparison, one finding.
     let compared = comparisons(&world, &run);
     assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["answer"], "mismatch", "{compared:?}");
+    assert_eq!(findings(&world, &run).len(), 1);
+}
+
+#[test]
+fn a_cancelled_dispatch_still_leaves_a_branch_and_it_is_read_like_any_other() {
+    let world = World::new("criteria-cancelled");
+    world.repository("local-direct", &[]);
+    // A worker that opens a turn, holds it, and takes the ask when it comes: what
+    // settles this node is a supervisor's intervention rather than a verdict on
+    // its task, and that is a settlement like any other.
+    world.script("service.turn-open", "");
+    world.script("service.wait", "hold");
+    world.script("service.stops-when-interrupted", "");
+    // The criterion names the file the repository was seeded with, because a
+    // dispatch stopped before it wrote anything leaves its branch holding what it
+    // started from — which is still a branch, and still this node's.
+    let path = world.plan(
+        "cancelled",
+        &plan_of(
+            "cancelled",
+            vec![node_bounded_by(&[
+                "the row in `README.md` is `complete_dataset: true`",
+            ])],
+        ),
+    );
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    let run = "cancelled".to_string();
+    world.until("the held node's turn to open", |world| {
+        !world.events_of(&run, "turn-started").is_empty()
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the cancelled node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "service")
+    });
+
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .expect("the settlement was just seen");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+
+    // Read, and reported, exactly as a node that failed its own dispatch is: the
+    // check follows the settlement rather than the reason for it.
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["file"], "README.md", "{compared:?}");
     assert_eq!(compared[0]["answer"], "mismatch", "{compared:?}");
     assert_eq!(findings(&world, &run).len(), 1);
 }

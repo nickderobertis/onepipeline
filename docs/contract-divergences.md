@@ -2191,7 +2191,8 @@ the branch contradicts, the same criterion on a branch that holds it, a node
 whose settlement is unchanged beside the finding, prose that is reported nowhere,
 the three ways a branch withholds a file, a bar written the other way round and
 one wrapped over two lines, a bar stated in an amendment and in two steps and
-read once each, a node whose dispatch failed being read all the same, a
+read once each, a node whose dispatch failed and one a supervisor cancelled being read all the
+same, a
 node with no branch reporting nothing, a node re-dispatched after a failed
 publication being read once at its settlement rather than once per attempt, a
 workstream read where it is held for a person and not again afterwards, and a
