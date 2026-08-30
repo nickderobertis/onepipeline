@@ -453,13 +453,11 @@ fn engine_refusal(refusal: Refusal) -> Reported {
 /// checks read keys outside this crate's reserved namespace, and dropping them
 /// would leave those checks unable to run here at all.
 ///
-/// Written to bytes here, once, rather than per check: what each check is handed
-/// is one document, and serializing it once is what makes that true by
-/// construction. `Err` is a document this build could not write at all — the
-/// caller turns that into every registered check being one that could not be
-/// run, because a node quietly replaced by an empty object would hand a check a
-/// plan that is not the one the engine loaded, and a check reading that answers
-/// about something nobody asked it about.
+/// Written to bytes once rather than per check, so "one document, handed to every
+/// check" holds by construction. `Err` is a document this build could not write:
+/// the caller turns it into every check being one that could not be run, since a
+/// node replaced by an empty object would have a check answering about a plan the
+/// engine never loaded.
 fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, String> {
     let mut tasks = Vec::with_capacity(read.plan.tasks.len());
     for node in &read.plan.tasks {
@@ -713,15 +711,9 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
 
 /// A relative path against the working directory; anything else as it was given.
 ///
-/// Said as `./<path>` rather than read off `current_dir`, and the difference is
-/// not cosmetic in either direction. It is the **same** directory: this process
-/// never changes the child's, so the leading `.` the OS resolves is the one
-/// `current_dir` would have named. And it is what keeps a bare `check.sh` a file
-/// beside the plan instead of a PATH lookup — `Command::new` searches PATH for a
-/// name carrying no separator, so a consumer naming its check the way it names
-/// its plan would otherwise run whatever the environment had by that name. What
-/// goes with the syscall is a failure this verb could report but nothing could
-/// ever drive: a working directory it cannot read.
+/// `./<path>` rather than `current_dir`: the same directory, since nothing here
+/// changes the child's, and the leading `.` is what keeps a bare `check.sh` a
+/// file beside the plan rather than a PATH lookup.
 fn resolve(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();

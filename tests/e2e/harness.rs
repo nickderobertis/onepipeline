@@ -2646,16 +2646,16 @@ pub fn double(name: &str) -> PathBuf {
 
 /// A live process working inside a run root.
 ///
-/// What a real dispatch has and what a session opened from the command line does
-/// not: since `onevcs` 0.16.3 a record whose owner process has gone is kept only
-/// while something is working inside its run root, and an agent working in a
-/// worktree for hours is exactly that. The fixture is this suite's own
-/// `outlive-the-graph` process, which parks rather than doing anything — what the
-/// sibling reads is a working directory, and nothing else about it.
+/// What a real dispatch has and a session opened from the command line does not:
+/// `onevcs session open` prints a token and exits, so its record answers stale
+/// from that instant while an agent works in the worktree for hours. A journey
+/// asserting what the sibling does with an abandoned record needs the occupancy
+/// too, or it is asserting against a shape no dispatch is ever in.
 ///
-/// Unix-only, and the sibling says why: it answers this by reading a process's
-/// working directory, which Windows exposes no supported way to ask. There a
-/// record is answered on its owner alone, so there is no occupancy to arrange.
+/// The fixture is this suite's own `outlive-the-graph` process, which parks
+/// rather than doing anything: what the sibling reads is a working directory.
+/// Unix-only, because that is how it reads one, and Windows exposes no supported
+/// way to ask which process holds a directory.
 #[cfg(unix)]
 pub fn occupy(world: &World, run_root: &Path) -> std::process::Child {
     let recorded = world.root.join(format!(
