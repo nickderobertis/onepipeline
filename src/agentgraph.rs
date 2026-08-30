@@ -59,7 +59,7 @@
 //! nothing here trips that half today.
 //!
 //! What a dispatch's own environment does instead is declare itself
-//! [`Environment::OwnProcess`], which sends the launch down the subprocess
+//! [`Environment::PerLaunch`], which sends the launch down the subprocess
 //! backend above — a process whose environment is its own, and which is *this*
 //! executable at [`DRIVE_VERB`] rather than an installed sibling. That is what
 //! makes `ONEPIPELINE_NODE_SCRATCH_DIR` a value no concurrent dispatch can read
@@ -732,15 +732,27 @@ pub enum GraphOutput<'a> {
 ///
 /// That is exact for a pair constant across a driver's launches and wrong for
 /// any other, so the caller that knows says which it has and
-/// [`GraphRun::start`] picks a backend that can keep it.
+/// [`GraphRun::start`] picks the backend that can keep it.
+///
+/// Each variant names **whose the pairs are**, which is the caller's own
+/// statement about its values, rather than the backend that keeps them — because
+/// which backend a launch reaches is [`GraphRun::start`]'s answer and depends on
+/// the host as well as on the launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Environment {
     /// Constant for the life of a driver — the run's own id, where its ledger
     /// lives — so one process-wide copy is every launch's own answer.
     Shared,
-    /// This launch's own: a value no other launch may read or overwrite, so the
-    /// launch is given a process to hold it in.
-    OwnProcess,
+    /// This launch's own: a value no other launch may read or overwrite.
+    ///
+    /// A request for isolation rather than a promise of it, which is why it is
+    /// not named for the process it usually gets: [`GraphRun::start`] gives such
+    /// a launch a process of its own wherever the host has one to give, and a
+    /// host that has none — see [`retainable`] — runs it in this process,
+    /// sharing the pairs exactly as it did before this variant existed. Every
+    /// dispatch the `onepipeline` binary makes is on the first side of that
+    /// line, because [`crate::run`] is what puts it there.
+    PerLaunch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1313,7 +1325,7 @@ impl ProcessGraphRun {
 /// run's own id and where its ledger lives, both constant for the life of a
 /// driver, and one driver drives one run. A per-node value must never come
 /// through here — and cannot, because a launch that carries one declares
-/// [`Environment::OwnProcess`] and never reaches this backend at all.
+/// [`Environment::PerLaunch`] and never reaches this backend at all.
 fn export(env: &[(String, String)]) {
     for (key, value) in env {
         // A pair already holding what it is about to be given is left alone. The
@@ -1340,15 +1352,22 @@ impl GraphRun {
     /// which backend it happened to take. Naming it is the only way a run gets
     /// one answer.
     ///
-    /// A launch whose environment is [`Environment::OwnProcess`] takes the
+    /// A launch whose environment is [`Environment::PerLaunch`] takes the
     /// subprocess backend wherever there is one to take, because that is the
     /// only place its pairs can be its own: see [`Environment`] and [`export`].
     /// [`retainable`] is where there is not — a consumer that linked this crate
     /// and never went through [`crate::run`], which has no executable to retain
-    /// and no sibling named to run instead.
+    /// and no sibling named to run instead — and that launch runs here, sharing
+    /// the pairs as it always did. Both arms are driven through the public
+    /// executor seam:
+    /// `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`
+    /// is the retained one, and
+    /// `contract::a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch`
+    /// is the other — a `PerLaunch` dispatch from a test binary that never
+    /// parsed this crate's `Cli`, which is exactly the consumer this arm is for.
     pub fn start(launch: &Launch<'_>) -> Result<Self> {
         if matches!(launch.output, GraphOutput::Logged(_))
-            || (launch.environment == Environment::OwnProcess && retainable())
+            || (launch.environment == Environment::PerLaunch && retainable())
             || std::env::var_os(BINARY_ENV).is_some()
         {
             return ProcessGraphRun::start(launch).map(|run| Self {

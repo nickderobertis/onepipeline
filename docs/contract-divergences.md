@@ -2134,7 +2134,7 @@ driver.
 
 Until then the pair gets what an environment needs, which is a process. A
 `Launch` declares whose its pairs are — `Environment::Shared` for the run id and
-the ledger root, which are constant for a driver, and `Environment::OwnProcess`
+the ledger root, which are constant for a driver, and `Environment::PerLaunch`
 for a dispatch's own — and `GraphRun::start` sends the second down the subprocess
 backend, which sets the pairs on the command it spawns. That process is **this
 executable** at `drive`, not an installed sibling, so nothing about the

@@ -250,7 +250,7 @@ impl Executor for LocalExecutor {
             // so the launch is given a process to hold it in: the library
             // backend has nowhere per-launch to put a pair, and two dispatches
             // sharing one driver would read and overwrite each other's.
-            environment: Environment::OwnProcess,
+            environment: Environment::PerLaunch,
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
@@ -313,7 +313,7 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// The **run id** is what the operator's `ask-manager` wrapper addresses a
 /// manager by, and a dispatch outside a run carries none for the same reason it
 /// registers nothing. The **scratch directory** is this dispatch's alone, which
-/// is why the launch below declares [`Environment::OwnProcess`]: the pair has to
+/// is why the launch below declares [`Environment::PerLaunch`]: the pair has to
 /// live somewhere no sibling dispatch can read or overwrite, and that is a
 /// process rather than a map.
 ///
