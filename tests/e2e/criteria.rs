@@ -308,16 +308,24 @@ fn a_criterion_pointing_out_of_the_tree_names_no_file() {
     std::os::unix::fs::symlink(&outside, world.project.join("linked.yaml"))
         .expect("the link is made");
 
-    let mut bar = vec![
+    // The fourth way in is a link, which only a platform that makes one has; on
+    // one that does not, the bar is the three that are always spellable rather
+    // than a list something conditionally appends to.
+    #[cfg(unix)]
+    let linked = Some("* the row in `linked.yaml` is `complete_dataset: true`.".to_owned());
+    #[cfg(not(unix))]
+    let linked: Option<String> = None;
+    let bar: Vec<String> = [
         "* the shared journey row in `dataset.yaml` is `complete_dataset: true`.".to_owned(),
         format!(
             "* the row in `{}` is `complete_dataset: true`.",
             outside.display()
         ),
         "* the row in `../outside.yaml` is `complete_dataset: true`.".to_owned(),
-    ];
-    #[cfg(unix)]
-    bar.push("* the row in `linked.yaml` is `complete_dataset: true`.".to_owned());
+    ]
+    .into_iter()
+    .chain(linked)
+    .collect();
 
     let mut audit = crate::harness::agent("audit", &[]);
     audit["task"] = json!(format!(
