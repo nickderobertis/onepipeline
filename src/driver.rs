@@ -449,6 +449,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
     let holders = concurrency::holders(&plan)?;
+    // Every stale holder the sibling still has anybody to answer for. Since
+    // `onevcs` 0.17.1 a record whose owner process has gone, whose run root
+    // nothing is working inside, and whose branch carries nothing unpublished is
+    // left out of the enumeration above rather than handed over, so what is left
+    // here is the one an operator can act on: a session somebody is still working
+    // in whose launcher died. Reported and proceeded past — refusing is the live
+    // holder's business, below.
     for holder in holders
         .iter()
         .filter(|holder| holder.state == State::Open && holder.liveness == Liveness::Stale)

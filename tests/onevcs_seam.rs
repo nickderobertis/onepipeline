@@ -116,6 +116,10 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             // it was drafted: nothing here composes or validates one, so this is
             // the whole of what the host is given.
             body: Some(DRAFTED.to_owned()),
+            // Not a draft, which is what `src/vcs.rs::publish` sends: the
+            // publication below is the reviewable change request this crate
+            // opens, rather than one the host holds unmergeable.
+            draft: None,
         },
     )
     .expect("the seam publishes a session it opened");

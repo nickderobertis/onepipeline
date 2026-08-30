@@ -3530,7 +3530,17 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
                 "commands": [{
                     "op": "retry",
                     "id": "service",
-                    "node": {"id": "service-2", "repo": "service", "steps": [
+                    "node": {"id": "service-2", "repo": "service",
+                             // The title the node it supersedes stated. A `retry`
+                             // inherits `branch` and `resume` and nothing else, so
+                             // a replacement that states none publishes under a
+                             // subject derived from the branch — and this branch
+                             // carries one commit, the record `onevcs` wrote when
+                             // it preserved the incomplete step. That describes no
+                             // change, which the sibling refuses to publish under
+                             // rather than naming the base branch after a marker.
+                             "title": "feat: land the workstream",
+                             "steps": [
                         {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
                         {"id": "review", "persona": "reviewer", "task": "## What\nreview",
                          "deps": ["implement"]},

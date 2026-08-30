@@ -662,6 +662,12 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // just pushed — which is how a stale verdict from an earlier head
         // decided a merge path and consumed a node's last retry.
         Some("headRefOid,statusCheckRollup") => "headRefOid,statusCheckRollup",
+        // Whether the host is holding this change back. `onevcs` 0.17.1 reads it
+        // on its own before it asks a change request to merge, and refuses a
+        // response that does not carry it rather than reading silence as "not a
+        // draft" — so a host that answered every other field would land work
+        // somebody had held.
+        Some("isDraft") => "isDraft",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -687,6 +693,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "number": opened.number,
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
+            // Never a draft: nothing opens one here. `onevcs publish` carries no
+            // `DraftReason` unless its caller states one, and `onepipeline` never
+            // does — `src/vcs.rs::publish` sends `draft: None` — so every change
+            // request this host holds was opened for review.
+            "isDraft": false,
             "headRefOid": head.as_str(),
             "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
             // What this host reports about the change request's checks, which is

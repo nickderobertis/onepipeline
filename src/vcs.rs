@@ -109,6 +109,13 @@ pub fn publish(
             policy,
             title,
             body: body.map(str::to_owned),
+            // Never a draft. A node publishes when its steps are done, and a
+            // draft is a change request whose reason for not being ready lives
+            // outside the repository — a state a plan has no way to state and
+            // this crate would have to invent. `None` is also what *lifts* one,
+            // so a branch some other publisher drafted is opened for review by
+            // the publication this crate makes of it.
+            draft: None,
         },
     )
     .map_err(refusal)
@@ -124,6 +131,13 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     match outcome {
         PublishOutcome::Merged(_) => "merged",
         PublishOutcome::ChangeOpen(_) => "change-open",
+        // Its own word and not a shade of `change-open`, because the two differ
+        // in the one thing a reader of a settlement acts on: a draft cannot
+        // land, so reporting one as open would send somebody to review a change
+        // the host will not merge. Nothing here asks for a draft — `publish`
+        // sends `draft: None` — so this is the answer for a branch already
+        // drafted elsewhere, and for totality.
+        PublishOutcome::ChangeDraft(_) => "change-draft",
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -335,7 +349,9 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     use crate::graph::Landing;
     match outcome {
         PublishOutcome::Merged(_) => Some(Landing::Landed),
-        PublishOutcome::ChangeOpen(_) | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
+        PublishOutcome::ChangeOpen(_)
+        | PublishOutcome::ChangeDraft(_)
+        | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
@@ -1544,6 +1560,10 @@ mod tests {
             outcome_of(&PublishOutcome::ChangeOpen(url.clone())),
             "change-open"
         );
+        assert_eq!(
+            outcome_of(&PublishOutcome::ChangeDraft(url.clone())),
+            "change-draft"
+        );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
         // A failed publication settles under the word its **kind** earns, which
@@ -1592,10 +1612,15 @@ mod tests {
             landing_of(&PublishOutcome::Merged(onevcs::Sha("abc".into()))),
             Some(Landing::Landed)
         );
-        // A change request somebody has to merge, and one the host is holding
-        // behind checks: both are a change that has not reached its base.
+        // A change request somebody has to merge, one nobody may merge yet, and
+        // one the host is holding behind checks: each is a change that has not
+        // reached its base.
         assert_eq!(
             landing_of(&PublishOutcome::ChangeOpen(url.clone())),
+            Some(Landing::Unlanded)
+        );
+        assert_eq!(
+            landing_of(&PublishOutcome::ChangeDraft(url.clone())),
             Some(Landing::Unlanded)
         );
         assert_eq!(

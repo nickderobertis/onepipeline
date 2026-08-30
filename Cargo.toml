@@ -201,6 +201,37 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# - `onevcs` 0.17.1 is the release a **holders read stops destroying a preserved
+#   branch's only route back**. 0.16.3 had made that read forget a session record
+#   nobody was left to answer for, and `src/concurrency.rs` runs it on every
+#   launch: a node that settled failed with its work committed on its branch is
+#   exactly such a record, so the continuation onto that branch found nothing
+#   carrying it, cut a fresh one under the same name, and the publication of it
+#   was refused for having no commit that describes a change — work stranded on
+#   disk with nothing pointing at it. 0.17.1 leaves a spent record out of the
+#   answer instead and reaps one only through `onevcs sweep`, and a branch still
+#   carrying unpublished work is not spent at all.
+#   `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
+#   holds it, and `tests/e2e/concurrency.rs` holds the other half: a launch
+#   reports the stale holder an operator can act on and says nothing about the one
+#   it cannot. A **requirement**, because `^0.16` admits no 0.17.x — pre-1.0 the
+#   minor is the breaking position.
+#   Two further promises of that release reach this crate. `session close`
+#   **commits an incomplete step's uncommitted tree** rather than letting
+#   `git worktree remove` delete it, so a preserved branch carries a provenance
+#   commit — and a publication of such a branch that states no title of its own is
+#   refused, because a provenance record describes no change. And the merge path
+#   reads `isDraft` off the host before it asks a change request to merge, which
+#   `crates/testfakes`'s `gh` double answers.
+# - `onevcs` 0.18.0 moves the release-declaration schema to **version 3**, which
+#   adds a target's own `adoption_instructions`. This repository is a producer, so
+#   the resolution decides the number `release-targets.toml` states; nothing here
+#   declares that key, so every reader from version 1 up still reads the document
+#   whole. It also carries `PublishRequest.draft` and `PublishOutcome::ChangeDraft`,
+#   which `src/vcs.rs` meets: nothing here opens a draft, and a change request that
+#   cannot land is not reported as one open for review. Taken because
+#   `onevcs-testing` 0.5.2 requires exactly this `onevcs` and `^0.5.1` admits that
+#   release, so the pair the currency check holds this build to is this one.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -304,19 +335,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.13"
-# **Held at 0.16.2 though the requirement permits 0.16.3, so `just
-# engines-current` is red here deliberately.** 0.16.3 forgets a session record
-# with no owner process and an empty run root — the state a settled run leaves —
-# and `src/concurrency.rs` reads that enumeration on every launch. A continuation
-# onto a preserved branch then cuts a fresh session, and its publication is
-# refused `has no commit that describes a change`, stranding work the branch
-# already carried. Measured on the lock alone:
-# `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
-# passes here and fails there. The repair is `onevcs`'s and is not published yet
-# — 0.17.0 is a different change — so every release above this one is worse here
-# than this one, and the pin moves when the repair ships rather than when the
-# check goes green.
-onevcs = "0.16.2"
+onevcs = "0.18.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -348,7 +367,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.22"
+onevcs-testing = "0.5.2"
 
 [package]
 name = "onepipeline"

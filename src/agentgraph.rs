@@ -2403,9 +2403,12 @@ mod tests {
         );
 
         // And the version a producer writes, which is what decides the number
-        // `release-targets.toml` states. 0.16.0 writes 1.
+        // `release-targets.toml` states. 0.16.0 writes 1, 0.16.2 writes 2, and
+        // 0.18.0 writes 3 — the version that added a target's own adoption
+        // instructions, which nothing here declares and every reader from 1 up
+        // therefore still reads whole.
         assert_eq!(
-            SCHEMA_VERSION, 2,
+            SCHEMA_VERSION, 3,
             "the linked onevcs writes a release-declaration schema this repository's own \
              document is not written against. {MOVE_THE_LOCK}"
         );
@@ -2414,7 +2417,7 @@ mod tests {
         // declaration does not stop being read when version 2 starts being
         // written, which is what keeps a consumer able to read the siblings that
         // have not moved their own document.
-        let older = declared_with("\nschema_version = 2\n", "\nschema_version = 1\n");
+        let older = declared_with("\nschema_version = 3\n", "\nschema_version = 1\n");
         let read = onevcs::validate_release_declaration(&older, FILE).unwrap_or_else(|error| {
             panic!(
                 "the linked onevcs refuses a schema_version 1 declaration, so a consumer \

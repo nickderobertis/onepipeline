@@ -996,11 +996,25 @@ impl World {
     /// state root is process-global, so two worlds asking at once would otherwise
     /// read one another's.
     pub fn on_onevcs<T>(&self, ask: impl FnOnce() -> T) -> T {
-        static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = ASKING.lock().unwrap_or_else(|held| held.into_inner());
+        let _held = self.pointed_at_this_world();
+        ask()
+    }
+
+    /// Point the process-global `ONEVCS_HOME`/`GIT_CONFIG_GLOBAL` pair at this
+    /// world, and hold the one lock over them until the caller is done.
+    ///
+    /// **One lock across every caller**, because they set the same two variables:
+    /// a lock of its own guards a caller against its own kind and against nothing
+    /// else, so a registration ran with another world's state root between its
+    /// `set_var` and its call and landed in that world's registry — which the
+    /// launch then met as `"engine" is not a registered repository`, naming the
+    /// repository whichever thread had lost the race.
+    fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
+        static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
         std::env::set_var("ONEVCS_HOME", self.onevcs_home());
         std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
-        ask()
+        held
     }
 
     /// Register a checkout with `onevcs`, **in this process**.
@@ -1011,10 +1025,7 @@ impl World {
     /// would otherwise write into each other's registry.
     pub fn register(&self, checkout: &Path, origin: Option<&str>) {
         use clap::Parser;
-        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = REGISTERING.lock().unwrap_or_else(|held| held.into_inner());
-        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
-        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        let _held = self.pointed_at_this_world();
         let mut argv: Vec<String> = vec![
             "onevcs".to_owned(),
             "register".to_owned(),
@@ -1068,10 +1079,7 @@ impl World {
     ///
     /// Under the same lock and for the same reason as [`register`](World::register).
     pub fn identity(&self, repo: &Path) -> onevcs::Identity {
-        static RESOLVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = RESOLVING.lock().unwrap_or_else(|held| held.into_inner());
-        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
-        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        let _held = self.pointed_at_this_world();
         onevcs::Providers::real()
             .vcs
             .resolve_identity(&repo.to_string_lossy())
