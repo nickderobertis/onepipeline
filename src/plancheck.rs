@@ -106,64 +106,41 @@ struct Reported {
     reason: Reason,
 }
 
-/// One registered check that could not be run.
+/// One registered check this verb **started** and could not read an answer from.
+///
+/// Only a check something ran can carry an exit status, so this is the only
+/// place one lives. A check the loader's own refusal stopped is not a value of
+/// this type at all — [`Answered::LoaderRefused`] names those, and nothing there
+/// can be given a status nothing produced.
 #[derive(Debug, Clone, PartialEq)]
 struct Unrunnable {
     /// The path as it was given.
     check: String,
-    /// How far this verb got with it, which is also where an exit status lives:
-    /// only a check something ran can have one.
-    ran: Ran,
+    /// The status it exited with, where it got far enough to have one.
+    exit_code: Option<i32>,
     /// What it said for itself, or why it never said anything.
     stderr: String,
 }
 
-/// How far this verb got with one registered check.
+/// What every registered check that did not answer is reported as.
 ///
-/// The distinction the exit status turns on, in the type rather than in the
-/// wording of a message: a check that was **attempted** and could not be run
-/// leaves what it would have said unknown, and a check the loader's own refusal
-/// stopped was never asked, so the refusal is what the status reports. The exit
-/// status hangs off the first case alone, because a check nothing started cannot
-/// have one, and a type that let it carry one would be a state the answer can
-/// print and nothing can mean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ran {
-    /// This verb tried to start it, carrying the status it exited with where it
-    /// got far enough to have one.
-    Attempted(Option<i32>),
-    /// The loader refused first, so there was no loaded plan to hand it.
-    StoppedByTheLoader,
+/// One wire shape over two different facts, built at the boundary from whichever
+/// case the answer is: a check this verb started has its own status and its own
+/// words, and a check the loader stopped has neither — it has the one sentence
+/// below, which is the same for every one of them.
+#[derive(Debug, Serialize)]
+struct NotRun<'a> {
+    /// The path as it was given.
+    check: &'a str,
+    /// Always present, and null for anything nothing ran.
+    exit_code: Option<i32>,
+    /// What it said for itself, or why it never said anything.
+    stderr: &'a str,
 }
 
-impl Ran {
-    /// The status the answer carries, which is null for anything nothing ran.
-    fn exit_code(self) -> Option<i32> {
-        match self {
-            Self::Attempted(code) => code,
-            Self::StoppedByTheLoader => None,
-        }
-    }
-
-    /// Whether this verb tried to start the check.
-    fn attempted(self) -> bool {
-        matches!(self, Self::Attempted(_))
-    }
-}
-
-impl Serialize for Unrunnable {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut answer = serializer.serialize_struct("Unrunnable", 3)?;
-        answer.serialize_field("check", &self.check)?;
-        answer.serialize_field("exit_code", &self.ran.exit_code())?;
-        answer.serialize_field("stderr", &self.stderr)?;
-        answer.end()
-    }
-}
+/// What a check the loader's refusal stopped is reported as having said.
+const STOPPED_BY_THE_LOADER: &str = "the plan loader refused the project, so there was no loaded \
+                                     plan to hand this check; it did not run";
 
 /// What one registered check answered with.
 ///
@@ -250,9 +227,9 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
     // drifting re-implementation already did once.
     let refusal = match store.read_plan(&project) {
         Err(Load::Unreadable(error)) => return Err(error),
-        Err(Load::Refused(refusal)) => Some(refusal),
+        Err(Load::Refused(refusal)) => refusal,
         Ok(read) => match crate::graph::check(&read.plan) {
-            Err(refusal) => Some(refusal),
+            Err(refusal) => refusal,
             Ok(()) => {
                 let document = document(&read);
                 let mut refusals = Vec::new();
@@ -263,45 +240,51 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
                         Err(why) => unrunnable.push(why),
                     }
                 }
-                return Ok(Answered::Read {
+                return Ok(Answered::Checked {
                     refusals,
                     unrunnable,
                 });
             }
         },
     };
-    let refusal = refusal.expect("this arm is only reached where the loader refused");
-    Ok(Answered::Read {
-        refusals: vec![engine_refusal(refusal)],
-        unrunnable: args
+    Ok(Answered::LoaderRefused {
+        refusal: engine_refusal(refusal),
+        stopped: args
             .checks
             .iter()
-            .map(|path| Unrunnable {
-                check: path.display().to_string(),
-                ran: Ran::StoppedByTheLoader,
-                stderr: "the plan loader refused the project, so there was no loaded plan to \
-                         hand this check; it did not run"
-                    .to_owned(),
-            })
+            .map(|path| path.display().to_string())
             .collect(),
     })
 }
 
 /// What this verb has to say about one project.
 ///
-/// Two cases, and acceptance is **derived** from them rather than carried
-/// beside them: a boolean argument could say a plan was accepted while the lists
-/// beside it held refusals, and that is the one answer this verb must never be
-/// able to give.
+/// One case per way this verb can end, so that the combinations it has no way to
+/// reach cannot be built: a plan the loader refused holds the loader's one
+/// refusal and no check's, because none was handed anything, and a plan it
+/// accepted holds no engine refusal at all. Acceptance and the exit status are
+/// **derived** from the case rather than carried beside it — a boolean argument
+/// could say a plan was accepted while the lists beside it held refusals, and
+/// that is the one answer this verb must never be able to give.
 enum Answered {
-    /// The project could not be read at all, so nothing was checked and nothing
-    /// accepted it.
+    /// The project could not be read at all, so nothing was loaded, nothing was
+    /// checked, and nothing accepted it.
     Unreadable,
-    /// The loader ran, and so did every check it left something to hand.
-    Read {
-        /// Engine refusals first, then each check's in flag order.
+    /// The loader refused, which is where it stops: one refusal, and no loaded
+    /// plan to hand a check.
+    LoaderRefused {
+        /// The loader's own, which is the only refusal this case can hold.
+        refusal: Reported,
+        /// Every registered check, in flag order, by the path it was given as.
+        /// None of them ran, and none of them can carry an exit status.
+        stopped: Vec<String>,
+    },
+    /// The loader accepted, so every registered check was offered the plan.
+    /// Nothing here is the engine's: past its own loader it has nothing to say.
+    Checked {
+        /// Each check's refusals, in the order its flag was given.
         refusals: Vec<Reported>,
-        /// Every check that could not be run, and every one the loader stopped.
+        /// Every check this verb started and could not read an answer from.
         unrunnable: Vec<Unrunnable>,
     },
 }
@@ -309,47 +292,68 @@ enum Answered {
 impl Answered {
     /// Nothing refused it and every check ran.
     fn accepted(&self) -> bool {
-        match self {
-            Self::Unreadable => false,
-            Self::Read {
+        matches!(
+            self,
+            Self::Checked {
                 refusals,
                 unrunnable,
-            } => refusals.is_empty() && unrunnable.is_empty(),
-        }
+            } if refusals.is_empty() && unrunnable.is_empty()
+        )
     }
 
     fn refusals(&self) -> &[Reported] {
         match self {
             Self::Unreadable => &[],
-            Self::Read { refusals, .. } => refusals,
+            Self::LoaderRefused { refusal, .. } => std::slice::from_ref(refusal),
+            Self::Checked { refusals, .. } => refusals,
         }
     }
 
-    fn unrunnable(&self) -> &[Unrunnable] {
+    /// Every registered check that did not answer, in the one wire shape.
+    fn not_run(&self) -> Vec<NotRun<'_>> {
         match self {
-            Self::Unreadable => &[],
-            Self::Read { unrunnable, .. } => unrunnable,
+            Self::Unreadable => Vec::new(),
+            Self::LoaderRefused { stopped, .. } => stopped
+                .iter()
+                .map(|check| NotRun {
+                    check,
+                    exit_code: None,
+                    stderr: STOPPED_BY_THE_LOADER,
+                })
+                .collect(),
+            Self::Checked { unrunnable, .. } => unrunnable
+                .iter()
+                .map(|report| NotRun {
+                    check: &report.check,
+                    exit_code: report.exit_code,
+                    stderr: &report.stderr,
+                })
+                .collect(),
         }
     }
 
     /// The status this answer exits with.
-    ///
-    /// A check that was *attempted* and could not be run is the exit-2 case:
-    /// what it would have said is unknown, and nothing else in the answer stands
-    /// in for it. A check the loader's own refusal stopped was never asked, and
-    /// the refusal it was stopped by is what the status reports.
     fn exit_code(&self) -> i32 {
-        if matches!(self, Self::Unreadable)
-            || self
-                .unrunnable()
-                .iter()
-                .any(|report| report.ran.attempted())
-        {
-            NOT_ANSWERED
-        } else if self.refusals().is_empty() {
-            ACCEPTED
-        } else {
-            REFUSED
+        match self {
+            Self::Unreadable => NOT_ANSWERED,
+            // A check the loader's own refusal stopped was never asked, and the
+            // refusal it was stopped by is what the status reports.
+            Self::LoaderRefused { .. } => REFUSED,
+            // A check this verb *started* and could not read is the exit-2 case
+            // instead: what it would have said is unknown, and nothing else in
+            // the answer stands in for it.
+            Self::Checked {
+                refusals,
+                unrunnable,
+            } => {
+                if !unrunnable.is_empty() {
+                    NOT_ANSWERED
+                } else if refusals.is_empty() {
+                    ACCEPTED
+                } else {
+                    REFUSED
+                }
+            }
         }
     }
 }
@@ -364,7 +368,7 @@ fn report(args: &PlanCheckArgs, answered: &Answered) -> i32 {
 fn print(args: &PlanCheckArgs, answered: &Answered) {
     let accepted = answered.accepted();
     let refusals = answered.refusals();
-    let unrunnable = answered.unrunnable();
+    let unrunnable = answered.not_run();
     if args.json {
         // The project as it was named: an id this build could not even parse is
         // still the one the caller asked about.
@@ -400,11 +404,11 @@ fn print(args: &PlanCheckArgs, answered: &Answered) {
     }
     // A check that could not be run is the exit-2 diagnosis rather than an
     // answer about the plan, so it goes where this binary's diagnoses go.
-    for report in unrunnable {
+    for report in &unrunnable {
         eprintln!(
             "{}: could not be run ({}): {}",
             report.check,
-            report.ran.exit_code().map_or_else(
+            report.exit_code.map_or_else(
                 || "no exit status".to_owned(),
                 |code| format!("exit {code}")
             ),
@@ -469,7 +473,7 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     let named = path.display().to_string();
     let cannot = |exit_code: Option<i32>, stderr: String| Unrunnable {
         check: named.clone(),
-        ran: Ran::Attempted(exit_code),
+        exit_code,
         stderr,
     };
     // Against the working directory this command was run from, which is also the
