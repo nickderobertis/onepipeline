@@ -138,7 +138,13 @@ fn criteria(task: &str) -> Vec<String> {
     criteria
 }
 
-/// One criterion, read against the tree.
+/// Which of a criterion's backticked tokens are files and which are values.
+///
+/// Nothing in the prose distinguishes the two — a criterion writes both the same
+/// way — so the **tree** decides: a token naming a file this tree holds is that
+/// file, and every other token is a value one of those files has to carry.
+/// Which is also why a criterion naming no file, or naming nothing beside one,
+/// is silent: there is no pair to read.
 fn check(criterion: &str, tree: &Path) -> Vec<Finding> {
     let quoted = backticked(criterion);
     let mut files: Vec<(String, String)> = Vec::new();
@@ -339,14 +345,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_in_tree_symlink_pointing_outside_it_names_no_file() {
-        let dir = tree("symlink", ROW);
-        let elsewhere = dir.join("elsewhere.yaml");
-        std::fs::write(&elsewhere, "complete_dataset: true\n").expect("the outside file");
+        let outside = tree("symlink", ROW);
         let inside = tree("symlink-tree", &[]);
-        std::os::unix::fs::symlink(&elsewhere, inside.join("journeys.yaml"))
+        std::os::unix::fs::symlink(outside.join("journeys.yaml"), inside.join("journeys.yaml"))
             .expect("the link is made");
-        // The link reads `complete_dataset: true`, so a check that followed it
-        // would find the criterion met and say nothing.
+        // The file the link delivers contradicts the criterion, so a check that
+        // followed it would report a finding about a file this tree does not
+        // hold. Silence is the answer, and it is the answer only because the
+        // link was not followed.
         let found = findings(
             ["## Acceptance criteria\n- `journeys.yaml` says `complete_dataset: true`.\n"],
             Some(&inside),
@@ -359,10 +365,14 @@ mod tests {
 
     #[test]
     fn a_token_that_climbs_out_of_the_tree_names_no_file() {
-        let dir = tree("climbs", ROW);
+        // The contradicting file is one level above the tree, so a token that
+        // climbed would reach it and report it.
+        let above = tree("climbs", ROW);
+        let inside = above.join("inside");
+        std::fs::create_dir_all(&inside).expect("the inner tree");
         assert!(findings(
             ["## Acceptance criteria\n- `../journeys.yaml` says `complete_dataset: true`.\n"],
-            Some(&dir),
+            Some(&inside),
         )
         .is_empty());
     }

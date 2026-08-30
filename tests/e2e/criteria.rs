@@ -283,6 +283,71 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
     assert_eq!(settled(&world, name, "audit").0, "done");
 }
 
+/// A criterion pointing **out of** the tree names no file at all.
+///
+/// Three ways prose reaches past the directory a dispatch worked in — an
+/// absolute path, one that climbs, and an in-tree name that a link delivers from
+/// somewhere else — and each of the three here names one file that holds the
+/// opposite of what its criterion states. A check that read any of them would
+/// report a finding about a file this node never touched, which is the one wrong
+/// answer it must not give. The in-tree file is the control: this run records
+/// its finding and no other, which is what says the reading happened at all.
+#[test]
+fn a_criterion_pointing_out_of_the_tree_names_no_file() {
+    let world = World::new("criteria-outside");
+    // Beside the directory the node works in, and holding what every criterion
+    // below forbids.
+    let outside = world.root.join("outside.yaml");
+    std::fs::write(&outside, "complete_dataset: false\n").expect("the outside file is written");
+    std::fs::write(
+        world.project.join("dataset.yaml"),
+        "complete_dataset: false\n",
+    )
+    .expect("the project file is written");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, world.project.join("linked.yaml"))
+        .expect("the link is made");
+
+    let mut bar = vec![
+        "* the shared journey row in `dataset.yaml` is `complete_dataset: true`.".to_owned(),
+        format!(
+            "* the row in `{}` is `complete_dataset: true`.",
+            outside.display()
+        ),
+        "* the row in `../outside.yaml` is `complete_dataset: true`.".to_owned(),
+    ];
+    #[cfg(unix)]
+    bar.push("* the row in `linked.yaml` is `complete_dataset: true`.".to_owned());
+
+    let mut audit = crate::harness::agent("audit", &[]);
+    audit["task"] = json!(format!(
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n\
+         ## Acceptance criteria\n{}\n",
+        bar.join("\n")
+    ));
+
+    let name = "outside";
+    let project = world.plan(name, &plan_of(name, vec![audit]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let found = findings(&world, name);
+    assert_eq!(
+        found.len(),
+        1,
+        "only the file inside the tree produced a finding: {found:?}"
+    );
+    assert_eq!(found[0].0, "audit", "{found:?}");
+    assert!(found[0].1.contains("dataset.yaml"), "{found:?}");
+    assert!(
+        !found[0].1.contains("outside.yaml") && !found[0].1.contains("linked.yaml"),
+        "a file outside the tree was read: {found:?}"
+    );
+    assert_eq!(settled(&world, name, "audit").0, "done");
+}
+
 /// A publication that failed leaving its work behind is re-dispatched, and what
 /// settles the node is the **last** attempt's reading of its branch.
 ///

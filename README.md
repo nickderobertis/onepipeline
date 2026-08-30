@@ -117,17 +117,20 @@ rule — so a consumer never has to re-implement it:
 onepipeline plan check plans:tracked-release --check ./checks/review-bar --json
 ```
 
-Each repeatable `--check` names an executable, resolved against the directory the
-verb ran in. It is handed the **loaded** plan as one JSON document on its stdin —
-every default resolved, each node carrying its task's own metadata map verbatim —
-with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment, and answers on stdout
-with `{"refusals": [...]}` and exit 0, `node` and `field` present on each and
-null where it is about neither. Exit `0` is the loader and every check
-accepting, `1` is at least one refusal from either source, and `2` is a project
-that could not be read or a check that could not be run — which is reported
-separately from a refusal and never read as an accept. A loader refusal
-short-circuits: there is no loaded plan to hand a check, so each is reported as
-not run.
+Each repeatable `--check <PATH>` names an executable, resolved against the
+directory the verb ran in. It is handed the **loaded** plan as one JSON document
+on its stdin — every default resolved, each node carrying its task's own metadata
+map verbatim — with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment, and
+answers on stdout with `{"refusals": [...]}` and exit 0, `node` and `field`
+present on each and null where it is about neither. Engine refusals come first
+and carry `"source": "engine"`; each check's follow in the order its flags were
+given, under the path as it was given, and `--json` prints them as one object
+carrying `project`, `accepted`, `refusals` and `unrunnable`, always all four.
+Exit `0` is the loader and every check accepting, `1` is at least one refusal
+from either source, and `2` is a project that could not be read or a check that
+could not be run — which is reported separately from a refusal and never read as
+an accept. A loader refusal short-circuits: there is no loaded plan to hand a
+check, so each is reported as not run.
 
 The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's

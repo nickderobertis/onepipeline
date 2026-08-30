@@ -3357,6 +3357,84 @@ fn the_plan_check_verb_is_the_one_the_contract_spells() {
     );
 }
 
+/// The README's own copy of the `plan check` interface, gated against the two
+/// things it is a copy *of*.
+///
+/// The README states the wire and the exit codes in an operator's prose, which
+/// is a second copy of the contract — and a consumer writes a check against
+/// whichever of the two it read. So every claim that passage makes is asserted
+/// here against its source: the wire against the contract itself, the exit codes
+/// against the constants the binary exits with, and the flags against the
+/// argument parser that offers them.
+#[test]
+fn the_readmes_plan_check_passage_is_a_gated_copy_of_the_contract() {
+    let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    // Wrapped prose on both sides, so match on words rather than line breaks.
+    let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let passage = readme
+        .split_once("A plan is checkable before it is launched")
+        .expect("the README has a plan-check passage")
+        .1
+        .split_once("The run's own record does not move")
+        .expect("that passage ends where the README says it does")
+        .0
+        .to_string();
+
+    // The wire, which is the contract's to state: every claim the README makes
+    // about it is one the contract makes too.
+    for claim in [
+        "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+        "repeatable `--check <PATH>`",
+        "carry `\"source\": \"engine\"`",
+        "never read as an accept",
+    ] {
+        assert!(
+            passage.contains(claim),
+            "the README's plan-check passage no longer states '{claim}'"
+        );
+        assert!(
+            contract.contains(claim),
+            "the README states '{claim}' and the contract does not"
+        );
+    }
+
+    // The exit codes, which are the binary's: the README names the numbers this
+    // build actually exits with.
+    for (code, meaning) in [
+        (EXIT_SUCCESS, "the loader and every check accepting"),
+        (EXIT_QUEUED, "at least one refusal from either source"),
+        (EXIT_REFUSED, "a project that could not be read"),
+    ] {
+        assert!(
+            passage.contains(&format!("`{code}` is {meaning}")),
+            "the README's plan-check passage no longer maps exit {code} to {meaning}"
+        );
+    }
+
+    // And the flags, which are the parser's.
+    let check = Cli::command()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "plan")
+        .expect("the binary offers `plan`")
+        .clone()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "check")
+        .expect("`plan` offers `check`")
+        .clone();
+    for flag in check
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+    {
+        // Either alone or with the value it takes, which is how the passage
+        // writes the one that has a value.
+        assert!(
+            passage.contains(&format!("`--{flag}`")) || passage.contains(&format!("`--{flag} ")),
+            "the README's plan-check passage does not name `--{flag}`, which the verb takes"
+        );
+    }
+}
+
 /// The settlement check the contract states, and the one thing it may not do.
 #[test]
 fn the_contract_states_the_literal_criteria_check_and_that_it_never_fails_a_node() {

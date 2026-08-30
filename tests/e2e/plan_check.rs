@@ -453,8 +453,26 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
     let unopenable = world.root.join("unopenable.sh");
     std::fs::write(&unopenable, "#!/bin/sh\nprintf '{\"refusals\": []}'\n")
         .expect("the check is written");
+    // A check the host killed, *after* it wrote a well-formed accept: it died by
+    // a signal, so it exited with no status at all and never said it had
+    // finished. A well-formed answer on the stdout of a process that was killed
+    // is not an accept — a check that ran answers with exit status 0 — and the
+    // report carries a null status rather than a number nothing produced.
+    #[cfg(unix)]
+    let signalled = check_script(
+        &world,
+        "signalled",
+        "cat > /dev/null\nprintf '{\"refusals\": []}'\necho 'killed before it finished' >&2\n\
+         kill -TERM $$",
+    );
 
-    for (check, exit_named, said) in [
+    // The signalled case is the only one added to this list, so on a host
+    // without it the list is already whole.
+    #[cfg_attr(
+        not(unix),
+        allow(unused_mut, reason = "nothing is pushed without signals")
+    )]
+    let mut cases = vec![
         (&failing, true, "the check broke"),
         (&babbling, true, "not-json"),
         (&wordless, true, "blank"),
@@ -463,7 +481,11 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         (&voluble, true, "truncated at the"),
         (&terse, true, "refusals[].node"),
         (&unopenable, false, "cannot be run"),
-    ] {
+    ];
+    #[cfg(unix)]
+    cases.push((&signalled, false, "killed before it finished"));
+
+    for (check, exit_named, said) in cases {
         let run = world.run(&[
             "plan",
             "check",
