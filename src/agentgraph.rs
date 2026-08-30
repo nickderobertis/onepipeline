@@ -2393,21 +2393,17 @@ mod tests {
     /// The linked `oneagentgraph` releases a dispatch on a blocker only when the
     /// dispatch could not have cleared it by running the thing again.
     ///
-    /// The same `engineer` bar as the test above, and the same reason it reaches
-    /// this crate: it is the linked library's file, so the resolution decides
-    /// which bar a judge is handed. Until 0.3.14 that bar released the
+    /// The same `engineer` bar as the test above. Until 0.3.14 it released the
     /// conversation on whatever the worker *called* terminal, with the final
     /// verdict false — so a run that timed out once, or lost a tool call to a
     /// network that would have answered on the retry, was settled `failed` and
-    /// its finished work discarded, when one more turn would have cleared it.
-    /// 0.3.14 defines the word: terminal is what nothing the worker can do
-    /// inside the run would clear, and a retryable failure is explicitly not it.
+    /// its finished work discarded.
     ///
-    /// Both halves again. The narrowed definition has to be *there*, and the
-    /// release it governs has to still be there — a resolution that answered the
-    /// same defect by dropping the terminal-blocker release outright would strand
-    /// a genuinely blocked worker in a conversation it cannot leave, which is the
-    /// opposite mistake and fails here too.
+    /// Both halves are asserted because either alone passes on a build this crate
+    /// does not work: the narrowed definition has to be *there*, and the release
+    /// it governs has to still be there — a resolution that answered the same
+    /// defect by dropping the release outright would strand a genuinely blocked
+    /// worker in a conversation it cannot leave.
     #[test]
     fn the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past() {
         let stance = shipped_engineer_stance();
