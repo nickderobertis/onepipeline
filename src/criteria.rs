@@ -53,17 +53,14 @@ pub(crate) struct Checkable {
 }
 
 impl Checkable {
-    /// The criterion as the plan wrote it.
     pub(crate) fn criterion(&self) -> &str {
         &self.criterion
     }
 
-    /// The file it named, relative to the node's branch.
     pub(crate) fn file(&self) -> &str {
         self.file.as_str()
     }
 
-    /// The literal it said that file holds.
     pub(crate) fn literal(&self) -> &str {
         &self.literal
     }
@@ -132,21 +129,15 @@ impl BranchPath {
 ///
 /// Three and not two: a file that cannot be read is not a file that disagrees,
 /// and a reader who could not tell them apart would chase a mismatch that was
-/// never measured.
+/// never measured. `Unread` is that third answer, and its `reason` is the words
+/// of whatever refused rather than this module's summary of them; `holds` is
+/// what the file has where the criterion's own value is not there, which is what
+/// makes a finding worth reading without opening the branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Answer {
-    /// The file holds the literal.
     Match,
-    /// The file was read and does not hold it.
-    Mismatch {
-        /// What it holds instead, for the finding to quote.
-        holds: String,
-    },
-    /// The check could not read the file, so it compared nothing.
-    Unread {
-        /// Why, in the words of whatever refused.
-        reason: String,
-    },
+    Mismatch { holds: String },
+    Unread { reason: String },
 }
 
 impl Answer {
