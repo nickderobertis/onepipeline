@@ -1000,24 +1000,50 @@ pub fn unblocks(graph: &Graph, id: &str) -> Vec<String> {
 mod tests {
     /// Every status a node can settle or wait at, for the gate below.
     ///
-    /// Written out because the enum offers no enumeration of itself, exactly as
-    /// `vcs::tests::EVERY_KIND` is. It does not stand alone: [`NodeStatus::as_str`]
-    /// matches arm by arm, so a variant added there fails *that* to compile, and
-    /// this list is what makes the same addition fail the divergence gate rather
-    /// than pass it silently.
-    const EVERY_STATUS: &[NodeStatus] = &[
-        NodeStatus::Pending,
-        NodeStatus::Ready,
-        NodeStatus::Running,
-        NodeStatus::Waiting,
-        NodeStatus::Blocked,
-        NodeStatus::Parked,
-        NodeStatus::Cancelled,
-        NodeStatus::Done,
-        NodeStatus::CompleteDraft,
-        NodeStatus::Failed,
-        NodeStatus::Skipped,
-    ];
+    /// **Walked rather than written out.** A list written out is one a new variant
+    /// never has to join: [`NodeStatus::as_str`] and [`NodeStatus::parse`] fail to
+    /// compile until the variant is spelled in each, and neither of those edits
+    /// touches a list beside them — so a status this build carried could reach the
+    /// divergence gate below unnamed, which is the one thing that gate exists to
+    /// catch. The walk is an exhaustive `match` over the enum itself, so the
+    /// variant has to be named *here* too, and the only answer its arm can give is
+    /// which status comes after it.
+    ///
+    /// One thing exhaustiveness cannot make somebody do is point an *existing* arm
+    /// at the new variant, so an arm written `=> None` would end the walk a second
+    /// time and leave its own status unreached. Nothing in stable Rust counts an
+    /// enum's variants, so that end is closed by the arms reading as an order —
+    /// each names the one after it and exactly one names none — and by the
+    /// assertion below, which refuses a walk that comes back to a status it has
+    /// already reached. A second list written out beside this one would close
+    /// nothing: it would be one more thing a new variant does not have to join.
+    fn every_status() -> Vec<NodeStatus> {
+        fn after(status: NodeStatus) -> Option<NodeStatus> {
+            match status {
+                NodeStatus::Pending => Some(NodeStatus::Ready),
+                NodeStatus::Ready => Some(NodeStatus::Running),
+                NodeStatus::Running => Some(NodeStatus::Waiting),
+                NodeStatus::Waiting => Some(NodeStatus::Blocked),
+                NodeStatus::Blocked => Some(NodeStatus::Parked),
+                NodeStatus::Parked => Some(NodeStatus::Cancelled),
+                NodeStatus::Cancelled => Some(NodeStatus::Done),
+                NodeStatus::Done => Some(NodeStatus::CompleteDraft),
+                NodeStatus::CompleteDraft => Some(NodeStatus::Failed),
+                NodeStatus::Failed => Some(NodeStatus::Skipped),
+                NodeStatus::Skipped => None,
+            }
+        }
+        let mut every = vec![NodeStatus::Pending];
+        while let Some(next) = after(*every.last().expect("the walk starts at one status")) {
+            assert!(
+                !every.contains(&next),
+                "the walk over NodeStatus reaches {next:?} twice, so it names no order and \
+                 whatever follows it is never reached"
+            );
+            every.push(next);
+        }
+        every
+    }
 
     /// The draft settlement vocabulary this build carries is exactly what the
     /// divergence record proposes, and `docs/contract.md` names none of it.
@@ -1056,7 +1082,7 @@ mod tests {
         // than in backticks (`a ready human action`, `blocked, never failed`), so
         // the search is for the word and not for a rendering of it: what is being
         // asked is whether the document has ever heard of it.
-        let undocumented: Vec<String> = EVERY_STATUS
+        let undocumented: Vec<String> = every_status()
             .iter()
             .map(|status| status.as_str().to_string())
             .filter(|word| !contract.contains(word.as_str()))
