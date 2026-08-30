@@ -76,7 +76,7 @@ for command in start plan adopt channel next reply surface attest stop runs stat
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \
-         "the installed binary predates that command — reinstall the version under test, or drop '$command' from this list if the contract no longer names it" ;;
+         "reinstall the version under test — 'pip install --force-reinstall onepipeline-cli${expect_version:+==$expect_version}' or 'npm install -g onepipeline-cli${expect_version:+@$expect_version}' — or, if the contract no longer names '$command', drop it from the 'for command in' list above" ;;
   esac
 done
 
