@@ -1941,7 +1941,7 @@ fn summarize(event: &Envelope) -> String {
 /// So the unlanded phrase is dated, and says that no later read has moved it.
 /// One does look: a driver asks again as the run closes out and records what it
 /// found, which [`landings_the_run_re_read`] is what carries onto these lines. It
-/// cannot always answer — see [`crate::vcs::landed_now`] and divergence 33 in
+/// cannot always answer — see [`crate::vcs::proved_landed`] and divergence 33 in
 /// [the divergence record](../../../docs/contract-divergences.md) — and where it
 /// does not, this is the claim that stands: the settlement's own, dated, beside
 /// the change's own URL. Asserting the state of things now would not be honest.

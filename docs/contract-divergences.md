@@ -1032,7 +1032,7 @@ takes the four-spelling reference this crate already resolves work by and answer
 `not landed` before it looks at any release at all — so it carries that library's
 own four-tier landing decision, made against the publication checkout's own
 history, across the seam. A driver asks it once, as the run closes out, of every
-change the run recorded unlanded: `vcs::landed_now`, `engine`'s
+change the run recorded unlanded: `vcs::proved_landed`, `engine`'s
 `landings_after_asking_again`, and `views::landings_the_run_re_read`, which is
 what puts the answer on the views beside the report.
 `a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed`

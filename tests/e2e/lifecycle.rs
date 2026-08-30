@@ -4131,7 +4131,7 @@ fn a_release_target_for_the_repository_under_test() -> String {
 /// So the run asks again as it closes out, which is the last thing it will ever
 /// say about the node and the thing a reader acts on. It asks the only read on
 /// `onevcs`'s public surface that answers from the publication checkout's own
-/// history — see `vcs::landed_now` — and where that library will not answer, the
+/// history — see `vcs::proved_landed` — and where that library will not answer, the
 /// settlement's own dated claim stands, exactly as the journey above holds.
 #[test]
 fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed() {
