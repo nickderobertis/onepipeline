@@ -281,6 +281,10 @@ pub struct Turn {
     /// The member it was, from its own config's `[env]`. Empty for a turn whose
     /// config a journey wrote itself and did not stamp.
     pub member: String,
+    /// The scratch directory the dispatch this turn belongs to was given, out of
+    /// the turn process's own environment. Empty for a turn the engine started
+    /// nothing for.
+    pub scratch: String,
 }
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
@@ -1945,6 +1949,7 @@ impl World {
                 prompt: Self::recorded(&call, 0, "the prompt"),
                 cwd: Self::recorded(&call, 1, "the working directory"),
                 member: Self::recorded(&call, 2, "the member"),
+                scratch: Self::recorded(&call, 3, "the scratch directory"),
             })
             .collect()
     }

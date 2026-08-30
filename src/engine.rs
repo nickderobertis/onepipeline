@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
@@ -1858,7 +1858,10 @@ pub(crate) fn drain(
     // What the producer said killed this dispatch, if it said so at all. The
     // **first** such envelope and not the last: a member that dies takes the run
     // down with it, so the deaths after the first are the teardown it caused.
-    let mut death: Option<MemberDeath> = None;
+    let mut death = Death::Unstated;
+    // What the producer published about the turns its members ran, which is what
+    // a death is reconciled against before it is acted on.
+    let mut turns = TurnRecords::default();
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
     loop {
@@ -1870,8 +1873,23 @@ pub(crate) fn drain(
                         addresses.push(address);
                     }
                 }
-                if death.is_none() {
-                    death = MemberDeath::of(&envelope);
+                turns.read(&envelope);
+                if matches!(death, Death::Unstated) {
+                    if let Some(published) = MemberDeath::of(&envelope) {
+                        // The turn record arrives before the death it is about —
+                        // a producer closes a turn and then reports the member,
+                        // in that order, on its own `seq` — so what has been read
+                        // by the time a death arrives is the record for the turn
+                        // that death is about.
+                        death = if published.from_provider
+                            && member_of(&envelope)
+                                .is_some_and(|member| turns.contradicts_a_death_of(member))
+                        {
+                            Death::Contradicted
+                        } else {
+                            Death::Published(published)
+                        };
+                    }
                 }
                 let _ = tx.send(Message::Event(Box::new(envelope)));
             }
@@ -1935,7 +1953,7 @@ pub(crate) fn drain(
             detail: asked_at.map(|_| stopped_how(killed, grace)),
             ..Settlement::plain(node, NodeStatus::Cancelled, None)
         },
-        Ok(outcome) => failed_task(node, &outcome, session.as_ref(), death.as_ref()),
+        Ok(outcome) => failed_task(node, &outcome, session.as_ref(), &death),
         Err(error) => Settlement {
             detail: Some(error.to_string()),
             ..failed(node, INFRASTRUCTURE_FAILURE)
@@ -2061,6 +2079,21 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
 /// assumed away.
 pub const DISPATCH_DIED: &str = "dispatch-died";
 
+/// The same death, where what killed the dispatch was the **provider**.
+///
+/// A narrowing of [`DISPATCH_DIED`] rather than a second word for it, and the
+/// narrowing is what a reader acts on: a node whose provider went is a node with
+/// nothing wrong with its work, and the word it settled under used to send the
+/// reader looking for what the work got wrong. The journal already said so — the
+/// producer's own liveness rule is `provider-failure` — and this is that fact
+/// reaching the settlement, the results, and the views instead of stopping at the
+/// event.
+///
+/// A node that failed its own task still settles [`TASK_FAILED`], and a dispatch
+/// that died to anything else — a heartbeat, a stall, a signal — still settles
+/// [`DISPATCH_DIED`]. This word names provider deaths and nothing else.
+pub const PROVIDER_FAILED: &str = "provider-failed";
+
 /// A node whose declaration no dispatch could be composed from.
 pub const INVALID_NODE: &str = "invalid-node";
 
@@ -2134,6 +2167,15 @@ struct MemberDeath {
     /// What killed the member, as its producer classified it: `oneagentgraph`'s
     /// own `Cause`, carried as the word it was spelled with.
     cause: String,
+    /// Whether the liveness rule that fired was the **provider** one.
+    ///
+    /// A decision taken at the boundary rather than the rule carried through it:
+    /// the only question anything here asks of that field is whether it is
+    /// `oneagentgraph`'s own `Rule::ProviderFailure`, and a rule this build does
+    /// not know is simply not that one. So nothing downstream holds another
+    /// producer's unbounded string, and a rule renamed there is a compile error
+    /// here rather than a word that silently stops matching.
+    from_provider: bool,
 }
 
 impl MemberDeath {
@@ -2170,8 +2212,166 @@ impl MemberDeath {
         let cause = envelope.payload.get("cause")?.as_str()?;
         is_a_classification(cause).then(|| Self {
             cause: cause.to_owned(),
+            from_provider: envelope.payload.get("rule").and_then(Value::as_str)
+                == Some(oneagentgraph::member::Rule::ProviderFailure.as_str()),
         })
     }
+}
+
+/// What a producer published about the turns one dispatch ran, as far as this
+/// dispatch's own stream carries it.
+///
+/// The **record** a death is reconciled against. `oneagentgraph` closes a turn
+/// only on a harness record it could settle on — a run that reported `ok` and
+/// exited `0` — and the close carries what that one turn consumed, so a turn that
+/// is open *and* closed on this stream is a turn whose own record said the work
+/// finished and the provider was spent on.
+///
+/// Keyed by the member as well as the turn, because a graph runs several and a
+/// turn number is only unique within one. A producer that stamps no member is one
+/// member's stream as far as anything here can tell, and keys under the same
+/// empty name on both sides — which is what keeps a single-sided producer's turn
+/// record readable rather than silently unmatchable.
+#[derive(Debug, Default)]
+struct TurnRecords {
+    /// The turn each member last **started**, kept whether or not it went on to
+    /// close: a completion is recorded beside this rather than taken out of it,
+    /// because the two together are the question — the turn a member was last on,
+    /// and whether that same turn closed billed.
+    last_started: BTreeMap<String, u64>,
+    /// The members and turns whose close carried a **non-zero**
+    /// [`USAGE_FIGURES`] figure, which is the whole of what "billed" means here:
+    /// a close carrying no usage, or a usage whose every figure is nought, is
+    /// not in this set.
+    with_billed_usage: BTreeSet<(String, u64)>,
+}
+
+// llmlint: ignore-block[changed_behavior_has_e2e] the half a producer reaches *is* a
+// journey: a close with no start leaves a member with no turn recorded, so the death stands,
+// which is what `lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`
+// and `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`
+// settle `provider-failed` over. The rest are the trust boundary — a turn number that is
+// not a number, a member label that is not a member name, a usage carrying no figure —
+// and every one of them is a shape no producer in this tree writes: `oneagentgraph` emits
+// both kinds through its own closed types. Reaching one end to end means hand-writing that
+// envelope, which proves the fixture; dropping the guards would let another process's JSON
+// suppress a real death. Held by this module's own test, which drives every shape past the
+// real reading.
+impl TurnRecords {
+    /// Fold one relayed envelope in, where it says something about a turn.
+    fn read(&mut self, envelope: &Envelope) {
+        if envelope.source != crate::event::Source::Agentgraph {
+            return;
+        }
+        let Some(turn) = envelope.payload.get("turn").and_then(Value::as_u64) else {
+            return;
+        };
+        let Some(member) = member_of(envelope).map(str::to_owned) else {
+            return;
+        };
+        let kind = &envelope.kind.0;
+        if kind == oneagentgraph::event::EventKind::TurnStarted.as_str() {
+            self.last_started.insert(member, turn);
+        } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
+            && has_a_usage_figure(envelope.payload.get("usage"))
+        {
+            self.with_billed_usage.insert((member, turn));
+        }
+    }
+
+    /// Whether the turn this member was last on is one its own record says
+    /// completed, and reported usage for.
+    ///
+    /// The turn it was **last on**, because a death names none: a `member-died`
+    /// says which member went and why, so the turn it is about is the one that
+    /// member had reached. A member that started none has no record to reconcile
+    /// against, and a death naming one stands.
+    fn contradicts_a_death_of(&self, member: &str) -> bool {
+        self.last_started
+            .get(member)
+            .is_some_and(|turn| self.with_billed_usage.contains(&(member.to_owned(), *turn)))
+    }
+} // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The key a relayed envelope's records pair under: the member it was stamped
+/// with, [`UNSTAMPED_MEMBER`] for a producer that stamped none, and `None` for a
+/// label this build cannot read as a member.
+///
+/// The third answer is a refusal rather than a default. The label is another
+/// process's JSON and this key is what a turn record and a death are correlated
+/// on, so folding an unreadable one onto the unstamped key would let a stranger's
+/// record contradict a real member's death — `projection::member_label` keeps the
+/// same three apart, for the same reason on the rendering side.
+fn member_of(envelope: &Envelope) -> Option<&str> {
+    match envelope.labels.extra.get("member") {
+        None => Some(UNSTAMPED_MEMBER),
+        // The same token check every other relayed string in this module crosses,
+        // for the same reason: this is another process's JSON, and a member name
+        // is a graph identifier — `worker`, `check-in` — so a paragraph or a
+        // control character is not one, whatever it is. Bounded here because the
+        // value becomes a map key held for the life of the dispatch.
+        Some(Value::String(member)) => is_a_classification(member).then_some(member.as_str()),
+        Some(_) => None,
+    }
+}
+
+/// The key a producer that stamped no member pairs its records under.
+///
+/// Deliberately a name no member can have — [`member_of`] refuses an empty
+/// label — so a single-sided producer's records pair with each other and with
+/// nothing else.
+const UNSTAMPED_MEMBER: &str = "";
+
+/// The figures on a turn's usage a non-zero one of which says the provider did
+/// work for it.
+///
+/// Three of the five the sibling declares, and the two left out are the choice: a
+/// prompt served from the provider's cache is what a turn is charged *less* for,
+/// so a turn whose only non-zero figure is a cache read is not evidence the
+/// provider ran one. The three here are independently optional on the wire — a
+/// provider that counted tokens and reported no price still ran the turn — so any
+/// of them settles it.
+///
+/// Field names rather than that library's `Usage`, for [`MemberDeath::of`]'s
+/// reason: the producer is resolved on the `PATH`, so it may be a newer release
+/// than this build links and that type is `deny_unknown_fields`. What keeps the
+/// names true is
+/// [`tests::the_usage_figures_this_crate_reads_are_the_ones_the_producer_writes`],
+/// which asks the linked `Usage` what it serializes to and fails on a rename.
+const USAGE_FIGURES: [&str; 3] = ["input_tokens", "output_tokens", "cost_usd"];
+
+/// Whether a turn's usage carries a non-zero [`USAGE_FIGURES`] figure.
+///
+/// The literal question, because every stronger one would be a claim the wire
+/// does not support: `cost_usd` is optional, so "was it charged" is unanswerable
+/// for a provider that counts tokens and prices nothing, and "does it report
+/// usage" would take a cache-only record — which is the one shape here that is
+/// deliberately not evidence a turn ran.
+fn has_a_usage_figure(usage: Option<&Value>) -> bool {
+    let Some(usage) = usage else { return false };
+    USAGE_FIGURES
+        .into_iter()
+        .filter_map(|figure| usage.get(figure))
+        .any(|figure| figure.as_f64().is_some_and(|spent| spent > 0.0))
+}
+
+/// What the producer said killed a dispatch, once it has been reconciled against
+/// the record of the turn it names.
+///
+/// Only the provider rule is reconciled — see divergence 49 in
+/// [the divergence record](../../../docs/contract-divergences.md) — because only
+/// it is a claim about a turn: a heartbeat, a stall and a signal are statements
+/// about the member *after* whatever turn it completed, so a closed turn beside
+/// one of those contradicts nothing.
+enum Death {
+    /// The producer published one, and the turn record does not contradict it.
+    Published(MemberDeath),
+    /// The producer published a `provider-failure` the record for that turn
+    /// contradicts: the turn completed, reporting usage.
+    Contradicted,
+    /// The producer published none. The sentence the dispatch exited on is all
+    /// there is, and [`dispatch_death_cause`] is the reading of it.
+    Unstated,
 }
 
 /// The classification a dispatch death carries, lifted out of the failure's own
@@ -2273,12 +2473,20 @@ pub(crate) fn is_a_classification(word: &str) -> bool {
 /// taken wherever there is one, and the reading remains for the producer that
 /// says nothing.
 ///
+/// A death the turn's own record **contradicts** takes neither. The record is
+/// stronger than both — see [`Death`] — and the sentence a contradicted dispatch
+/// exits on is the same producer saying the same thing less precisely, so
+/// consulting it would put back exactly what the reconciliation took out. What
+/// that node settles is the plain failure, carrying the commit its branch was
+/// left at: nothing here can say the work passed its bar, and nobody should have
+/// to dig through a journal to find out whether there is any.
+///
 /// Every unknown degrades to the plain failure this arm always produced.
 fn failed_task(
     node: &str,
     outcome: &DispatchOutcome,
     session: Option<&onevcs::SessionToken>,
-    death: Option<&MemberDeath>,
+    death: &Death,
 ) -> Settlement {
     let detail = (!outcome.detail.is_empty()).then(|| outcome.detail.clone());
     if let Some(url) = session.and_then(crate::vcs::change_opened_in) {
@@ -2288,8 +2496,26 @@ fn failed_task(
             ..failed(node, TASK_FAILED_CHANGE_OPEN)
         };
     }
-    let stated = death.map(|death| death.cause.clone());
-    let Some(cause) = stated.or_else(|| dispatch_death_cause(&outcome.detail)) else {
+    let head = || session.and_then(crate::vcs::branch_head_in);
+    let (cause, word) = match death {
+        Death::Contradicted => {
+            return Settlement {
+                detail,
+                head: head(),
+                ..failed(node, TASK_FAILED)
+            }
+        }
+        Death::Published(published) => (
+            Some(published.cause.clone()),
+            if published.from_provider {
+                PROVIDER_FAILED
+            } else {
+                DISPATCH_DIED
+            },
+        ),
+        Death::Unstated => (dispatch_death_cause(&outcome.detail), DISPATCH_DIED),
+    };
+    let Some(cause) = cause else {
         return Settlement {
             detail,
             ..failed(node, TASK_FAILED)
@@ -2298,8 +2524,8 @@ fn failed_task(
     Settlement {
         detail,
         cause: Some(cause),
-        head: session.and_then(crate::vcs::branch_head_in),
-        ..failed(node, DISPATCH_DIED)
+        head: head(),
+        ..failed(node, word)
     }
 }
 
@@ -2921,6 +3147,69 @@ mod tests {
     use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
     use crate::projection::Recorded;
 
+    /// The two things this change publishes outside the crate are spelled the
+    /// same in the README, in the divergence record, and here.
+    ///
+    /// The gate the publication budget's own has, for the same reason: an
+    /// environment variable is set from outside this crate by a name nothing
+    /// compiles, and a settlement word is read out of a run's result by one. Both
+    /// are stated in three documents, each further from the constant than the
+    /// last, and the README is the copy an operator actually meets. Each is
+    /// asserted from the constant, so a rename fails here rather than leaving
+    /// three documents describing a build that no longer exists.
+    ///
+    /// The **divergence record** rather than the contract, deliberately: neither
+    /// is in `docs/contract.md`, both are proposals to the planner who owns it,
+    /// and that is exactly the status the two entries state. A gate against the
+    /// contract would be a gate against a document that must not carry them yet.
+    #[test]
+    fn the_scratch_variable_and_the_provider_word_are_spelled_one_way_in_every_document() {
+        let read = |relative: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
+                .unwrap_or_else(|error| panic!("{relative} ships: {error}"))
+        };
+        let readme = read("README.md");
+        let divergences = read("docs/contract-divergences.md");
+        let contract = read("docs/contract.md");
+
+        for named in [
+            crate::executor::NODE_SCRATCH_DIR_ENV,
+            PROVIDER_FAILED,
+            // The word it narrows, which is what makes the narrowing legible: a
+            // README naming only the new one would read as a rename.
+            DISPATCH_DIED,
+        ] {
+            let quoted = format!("`{named}`");
+            assert!(
+                readme.contains(&quoted),
+                "the README does not name {quoted}"
+            );
+            assert!(
+                divergences.contains(&quoted),
+                "docs/contract-divergences.md does not name {quoted}"
+            );
+        }
+        // And the two the contract does not carry are still the two it does not
+        // carry, so the README's "open divergence" is true when a reader reads it.
+        for open in [crate::executor::NODE_SCRATCH_DIR_ENV, PROVIDER_FAILED] {
+            assert!(
+                !contract.contains(open),
+                "docs/contract.md now names {open:?}, so the README must stop calling it an \
+                 open divergence and the entry must be marked ruled on"
+            );
+        }
+        assert!(
+            readme.contains("open divergence 48") && readme.contains("open divergence 49"),
+            "the README does not say which entries these two are waiting on"
+        );
+        for entry in ["## 48. ", "## 49. "] {
+            assert!(
+                divergences.contains(entry),
+                "docs/contract-divergences.md has no entry {entry:?}"
+            );
+        }
+    }
+
     /// The bound on re-dispatching a node whose publication keeps failing is
     /// named in the contract that publishes it, under the spelling an operator
     /// sets.
@@ -3150,6 +3439,7 @@ mod tests {
         // And the new word is in the vocabulary at all, so a rename that emptied
         // the list would not pass this by saying nothing.
         assert!(SETTLEMENT_OUTCOMES.contains(&DISPATCH_DIED));
+        assert!(SETTLEMENT_OUTCOMES.contains(&PROVIDER_FAILED));
         assert!(draftings.contains(&"dispatch-failed"));
     }
 
@@ -3163,7 +3453,7 @@ mod tests {
     /// this carries is the other half: a word *added* is a deliberate edit here,
     /// and the gate below is what stops it colliding with a vocabulary an
     /// operator reads through the same views.
-    const SETTLEMENT_OUTCOMES: [&str; 7] = [
+    const SETTLEMENT_OUTCOMES: [&str; 8] = [
         INVALID_NODE,
         NO_CHANGES,
         INFRASTRUCTURE_FAILURE,
@@ -3171,6 +3461,7 @@ mod tests {
         TASK_FAILED,
         TASK_FAILED_CHANGE_OPEN,
         DISPATCH_DIED,
+        PROVIDER_FAILED,
     ];
 
     /// Every `FailureKind` the sibling distinguishes, for the vocabulary gate.
@@ -3284,14 +3575,26 @@ mod tests {
         use crate::event::Source;
         let member_died = oneagentgraph::event::EventKind::MemberDied.as_str();
 
+        let read = MemberDeath::of(&died(
+            Source::Agentgraph,
+            member_died,
+            Some(serde_json::json!("quota")),
+        ))
+        .expect("a death this build can take a classification from");
+        assert_eq!(read.cause, "quota");
+        // The rule the payload names, decided here rather than carried: the
+        // fixtures above are written under the provider rule, which is the one
+        // this crate asks about.
+        assert!(read.from_provider);
+        let mut supervised = died(Source::Agentgraph, member_died, Some(json!("timeout")));
+        supervised.payload.insert(
+            "rule".into(),
+            json!(oneagentgraph::member::Rule::Heartbeat.as_str()),
+        );
         assert_eq!(
-            MemberDeath::of(&died(
-                Source::Agentgraph,
-                member_died,
-                Some(serde_json::json!("quota"))
-            ))
-            .map(|death| death.cause),
-            Some("quota".to_owned())
+            MemberDeath::of(&supervised).map(|death| death.from_provider),
+            Some(false),
+            "a death under another liveness rule was read as the provider's"
         );
         for beside in [
             // This crate's own kinds and `onevcs`'s are relayed onto the same
@@ -3318,6 +3621,201 @@ mod tests {
                 "{beside:?} was read as a member this producer said had died"
             );
         }
+    }
+
+    /// The usage figures this crate reads off a turn record are the ones the
+    /// linked producer writes.
+    ///
+    /// The drift gate for [`USAGE_FIGURES`], which is the one place this crate
+    /// names a sibling's payload fields rather than deserializing them. The
+    /// spelling comes from that library's own type here, so a field renamed
+    /// upstream fails this rather than quietly making every turn look unbilled —
+    /// which would put back exactly the settlement the reconciliation removes.
+    #[test]
+    fn the_usage_figures_this_crate_reads_are_the_ones_the_producer_writes() {
+        let written = serde_json::to_value(oneagentgraph::event::Usage {
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cache_read_tokens: Some(1),
+            cache_write_tokens: Some(1),
+            cost_usd: Some(1.0),
+        })
+        .expect("the sibling's usage serializes");
+        for figure in USAGE_FIGURES {
+            assert!(
+                written.get(figure).is_some(),
+                "the producer no longer writes {figure:?}: {written}"
+            );
+        }
+        // And the two this crate deliberately does not read are still the two it
+        // was deciding about, rather than names that have since become something
+        // else.
+        for cached in ["cache_read_tokens", "cache_write_tokens"] {
+            assert!(written.get(cached).is_some(), "{written}");
+            assert!(!USAGE_FIGURES.contains(&cached));
+        }
+    }
+
+    /// A death is reconciled against the record of the turn it names, and only a
+    /// `provider-failure` is.
+    ///
+    /// The end-to-end halves are
+    /// `lifecycle::a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one`,
+    /// whose producer publishes both, and
+    /// `lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words`,
+    /// which holds the three words apart. What is held here is the **reading**:
+    /// which records pair, which do not, and which figures count. Every
+    /// shape below is one a producer can put on that stream, and the pairing is
+    /// what decides whether about $24.72 of finished work is thrown away.
+    #[test]
+    fn a_turn_record_contradicts_only_the_death_of_the_member_and_turn_it_belongs_to() {
+        let of = |kind: &str, member: Option<&str>, payload: serde_json::Value| {
+            let mut envelope = Envelope {
+                v: crate::event::ENVELOPE_VERSION,
+                ts: "2026-08-29T00:00:00.000Z".into(),
+                stream: "oneagentgraph-1".into(),
+                seq: 0,
+                source: crate::event::Source::Agentgraph,
+                kind: crate::event::EventKind(kind.into()),
+                phase: None,
+                labels: Labels::default(),
+                payload: payload
+                    .as_object()
+                    .cloned()
+                    .expect("a payload is an object"),
+                artifacts: Vec::new(),
+            };
+            if let Some(member) = member {
+                envelope.labels.extra.insert("member".into(), json!(member));
+            }
+            envelope
+        };
+        let started = oneagentgraph::event::EventKind::TurnStarted.as_str();
+        let completed = oneagentgraph::event::EventKind::TurnCompleted.as_str();
+        let billed = json!({"turn": 1, "usage": {"output_tokens": 12}});
+
+        // The pair the incident produced: one member, one turn, opened and closed
+        // on a record that was billed.
+        let mut records = TurnRecords::default();
+        records.read(&of(started, Some("worker"), json!({"turn": 1})));
+        records.read(&of(completed, Some("worker"), billed.clone()));
+        assert!(records.contradicts_a_death_of("worker"));
+        // A member whose *next* turn is the one it had open has no record for it,
+        // which is what a real provider death looks like: the turn never closed.
+        records.read(&of(started, Some("worker"), json!({"turn": 2})));
+        assert!(
+            !records.contradicts_a_death_of("worker"),
+            "a record of an earlier turn was read as the record of the turn that died"
+        );
+        // And another member's record says nothing about this one.
+        assert!(!records.contradicts_a_death_of("reviewer"));
+
+        // A close with no opening is not a turn record this crate can attribute:
+        // a death names no turn, so the turn it is about is the one its member had
+        // open, and a member with none has nothing to reconcile against.
+        let mut orphan = TurnRecords::default();
+        orphan.read(&of(completed, Some("worker"), billed.clone()));
+        assert!(!orphan.contradicts_a_death_of("worker"));
+
+        // A turn that closed on nothing billed is not the record either: what
+        // contradicts a death is a turn the provider was paid for.
+        let mut unpaid = TurnRecords::default();
+        unpaid.read(&of(started, Some("worker"), json!({"turn": 1})));
+        for nothing in [
+            json!({"turn": 1}),
+            json!({"turn": 1, "usage": {}}),
+            json!({"turn": 1, "usage": {"cost_usd": 0.0}}),
+            json!({"turn": 1, "usage": {"output_tokens": "many"}}),
+        ] {
+            unpaid.read(&of(completed, Some("worker"), nothing));
+        }
+        assert!(!unpaid.contradicts_a_death_of("worker"));
+        unpaid.read(&of(completed, Some("worker"), billed.clone()));
+        assert!(unpaid.contradicts_a_death_of("worker"));
+
+        // A producer that stamps no member is one member's stream as far as
+        // anything here can tell, and both halves key under the same name.
+        let mut unstamped = TurnRecords::default();
+        unstamped.read(&of(started, None, json!({"turn": 1})));
+        unstamped.read(&of(completed, None, billed.clone()));
+        assert!(unstamped.contradicts_a_death_of(UNSTAMPED_MEMBER));
+
+        // A label present and unreadable is refused rather than folded onto the
+        // unstamped key: a stranger's record would otherwise contradict a real
+        // member's death. Every way of not being a member name, including the two
+        // that are strings.
+        for label in [
+            json!(7),
+            json!(""),
+            json!("a name with spaces in it"),
+            json!("worker\n"),
+            json!("m".repeat(CLASSIFICATION_LIMIT + 1)),
+        ] {
+            let mut unreadable = TurnRecords::default();
+            let mut opened = of(started, None, json!({"turn": 1}));
+            opened.labels.extra.insert("member".into(), label.clone());
+            unreadable.read(&opened);
+            let mut closed = of(completed, None, billed.clone());
+            closed.labels.extra.insert("member".into(), label);
+            unreadable.read(&closed);
+            assert!(!unreadable.contradicts_a_death_of(UNSTAMPED_MEMBER));
+            assert!(!unreadable.contradicts_a_death_of("worker"));
+        }
+
+        // Everything that says nothing about a turn is folded as nothing: another
+        // producer's stream, and a kind with no turn on it.
+        let mut beside = TurnRecords::default();
+        let mut relayed = of(started, Some("worker"), json!({"turn": 1}));
+        relayed.source = crate::event::Source::Vcs;
+        beside.read(&relayed);
+        beside.read(&of(started, Some("worker"), json!({})));
+        beside.read(&of("member-heartbeat", Some("worker"), json!({"turn": 1})));
+        beside.read(&of(completed, Some("worker"), billed));
+        assert!(
+            !beside.contradicts_a_death_of("worker"),
+            "a record from another producer opened a turn for this one"
+        );
+    }
+
+    /// A death the producer published settles under the word its liveness rule
+    /// names, and a death the record contradicts settles under neither.
+    ///
+    /// The mapping, held beside the journeys that drive it: three inputs on one
+    /// seam, and the whole point of the word is that they do not collapse.
+    #[test]
+    fn each_death_settles_under_the_word_its_own_rule_and_record_leave_it() {
+        let failed = DispatchOutcome {
+            succeeded: false,
+            detail: "oneagentgraph: member 'worker' failed: the turn exited 0 without a report"
+                .into(),
+            ..DispatchOutcome::default()
+        };
+        let word = |death: &Death| {
+            failed_task("build", &failed, None, death)
+                .outcome
+                .expect("a failed dispatch settles under a word")
+        };
+        assert_eq!(
+            word(&Death::Published(MemberDeath {
+                cause: "quota".into(),
+                from_provider: true,
+            })),
+            PROVIDER_FAILED
+        );
+        assert_eq!(
+            word(&Death::Published(MemberDeath {
+                cause: "timeout".into(),
+                from_provider: false,
+            })),
+            DISPATCH_DIED
+        );
+        // The record won: neither the event nor the sentence it exited on gets a
+        // say, and no classification rides a settlement the record contradicts.
+        let contradicted = failed_task("build", &failed, None, &Death::Contradicted);
+        assert_eq!(contradicted.outcome.as_deref(), Some(TASK_FAILED));
+        assert_eq!(contradicted.cause, None);
+        // And a producer that published nothing settles exactly as it always did.
+        assert_eq!(word(&Death::Unstated), TASK_FAILED);
     }
 
     /// The checked-in shape of a schema-5 run result.

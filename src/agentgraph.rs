@@ -47,16 +47,24 @@
 //! CLI's own mapping — and publishes the `turn-interrupted` envelope the verb
 //! publishes, through the sibling's own emitter.
 //!
-//! **Concurrency.** One thing in the sibling's library path is process-wide and
-//! is therefore *no longer isolated between concurrent nodes*: a graph's `env:`
-//! block is exported into the running process, and `ONEHARNESS_HARNESSES` is
-//! removed from it. That is deliberate upstream — a two-party member is a thread
-//! there, and the `oneharness run` it spawns has to inherit what the contract
-//! promises it — and it was safe while one graph run was one process. This crate
-//! dispatches several nodes at once, so it no longer is.
+//! **Concurrency.** One thing in the sibling's library path is process-wide: a
+//! graph's `env:` block is exported into the running process, and
+//! `ONEHARNESS_HARNESSES` is removed from it. That is deliberate upstream — a
+//! two-party member is a thread there, and the `oneharness run` it spawns has to
+//! inherit what the contract promises it — and it was safe while one graph run
+//! was one process. This crate dispatches several nodes at once, so a pair that
+//! differs *per dispatch* cannot live there:
 //! `a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone`
-//! observes it. The shipped graphs declare no `env:` block, so nothing here
-//! trips it today.
+//! observes the export, and the shipped graphs declare no `env:` block, so
+//! nothing here trips that half today.
+//!
+//! What a dispatch's own environment does instead is declare itself
+//! [`Environment::PerLaunch`], which sends the launch down the subprocess
+//! backend above — a process whose environment is its own, and which is *this*
+//! executable at [`DRIVE_VERB`] rather than an installed sibling. That is what
+//! makes `ONEPIPELINE_NODE_SCRATCH_DIR` a value no concurrent dispatch can read
+//! or overwrite, and it is driven end to end by
+//! `dispatch::concurrent_dispatches_each_hold_their_own_scratch_directory_throughout`.
 //!
 //! From `oneagentgraph 0.2.18` that model covers a **single-sided** member too:
 //! its turn is an `oneharness_core` library call, so the harness process
@@ -713,6 +721,40 @@ pub enum GraphOutput<'a> {
 // string and adds no invariant, and one of the two callers here holds a `String` off the
 // launch record rather than a `ConfigRef` — so taking one would mint the sibling's type
 // at this seam only to unwrap it again two functions down.
+/// Whose environment a launch's [`Launch::env`] pairs are.
+///
+/// The question is *where the launch can run*, because the two backends hold an
+/// environment in different places. The subprocess one sets the pairs on the
+/// command it spawns, so they are that launch's and nobody else's. The library
+/// one has nowhere per-launch to put them — `oneagentgraph` composes a member's
+/// environment from the hosting process's, and says so — so [`export`] writes
+/// them onto *this* process, where every concurrent launch shares them.
+///
+/// That is exact for a pair constant across a driver's launches and wrong for
+/// any other, so the caller that knows says which it has and
+/// [`GraphRun::start`] picks the backend that can keep it.
+///
+/// Each variant names **whose the pairs are**, which is the caller's own
+/// statement about its values, rather than the backend that keeps them — because
+/// which backend a launch reaches is [`GraphRun::start`]'s answer and depends on
+/// the host as well as on the launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Environment {
+    /// Constant for the life of a driver — the run's own id, where its ledger
+    /// lives — so one process-wide copy is every launch's own answer.
+    Shared,
+    /// This launch's own: a value no other launch may read or overwrite.
+    ///
+    /// A request for isolation rather than a promise of it, which is why it is
+    /// not named for the process it usually gets: [`GraphRun::start`] gives such
+    /// a launch a process of its own wherever the host has one to give, and a
+    /// host that has none — see [`retainable`] — runs it in this process,
+    /// sharing the pairs exactly as it did before this variant existed. Every
+    /// dispatch the `onepipeline` binary makes is on the first side of that
+    /// line, because [`crate::run`] is what puts it there.
+    PerLaunch,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     /// The agent-graph config to run.
@@ -725,6 +767,9 @@ pub struct Launch<'a> {
     pub labels: &'a Labels,
     /// Environment exported to the launch, beyond this process's own.
     pub env: &'a [(String, String)],
+    /// Whose environment [`env`](Self::env) is, which decides where the launch
+    /// can run.
+    pub environment: Environment,
     /// Opaque graph-config overrides, applied in order.
     pub sets: &'a [String],
     /// What this launch may relay onto the run's merged store, or everything.
@@ -768,6 +813,37 @@ enum Output {
     Logged(PathBuf),
 }
 
+/// The executable that answers this crate's own command line, once the caller
+/// that owns that command line has said which one it is.
+///
+/// A retained launch is *this build* asked to [`drive`] a graph, and knowing
+/// which file that is cannot be guessed: `std::env::current_exe` answers with
+/// whatever program is running, and this crate is a **library** as well as a
+/// binary — so an embedding consumer that reached the executor seam directly
+/// would have had its own program spawned with a verb it has never heard of.
+/// [`crate::run`] is what knows, because parsing this crate's `Cli` is what makes
+/// a process one that speaks it, and it says so once.
+static SPEAKS_THIS_CLI: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Record that this process's executable answers this crate's command line.
+///
+/// Called by [`crate::run`] and nowhere else: that function *is* the command
+/// line, so reaching it is the proof. Idempotent — a driver calls it once and a
+/// retained `drive` child calls it again in its own process.
+pub fn speaks_this_cli(exe: PathBuf) {
+    let _ = SPEAKS_THIS_CLI.set(exe);
+}
+
+/// Whether a launch can be given a process of its own, and with what.
+///
+/// Two ways and no third: an installed sibling the operator named at
+/// [`BINARY_ENV`], or this executable — when something has said which file that
+/// is. A consumer that linked this crate and never went through [`crate::run`]
+/// has neither, and its launches stay in its own process.
+fn retainable() -> bool {
+    overridden() || SPEAKS_THIS_CLI.get().is_some()
+}
+
 /// The command a retained launch runs its graph with: *this executable*, asked
 /// to [`drive`] the graph.
 ///
@@ -793,11 +869,21 @@ fn retained_command(
             command
         }
         false => {
-            let mut command = Command::new(std::env::current_exe().map_err(|e| {
-                sibling(format!(
-                    "cannot find this executable to retain a driver: {e}"
-                ))
-            })?);
+            let exe = SPEAKS_THIS_CLI.get().cloned().map_or_else(
+                || {
+                    // Only a caller that never went through `crate::run` reaches
+                    // this, and only for a `Logged` launch — which that caller
+                    // cannot ask for either, because `--detach` is a verb of the
+                    // command line it did not use.
+                    std::env::current_exe().map_err(|e| {
+                        sibling(format!(
+                            "cannot find this executable to retain a driver: {e}"
+                        ))
+                    })
+                },
+                Ok,
+            )?;
+            let mut command = Command::new(exe);
             command.arg(DRIVE_VERB).arg(graph);
             command
         }
@@ -1238,7 +1324,8 @@ impl ProcessGraphRun {
 /// what makes it safe here is *which* pairs these are: a launch carries the
 /// run's own id and where its ledger lives, both constant for the life of a
 /// driver, and one driver drives one run. A per-node value must never come
-/// through here.
+/// through here — and cannot, because a launch that carries one declares
+/// [`Environment::PerLaunch`] and never reaches this backend at all.
 fn export(env: &[(String, String)]) {
     for (key, value) in env {
         // A pair already holding what it is about to be given is left alone. The
@@ -1264,8 +1351,24 @@ impl GraphRun {
     /// said nothing would send a different `--cwd` to the harness depending on
     /// which backend it happened to take. Naming it is the only way a run gets
     /// one answer.
+    ///
+    /// A launch whose environment is [`Environment::PerLaunch`] takes the
+    /// subprocess backend wherever there is one to take, because that is the
+    /// only place its pairs can be its own: see [`Environment`] and [`export`].
+    /// [`retainable`] is where there is not — a consumer that linked this crate
+    /// and never went through [`crate::run`], which has no executable to retain
+    /// and no sibling named to run instead — and that launch runs here, sharing
+    /// the pairs as it always did. Both arms are driven through the public
+    /// executor seam:
+    /// `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`
+    /// is the retained one, and
+    /// `contract::a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch`
+    /// is the other — a `PerLaunch` dispatch from a test binary that never
+    /// parsed this crate's `Cli`, which is exactly the consumer this arm is for.
     pub fn start(launch: &Launch<'_>) -> Result<Self> {
-        if matches!(launch.output, GraphOutput::Logged(_)) || std::env::var_os(BINARY_ENV).is_some()
+        if matches!(launch.output, GraphOutput::Logged(_))
+            || (launch.environment == Environment::PerLaunch && retainable())
+            || std::env::var_os(BINARY_ENV).is_some()
         {
             return ProcessGraphRun::start(launch).map(|run| Self {
                 backend: GraphBackend::Process(run),
@@ -2083,6 +2186,9 @@ mod tests {
             dir: &root,
             labels: &Labels::default(),
             env: &[],
+            // The claim is about the library backend's own export, so this is
+            // the launch shape that reaches it.
+            environment: Environment::Shared,
             sets: &[],
             filter: None,
             output: GraphOutput::Relayed,

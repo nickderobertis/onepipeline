@@ -225,7 +225,9 @@ fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_e
     );
 
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["outcome"], "dispatch-died", "{node}");
+    // The rule the first death named is the provider one, so the word is the one
+    // that says so rather than the general `dispatch-died`.
+    assert_eq!(node["outcome"], "provider-failed", "{node}");
     assert_eq!(
         node["cause"], "quota",
         "the settlement took the teardown's cause or the exit sentence's over the death \
@@ -234,7 +236,7 @@ fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_e
     world
         .run(&["results", &run])
         .exited(0)
-        .out_has("the dispatch died (quota) rather than failing its task");
+        .out_has("the provider killed the dispatch (quota), so nothing here is the work's fault");
 }
 
 /// The same failure with a verdict of the agent's own settles exactly as it did.
