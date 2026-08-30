@@ -921,15 +921,9 @@ enum ProjectedStatus {
 /// looking for what the work got wrong when nothing was wrong with the work.
 fn projected(status: NodeStatus, outcome: Option<&str>) -> ProjectedStatus {
     match status {
-        // A draft-complete node is `in progress`, which is the one word above
-        // that is not the settlement's own: it has not settled. Its work is
-        // finished and the change it published cannot land until the release it
-        // is waiting on happens, so the run is still working on it and a person
-        // deciding what is left to do has it in front of them. `done` would say
-        // the change landed and `cancelled` would say nobody is coming back to
-        // it, and both are false. *Why* it is still open is beside the word, on
-        // the reserved settlement metadata that carries the draft's reason and
-        // on `onepipeline.change_url`, which names the draft to read.
+        // The one node here projected under a word that is not its own: a draft
+        // has not settled, so `done` and `cancelled` would both be false, and
+        // the run is still on it.
         NodeStatus::Running | NodeStatus::CompleteDraft => ProjectedStatus::InProgress,
         NodeStatus::Done => ProjectedStatus::Done,
         NodeStatus::Failed if outcome == Some(crate::engine::PROVIDER_FAILED) => {
