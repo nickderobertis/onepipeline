@@ -281,6 +281,45 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
     assert_eq!(settled(&world, name, "audit").0, "done");
 }
 
+/// A direct node whose dispatch **failed** has its project directory read too.
+///
+/// The direct path reads its criteria after the attempt, whatever the attempt
+/// came to — and a node that failed is where a criterion naming a literal is
+/// worth reporting, because what the dispatch wrote is still sitting in the
+/// launch directory for whoever picks the work up.
+#[test]
+fn a_failed_direct_dispatch_still_has_the_project_directory_read() {
+    let world = World::new("criteria-direct-failed");
+    // The dispatch writes `audit.md` into the directory it works in — the launch
+    // directory, for a direct node — and then fails, which is what a worker that
+    // wrote its work and could not finish leaves behind.
+    world.script("audit.work", "complete_dataset: false\n");
+    world.script("audit.fail", "1");
+
+    let mut audit = crate::harness::agent("audit", &[]);
+    audit["task"] = json!(
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n\
+         ## Acceptance criteria\n\
+         * the shared journey row in `audit.md` is `complete_dataset: true`.\n"
+    );
+
+    let name = "direct-failed";
+    let project = world.plan(name, &plan_of(name, vec![audit]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let found = findings(&world, name);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "audit", "{found:?}");
+    assert!(found[0].1.contains("audit.md"), "{found:?}");
+    assert!(found[0].1.contains("complete_dataset: true"), "{found:?}");
+    // The node failed on its dispatch, exactly as it would have without the
+    // read: the finding is beside the settlement and never over it.
+    assert_eq!(settled(&world, name, "audit").0, "failed");
+}
+
 /// A criterion pointing **out of** the tree names no file at all.
 ///
 /// Three ways prose reaches past the directory a dispatch worked in — an

@@ -798,6 +798,55 @@ fn a_project_that_cannot_be_read_is_exit_two_and_still_answers_with_one_object()
     run.err_has("qualified onetaskgraph id");
 }
 
+/// A project this build cannot read leaves its registered checks unspawned.
+///
+/// There is no loaded plan to hand them, so the same thing happens to them as a
+/// loader refusal does — and this answer says so the only way it can: nothing
+/// accepted the project, and the two lists a consumer reads a *verdict* out of
+/// are both empty. An empty `unrunnable` beside exit 2 is what tells the two
+/// exit-2 causes apart: a check that could not be run names itself there, and
+/// this one, where nothing got as far as a check, names nobody.
+#[test]
+fn an_unreadable_project_runs_no_registered_check_and_accepts_nothing() {
+    let world = World::new("plancheck-unreadable-checks");
+    let first = world.root.join("first.json");
+    let second = world.root.join("second.json");
+    let one = recording_check(&world, "one", &first);
+    let two = recording_check(&world, "two", &second);
+
+    let missing = format!("{STORE_SOURCE}:nothing-here");
+    let run = world.run(&[
+        "plan",
+        "check",
+        &missing,
+        "--check",
+        &as_str(&one),
+        "--check",
+        &as_str(&two),
+        "--json",
+    ]);
+    run.exited(REFUSED);
+    let answered = answer(&run);
+    assert_shape(&answered);
+    assert_eq!(answered["project"], json!(missing), "{answered}");
+    assert_eq!(answered["accepted"], json!(false), "{answered}");
+    // Neither was spawned: neither wrote the file it writes the moment it is.
+    assert!(!first.exists() && !second.exists(), "{answered}");
+    assert!(refusals(&answered).is_empty(), "{answered}");
+    assert!(unrunnable(&answered).is_empty(), "{answered}");
+    // The diagnosis is on stderr, where every other refusal this binary makes
+    // goes, and it is about the project rather than about either check.
+    assert!(
+        !run.stderr.trim().is_empty(),
+        "nothing said what went wrong"
+    );
+    assert!(
+        !run.stderr.contains(&as_str(&one)) && !run.stderr.contains(&as_str(&two)),
+        "a check nothing spawned was reported: {}",
+        run.stderr
+    );
+}
+
 /// A refusing check beside one that could not be run: exit 2 wins, and both are
 /// still in the answer.
 ///
