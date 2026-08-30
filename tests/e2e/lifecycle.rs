@@ -3502,6 +3502,10 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     // The second step fails, so the node settles failed with the first step's
     // work committed on the branch the session preserved.
     world.script("service.implement.work", "the worker wrote this\n");
+    // The step that is re-run writes something of its own, so the continuation has
+    // a change to publish: a branch carrying only preserved work is refused by
+    // `onevcs`, which is a different journey's subject.
+    world.script("service.review.work", "and the reviewer wrote this\n");
     world.script("service.review.fail", "1");
     let node = json!({
         "id": "service",
@@ -3530,7 +3534,8 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
                 "commands": [{
                     "op": "retry",
                     "id": "service",
-                    "node": {"id": "service-2", "repo": "service", "steps": [
+                    "node": {"id": "service-2", "repo": "service",
+                             "title": "feat: land the workstream", "steps": [
                         {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
                         {"id": "review", "persona": "reviewer", "task": "## What\nreview",
                          "deps": ["implement"]},

@@ -921,7 +921,10 @@ enum ProjectedStatus {
 /// looking for what the work got wrong when nothing was wrong with the work.
 fn projected(status: NodeStatus, outcome: Option<&str>) -> ProjectedStatus {
     match status {
-        NodeStatus::Running => ProjectedStatus::InProgress,
+        // The one node here projected under a word that is not its own: a draft
+        // has not settled, so `done` and `cancelled` would both be false, and
+        // the run is still on it.
+        NodeStatus::Running | NodeStatus::CompleteDraft => ProjectedStatus::InProgress,
         NodeStatus::Done => ProjectedStatus::Done,
         NodeStatus::Failed if outcome == Some(crate::engine::PROVIDER_FAILED) => {
             ProjectedStatus::ProviderFailed
@@ -1680,5 +1683,76 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 5, "two settlements shared a word: {seen:?}");
+    }
+
+    /// A draft-complete node reaches the board as `in progress`, and why it is
+    /// still open is beside the word.
+    ///
+    /// It is the one node projected under a word that is not its settlement's,
+    /// because it has not settled: its work is finished and the change it
+    /// published cannot land until the release it awaits happens, so the run is
+    /// still on it. `done` would tell a reader the change landed and `cancelled`
+    /// would tell them nobody is coming back to it, so both halves are held —
+    /// the word it takes, and the two it must not share with the settlements
+    /// that do mean those things.
+    #[test]
+    fn a_draft_complete_node_reaches_the_board_as_in_progress_and_says_why() {
+        let mut fixture = Fixture::new("draft-complete");
+        fixture
+            .snapshot
+            .statuses
+            .insert("build".to_owned(), NodeStatus::CompleteDraft);
+        fixture
+            .snapshot
+            .outcomes
+            .insert("build".to_owned(), crate::vcs::DRAFTED.to_owned());
+        fixture
+            .snapshot
+            .landings
+            .insert("build".to_owned(), Landing::Unlanded);
+        fixture.snapshot.change_urls.insert(
+            "build".to_owned(),
+            "https://example.invalid/pull/9".to_owned(),
+        );
+        fixture.snapshot.settlements.insert(
+            "build".to_owned(),
+            json!({
+                "status": NodeStatus::CompleteDraft.as_str(),
+                "outcome": crate::vcs::DRAFTED,
+                "detail": "awaiting the crate release of github.com/owner/engine",
+            }),
+        );
+        fixture.project();
+
+        let (build, _) = fixture.task_document("build");
+        assert_eq!(
+            build["status"], "in progress",
+            "a node whose change cannot land yet did not reach the board as work still in hand"
+        );
+        // The two words it must not take, read off the projection that writes
+        // them rather than restated beside it: a draft is neither closed nor
+        // abandoned.
+        for settled in [NodeStatus::Done, NodeStatus::Cancelled] {
+            assert_ne!(
+                build["status"].as_str(),
+                Some(word(projected(settled, None)).as_str()),
+                "a draft-complete node took the board word `{}` settles under",
+                settled.as_str()
+            );
+        }
+
+        // Why it is still open, beside the word that cannot say it. The
+        // settlement's own reason is on the reserved key, and the draft a person
+        // opens to read it is beside that.
+        assert_eq!(
+            build["metadata"][crate::taskgraph::SETTLEMENT_KEY]["detail"],
+            json!("awaiting the crate release of github.com/owner/engine"),
+            "the draft reached the board with nothing on it saying why it is still open"
+        );
+        assert_eq!(
+            build["metadata"]["onepipeline.change_url"],
+            "https://example.invalid/pull/9"
+        );
+        assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
     }
 }

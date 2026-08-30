@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use onevcs::SessionRequest;
 
@@ -305,6 +306,7 @@ fn attempt_once(
         paths,
         launch,
         node,
+        references,
         worktree.as_deref(),
         base.as_deref(),
         cancel,
@@ -367,6 +369,7 @@ fn publish(
     paths: &RunPaths,
     launch: &Launch,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     worktree: Option<&std::path::Path>,
     base: Option<&str>,
     cancel: &crate::executor::CancellationToken,
@@ -427,7 +430,14 @@ fn publish(
         })
     };
 
-    let publication = publish_rereading_the_merge_path(node, token, body.as_deref(), cancel);
+    // Whether this node's temporary git pin is still temporary, asked at the one
+    // moment it decides anything. A node with no reference block — every node that
+    // is not fast-adoption, and every fast one whose dependencies land where it
+    // does — has nothing to ask about and gets `None`, which is the publication
+    // this crate has always made.
+    let draft = crate::release::draft_reason(references);
+    let publication =
+        publish_rereading_the_merge_path(node, token, body.as_deref(), draft.as_ref(), cancel);
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
@@ -495,10 +505,20 @@ fn publish(
                 }),
                 _ => None,
             };
+            // A change the host is holding as a draft says why, on the line a
+            // settlement is read back on. It leads whatever else the settlement
+            // had to say for the reason a publication's own reason leads a
+            // drafting failure: this is what the node settled as.
+            let drafted = matches!(published.outcome, onevcs::PublishOutcome::ChangeDraft(_))
+                .then(|| draft.as_ref().map(crate::release::drafted_detail))
+                .flatten();
             Attempt::Settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
-                detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
+                detail: drafted
+                    .or(compared)
+                    .map(&with_undrafted)
+                    .or_else(|| undrafted.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -516,7 +536,14 @@ fn publish(
                 // it ran under: an identity that asks the host to merge
                 // immediately still has to be observed doing it.
                 landing: crate::vcs::landing_of(&published.outcome),
-                ..Settlement::plain(&node.id, NodeStatus::Done, None)
+                // **Complete, and not `done`.** Every step ran and the branch is
+                // published, so nothing here failed and nothing is left for this
+                // run to ask a worker for; what is left is a release outside it.
+                // Settled `done`, the node's dependents would start on work that
+                // cannot land and the run would report finished with the git pin
+                // it launched against sitting in an open change — which is the
+                // one ending fast adoption must not have.
+                ..Settlement::plain(&node.id, drafted_status(&published.outcome), None)
             })
         }
         // llmlint: ignore[changed_behavior_has_e2e] this arm is `onevcs` refusing the
@@ -529,6 +556,19 @@ fn publish(
         // `a_publication_its_merge_path_refuses_settles_the_node_failed_by_name` drives
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
+    }
+}
+
+/// The status a publication settles its node at.
+///
+/// Read off what the publication **answered** rather than off the reason that was
+/// asked for, because the two can differ: a host that would not draft the change
+/// is a change that can land, and reporting it as held back would leave a landable
+/// pin reported as safe.
+fn drafted_status(outcome: &onevcs::PublishOutcome) -> NodeStatus {
+    match outcome {
+        onevcs::PublishOutcome::ChangeDraft(_) => NodeStatus::CompleteDraft,
+        _ => NodeStatus::Done,
     }
 }
 
@@ -562,9 +602,11 @@ fn publish_rereading_the_merge_path(
     node: &Node,
     token: &onevcs::SessionToken,
     body: Option<&str>,
+    draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
 ) -> Published {
-    let publish = || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body);
+    let publish =
+        || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body, draft);
     let budget = engine::merge_path_reads();
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;
@@ -1130,15 +1172,23 @@ pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
     labels.persona = labels.persona.take().or_else(|| known.persona.clone());
 }
 
+/// How long ending a session waits for the terminator its stream ends with.
+///
+/// Nothing in the ordinary case: a session whose terminator is written answers on
+/// the first read. The grace bounds the case where none is.
+const TERMINATOR_GRACE: Duration = Duration::from_secs(5);
+
+/// How often that wait re-reads the stream, and re-asks a close that refused.
+const TERMINATOR_POLL: Duration = Duration::from_millis(250);
+
 /// Close the session, and collect what its stream said.
 ///
 /// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record: closing marks the session closed before it emits
-/// `session-closed`, and the follow ends as soon as it reads a session closed. A
-/// follow can therefore end cleanly having relayed everything but the tail — so
-/// the stream is always read once more afterwards, from the point the follow
-/// reached. A gap in the merged store is what makes a later reader think nothing
-/// happened.
+/// session's last record — so a follow can end cleanly having relayed everything
+/// but the tail, and the stream is read again afterwards from the point it
+/// reached. **Again, rather than once more**: every way a read can go badly hands
+/// back an empty batch, so one read made the last record conditional on that read
+/// having gone well, and a node settled in silence with a hole in its record.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -1146,11 +1196,11 @@ fn end_session(
     node: &Labels,
     filter: Option<&EventFilter>,
 ) {
-    close(token);
+    let refused = close(token);
     // Empty from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
-    relay_session_events(tx, token, node, &followed_through, filter);
+    relay_session_events(tx, token, node, followed_through, filter, refused);
 }
 
 /// Fold the part of the session's stream nothing has relayed into the merged one.
@@ -1168,18 +1218,65 @@ fn relay_session_events(
     tx: &Sender<Message>,
     token: Option<&onevcs::SessionToken>,
     node: &Labels,
-    followed_through: &crate::vcs::Watermarks,
+    followed_through: crate::vcs::Watermarks,
     filter: Option<&EventFilter>,
+    refused: Option<String>,
 ) {
     let Some(token) = token else { return };
     let relay = relay_into(tx, node.clone());
-    // The same filter the follow was opened with: the read-once fallback covers
-    // the tail of the *same* stream, so a run that filtered what it followed and
-    // not what it caught up on would relay events it said it did not want, for
-    // no reason but which side of a settlement they landed on.
-    for envelope in beyond(crate::vcs::events(token, filter), followed_through) {
-        relay(envelope);
+    // Carried across the reads rather than re-derived from each: what stops a
+    // record arriving twice is the mark the relay left on it, and a second read of
+    // a stream hands back everything the first one did.
+    let mut relayed = followed_through;
+    let mut refused = refused;
+    let deadline = Instant::now() + TERMINATOR_GRACE;
+    // llmlint: ignore-block[changed_behavior_has_e2e] every lifecycle journey drives the
+    // first pass. A second one needs a stream that gains its last record late or never,
+    // which no plan can ask for — `a_session_whose_terminator_arrives_late_still_relays_it_and_one_with_none_says_so`
+    // holds both, against a real stream through the real reader.
+    loop {
+        // The same filter the follow was opened with: this read covers the tail of
+        // the *same* stream, so a run that filtered what it followed and not what
+        // it caught up on would relay events it said it did not want, for no
+        // reason but which side of a settlement they landed on.
+        let read = crate::vcs::events(token, filter);
+        // Asked of the whole read rather than of what this pass relays: the follow
+        // may have relayed the terminator already, and what the wait is for is a
+        // session that has *ended*, however its last record reached the store.
+        let ended = read.iter().any(crate::vcs::is_terminator);
+        for envelope in beyond(read, &relayed) {
+            relayed.reached(&envelope);
+            relay(envelope);
+        }
+        if ended {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // The one thing a reader of the merged store cannot work out for
+            // itself: the records are all there and the last one is missing, which
+            // is indistinguishable from a publication still running.
+            eprintln!(
+                "onepipeline: session {} ended with no `session-closed` record{}",
+                token.0,
+                refused
+                    .map(|why| format!("; its close refused: {why}"))
+                    .unwrap_or_default()
+            );
+            return;
+        }
+        // Asked again only where the ask before it refused, and only after the read
+        // above found no terminator — so a close that emitted one and then failed is
+        // never asked to emit a second. `onevcs` refuses a close over a live process
+        // working inside the run root, which is exactly what the dispatch that has
+        // just finished is until the host reaps it: a refusal that answers
+        // differently a moment later, and the only one that leaves a session with no
+        // last record at all.
+        if refused.is_some() {
+            refused = close(Some(token));
+        }
+        std::thread::sleep(TERMINATOR_POLL);
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// The part of what a read handed back that a follow did not already relay.
@@ -1196,12 +1293,16 @@ fn beyond(envelopes: Vec<Envelope>, followed_through: &crate::vcs::Watermarks) -
         .collect()
 }
 
-fn close(token: Option<&onevcs::SessionToken>) {
-    // Best effort: a node that already failed must not be reported as a
-    // different failure because its cleanup also failed.
-    if let Some(token) = token {
-        let _ = crate::vcs::session_close(token);
-    }
+/// Close the session, and answer with what refused it.
+///
+/// Still best effort where it mattered — the refusal settles no node, so a node
+/// that already failed is not reported as a different failure because its cleanup
+/// also failed. It is kept because it is the one thing that explains a stream with
+/// no terminator on it.
+fn close(token: Option<&onevcs::SessionToken>) -> Option<String> {
+    crate::vcs::session_close(token?)
+        .err()
+        .map(|refusal| refusal.to_string())
 }
 
 /// A node's steps in dispatch order, each with the controls its dispatch runs
@@ -1573,6 +1674,127 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    /// A terminator written after the follow ended still reaches the merged
+    /// store, and a session that never writes one is **said** rather than left as
+    /// a hole in it.
+    ///
+    /// Driven against the stream **file**, because that is what decides: no
+    /// journey can make a real close write its terminator late or not at all. The
+    /// sibling is not doubled — the reader under test is its own.
+    ///
+    /// One test for all three cases: `ONEVCS_HOME` is process-global.
+    #[test]
+    fn a_session_whose_terminator_arrives_late_still_relays_it_and_one_with_none_says_so() {
+        let _home = crate::vcs::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-terminator-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var("ONEVCS_HOME", &root);
+
+        let record = |token: &str, seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": crate::event::ENVELOPE_VERSION,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let path = |token: &str| root.join("streams").join(format!("{token}.ndjson"));
+        let write = |token: &str, body: &str| {
+            std::fs::write(path(token), body).expect("the stream is written");
+        };
+        // What the loop put in the merged store, in the order it put it there —
+        // which is where a record relayed twice shows up as well as one lost.
+        let relayed = |rx: &std::sync::mpsc::Receiver<Message>| {
+            let mut kinds = Vec::new();
+            while let Ok(message) = rx.try_recv() {
+                if let Message::Event(envelope) = message {
+                    kinds.push(envelope.kind.0.clone());
+                }
+            }
+            kinds
+        };
+        let end = |token: &str, tx: &Sender<Message>| {
+            end_session(
+                None,
+                tx,
+                Some(&onevcs::SessionToken(token.to_owned())),
+                &Labels::default(),
+                None,
+            );
+        };
+
+        // A stream that already carries its terminator is read once and answered
+        // on: the wait below must cost an ordinary settlement nothing.
+        let closed = "s-terminated";
+        write(
+            closed,
+            &format!(
+                "{}\n{}\n",
+                record(closed, 1, "push"),
+                record(closed, 2, "session-closed")
+            ),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let began = Instant::now();
+        end(closed, &tx);
+        assert_eq!(relayed(&rx), vec!["push", "session-closed"]);
+        assert!(
+            began.elapsed() < TERMINATOR_GRACE,
+            "a session that had already ended was waited on anyway"
+        );
+
+        // A terminator the first read did not find. Before this it was lost: the
+        // one read had been made, and nothing afterwards reads a session's stream.
+        let late = "s-latelyclosed";
+        let pushed = record(late, 1, "push");
+        let ended = record(late, 2, "session-closed");
+        write(late, &format!("{pushed}\n"));
+        let writing = {
+            let path = path(late);
+            std::thread::spawn(move || {
+                std::thread::sleep(TERMINATOR_POLL * 2);
+                std::fs::write(&path, format!("{pushed}\n{ended}\n"))
+                    .expect("the terminator is written");
+            })
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        end(late, &tx);
+        writing.join().expect("the writer finishes");
+        assert_eq!(
+            relayed(&rx),
+            vec!["push", "session-closed"],
+            "a terminator written after the first read never reached the merged store"
+        );
+
+        // And one that never arrives: bounded, so a node cannot hang on its own
+        // cleanup, and the records before it relayed exactly once however many
+        // reads the wait made.
+        let never = "s-neverclosed";
+        write(never, &format!("{}\n", record(never, 1, "push")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let began = Instant::now();
+        end(never, &tx);
+        assert!(
+            began.elapsed() >= TERMINATOR_GRACE,
+            "the wait for a terminator gave up early"
+        );
+        assert_eq!(
+            relayed(&rx),
+            vec!["push"],
+            "a re-read handed the same record back a second time"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

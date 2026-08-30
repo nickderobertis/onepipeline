@@ -84,6 +84,14 @@ pub enum NodeStatus {
     Cancelled,
     /// It executed and completed.
     Done,
+    /// It executed and completed, and the change it published is a **draft**
+    /// because a release it adopted early has not happened yet.
+    ///
+    /// Neither settled nor running: merging now would make the node's temporary
+    /// git pin permanent in a base branch, so no dependent may start on it and no
+    /// run holding one has settled. What clears it is the release arriving, which
+    /// puts a new worker on the branch this node already has.
+    CompleteDraft,
     /// It executed and failed.
     Failed,
     /// A failed dependency made execution unsafe.
@@ -102,6 +110,7 @@ impl NodeStatus {
             Self::Parked => "parked",
             Self::Cancelled => "cancelled",
             Self::Done => "done",
+            Self::CompleteDraft => "complete-but-draft",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
         }
@@ -118,6 +127,7 @@ impl NodeStatus {
             "parked" => Self::Parked,
             "cancelled" => Self::Cancelled,
             "done" => Self::Done,
+            "complete-but-draft" => Self::CompleteDraft,
             "failed" => Self::Failed,
             "skipped" => Self::Skipped,
             _ => return None,
@@ -125,6 +135,11 @@ impl NodeStatus {
     }
 
     /// Whether the loop is finished with the node.
+    ///
+    /// [`CompleteDraft`](Self::CompleteDraft) is deliberately not one: the node
+    /// has finished its work and the run has not finished with it, because the
+    /// release it is waiting on lifts the draft and dispatches it once more. A
+    /// run whose nodes are all draft-complete is **waiting**, not settled.
     pub fn is_settled(self) -> bool {
         matches!(
             self,
@@ -140,7 +155,8 @@ impl NodeStatus {
 
     /// Whether a later pass may still dispatch the node.
     ///
-    /// A `done` node is never rescheduled; a parked one waits for a `requeue`.
+    /// A `done` node is never rescheduled; a parked one waits for a `requeue`. A
+    /// draft-complete one is dispatched again by the release it awaits arriving.
     pub fn is_dispatchable(self) -> bool {
         !matches!(self, Self::Done | Self::Parked)
     }
@@ -982,6 +998,122 @@ pub fn unblocks(graph: &Graph, id: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Every status a node can settle or wait at, for the gate below.
+    ///
+    /// **Walked rather than written out.** A list written out is one a new variant
+    /// never has to join: [`NodeStatus::as_str`] and [`NodeStatus::parse`] fail to
+    /// compile until the variant is spelled in each, and neither of those edits
+    /// touches a list beside them — so a status this build carried could reach the
+    /// divergence gate below unnamed, which is the one thing that gate exists to
+    /// catch. The walk is an exhaustive `match` over the enum itself, so the
+    /// variant has to be named *here* too, and the only answer its arm can give is
+    /// which status comes after it.
+    ///
+    /// One thing exhaustiveness cannot make somebody do is point an *existing* arm
+    /// at the new variant, so an arm written `=> None` would end the walk a second
+    /// time and leave its own status unreached. Nothing in stable Rust counts an
+    /// enum's variants, so that end is closed by the arms reading as an order —
+    /// each names the one after it and exactly one names none — and by the
+    /// assertion below, which refuses a walk that comes back to a status it has
+    /// already reached. A second list written out beside this one would close
+    /// nothing: it would be one more thing a new variant does not have to join.
+    fn every_status() -> Vec<NodeStatus> {
+        fn after(status: NodeStatus) -> Option<NodeStatus> {
+            match status {
+                NodeStatus::Pending => Some(NodeStatus::Ready),
+                NodeStatus::Ready => Some(NodeStatus::Running),
+                NodeStatus::Running => Some(NodeStatus::Waiting),
+                NodeStatus::Waiting => Some(NodeStatus::Blocked),
+                NodeStatus::Blocked => Some(NodeStatus::Parked),
+                NodeStatus::Parked => Some(NodeStatus::Cancelled),
+                NodeStatus::Cancelled => Some(NodeStatus::Done),
+                NodeStatus::Done => Some(NodeStatus::CompleteDraft),
+                NodeStatus::CompleteDraft => Some(NodeStatus::Failed),
+                NodeStatus::Failed => Some(NodeStatus::Skipped),
+                NodeStatus::Skipped => None,
+            }
+        }
+        let mut every = vec![NodeStatus::Pending];
+        while let Some(next) = after(*every.last().expect("the walk starts at one status")) {
+            assert!(
+                !every.contains(&next),
+                "the walk over NodeStatus reaches {next:?} twice, so it names no order and \
+                 whatever follows it is never reached"
+            );
+            every.push(next);
+        }
+        every
+    }
+
+    /// The draft settlement vocabulary this build carries is exactly what the
+    /// divergence record proposes, and `docs/contract.md` names none of it.
+    ///
+    /// A node status and a publication outcome, and both are private vocabulary —
+    /// `graph` and `vcs` are engine modules, so `tests/contract.rs`, which drives
+    /// the published surface, cannot reach either and entry 51 is the only place
+    /// they are written down. Held both directions, and against the contract as
+    /// well: a word this build grows without a line in that entry fails here, one
+    /// the entry names that this build no longer spells fails here, and one the
+    /// approved contract has since taken up is no divergence and fails here too.
+    #[test]
+    fn the_draft_settlement_vocabulary_is_what_the_divergence_record_names() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let record = std::fs::read_to_string(docs.join("contract-divergences.md"))
+            .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("51."))
+            .expect("the record still carries entry 51");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 51 carries the json block this test drives");
+        let contract =
+            std::fs::read_to_string(docs.join("contract.md")).expect("the contract ships");
+
+        let statuses: Vec<String> = serde_json::from_value(block["node_statuses"].clone())
+            .expect("entry 51 names the node statuses it adds");
+        // Every status this build spells that the contract does not mention **at
+        // all** — read off the enum through the same `parse`/`as_str` pair the
+        // journal is written and read back with, so a word only one of the two
+        // knows fails here. The contract writes most of these in prose rather
+        // than in backticks (`a ready human action`, `blocked, never failed`), so
+        // the search is for the word and not for a rendering of it: what is being
+        // asked is whether the document has ever heard of it.
+        let undocumented: Vec<String> = every_status()
+            .iter()
+            .map(|status| status.as_str().to_string())
+            .filter(|word| !contract.contains(word.as_str()))
+            .collect();
+        assert_eq!(
+            undocumented, statuses,
+            "the statuses this build carries that docs/contract.md does not name are not entry \
+             51's"
+        );
+        for word in &statuses {
+            assert_eq!(
+                NodeStatus::parse(word).map(NodeStatus::as_str),
+                Some(word.as_str()),
+                "`{word}` does not round-trip through the status this build writes"
+            );
+        }
+
+        let outcomes: Vec<String> = serde_json::from_value(block["outcomes"].clone())
+            .expect("entry 51 names the outcome it adds");
+        assert_eq!(
+            outcomes,
+            vec![crate::vcs::DRAFTED.to_string()],
+            "entry 51 names a different outcome than a drafted publication settles on"
+        );
+        for word in &outcomes {
+            assert!(
+                !contract.contains(word.as_str()),
+                "the contract names `{word}`, so it is no divergence"
+            );
+        }
+    }
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
 

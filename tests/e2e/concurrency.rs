@@ -99,14 +99,24 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     world.run(&["stop", "second"]).exited(0);
     world.release("build.go");
 
+    // A holder nobody is left to answer for refuses nothing, which is the half of
+    // this pair the launcher decides. `onevcs` forgets such a record where it
+    // reads it, so there is none left to name either.
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
-    world
-        .run_on(
-            world.cmd(&["start", &stale_plan, "--detach"]),
-            "start stale",
-        )
-        .exited(0)
-        .err_has("stale repository holder")
-        .err_has(&live_token)
-        .err_has("proceeding");
+    let past = world.run_on(
+        world.cmd(&["start", &stale_plan, "--detach"]),
+        "start stale",
+    );
+    past.exited(0);
+    assert!(
+        !past.stderr.contains("concurrent project work refused"),
+        "a holder nobody is left to answer for refused a launch:\n{}",
+        past.stderr
+    );
+    assert!(
+        !past.stderr.contains(&live_token),
+        "the sibling still reports the session whose owner is gone and whose run root \
+         nothing is working in, so this journey is no longer about what it says:\n{}",
+        past.stderr
+    );
 }

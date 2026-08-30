@@ -56,14 +56,9 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Empty, and `oneagentgraph` was the last entry. Both siblings now resolve from
-# the registry, and an allowance for a pin no build asks for is one a revision
-# could quietly come back through. With `unknown-git` at `deny` this is the whole
-# of what a git source may be, so any of them — a sibling pinned back, or a
-# transitive dependency that grew one — fails here.
-#
-# That is the property publishing needs rather than a preference: a revision is
-# content crates.io cannot reproduce, and a crate that ships there cannot record
-# a dependency on one. `cargo publish --dry-run` holds the same line from the
-# other side.
-allow-git = []
+# One entry: the unreleased `onevcs` revision `Cargo.toml`'s `[patch.crates-io]`
+# links, and that block says why. The revision rather than the repository, so any
+# other is still refused, and it is deleted in the same change that moves the two
+# requirements to the release. `tests/patch_pin.rs` holds this list equal to that
+# block's, so neither can move — or be deleted — without the other.
+allow-git = ["https://github.com/nickderobertis/onevcs?rev=6636404c6aa3c4ebd6314e48de65ee1dd8ae629d"]
