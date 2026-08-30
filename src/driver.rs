@@ -1999,7 +1999,7 @@ pub(crate) fn deliver_note_envelope(
             }),
         // Compiled by the run's own reconciler, which recorded it: the record is
         // written before the outcome this returned on, so it is there to be read.
-        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)
+        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)?
             .map(crate::note::Delivered::To)
             .ok_or_else(|| {
                 Error::Refused(format!(
@@ -2030,29 +2030,51 @@ fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     })
 }
 
-/// What the run recorded for the last note of this text delivered to this node.
+/// What the run recorded for the last note of this text delivered to this node,
+/// or nothing where it recorded none.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a committed edit whose recorded operations are not a
+/// shape this build reads. That is the run's own record being unreadable, and it
+/// is **not** the same answer as no disposition: the caller turns the second into
+/// "the run applied the note and recorded no disposition for it", which would
+/// send a manager looking for a delivery that is sitting in the journal all
+/// along. So it is said rather than folded into that.
 fn last_note_delivered(
     paths: &RunPaths,
     node: &str,
     text: &crate::note::NoteText,
-) -> Option<crate::note::Reached> {
-    journal::read(&paths.journal())
-        .into_iter()
-        .rev()
-        .filter(|envelope| envelope.kind.0 == journal::PipelineKind::EditCommitted.as_str())
-        .find_map(|envelope| {
-            let operations: Vec<edits::Operation> =
-                serde_json::from_value(envelope.payload.get("operations")?.clone()).ok()?;
-            operations.iter().find_map(|operation| match operation {
-                edits::Operation::NoteDelivered {
-                    node: recorded,
-                    text: said,
-                    reached,
-                    ..
-                } if recorded == node && said == text => Some(reached.clone()),
-                _ => None,
-            })
-        })
+) -> Result<Option<crate::note::Reached>> {
+    for envelope in journal::read(&paths.journal()).into_iter().rev() {
+        if envelope.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+            continue;
+        }
+        let Some(recorded) = envelope.payload.get("operations") else {
+            continue;
+        };
+        let operations: Vec<edits::Operation> =
+            serde_json::from_value(recorded.clone()).map_err(|why| {
+                Error::Invalid(format!(
+                    "run '{}': a committed edit at seq {} records operations this build does \
+                     not read, so what it did with a note cannot be said: {why}",
+                    paths.run, envelope.seq
+                ))
+            })?;
+        let reached = operations.iter().find_map(|operation| match operation {
+            edits::Operation::NoteDelivered {
+                node: written,
+                text: said,
+                reached,
+                ..
+            } if written == node && said == text => Some(reached.clone()),
+            _ => None,
+        });
+        if reached.is_some() {
+            return Ok(reached);
+        }
+    }
+    Ok(None)
 }
 
 /// Validate a reply and queue it, or apply it, and say which happened.

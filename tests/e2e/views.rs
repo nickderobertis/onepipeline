@@ -1934,11 +1934,22 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
 /// earlier one wrote. What separates the two is inside them — the start token
 /// naming the process, and the moment it was dispatched — so that is what the
 /// journey below compares.
+///
+/// An entry that is **gone** between the listing and the read is one that is not
+/// there: the registry is written while this polls it, and a dispatch that
+/// removes its own entry as it ends is a state the wait below is entitled to
+/// see. Any other reason an entry will not read is a fault, and fails here rather
+/// than quietly shrinking the set this journey is comparing — which is the one
+/// way this helper could report a fresh dispatch that never registered.
 fn registry_of(world: &World, run: &str) -> Vec<String> {
     world
         .dispatch_records(run)
         .iter()
-        .filter_map(|entry| std::fs::read_to_string(entry).ok())
+        .filter_map(|entry| match std::fs::read_to_string(entry) {
+            Ok(held) => Some(held),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
+            Err(why) => panic!("cannot read the registry entry {}: {why}", entry.display()),
+        })
         .collect()
 }
 
