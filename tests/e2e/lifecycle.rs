@@ -2241,13 +2241,19 @@ fn a_merge_path_that_never_answers_settles_the_node_saying_where_the_work_is() {
 /// hour of gate-green work and reported the node as though there had been none
 /// to do.
 ///
-/// This crate closes every session best-effort and reads nothing back from it,
-/// so what holds the floor is where the work **ends up**: `onevcs` 0.11.1 copies
-/// a stray ref into the execution checkout before refusing to reap the worktree
-/// over it, and the execution checkout is the one place that outlives the run.
-/// Below the floor the close removes the worktree and the branch below is
-/// nowhere, so this fails rather than reads differently. The pin is carried by
-/// `Cargo.toml`'s `onevcs` requirement, and the reason is with it.
+/// This crate closes every session best-effort, so what holds the floor is where
+/// the work **ends up**: `onevcs` 0.11.1 copies a stray ref into the execution
+/// checkout before refusing to reap the worktree over it, and the execution
+/// checkout is the one place that outlives the run. Below the floor the close
+/// removes the worktree and the branch below is nowhere, so this fails rather
+/// than reads differently. The pin is carried by `Cargo.toml`'s `onevcs`
+/// requirement, and the reason is with it.
+///
+/// Best-effort is not silent, which this journey is also the one place to hold:
+/// the refusal names a session still holding a worktree and the verb that
+/// releases it, and an operator who is never told has a session nothing will
+/// ever close. This is the only journey where a close is refused for a reason
+/// the world states, so it is where the refusal is read.
 ///
 /// The dispatch's own work is published as it always is — the side branch is cut
 /// and left before the worker writes anything on the session's branch — so this
@@ -2265,7 +2271,11 @@ fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
     world.script("service.side-branch", CUT);
     world.script("service.work", "the worker wrote this\n");
 
-    let run = settle(&world, "straywork", vec![lifecycle("service", &[])]);
+    let (run, launched) = driven(&world, "straywork", vec![lifecycle("service", &[])]);
+    launched
+        .settled()
+        .err_has("was not released")
+        .err_has("onevcs recoverable");
     let result = world.run_json(&run, "result.json");
     let node = result["nodes"][0].clone();
     // The node did its own job: the session's branch published and landed, which
@@ -3535,7 +3545,16 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
                     "op": "retry",
                     "id": "service",
                     "node": {"id": "service-2", "repo": "service",
-                             "title": "feat: land the workstream", "steps": [
+                             // The title the node it supersedes stated. A `retry`
+                             // inherits `branch` and `resume` and nothing else, so
+                             // a replacement that states none publishes under a
+                             // subject derived from the branch — and this branch
+                             // carries one commit, the record `onevcs` wrote when
+                             // it preserved the incomplete step. That describes no
+                             // change, which the sibling refuses to publish under
+                             // rather than naming the base branch after a marker.
+                             "title": "feat: land the workstream",
+                             "steps": [
                         {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
                         {"id": "review", "persona": "reviewer", "task": "## What\nreview",
                          "deps": ["implement"]},

@@ -2579,6 +2579,106 @@ fn a_retained_driver_carries_a_failing_graphs_own_exit_code() {
     );
 }
 
+/// A classification the harness's own record contradicts does not kill the
+/// member: the turn that record describes is carried as a settlement instead.
+///
+/// The loss this is named for, and why this crate cares rather than only the
+/// sibling. A `member-died` is the one event a node is settled **dead** on —
+/// `src/engine.rs` reads the producer's cause straight off it — so a node was
+/// settled `failed` on `{"cause":"rate_limit"}` while the harness's record for
+/// the same turn read `status: ok`, `exit_code: 0` and billed usage, and the
+/// finished work went with it. `oneagentgraph` 0.3.14 weighs the two before it
+/// publishes a death, and that is a floor **this build links** rather than a rule
+/// written here: below it this journey fails rather than reading differently.
+///
+/// Driven through the real supervisor: the real sibling drives a real two-party
+/// member, and the contradiction is a record `oneharness`'s own double writes in
+/// that library's own types — `status: ok`, `exit_code: 0`, billed usage, beside
+/// `failure_kind: rate_limit`. Nothing is asserted at a seam: what this reads is
+/// the sibling's published events and the report it stored.
+#[test]
+fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
+    let world = World::new("drive-reconciled");
+    world.write_graphs();
+    // Two-party, because the reconciliation is the supervisor's: a classification
+    // is only ever weighed against a record where there is a judge to publish a
+    // death in place of a settlement.
+    world.write_supervised_node_graph();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven-reconciled");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    world.script("harness.rejects", "");
+    let driven = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Be billed for a turn the provider then rejects.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive a graph whose classification its own record contradicts",
+    );
+    let published: Vec<Value> = driven
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    // Still a member that did not reach its bar — so still the sibling's own
+    // member-failed code — but one that *failed its task* rather than one that
+    // died, which is the whole of the distinction a node is settled on.
+    assert_eq!(
+        driven.code,
+        oneagentgraph::error::EXIT_MEMBER_FAILED,
+        "a driver did not carry its graph's own exit code:\nstdout: {}\nstderr: {}",
+        driven.stdout,
+        driven.stderr
+    );
+    assert!(
+        !published.iter().any(|event| event["kind"] == "member-died"),
+        "a turn the harness recorded as completed and billed was published as a \
+         death, which is what a node destroys finished work on:\n{}",
+        driven.stdout
+    );
+    let settled: Vec<&Value> = published
+        .iter()
+        .filter(|event| event["kind"] == "member-settled")
+        .collect();
+    assert_eq!(
+        settled.len(),
+        1,
+        "the carried turn did not settle exactly once:\n{}",
+        driven.stdout
+    );
+    assert_eq!(
+        settled[0]["payload"]["completed"],
+        json!(false),
+        "a turn that never reached its bar settled as one that did: {}",
+        settled[0]
+    );
+
+    // And the reconciliation is on the stored report rather than left for nobody
+    // to find: the classification, and the record's own facts beside it.
+    let stored = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settle named no stored report: {}", settled[0]));
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(stored).expect("the stored report is readable"),
+    )
+    .expect("the stored report is JSON");
+    let why = report["settled_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the carried turn said nothing about why: {report}"));
+    for said in ["rate_limit", "status ok", "exit code 0"] {
+        assert!(
+            why.contains(said),
+            "the carried turn's reason does not name {said:?}: {why}"
+        );
+    }
+}
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///

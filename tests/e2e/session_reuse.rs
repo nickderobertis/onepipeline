@@ -436,8 +436,11 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
         .collect()
 }
 
-/// A run stopped mid-publication, and the retry that takes up the session it left
-/// its work in.
+/// A run stopped mid-publication, and the retry that lands the work it stranded.
+///
+/// What is asserted is the landing rather than the mechanism: a retry pinned to
+/// the stopped run's branch may take that run's session up or continue a fresh
+/// one from the branch tip, and the sibling has shipped both.
 ///
 /// **Unix-only for what it asserts on:** stopping a publication here is a sweep
 /// of the host's own process table and of the groups under the stopped run —
@@ -452,7 +455,7 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// child of the stopped process rather than git's grandchild.
 #[cfg(unix)]
 #[test]
-fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
+fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
     let world = World::new("session-reuse-adopt");
     // A `pre-push` hook the journey holds, which is how a run is stopped
     // *mid-publication*: `onevcs` commits the worktree onto the branch before it
@@ -535,25 +538,16 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
         why(&world, "retry")
     );
 
-    // It continued the branch the stopped run left its work on, rather than
-    // cutting one beside it. Not that run's own session: the launch's concurrency
-    // interlock forgets the record `open_session` would have taken up, which
-    // divergence entry 51 raises with `onevcs`.
+    // On the branch the plan pinned, which is where the stopped run's commit is.
+    // Taking that run's session up and continuing a fresh one from the branch tip
+    // are both ways to get there and the sibling has shipped both, so what is
+    // asserted is the reaching rather than the mechanism.
     let taken = opened(&world, "retry");
-    assert!(
-        taken["payload"]["token"].is_string(),
-        "the retry opened no session at all: {taken}"
-    );
     assert_eq!(
         taken["payload"]["branch"].as_str(),
         Some(STRANDED),
-        "the retry did not work on the branch the stopped run stranded: {taken}"
-    );
-    assert_eq!(
-        taken["payload"]["continued"],
-        json!(true),
-        "the sibling cut the session from the base rather than continuing the branch \
-         that holds the stranded work: {taken}"
+        "the retry did not work on the branch the plan pinned, so nothing it did \
+         could reach the work session {stranded} left there: {taken}"
     );
     let _ = &stranded;
 
@@ -601,6 +595,11 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // housekeeping does with it is case 2, and since `onevcs` 0.15.6 the answer
     // is *nothing*.
     let swept = abandoned_session(&world, "feature/swept");
+    // Occupied, as a session a dispatch is working in is: `onevcs session open`
+    // prints a token and exits, so the fixture alone has nobody left to answer for
+    // it and is the one shape a live dispatch never has.
+    #[cfg(unix)]
+    let mut occupant = crate::harness::occupy(&world, run_root(&swept));
 
     // 1. Occupied. Somebody has taken the run root against the world, so the
     //    session cannot be taken up and a fresh one is cut instead.
@@ -623,28 +622,42 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // 2. Gone. The record still names a run root; the directory is not there, and
     //    with it goes every place the branch could have been continued.
     //
-    //    The precondition is that the directory is gone; who removed it is not
-    //    this case's subject, and since `onevcs` 0.16.3 the sibling may have.
+    //    The sweep is this journey's, because since `onevcs` 0.15.6 the sibling
+    //    will not do it: case 1's opening ran its reclamation over this host with
+    //    the session above sitting open in it and left that run root standing.
+    //    Asserted first, both because it is the fix this build links and because
+    //    the fall-through below is only a fair test once the removal is the one
+    //    thing that reached the directory.
     //
-    // llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing verb
-    // for "this run root is no longer on the host": what case 2 is about is a
-    // record naming a directory a person, a backup, or a full disk removed, so the
-    // fixture is the removal itself. Every other step of this journey is the
-    // compiled binary and the real sibling.
-    if run_root(&swept).is_dir() {
-        std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
-            panic!(
-                "the run root at {} could not be swept: {e}",
-                run_root(&swept).display()
-            )
-        });
+    //    Unix-only: occupancy is a process's working directory, which Windows
+    //    exposes no supported way to ask about.
+    #[cfg(unix)]
+    {
+        assert!(
+            run_root(&swept).is_dir(),
+            "the sibling reclaimed the run root of a session still open at {}: a \
+             session opened from the command line answers stale the moment that \
+             command exits, and reading stale as nobody is in here deletes live \
+             dispatches",
+            run_root(&swept).display()
+        );
+        // And the record, which is what a reclamation consults: a run root is kept
+        // only while an open record names it.
+        let held = onevcs(&world, &["session", "holders", "service"]);
+        assert!(
+            held.contains(&swept.token.0),
+            "the sibling forgot the record of a session a process is working \
+             inside: {held}"
+        );
+        occupant.kill().expect("the run root's occupant is ended");
+        occupant.wait().expect("the run root's occupant exits");
     }
-    assert!(
-        !run_root(&swept).is_dir(),
-        "the run root at {} is still there, so the fall-through below is not the case \
-         it is written for",
-        run_root(&swept).display()
-    ); // llmlint: ignore-end[tests_mirror_real_usage]
+    std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
+        panic!(
+            "the run root at {} could not be swept: {e}",
+            run_root(&swept).display()
+        )
+    });
     let (settled, session) = dispatched(&world, "swept", Some("feature/swept"));
     assert_eq!(
         settled["nodes"][0]["status"],

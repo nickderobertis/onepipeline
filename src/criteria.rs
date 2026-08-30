@@ -151,6 +151,16 @@ impl Answer {
     }
 }
 
+/// The most of one named file this reads.
+///
+/// A criterion names a source file, and the tree it is read against also holds
+/// build output and vendored archives that a mistyped path can land on — an
+/// extension is all [`BranchPath::named`] asks of a path, and `.rlib` is as
+/// lettered as `.toml`. Past this the file is one the branch will not give up,
+/// which is [`Answer::Unread`] like every other file this cannot read, rather
+/// than a whole artifact pulled into memory to be searched for a literal.
+const MAX_FILE_BYTES: u64 = 1 << 20;
+
 /// The heading a task states its bar under, matched exactly.
 ///
 /// A section named nearly this is not the bar the worker and its judge were
@@ -221,6 +231,16 @@ pub(crate) fn answer(root: &Path, check: &Checkable) -> Answer {
             check.file(),
             path.display()
         ));
+    }
+    match std::fs::metadata(&path).map(|file| file.len()) {
+        Err(error) => return declined(error.to_string()),
+        Ok(bytes) if bytes > MAX_FILE_BYTES => {
+            return declined(format!(
+                "`{}` is {bytes} bytes, past the {MAX_FILE_BYTES} this reads",
+                check.file()
+            ))
+        }
+        Ok(_) => {}
     }
     match std::fs::read_to_string(&path) {
         Err(error) => declined(error.to_string()),
@@ -540,6 +560,42 @@ mod tests {
             ..check
         };
         assert_eq!(answer(&dir, &absent).as_str(), "unread");
+    }
+
+    /// A file past the bound is one more the branch will not give up.
+    ///
+    /// An extension is all a path has to look like, and a tree holds build
+    /// output and vendored archives wearing lettered ones — so a mistyped
+    /// criterion can name an artifact, and searching one for a literal is not a
+    /// comparison anybody asked for. It declines, and the same file under the
+    /// bound is compared, so the refusal is the size and not the file.
+    #[test]
+    fn a_file_past_the_bound_is_not_read() {
+        let dir = tempdir("bounded-file");
+        let check = Checkable {
+            criterion: "`vendor/blob.rlib` holds `state: done`".into(),
+            file: BranchPath("vendor/blob.rlib".into()),
+            literal: "state: done".into(),
+        };
+        std::fs::create_dir_all(dir.join("vendor")).expect("a directory");
+        let path = dir.join("vendor/blob.rlib");
+        // The literal is in it, so a check that read it would answer `match`.
+        let padding = "-".repeat(usize::try_from(MAX_FILE_BYTES).expect("the bound fits"));
+        std::fs::write(&path, format!("state: done\n{padding}")).expect("the file writes");
+        let answered = answer(&dir, &check);
+        assert_eq!(answered.as_str(), "unread", "{answered:?}");
+        let Answer::Unread { reason } = answered else {
+            panic!("the check did not decline")
+        };
+        assert!(
+            reason.contains("vendor/blob.rlib") && reason.contains("past the"),
+            "the refusal does not say the file was too big to read: {reason}"
+        );
+
+        // The same file inside the bound is read, so what declined above is its
+        // size rather than its name.
+        std::fs::write(&path, "state: done\n").expect("the file writes");
+        assert_eq!(answer(&dir, &check), Answer::Match);
     }
 
     /// A path that is lexically inside the branch and resolves outside it.

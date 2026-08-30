@@ -3462,6 +3462,7 @@ mod tests {
         let publications: std::collections::BTreeSet<&str> = [
             PublishOutcome::Merged(onevcs::Sha("abc".into())),
             PublishOutcome::ChangeOpen(url()),
+            PublishOutcome::ChangeDraft(url()),
             PublishOutcome::Queued(url()),
             PublishOutcome::NothingToPublish,
         ]

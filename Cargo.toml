@@ -201,6 +201,43 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# - `onevcs` 0.17.1 is the release a **holders read stops destroying a preserved
+#   branch's only route back**. 0.16.3 had made that read forget a session record
+#   nobody was left to answer for, and `src/concurrency.rs` runs it on every
+#   launch: a node that settled failed with its work committed on its branch is
+#   exactly such a record, so the continuation onto that branch found nothing
+#   carrying it, cut a fresh one under the same name, and the publication of it
+#   was refused for having no commit that describes a change — work stranded on
+#   disk with nothing pointing at it. 0.17.1 leaves a spent record out of the
+#   answer instead and reaps one only through `onevcs sweep`, and a branch still
+#   carrying unpublished work is not spent at all.
+#   `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
+#   holds it, and `tests/e2e/concurrency.rs` holds the other half: a launch
+#   reports the stale holder an operator can act on and says nothing about the one
+#   it cannot. A **requirement**, because `^0.16` admits no 0.17.x — pre-1.0 the
+#   minor is the breaking position.
+#   Three further promises of that release reach this crate. `session close`
+#   **commits an incomplete step's uncommitted tree** rather than letting
+#   `git worktree remove` delete it, so a preserved branch carries a provenance
+#   commit — and a publication of such a branch that states no title of its own is
+#   refused, because a provenance record describes no change. The merge path
+#   reads `isDraft` off the host before it asks a change request to merge, which
+#   `crates/testfakes`'s `gh` double answers. And `session close` now **refuses a
+#   session any live process is working inside**, which decided an ordering here:
+#   asking whether a session is closed shells out to `git` in its clone, so a
+#   follow still polling at the moment of the close is such a process. The follow
+#   is stopped first for that reason — `lifecycle::end_session` says so, and
+#   `lifecycle::a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs`
+#   is what reads `session-closed` back out of the merged store.
+# - `onevcs` 0.18.0 moves the release-declaration schema to **version 3**, which
+#   adds a target's own `adoption_instructions`. This repository is a producer, so
+#   the resolution decides the number `release-targets.toml` states; nothing here
+#   declares that key, so every reader from version 1 up still reads the document
+#   whole. It also carries `PublishRequest.draft` and `PublishOutcome::ChangeDraft`,
+#   which `src/vcs.rs` meets: nothing here opens a draft, and a change request that
+#   cannot land is not reported as one open for review. Taken because
+#   `onevcs-testing` 0.5.2 requires exactly this `onevcs` and `^0.5.1` admits that
+#   release, so the pair the currency check holds this build to is this one.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -269,6 +306,41 @@ resolver = "2"
 # note to a *node* and never names a side, so nothing here reaches it. No test
 # records a floor for either.
 #
+# `oneagentgraph` 0.3.14 **defines "terminal blocker"** in the shipped `engineer`
+# bar, and reaches this crate for the reason 0.3.5 does: `engineer` is the role
+# `src/executor.rs` names on `members.worker`, and the bar is the linked
+# library's file, so the resolution decides which one a judge is handed. What the
+# definition is worth, and why both halves of it are asserted, is
+# `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past`.
+#
+# The **other half of 0.3.14 is the reconciliation**: `src/judge.rs` weighs a
+# producer's provider-failure classification against the `oneharness` record for
+# the same turn, and declines to publish `member-died` where that record says the
+# turn completed and was billed. `oneharness-core` 0.12.2, which the lock carries
+# for the same reason, stops the producer stamping the classification at all.
+# That reaches this crate directly: `graphs/node-scope.yaml`'s worker is a
+# `kind: onejudge` member, so every dispatch runs through that judge, and
+# `src/lifecycle.rs` settles a node `failed` on the death it publishes — which is
+# how a node was lost on a `rate_limit` whose own turn had exited `0` and billed.
+# `tests/e2e/dispatch.rs`'s
+# `a_classification_the_harness_record_contradicts_settles_rather_than_dies` is
+# what holds the floor.
+#
+# `oneagentgraph` 0.3.15 and `onejudge` 0.7.0 are **one release**, and the reason
+# the `onejudge` pin moves with it: they add a `note` seam — a role-addressed note
+# delivered to both parties of a conversation — and 0.3.15 requires `onejudge 0.7`,
+# which pre-1.0 is the breaking position, so `^0.6.2` admitted none of it and the
+# graph would have carried two turn engines rather than one.
+#
+# Not a floor, and nothing here changes: no verb of this crate delivers a note.
+# What it does reach is the other half of that file, `control::interrupt`, and
+# 0.3.15 leaves that as it was — `control.json` moves to schema **2** for an
+# endpoint that is optional, so a member binding none and a record written before
+# the seam existed both fall through to the interrupt `src/agentgraph.rs` already
+# sends. `tests/e2e/dispatch.rs`'s interrupt journeys drive it against the linked
+# library and are what would say otherwise.
+#
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
 # below must be the version that pin resolves to, because `src/report.rs` coerces
@@ -288,7 +360,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.16.3"
+onevcs = "0.18.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -320,7 +392,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.23"
+onevcs-testing = "0.5.2"
 
 [package]
 name = "onepipeline"
@@ -364,9 +436,15 @@ include = [
   "/examples/**",
 ]
 
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
+# is a verb on this binary, beside `start`, `validate` and `session` — not a new
+# command or client. The shipped shape is one library and one binary, which
+# `AGENTS.md` states and `docs/contract.md` states the verb against; a second
+# project for a subcommand would contradict both.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 [lib]
 name = "onepipeline"
@@ -469,22 +547,3 @@ path = "tests/smoke/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
-
-# The draft surface `src/lifecycle.rs` settles a complete-but-draft node through —
-# `PublishRequest.draft`, `DraftReason`, `PublishOutcome::ChangeDraft`,
-# `RemoteHost::{ready_for_review, is_draft}` — has landed in `onevcs` and is in no
-# release, so this build links the commit. A **patch** rather than a git
-# requirement above, so the requirement still states the newest release the
-# registry carries and the lock still records what is linked, `source =
-# "git+…?rev=…"`. Both members come from the one revision: two copies of `onevcs`
-# is a compile error.
-#
-# `cargo publish` ignores `[patch]`, so this tree must not be published while it
-# stands; what holds that is the behaviour this change adds rather than a check —
-# the node holding this pin settles complete-but-draft and cannot land. Delete
-# this block and move the two requirements when the release carrying `6636404c` is
-# out; `deny.toml`'s `allow-git` entry names the same revision and goes with it,
-# which `tests/patch_pin.rs` is what insists on.
-[patch.crates-io]
-onevcs = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
-onevcs-testing = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }

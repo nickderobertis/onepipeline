@@ -24,7 +24,7 @@ use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
     OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status, SCHEMA_VERSION,
 };
-use oneharness_core::domain::signals::Usage;
+use oneharness_core::domain::signals::{FailureKind, Usage};
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
@@ -368,7 +368,9 @@ fn work(
     // pair is what a caller reading the graph's settlement sees. Without it the
     // only failing member this suite could produce was one that refused on the
     // way in, which never reaches a settlement at all.
-    let outcome = if fake::node_script(dir, "harness", "fail").is_some()
+    let outcome = if fake::node_script(dir, "harness", "rejects").is_some() {
+        Outcome::ProviderRejected
+    } else if fake::node_script(dir, "harness", "fail").is_some()
         || (observing && fake::observe(dir) != ExitCode::SUCCESS)
     {
         Outcome::TurnFailed
@@ -527,6 +529,14 @@ enum Outcome {
     Answered,
     /// It did not, and says so in the report as well as with a non-zero exit.
     TurnFailed,
+    /// The turn **ran, answered and was billed**, and the provider then rejected
+    /// it — declared in the same terminal record while the process exits 0. What
+    /// oneharness writes down for such a turn is a record that contradicts its own
+    /// classification: `status: ok`, `exit_code: 0` and billed usage beside
+    /// `failure_kind: rate_limit`. This double writes exactly that record, in
+    /// oneharness's own types, because it is the pair a supervisor has to
+    /// reconcile and no other outcome here can produce it.
+    ProviderRejected,
 }
 
 impl Outcome {
@@ -544,7 +554,7 @@ impl Outcome {
     /// there.
     fn text(self) -> &'static str {
         match self {
-            Self::Answered => "Ran what the task asked for.",
+            Self::Answered | Self::ProviderRejected => "Ran what the task asked for.",
             Self::TurnFailed => "The turn did the work and did not get there.",
         }
     }
@@ -552,7 +562,10 @@ impl Outcome {
     /// The `status` this turn's result carries.
     fn status(self) -> Status {
         match self {
-            Self::Answered => Status::Ok,
+            // `Ok` on the rejection too, and that is the whole point: the process
+            // ran to completion, so the record says so however the turn was
+            // classified.
+            Self::Answered | Self::ProviderRejected => Status::Ok,
             Self::TurnFailed => Status::Nonzero,
         }
     }
@@ -561,7 +574,7 @@ impl Outcome {
     /// answers with.
     fn code(self) -> i32 {
         match self {
-            Self::Answered => 0,
+            Self::Answered | Self::ProviderRejected => 0,
             Self::TurnFailed => 1,
         }
     }
@@ -571,6 +584,40 @@ impl Outcome {
         match self {
             Self::Answered => None,
             Self::TurnFailed => Some(self.text().to_string()),
+            Self::ProviderRejected => Some("API Error: 429 rate limit exceeded".to_string()),
+        }
+    }
+
+    /// What the harness classified this turn as, which is the field a supervisor
+    /// publishes a death on. `None` where the record has nothing to say.
+    fn failure_kind(self) -> Option<FailureKind> {
+        match self {
+            Self::Answered | Self::TurnFailed => None,
+            Self::ProviderRejected => Some(FailureKind::RateLimit),
+        }
+    }
+
+    /// What the provider billed for this turn.
+    ///
+    /// One token each is the ordinary reading; the rejection's is real money on a
+    /// real turn, because *billed* is the half of the record that says a turn was
+    /// paid for and got — the reading a reconciliation asks about.
+    fn usage(self) -> Usage {
+        match self {
+            Self::Answered | Self::TurnFailed => Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: None,
+            },
+            Self::ProviderRejected => Usage {
+                input_tokens: Some(41233),
+                output_tokens: Some(9812),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: Some(12.11),
+            },
         }
     }
 
@@ -584,13 +631,13 @@ impl Outcome {
     fn work(self) -> Option<RunWork> {
         match self {
             Self::Answered => None,
-            Self::TurnFailed => Some(RunWork::Done),
+            Self::TurnFailed | Self::ProviderRejected => Some(RunWork::Done),
         }
     }
 
     fn exit_code(self) -> ExitCode {
         match self {
-            Self::Answered => ExitCode::SUCCESS,
+            Self::Answered | Self::ProviderRejected => ExitCode::SUCCESS,
             Self::TurnFailed => ExitCode::from(1),
         }
     }
@@ -711,13 +758,7 @@ fn report(
             output_format: OutputFormat::StreamJson,
             text: Some(said.into()),
             text_source: Some("json:result".into()),
-            usage: Usage {
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                cost_usd: None,
-            },
+            usage: outcome.usage(),
             usage_source: Some("json".into()),
             session_id: Some("fake-oneharness-session".into()),
             events,
@@ -726,8 +767,8 @@ fn report(
             schema_valid: None,
             schema_attempts: None,
             schema_error: None,
-            failure_kind: None,
-            failure_kind_source: None,
+            failure_kind: outcome.failure_kind(),
+            failure_kind_source: outcome.failure_kind().map(|_| "stdout".to_string()),
             work: outcome.work(),
             stdout: String::new(),
             stderr: String::new(),
