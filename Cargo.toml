@@ -65,6 +65,16 @@ resolver = "2"
 #   `tests/e2e/shipped.rs` reads each shipped persona through the sibling's own
 #   `Persona::parse` and layers it onto a base, so a file in the wrong spelling
 #   fails rather than reads differently.
+# - `oneagentgraph` 0.3.15 publishes `oneagentgraph::control::note`, which hands
+#   one role-addressed note to a named member of a graph run and answers what that
+#   member's conversation did with it. It is the delivery half of the approved
+#   delivery-seam contract and there is no verb behind it — the sibling's command
+#   line has no `note` — so it is a **compile floor** rather than a version this
+#   build could compose an installed executable at. Below it a manager's note
+#   reaches the worker by interrupt and the judge not at all, which is the seam
+#   `src/note.rs` exists to end. `tests/e2e/note.rs` drives it against the real
+#   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
+#   than reads differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -261,13 +271,15 @@ resolver = "2"
 # pre-1.0 the minor is the breaking position, so `^0.6.2` admitted no 0.7.x and
 # the two copies could only be ended by moving the pin.
 #
-# Neither 0.3.14 nor 0.3.15 is a floor. 0.3.14 reconciles a member death against
-# the record beside it — a correction under the stream this crate already relays,
-# rather than an answer it newly asks for. 0.3.15 routes a **role-addressed**
-# note to whichever side of a member is live, and `onejudge` 0.7.0 is the
-# vocabulary for it; the only lever here is `Channel::Context`, which carries a
-# note to a *node* and never names a side, so nothing here reaches it. No test
-# records a floor for either.
+# 0.3.14 is not a floor: it reconciles a member death against the record beside
+# it — a correction under the stream this crate already relays, rather than an
+# answer it newly asks for. **0.3.15 is one**, and so is `onejudge` 0.7.0 beside
+# it: 0.3.15 routes a **role-addressed** note to whichever side of a member is
+# live and 0.7.0 is the vocabulary for it, and `src/note.rs` calls that seam and
+# re-exports those shapes. `Channel::Context` carries a note to a *node* and
+# never names a side, which is the seam the `note` op beside it exists to end.
+# The floors are recorded in the list at the top of this file and driven by
+# `tests/e2e/note.rs`.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -295,6 +307,15 @@ onevcs = "0.16.3"
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
+#
+# 0.7.0 is a second vocabulary beside the verdicts, and a **compile floor**: it
+# publishes `onejudge::note`, whose `Addressee`, `Note`, `Criterion`, `Accepted`
+# and `Undelivered` are the approved delivery-seam contract's own shapes.
+# `src/note.rs` re-exports them through `oneagentgraph::note` rather than
+# restating them — a second declaration is a shape that drifts, and a note that
+# satisfied the copy would still be refused by the conversation it was written
+# for. `oneagentgraph` 0.3.15 requires the same release, so the one resolution
+# rule above already holds the pair together.
 onejudge = "0.7.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
