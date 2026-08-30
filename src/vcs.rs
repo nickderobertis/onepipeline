@@ -833,7 +833,7 @@ fn settled(session: &SessionToken) -> bool {
 /// higher series hide the lower one's next record, which is a relayed record
 /// lost, and would make the per-stream `seq` gaps a consumer detects loss
 /// through describe two producers at once.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Watermarks {
     /// The highest `seq` relayed, per producing stream.
     reached: BTreeMap<String, u64>,
@@ -871,6 +871,18 @@ impl Watermarks {
             .get(&envelope.stream)
             .is_none_or(|seq| envelope.seq > *seq)
     }
+}
+
+/// Whether one relayed envelope is the record a session's stream ends with.
+///
+/// Spelled through `onevcs`'s own serializer rather than as a literal, for
+/// [`kind_of`]'s reason: the vocabulary is the sibling's, and a second copy of it
+/// here is one that goes stale the release the sibling renames a kind — and this
+/// is the kind a settlement is *checked* against, so a stale copy would report
+/// every session as having ended without its terminator.
+#[must_use]
+pub fn is_terminator(envelope: &Envelope) -> bool {
+    envelope.kind == kind_of(onevcs::EventKind::SessionClosed)
 }
 
 /// One session's stream, being followed.
@@ -1180,6 +1192,21 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         base: node.base_branch.clone(),
         execution_checkout: node.execution_checkout.clone(),
     })
+}
+
+/// Serialises the tests that point `ONEVCS_HOME` at a scratch state root.
+///
+/// That variable is process-global and this crate's unit tests share one process,
+/// so two modules pointing it at two roots at once read each other's state. Each
+/// such test holds this for its duration instead; the guard is the whole of the
+/// protocol, which is why it is a value the caller binds rather than a pair of
+/// calls it could get half right.
+#[cfg(test)]
+pub(crate) fn scratch_home_held() -> std::sync::MutexGuard<'static, ()> {
+    static IN_USE: Mutex<()> = Mutex::new(());
+    IN_USE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -1706,9 +1733,12 @@ mod tests {
     /// happened. So it is exercised rather than reasoned about.
     ///
     /// One test, not three: `ONEVCS_HOME` is process-global, and separate tests
-    /// would set it from separate threads and read one another's state root.
+    /// would set it from separate threads and read one another's state root. The
+    /// other module that needs a scratch root takes turns with this one through
+    /// [`scratch_home_held`], which is held for as long as this root is pointed at.
     #[test]
     fn a_session_stream_that_is_not_whole_is_read_for_what_it_holds() {
+        let _home = super::scratch_home_held();
         let root = std::env::temp_dir().join(format!("onepipeline-stream-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");

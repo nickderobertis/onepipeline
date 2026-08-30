@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use onevcs::SessionRequest;
 
@@ -1171,15 +1172,34 @@ pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
     labels.persona = labels.persona.take().or_else(|| known.persona.clone());
 }
 
+/// How long ending a session waits for the terminator its stream ends with.
+///
+/// It is a wait that costs nothing in the ordinary case: the first read is made
+/// the moment the follow has been collected, and a session whose terminator is
+/// already written answers on it. What the grace bounds is the case this exists
+/// for — a close that has not written one *yet*, or has not written one at all.
+const TERMINATOR_GRACE: Duration = Duration::from_secs(5);
+
+/// How often that wait re-reads the stream, and re-asks a close that refused.
+const TERMINATOR_POLL: Duration = Duration::from_millis(250);
+
 /// Close the session, and collect what its stream said.
 ///
 /// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record: closing marks the session closed before it emits
+/// session's last record: closing marks the session closed and emits
 /// `session-closed`, and the follow ends as soon as it reads a session closed. A
 /// follow can therefore end cleanly having relayed everything but the tail — so
-/// the stream is always read once more afterwards, from the point the follow
-/// reached. A gap in the merged store is what makes a later reader think nothing
-/// happened.
+/// the stream is always read again afterwards, from the point the follow reached.
+///
+/// **Again, rather than once more.** A single re-read makes the terminator's
+/// arrival conditional on that one read having gone well, and every way it can go
+/// badly hands back an empty batch: a stream that cannot be opened, a batch the
+/// sibling's typed reader refuses over one line, and a close that refused and
+/// wrote no terminator at all. Each of those settled the node in silence with a
+/// hole in its record, which reads to a later reader as a publication that never
+/// ended. So the read is repeated until the stream carries the terminator or the
+/// grace runs out, and a session that ends without one is *said* rather than
+/// left to be noticed.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -1187,11 +1207,11 @@ fn end_session(
     node: &Labels,
     filter: Option<&EventFilter>,
 ) {
-    close(token);
+    let refused = close(token);
     // Empty from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
-    relay_session_events(tx, token, node, &followed_through, filter);
+    relay_session_events(tx, token, node, followed_through, filter, refused);
 }
 
 /// Fold the part of the session's stream nothing has relayed into the merged one.
@@ -1209,17 +1229,59 @@ fn relay_session_events(
     tx: &Sender<Message>,
     token: Option<&onevcs::SessionToken>,
     node: &Labels,
-    followed_through: &crate::vcs::Watermarks,
+    followed_through: crate::vcs::Watermarks,
     filter: Option<&EventFilter>,
+    refused: Option<String>,
 ) {
     let Some(token) = token else { return };
     let relay = relay_into(tx, node.clone());
-    // The same filter the follow was opened with: the read-once fallback covers
-    // the tail of the *same* stream, so a run that filtered what it followed and
-    // not what it caught up on would relay events it said it did not want, for
-    // no reason but which side of a settlement they landed on.
-    for envelope in beyond(crate::vcs::events(token, filter), followed_through) {
-        relay(envelope);
+    // Carried across the reads rather than re-derived from each: what stops a
+    // record arriving twice is the mark the relay left on it, and a second read of
+    // a stream hands back everything the first one did.
+    let mut relayed = followed_through;
+    let mut refused = refused;
+    let deadline = Instant::now() + TERMINATOR_GRACE;
+    loop {
+        // The same filter the follow was opened with: this read covers the tail of
+        // the *same* stream, so a run that filtered what it followed and not what
+        // it caught up on would relay events it said it did not want, for no
+        // reason but which side of a settlement they landed on.
+        let read = crate::vcs::events(token, filter);
+        // Asked of the whole read rather than of what this pass relays: the follow
+        // may have relayed the terminator already, and what the wait is for is a
+        // session that has *ended*, however its last record reached the store.
+        let ended = read.iter().any(crate::vcs::is_terminator);
+        for envelope in beyond(read, &relayed) {
+            relayed.reached(&envelope);
+            relay(envelope);
+        }
+        if ended {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // The one thing a reader of the merged store cannot work out for
+            // itself: the records are all there and the last one is missing, which
+            // is indistinguishable from a publication still running.
+            eprintln!(
+                "onepipeline: session {} ended with no `session-closed` record{}",
+                token.0,
+                refused
+                    .map(|why| format!("; its close refused: {why}"))
+                    .unwrap_or_default()
+            );
+            return;
+        }
+        // Asked again only where the ask before it refused, and only after the read
+        // above found no terminator — so a close that emitted one and then failed is
+        // never asked to emit a second. `onevcs` refuses a close over a live process
+        // working inside the run root, which is exactly what the dispatch that has
+        // just finished is until the host reaps it: a refusal that answers
+        // differently a moment later, and the only one that leaves a session with no
+        // last record at all.
+        if refused.is_some() {
+            refused = close(Some(token));
+        }
+        std::thread::sleep(TERMINATOR_POLL);
     }
 }
 
@@ -1237,12 +1299,17 @@ fn beyond(envelopes: Vec<Envelope>, followed_through: &crate::vcs::Watermarks) -
         .collect()
 }
 
-fn close(token: Option<&onevcs::SessionToken>) {
-    // Best effort: a node that already failed must not be reported as a
-    // different failure because its cleanup also failed.
-    if let Some(token) = token {
-        let _ = crate::vcs::session_close(token);
-    }
+/// Close the session, and answer with what refused it.
+///
+/// Best effort in the sense that mattered and still does: the refusal settles no
+/// node, because a node that already failed must not be reported as a different
+/// failure because its cleanup also failed. It is *kept* rather than dropped
+/// because it is the one thing that explains a session stream with no terminator
+/// on it, and because it says whether asking again could answer differently.
+fn close(token: Option<&onevcs::SessionToken>) -> Option<String> {
+    crate::vcs::session_close(token?)
+        .err()
+        .map(|refusal| refusal.to_string())
 }
 
 /// A node's steps in dispatch order, each with the controls its dispatch runs
@@ -1614,6 +1681,146 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    /// A terminator written after the follow ended still reaches the merged
+    /// store, and a session that never writes one is **said** rather than left as
+    /// a hole in it.
+    ///
+    /// This is the window `end_session` exists for. The follow reads the stream
+    /// and only *then* asks whether the session closed, so it can end cleanly
+    /// having relayed everything but the last record — and the read that covers
+    /// that window is the only thing standing between a settled node and a store
+    /// whose publication looks like it never ended. A single read made that cover
+    /// conditional on nothing going wrong once: an unopenable stream, a batch the
+    /// sibling's typed reader refuses over one line, and a close that wrote no
+    /// terminator at all each hand back an empty batch, and each settled the node
+    /// in silence.
+    ///
+    /// Driven against the stream **file**, because that is what decides: no
+    /// journey can make a real `onevcs` close write its terminator late or not at
+    /// all, and the sibling is not doubled here — the reader under test is its
+    /// own, reading a real stream through the real seam.
+    ///
+    /// One test for all three cases rather than three: `ONEVCS_HOME` is
+    /// process-global, and the guard says so.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the happy half of this — a session
+    // whose terminator is already written when the read comes — is what every lifecycle
+    // journey drives, `real_vcs::a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays`
+    // included, which is the journey that reported this gap. The other two halves are a
+    // stream that gains its last record late and one that never gains it, and neither is
+    // reachable from outside: a close either writes the record or refuses, and nothing a
+    // plan can say chooses which.
+    #[test]
+    fn a_session_whose_terminator_arrives_late_still_relays_it_and_one_with_none_says_so() {
+        let _home = crate::vcs::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-terminator-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var("ONEVCS_HOME", &root);
+
+        let record = |token: &str, seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": crate::event::ENVELOPE_VERSION,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let path = |token: &str| root.join("streams").join(format!("{token}.ndjson"));
+        let write = |token: &str, body: &str| {
+            std::fs::write(path(token), body).expect("the stream is written");
+        };
+        // What the loop put in the merged store, in the order it put it there —
+        // which is where a record relayed twice shows up as well as one lost.
+        let relayed = |rx: &std::sync::mpsc::Receiver<Message>| {
+            let mut kinds = Vec::new();
+            while let Ok(message) = rx.try_recv() {
+                if let Message::Event(envelope) = message {
+                    kinds.push(envelope.kind.0.clone());
+                }
+            }
+            kinds
+        };
+        let end = |token: &str, tx: &Sender<Message>| {
+            end_session(
+                None,
+                tx,
+                Some(&onevcs::SessionToken(token.to_owned())),
+                &Labels::default(),
+                None,
+            );
+        };
+
+        // A stream that already carries its terminator is read once and answered
+        // on: the wait below must cost an ordinary settlement nothing.
+        let closed = "s-terminated";
+        write(
+            closed,
+            &format!(
+                "{}\n{}\n",
+                record(closed, 1, "push"),
+                record(closed, 2, "session-closed")
+            ),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let began = Instant::now();
+        end(closed, &tx);
+        assert_eq!(relayed(&rx), vec!["push", "session-closed"]);
+        assert!(
+            began.elapsed() < TERMINATOR_GRACE,
+            "a session that had already ended was waited on anyway"
+        );
+
+        // A terminator the first read did not find. Before this it was lost: the
+        // one read had been made, and nothing afterwards reads a session's stream.
+        let late = "s-latelyclosed";
+        let pushed = record(late, 1, "push");
+        let ended = record(late, 2, "session-closed");
+        write(late, &format!("{pushed}\n"));
+        let writing = {
+            let path = path(late);
+            std::thread::spawn(move || {
+                std::thread::sleep(TERMINATOR_POLL * 2);
+                std::fs::write(&path, format!("{pushed}\n{ended}\n"))
+                    .expect("the terminator is written");
+            })
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        end(late, &tx);
+        writing.join().expect("the writer finishes");
+        assert_eq!(
+            relayed(&rx),
+            vec!["push", "session-closed"],
+            "a terminator written after the first read never reached the merged store"
+        );
+
+        // And one that never arrives: bounded, so a node cannot hang on its own
+        // cleanup, and the records before it relayed exactly once however many
+        // reads the wait made.
+        let never = "s-neverclosed";
+        write(never, &format!("{}\n", record(never, 1, "push")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let began = Instant::now();
+        end(never, &tx);
+        assert!(
+            began.elapsed() >= TERMINATOR_GRACE,
+            "the wait for a terminator gave up early"
+        );
+        assert_eq!(
+            relayed(&rx),
+            vec!["push"],
+            "a re-read handed the same record back a second time"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
