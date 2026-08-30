@@ -704,6 +704,7 @@ fn converge(
         reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)?;
         if let Some(writeback) = &writeback {
             writeback.publish(paths, launch, state);
+            report_unprojected(paths, journal, writeback)?;
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
@@ -899,6 +900,11 @@ fn converge(
     if let Some(writeback) = &writeback {
         writeback.publish(paths, launch, state);
         writeback.wait_briefly();
+        // The last thing this loop does, and the reason it is here rather than
+        // only at the top: a run whose *terminal* projection failed is exactly
+        // the run that settles and is read as the record of what happened, so
+        // the failure has to reach the planner before this driver stops.
+        report_unprojected(paths, journal, writeback)?;
     }
     Ok(graph::state_of(&state.statuses()))
 }
@@ -2901,6 +2907,65 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         workstream: Some(checked.node.as_str().to_owned()),
+    }
+}
+
+/// Raise every projection that failed since this was last asked.
+///
+/// Non-blocking, and it changes nothing about the run: the projection is best
+/// effort by contract, so a store that refused a write is not a node settlement
+/// and not a scheduling decision. What it *is* is a board that no longer says
+/// what happened, which nothing else tells anybody — the worker's own report is
+/// one line on the driver's standard error, and a detached run writes that to a
+/// log nobody opens.
+fn report_unprojected(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    writeback: &crate::writeback::Writeback,
+) -> Result<()> {
+    for failure in writeback.unprojected() {
+        raise(paths, journal, unprojected_surface(&failure))?;
+    }
+    Ok(())
+}
+
+/// How many of a failed projection's items one surface names before it counts
+/// the rest.
+///
+/// A plan is a whole project's worth of nodes and the planner reads this in a
+/// terminal, so the list is bounded here rather than by [`bounded`] truncating
+/// the sentence that follows it.
+const ITEMS_NAMED: usize = 20;
+
+/// The finding one failed projection raises.
+fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
+    let named: Vec<&str> = failure
+        .items
+        .iter()
+        .take(ITEMS_NAMED)
+        .map(String::as_str)
+        .collect();
+    let rest = failure.items.len().saturating_sub(named.len());
+    let items = match rest {
+        0 => named.join(", "),
+        rest => format!("{}, and {rest} more", named.join(", ")),
+    };
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: format!(
+            "the onetaskgraph project '{project}' did not take this run's projection.
+             items: {items}
+             reason: {reason}
+             The run itself is unaffected — nothing was settled, scheduled or failed on              this — but that project is behind what the run recorded until it is fixed.",
+            project = bounded(&failure.project),
+            items = bounded(&items),
+            reason = bounded(&failure.reason),
+        ),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: None,
     }
 }
 
