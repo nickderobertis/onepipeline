@@ -536,21 +536,14 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     );
 
     // It continued the branch the stopped run left its work on, rather than
-    // cutting one beside it — which is what the sibling says with `continued`.
+    // cutting one beside it.
     //
-    // **Not the stopped run's own session, since `onevcs` 0.16.3.** That release
-    // forgets a session record whose owner process has gone with nothing working
-    // inside its run root, at the moment anybody asks who holds the repository —
-    // and asking is the first thing a launch does, because the contract's
-    // concurrency interlock *is* `onevcs session holders`. So by the time the
-    // dispatch could take that session up, the record naming it is gone and the
-    // sibling continues the branch from its own tip instead. What that costs is
-    // the clone and the worktree the stopped run had already built; what it does
-    // **not** cost is the work, which is on the branch and is what reaches the
-    // base below. The lost reuse is a question for `onevcs` — a read verb that
-    // prunes the records its own `open_session` takes up — rather than something
-    // this crate decides, and the stranded token is still held here so the
-    // journey says which session it means.
+    // **Not that run's own session, since `onevcs` 0.16.3.** A launch's first act
+    // is the contract's concurrency interlock, `onevcs session holders`, and that
+    // read now forgets a record whose owner is gone with nothing inside its run
+    // root — the one `open_session` would have taken up. The work still reaches
+    // the base below; what is spent is a clone and a gate. Divergence entry 50
+    // carries the question that raises for `onevcs`.
     let taken = opened(&world, "retry");
     assert!(
         taken["payload"]["token"].is_string(),

@@ -1176,7 +1176,11 @@ pub fn status(survey: &Survey) -> String {
                 drafted.len()
             ));
             for (id, awaiting) in &drafted {
-                out.push_str(&format!("  {id}: complete-but-draft — {awaiting}\n"));
+                let says = awaiting
+                    .as_deref()
+                    .map(|detail| format!(" — {detail}"))
+                    .unwrap_or_default();
+                out.push_str(&format!("  {id}: complete-but-draft{says}\n"));
             }
         }
         // The settled nodes whose work has not reached anyone. This view
@@ -1573,15 +1577,13 @@ fn unlanded_nodes(view: &RunView) -> Vec<String> {
 /// The reason is the settlement's own detail — the same sentence `results` prints
 /// and the same one the host is holding the change under — so a reader meeting
 /// this line and a reader opening `results` are told the same thing.
-fn drafted_nodes(view: &RunView) -> Vec<(String, String)> {
+fn drafted_nodes(view: &RunView) -> Vec<(String, Option<String>)> {
     view.state
         .statuses()
         .into_iter()
         .filter(|(_, status)| *status == NodeStatus::CompleteDraft)
         .map(|(node, _)| {
-            let awaiting = settled_detail(view, &node)
-                .map(|detail| one_line(&detail))
-                .unwrap_or_else(|| "awaiting a release this run recorded nothing about".to_owned());
+            let awaiting = settled_detail(view, &node).map(|detail| one_line(&detail));
             (node, awaiting)
         })
         .collect()

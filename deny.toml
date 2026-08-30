@@ -56,17 +56,8 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# One entry, and it is the fast adoption this build performs on itself: the draft
-# surface `src/lifecycle.rs` settles a complete-but-draft node through has landed
-# in `onevcs` and has not been released, so `[patch.crates-io]` in `Cargo.toml`
-# points both members of that sibling at the commit carrying it. The allowance is
-# the commit rather than the repository's whole history — a revision this policy
-# does not name is still refused — and it is deleted in the same change that moves
-# the two requirements to the release, which `Cargo.toml`'s own block says.
-#
-# The property publishing needs is unchanged and is why the entry is temporary: a
-# revision is content crates.io cannot reproduce, and a crate that ships there
-# cannot record a dependency on one. What holds the line while this stands is not
-# a check but the behaviour the pin exists for — a node launched against a git pin
-# settles complete-but-draft and its change request cannot land.
+# One entry: the unreleased `onevcs` revision `Cargo.toml`'s `[patch.crates-io]`
+# links, and that block says why. The revision rather than the repository, so any
+# other is still refused, and it is deleted in the same change that moves the two
+# requirements to the release.
 allow-git = ["https://github.com/nickderobertis/onevcs?rev=6636404c6aa3c4ebd6314e48de65ee1dd8ae629d"]

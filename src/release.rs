@@ -1173,29 +1173,29 @@ fn renderable(value: &str) -> Option<String> {
 /// nothing can ever lift is a change request nobody can finish. Such a node
 /// launches and settles exactly as it did before this existed.
 pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
-    let unreleased: Vec<&CrossRepoReference> = references
+    let unreleased: Vec<(&CrossRepoReference, &str, TargetName)> = references
         .iter()
-        .filter(|row| askable(row).is_some())
-        .filter(|row| !released_already(row))
+        .filter_map(|row| {
+            let (reference, target) = askable(row)?;
+            Some((row, reference, target))
+        })
+        .filter(|(_, reference, target)| !released_already(reference, target))
         .collect();
-    let first = unreleased.first()?;
-    let (reference, target) = askable(first)?;
+    let (row, reference, target) = unreleased.first()?;
     // One reason names one dependency, because [`onevcs::DraftReason`] carries one
-    // target — so the rest are named in the sentence a person reads rather than
-    // dropped, which is the difference between "waiting on this" and "waiting on
-    // this and two others nobody mentioned".
-    let others = match unreleased.len() - 1 {
-        0 => String::new(),
-        more => format!(", and on {more} further release(s) this node adopted early"),
-    };
+    // target — so how many are being waited on is said in the sentence a person
+    // reads rather than left for them to count.
     Some(onevcs::DraftReason {
         because: format!(
-            "this node adopted {identity} early and is pinned to {reference} rather than to a              released version{others}; landing it now would make that pin permanent",
-            identity = first.repository,
+            "this node adopted {identity} early and is pinned to {reference} rather than to a \
+             released version; it is one of {count} release(s) this node adopted early, and \
+             landing now would make that pin permanent",
+            identity = row.repository,
+            count = unreleased.len(),
         ),
-        awaiting: first.repository.clone(),
-        target,
-        reference: reference.to_owned(),
+        awaiting: row.repository.clone(),
+        target: target.clone(),
+        reference: (*reference).to_owned(),
     })
 }
 
@@ -1236,11 +1236,8 @@ fn askable(row: &CrossRepoReference) -> Option<(&str, TargetName)> {
 /// person, a probe that could not answer — leaves the change a draft. "Not
 /// answered" is never "not released" here either; what it is is a change that
 /// must not land yet, which is the safe direction and the only one.
-fn released_already(row: &CrossRepoReference) -> bool {
-    let Some((reference, target)) = askable(row) else {
-        return false;
-    };
-    Answer::of(&onevcs::release_status(reference, Some(&target)))
+fn released_already(reference: &str, target: &TargetName) -> bool {
+    Answer::of(&onevcs::release_status(reference, Some(target)))
         .version()
         .is_some()
 }

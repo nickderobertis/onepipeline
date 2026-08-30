@@ -461,33 +461,20 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
-# **The draft surface this build's fast adoption settles on has landed in
-# `onevcs` and has not been released**, so this build links the commit that
-# carries it. That is what fast adoption *is* — launch against a git pin, and do
-# not let the pin become permanent — and this repository is the first consumer to
-# pay it: `PublishRequest.draft`, `DraftReason`, `PublishOutcome::ChangeDraft`,
-# and `RemoteHost::{ready_for_review, is_draft}` are all
-# `nickderobertis/onevcs@6636404c` and none of them is in 0.16.3.
+# The draft surface `src/lifecycle.rs` settles a complete-but-draft node through —
+# `PublishRequest.draft`, `DraftReason`, `PublishOutcome::ChangeDraft`,
+# `RemoteHost::{ready_for_review, is_draft}` — has landed in `onevcs` and is in no
+# release, so this build links the commit. A **patch** rather than a git
+# requirement above, so the requirement still states the newest release the
+# registry carries and the lock still records what is linked, `source =
+# "git+…?rev=…"`. Both members come from the one revision: two copies of `onevcs`
+# is a compile error.
 #
-# A **patch** rather than a git requirement in `[workspace.dependencies]`, so the
-# requirement above still says the newest release the registry carries and
-# `just engines-current` still answers about it. The lock is where what this
-# build actually contains is recorded — `source = "git+…?rev=…"` on both entries
-# — which is the invariant AGENTS.md states: only the lock says what a build
-# contains, and it does.
-#
-# **This tree cannot be published while the patch stands**: `cargo publish`
-# ignores `[patch]`, so it would cut a crate requiring `onevcs 0.16.3`, which
-# does not carry the surface `src/lifecycle.rs` compiles against. Nothing here
-# guards that with a check, because the guard is the behaviour this change adds:
-# a node holding a git pin settles complete-but-draft and its change request is
-# unmergeable until the release arrives. When `onevcs` cuts the release carrying
-# `6636404c`, the whole of the work is to move the two requirements above to it
-# and delete this block; `deny.toml`'s `allow-git` entry names the same commit
-# and goes with it.
-#
-# Both members come from the one revision, for the reason the `onevcs-testing`
-# pin above states: two copies of `onevcs` is a compile error rather than a skew.
+# `cargo publish` ignores `[patch]`, so this tree must not be published while it
+# stands; what holds that is the behaviour this change adds rather than a check —
+# the node holding this pin settles complete-but-draft and cannot land. Delete
+# this block and move the two requirements when the release carrying `6636404c` is
+# out; `deny.toml`'s `allow-git` entry names the same revision and goes with it.
 [patch.crates-io]
 onevcs = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
 onevcs-testing = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
