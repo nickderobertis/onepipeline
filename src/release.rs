@@ -1218,7 +1218,8 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
 /// spelling of it.
 pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
     format!(
-        "complete, and held as a draft: awaiting the {target} release of {awaiting}, pinned to          {reference} until it arrives",
+        "complete, and held as a draft: awaiting the {target} release of {awaiting}, pinned \
+         to {reference} until it arrives",
         target = reason.target,
         awaiting = reason.awaiting,
         reference = reason.reference,

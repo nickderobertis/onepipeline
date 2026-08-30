@@ -2446,9 +2446,18 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     let detail = settled["payload"]["detail"]
         .as_str()
         .expect("a draft settlement says why");
-    assert!(
-        detail.contains("github.com/owner/engine") && detail.contains("crate"),
-        "the settlement does not name the dependency and the target it awaits: {detail}"
+    // The whole sentence, character for character, against the branch the engine
+    // really published from: a `contains` over the two names it has to carry
+    // would pass on a line no person could read, and this is the one line a
+    // person reads to learn why the node stopped short of done.
+    assert_eq!(
+        detail,
+        format!(
+            "complete, and held as a draft: awaiting the crate release of \
+             github.com/owner/engine, pinned to {reference} until it arrives",
+            reference = branch_of(&world, &run, ENGINE),
+        ),
+        "the settlement does not name the dependency and the target it awaits"
     );
 
     // A node downstream of it does not start. `complete-but-draft` is not `done`,
