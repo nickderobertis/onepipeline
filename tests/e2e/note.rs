@@ -21,6 +21,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use onepipeline::channel::Command;
 use onepipeline::note::{deliver, Addressee, Delivered, Note, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
@@ -56,6 +57,20 @@ fn note_op(node: &str, addressee: &str, text: &str, criterion: Option<&str>) -> 
     op
 }
 
+/// Start a run whose nodes are two-party members, against the real sibling.
+///
+/// Whatever a journey scripted before calling this is what the conversation then
+/// does: the scripts are read by the doubles under the members, so they are
+/// written before the run starts rather than passed in here.
+fn supervised_run(world: &World, run: &str, nodes: Vec<Value>) {
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, nodes));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+}
+
 /// Start a supervised run whose worker turn is held open, and wait until it is.
 ///
 /// The judge asks once and then completes, which is the shortest conversation with
@@ -63,48 +78,95 @@ fn note_op(node: &str, addressee: &str, text: &str, criterion: Option<&str>) -> 
 /// judge's hands for the *first* of them, and "before the verdict" is a claim about
 /// a verdict that really came later.
 fn held_conversation(world: &World, run: &str, nodes: Vec<Value>) {
-    world.write_graphs();
-    world.write_supervised_node_graph();
     world.script(
         "judge.asks-again",
         "Run the check again and report what it said.",
     );
     world.script("turn.hold", "hold");
-    let path = world.plan(run, &plan_of(run, nodes));
-    world
-        .run_on_agentgraph(&["start", &path, "--detach"])
-        .exited(0);
+    supervised_run(world, run, nodes);
     world.until("the worker's turn to open", |world| {
         !world.events_of(run, "turn-started").is_empty()
     });
 }
 
-/// Release the held worker turn once the note is really on its way to it.
+/// Start a supervised run whose **judge** turn is held open, and wait until it is.
+///
+/// The other half of [`held_conversation`], and the only way to offer a note while
+/// the supervisor is the party taking a turn: holding the worker holds the wrong
+/// party, and every turn either party takes is otherwise over in milliseconds.
+fn held_judge(world: &World, run: &str, nodes: Vec<Value>) {
+    world.script("judge.hold", "hold");
+    supervised_run(world, run, nodes);
+    world.until("the judge's turn to open", |world| {
+        world.fakes.join("judge.holding").exists()
+    });
+}
+
+/// Release the held turn once the note is really on its way to it.
 ///
 /// The wait is on the run's own durable command queue rather than on a clock: the
-/// note is in it before the reconciler can offer it, and the worker's turn cannot
-/// end until this releases it — so the note reaches a turn that is still live
-/// rather than whichever party happened to be speaking when a timer went off. The
-/// short pause after it is the reconciler's own pass, which is the one step with
-/// nothing durable to watch for.
-fn release_when_the_note_is_queued(world: &World, run: &str) -> std::thread::JoinHandle<()> {
+/// note is in it before the reconciler can offer it, and the held turn cannot end
+/// until this releases it — so the note reaches a turn that is still live rather
+/// than whichever party happened to be speaking when a timer went off. The short
+/// pause after it is the reconciler's own pass, which is the one step with nothing
+/// durable to watch for.
+fn release_when_the_note_is_queued(
+    world: &World,
+    run: &str,
+    gates: &[&str],
+) -> std::thread::JoinHandle<()> {
     let queue = world.run_file(run, "channel/commands.jsonl");
     let fakes = world.fakes.clone();
+    let gates: Vec<String> = gates.iter().map(|gate| (*gate).to_string()).collect();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if std::fs::read_to_string(&queue)
-                .unwrap_or_default()
-                .contains("\"op\":\"note\"")
-            {
-                break;
-            }
+        while Instant::now() < deadline && !a_note_is_queued(&queue) {
             std::thread::sleep(Duration::from_millis(20));
         }
         std::thread::sleep(Duration::from_secs(2));
-        release(&fakes, "turn.go");
-        release(&fakes, "turn.settle");
+        for gate in &gates {
+            release(&fakes, gate);
+        }
     })
+}
+
+/// Whether the run's durable command queue already carries a `note` op.
+///
+/// Read as the records it holds rather than as text: the queue is a ledger of
+/// submitted envelopes, and asking a substring whether one has arrived would
+/// answer yes to a note *named* inside some other op's prose. A queue file that
+/// does not exist yet is the state this waits out, and is the only read failure
+/// treated as one — anything else, and any record this build cannot parse as the
+/// commands it is, ends the journey rather than reading as "not yet".
+fn a_note_is_queued(queue: &Path) -> bool {
+    let text = match std::fs::read_to_string(queue) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => panic!(
+            "the run's command queue at {} could not be read: {error}",
+            queue.display()
+        ),
+    };
+    let mut lines = text.lines().peekable();
+    let mut queued = false;
+    while let Some(line) = lines.next() {
+        let envelope: Value = match serde_json::from_str(line) {
+            Ok(envelope) => envelope,
+            // The last line, and only the last, may be an append still in
+            // flight; an unreadable record before it is a queue this journey is
+            // wrong about rather than one it should wait longer on.
+            Err(_) if lines.peek().is_none() => break,
+            Err(error) => panic!("the command queue holds an unreadable record: {error}: {line}"),
+        };
+        let commands: Vec<Command> = serde_json::from_value(envelope["commands"].clone())
+            .unwrap_or_else(|error| {
+                panic!("the command queue holds commands this build cannot read: {error}: {line}")
+            });
+        queued |= commands
+            .iter()
+            .any(|command| matches!(command, Command::Note { .. }));
+    }
+    queued
 }
 
 fn release(fakes: &Path, name: &str) {
@@ -170,7 +232,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     let run = "live";
     held_conversation(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run);
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "worker", NOTE, None)),
@@ -232,7 +294,7 @@ fn a_binding_note_enters_the_bar_its_judge_decides_against_as_the_workers_own() 
     let run = "binding";
     held_conversation(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run);
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
@@ -376,9 +438,21 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     );
     let paths = RunPaths::under(&world.runs, run);
 
-    // First the refusal, while the held node keeps the run's own reconciler alive
-    // to answer it: `later` has not been dispatched, so there is no conversation of
-    // its own for a note to be handed to, and saying so is the whole point.
+    // First the refusals, while the held node keeps the run's own reconciler alive
+    // to answer them. A node this run does not have at all is the ask that is
+    // wrong rather than the delivery that failed, and it is answered as one —
+    // before any conversation is looked for.
+    let absent = deliver(&paths, "nowhere", &Note::to(Addressee::Worker, NOTE))
+        .expect_err("a node the graph does not hold takes no note");
+    let said = absent.to_string();
+    assert!(
+        said.contains("no node") && said.contains("nowhere"),
+        "the refusal does not name the node the graph does not hold: {said}"
+    );
+
+    // Then the delivery that could not be made: `later` has not been dispatched,
+    // so there is no conversation of its own for a note to be handed to, and
+    // saying so is the whole point.
     let refused = deliver(&paths, "later", &Note::to(Addressee::Worker, NOTE))
         .expect_err("a node with no conversation takes no note");
     let said = refused.to_string();
@@ -389,7 +463,7 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
 
     // Then the delivery, into the conversation that is live — answered with which
     // party took it, which is what a caller has no second source for.
-    let releasing = release_when_the_note_is_queued(&world, run);
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
     let delivered = deliver(
         &paths,
         "build",
@@ -406,4 +480,152 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     world.until("the run's driver to release it", |world| {
         !world.run_file(run, "owner.lock").exists()
     });
+}
+
+/// A note offered while the **judge** is the party taking a turn re-takes that
+/// decision with the note in hand, and rides the response back to the worker.
+///
+/// The other half of "whoever is live", and it is a different code path in the
+/// conversation: the worker's turn is reopened, the judge's is *re-decided*. What
+/// makes this a claim about the judge and not about a timer is that the supervisor
+/// turn is held open until the note is really in the run's queue for it.
+///
+/// The judge sends the agent back twice here, so the decision this note re-takes
+/// is not the conversation's last — which is what leaves a next worker turn for
+/// the note to ride to. A re-taken decision that *completed* is the other
+/// disposition, driven by
+/// `a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with`.
+#[test]
+fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_worker() {
+    let world = World::new("note-judge");
+    let run = "judge";
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("judge.asks-again-times", "2");
+    held_judge(&world, run, vec![agent("build", &[])]);
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["judge.go"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "supervisor", NOTE, None)),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied.exited(0).out_has("\"state\":\"applied\"");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The party it reached, which is the answer no reader of the transcript can
+    // work out for itself.
+    let operation = recorded(&world, run);
+    assert_eq!(operation["addressee"], json!("supervisor"), "{operation}");
+    assert_eq!(
+        operation["reached"],
+        json!("supervisor"),
+        "the note did not reach the party whose turn was live: {operation}"
+    );
+
+    // The judge read it as its own, addressed to it...
+    let judge = judged(&world);
+    assert!(
+        judge
+            .iter()
+            .any(|prompt| prompt.contains("delivered to YOU, the supervisor")
+                && prompt.contains(NOTE)),
+        "no judge decision was handed the note as its own:\n{judge:#?}"
+    );
+
+    // ...and the worker received it *with* that response, framed as the other
+    // party's rather than as an instruction of its own.
+    let worker = worked(&world);
+    assert!(
+        worker.iter().any(|prompt| prompt
+            .contains("delivered to the SUPERVISOR, addressed to it and not to you")
+            && prompt.contains(NOTE)),
+        "the note never rode the judge's response to the worker:\n{worker:#?}"
+    );
+}
+
+/// A note reaching a live judge whose re-taken decision is completion: the work
+/// was passed with the note in hand, and the run records exactly that.
+///
+/// Not a failure and not a non-delivery — the note was read, by the party that
+/// decided — but there was no next worker turn to deliver it into, and a run that
+/// recorded it as an ordinary delivery to the worker would be saying something
+/// false about who acted on it. The note here is addressed to **both** parties,
+/// which is the addressing the other journeys do not drive.
+#[test]
+fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
+    let world = World::new("note-passed");
+    let run = "passed";
+    held_judge(&world, run, vec![agent("build", &[])]);
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["judge.go"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "both", NOTE, None)),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied.exited(0).out_has("\"state\":\"applied\"");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    let operation = recorded(&world, run);
+    assert_eq!(operation["addressee"], json!("both"), "{operation}");
+    assert_eq!(
+        operation["reached"],
+        json!("judged-with"),
+        "the run does not say the work was passed with the note in hand: {operation}"
+    );
+    assert!(
+        operation["completion_reason"].is_string(),
+        "the record does not carry the reason the work was passed: {operation}"
+    );
+
+    // And the judge really was told it, under the addressing it was sent with.
+    let judge = judged(&world);
+    assert!(
+        judge
+            .iter()
+            .any(|prompt| prompt.contains("(addressed to both)") && prompt.contains(NOTE)),
+        "no judge decision was handed the note addressed to both parties:\n{judge:#?}"
+    );
+}
+
+/// A note is refused rather than half-delivered when this run composes the
+/// `oneagentgraph` **executable** instead of the library.
+///
+/// The seam the sibling publishes is a library call and its command line has no
+/// verb for it, so an operator who pinned an executable is told that — rather than
+/// quietly served by the interrupt that reaches one party, which is the whole
+/// defect this op exists to end. The refusal names the override, so the operator
+/// knows which of its own decisions to change.
+///
+/// `world.cmd` rather than `world.agentgraph_cmd`: the difference between the two
+/// is exactly this override, which every other journey here removes.
+#[test]
+fn a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable() {
+    let world = World::new("note-pinned");
+    let run = "pinned";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run's driver to release it", |world| {
+        !world.run_file(run, "owner.lock").exists()
+    });
+
+    let refused = world.run_with_stdin_on(
+        world.cmd(&["reply", run]),
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    refused
+        .exited(2)
+        .err_has("was not delivered")
+        .err_has("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+        .err_has("no verb");
 }

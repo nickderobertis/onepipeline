@@ -438,22 +438,29 @@ fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitC
     }
 }
 
-/// The supervisor's decision: send the agent back once when a journey scripted an
+/// The supervisor's decision: send the agent back when a journey scripted an
 /// instruction for it to send, and otherwise call the work done.
 ///
-/// **Once**, and the marker file is how: each turn is its own process, so without
-/// it the conversation would only ever end at its turn ceiling. Written before
-/// the instruction is handed over, so a second ask reads it whether or not the
-/// turn it asked for got anywhere.
+/// **A bounded number of times**, counted rather than remembered by a marker:
+/// each turn is its own process, so without a bound the conversation would only
+/// ever end at its turn ceiling. Counted before the instruction is handed over,
+/// so a later ask reads it whether or not the turn it asked for got anywhere.
+///
+/// The bound is one unless a journey names another with `judge.asks-again-times`,
+/// which exists for the one shape a single ask cannot state: a supervisor
+/// decision *re-taken* — as a note delivered into a live judge turn re-takes it —
+/// that is still not the conversation's last, so the note rides a response that
+/// opens another worker turn rather than one that ends the work.
 fn supervision(dir: &std::path::Path) -> Result<String, String> {
+    hold_the_supervisor(dir);
     let asked_again = dir.join("judge.asked-again");
+    let nth = fake::count(dir, "judge-supervision");
+    let times = asks_again_times(dir)?;
     match fake::node_script(dir, "judge", "asks-again") {
-        Some(instruction) if !asked_again.exists() => {
+        Some(instruction) if nth <= times => {
             fake::record(dir, "judge-asks-again", std::slice::from_ref(&instruction));
             // Refused rather than unwrapped: a marker this process could not write
-            // is a supervisor that will ask again on every turn, which runs the
-            // conversation to its ceiling and leaves the journey reading a shape
-            // nobody scripted. Better the member dies saying so.
+            // is a journey reading a conversation whose shape it cannot see.
             std::fs::write(&asked_again, &instruction).map_err(|error| {
                 format!(
                     "cannot record the supervisor's ask at {}: {error}",
@@ -468,6 +475,46 @@ fn supervision(dir: &std::path::Path) -> Result<String, String> {
         }
         _ => Ok(SUPERVISED_COMPLETE.to_string()),
     }
+}
+
+/// How many supervisor decisions send the agent back before one calls it done.
+///
+/// One, unless `judge.asks-again-times` names another. A script holding anything
+/// that is not a count is a scenario nobody wrote, and reading it as the default
+/// would run a journey against a conversation it did not ask for.
+fn asks_again_times(dir: &std::path::Path) -> Result<usize, String> {
+    match fake::node_script(dir, "judge", "asks-again-times") {
+        None => Ok(1),
+        Some(text) => text.parse().map_err(|error| {
+            format!("judge.asks-again-times holds {text:?}, which is not a count: {error}")
+        }),
+    }
+}
+
+/// Hold this supervisor turn open, when a journey asked for one that is.
+///
+/// The judge's side of `turn.hold`, and the only way a journey can offer anything
+/// — a manager's note, in particular — while the **supervisor** is the party
+/// taking a turn: a worker hold reaches the other party and holds the wrong one.
+/// The marker is written before the wait so the journey can tell a supervisor turn
+/// that is live from one that has not opened yet, and the gate is a file rather
+/// than a clock so the note really arrives inside the turn.
+///
+/// The gate is not consumed, so a decision re-taken *because* of what arrived
+/// runs straight through: what a journey holds is the turn it is delivering into,
+/// not every turn after it.
+fn hold_the_supervisor(dir: &std::path::Path) {
+    if fake::node_script(dir, "judge", "hold").is_none() {
+        return;
+    }
+    let holding = dir.join("judge.holding");
+    if let Err(error) = std::fs::write(&holding, "holding") {
+        fake::fail(&format!(
+            "cannot say the supervisor turn is live at {}: {error}",
+            holding.display()
+        ));
+    }
+    fake::wait_for(&dir.join("judge.go"));
 }
 
 /// How onejudge opens the prompt it hands its supervisor side.

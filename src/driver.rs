@@ -1994,6 +1994,13 @@ pub(crate) fn deliver_note_envelope(
                      for it"
                 ))
             }),
+        // llmlint: ignore[changed_behavior_has_e2e] this arm is the reply timeout
+        // elapsing, which is read from the *calling process's* environment — and
+        // this call is a library call, so a journey driving it would have to
+        // mutate the test binary's own environment while its other journeys run
+        // in parallel threads. The op's own timeout path is driven end to end by
+        // `context_delivery`, through the envelope, where the bound is a
+        // subprocess's to set.
         Submitted::Queued { .. } => Ok(crate::note::Delivered::Queued),
         Submitted::Answered { .. } => Err(Error::Refused(
             "a note carries a command, and this envelope was answered as a verdict".to_string(),

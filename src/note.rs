@@ -64,6 +64,14 @@ use crate::views::RunPaths;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reached", rename_all = "kebab-case")]
 pub enum Reached {
+    // llmlint: ignore[changed_behavior_has_e2e] no journey here drives this
+    // disposition because none can: the conversation answers it only for a note
+    // offered with **no turn live**, and the gap between two turns has no seam
+    // this suite can hold open — the one process it may stand in for is the
+    // harness, and a harness runs *inside* a turn. `oneagentgraph` holds that gap
+    // itself, behind its non-default `test-doubles` feature, and drives this
+    // disposition there; what is left here is the mapping below, which is
+    // exhaustive in both directions and fails this build if the sibling adds one.
     /// Nobody was taking a turn, so the next turn to open takes it.
     Queued,
     /// The worker's turn was live and was reopened carrying it, before the judge
