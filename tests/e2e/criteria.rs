@@ -283,6 +283,20 @@ fn criteria_this_check_cannot_parse_are_reported_nowhere() {
             // Both halves, in a sentence whose meaning is the absence — which
             // this reading would answer backwards.
             "`service.md` no longer holds `complete_dataset: false`",
+            // Three spans: which two are the pair is a guess.
+            "`service.md` and `README.md` both hold `complete_dataset: true`",
+            // Two paths, and two literals: neither says which is the value.
+            "`service.md` matches `README.md`",
+            "`complete_dataset: true` is not `complete_dataset: false`",
+            // A span nobody closed. Two spans by the split, one quotation by
+            // the writer.
+            "`service.md` holds `complete_dataset: true",
+            // Paths that are not files on this branch, each spelled the way a
+            // host of its own spells leaving one.
+            "`/etc/passwd` holds `root: yes`",
+            "`../elsewhere/service.md` holds `complete_dataset: true`",
+            "`C:\\elsewhere\\service.md` holds `complete_dataset: true`",
+            "`some file.md` holds `complete_dataset: true`",
         ])],
     );
 
@@ -296,6 +310,43 @@ fn criteria_this_check_cannot_parse_are_reported_nowhere() {
         "done",
         "the journey did not reach a settlement"
     );
+}
+
+#[test]
+fn a_bar_written_the_other_way_round_or_over_two_lines_is_still_read() {
+    let world = writing("criteria-shapes", "complete_dataset: false\n");
+    // Two shapes the sentence can take and one it cannot. The file and the
+    // literal are read off the sentence in either order and across a line break;
+    // an indented line after a *paragraph* belongs to the paragraph, and
+    // stitching it onto the bullet above would compare a sentence the plan never
+    // wrote.
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: ship the row",
+        "task": "## What\nWrite the row.\n\n## Acceptance criteria\n\n\
+                 - `complete_dataset: true` is what `service.md` holds\n\
+                 - the row in `README.md`\n  is `the repository under test`\n\
+                 - the origin is seeded\n\nAnd separately:\n  \
+                 the row in `service.md` is `complete_dataset: true`\n",
+    });
+    let run = settle(&world, "shapes", vec![node]);
+
+    let compared = comparisons(&world, &run);
+    // Two read, and the paragraph's continuation joined neither of them: a third
+    // comparison here would be a bar nobody stated.
+    assert_eq!(compared.len(), 2, "{compared:?}");
+    let answer_for = |named: &str| {
+        compared
+            .iter()
+            .find(|payload| payload["file"] == named)
+            .unwrap_or_else(|| panic!("`{named}` was never read: {compared:?}"))["answer"]
+            .clone()
+    };
+    assert_eq!(answer_for("service.md"), "mismatch");
+    assert_eq!(answer_for("README.md"), "match");
+    assert_eq!(findings(&world, &run).len(), 1);
 }
 
 #[test]

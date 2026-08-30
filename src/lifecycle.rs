@@ -323,31 +323,18 @@ fn attempt_once(
     attempted
 }
 
-/// Compare the settling node's mechanically checkable criteria against the
-/// branch it settled on, and hand each answer to the loop.
+/// Hand [`crate::criteria`]'s reading of this node's branch to the loop.
 ///
-/// Where a criterion names **a literal value in a named file**, that file is on
-/// the branch this node's session opened and the comparison costs one read. It
-/// is the cheapest check in the run and nothing was making it: a criterion
-/// naming a boolean, negated in the shipped file, has passed a worker, a judge,
-/// a monitor and a manager, all of whom read the prose.
+/// **When**, which is all this call site decides. Every caller is a settlement
+/// `attempt_once` has already made, so nothing here can change one; and it is
+/// once per settlement rather than once per node, which differ only for a
+/// workstream held at a human step and dispatched again afterwards — two
+/// settlements, and not the same branch between them.
 ///
-/// Three things it does not do, and each is deliberate. It never touches the
-/// settlement — `attempt_once` has already decided that and this is called with
-/// the answer in hand. It says nothing about a criterion it cannot parse, which
-/// is most of them. And it reports a file it could not read as exactly that,
-/// rather than as a branch that disagreed.
-///
-/// A node with no worktree is a node with no branch to read — every step
-/// declared no diff, the session never opened, or every remaining step was
-/// already done on a previous attempt — and there is nothing here to compare
-/// against, which is silence rather than an unread answer: nothing was named
-/// that could not be read.
-///
-/// Once per settlement rather than once per node, and the two differ only for a
-/// workstream that settles twice: one held at a human step and dispatched again
-/// afterwards settles once at the hold and once at its end, and the branch is
-/// not the same branch between them.
+/// No worktree is no branch to read: every step declared no diff, the session
+/// never opened, or the remaining steps were all done on a previous attempt.
+/// Silence rather than an unread answer — nothing was named that could not be
+/// read.
 fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
     // Both halves of "there is something to read, on behalf of somebody": a
     // branch in hand, and a node the graph carries to report it against.

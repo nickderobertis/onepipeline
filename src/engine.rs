@@ -481,16 +481,13 @@ pub(crate) enum Message {
 
 /// One acceptance criterion, read against the branch the node settled on.
 ///
-/// Handed over rather than written where it is measured, for the reason
-/// [`UndraftedBody`] gives: the loop owns the pipeline stream and the sequence
-/// it is numbered in, and a dispatch thread composing an envelope beside that
-/// series would write a `seq` this side never issued.
+/// Handed over rather than written where it is measured, for [`UndraftedBody`]'s
+/// reason.
 ///
-/// It carries the criterion and the answer and no verdict, because it **is** no
-/// verdict: the node's settlement is decided by its dispatches and its
-/// publication exactly as it was before this check existed, and what a mismatch
-/// buys a reader is a finding beside that settlement rather than a different
-/// one.
+/// It carries no verdict, because it **is** no verdict: the node's settlement is
+/// decided by its dispatches and its publication exactly as it was before this
+/// check existed, and what a mismatch buys a reader is a finding beside that
+/// settlement rather than a different one.
 pub(crate) struct CriterionChecked {
     /// The node whose branch was read.
     ///
