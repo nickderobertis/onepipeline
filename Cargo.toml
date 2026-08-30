@@ -393,14 +393,19 @@ include = [
   "/examples/**",
 ]
 
-# llmlint: ignore[new_command_or_client_gets_its_own_project] `plan check` is a
-# verb on this binary, beside `start`, `validate` and `session` — not a new
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
+# is a verb on this binary, beside `start`, `validate` and `session` — not a new
 # command or client. The shipped shape is one library and one binary, which
 # `AGENTS.md` states and `docs/contract.md` states the verb against; a second
 # project for a subcommand would contradict both.
+#
+# Block-scoped rather than line-scoped: the reason above runs to five lines, and
+# a line-scoped `ignore` reaches only the line beneath it, so the continuation
+# lines held it away from the `[[bin]]` it is about and the rule fired anyway.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 [lib]
 name = "onepipeline"
