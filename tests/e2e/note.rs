@@ -26,7 +26,7 @@ use onepipeline::note::{deliver, Addressee, Delivered, Note, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World};
+use crate::harness::{agent, plan_of, World, REFUSED};
 
 /// The correction a manager sends at the moment it matters: while the worker is
 /// still working, and before its judge has ruled on anything.
@@ -628,4 +628,75 @@ fn a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable() {
         .err_has("was not delivered")
         .err_has("ONEPIPELINE_ONEAGENTGRAPH_BIN")
         .err_has("no verb");
+}
+
+/// An observer is refused `note` by name, and nothing durable is queued from the
+/// attempt.
+///
+/// A note may carry a criterion, and a delivered one enters the bar the node's
+/// judge decides against — which is the decision `amend` makes, taken against the
+/// conversation running now, and the one the monitor's own persona reserves to the
+/// planner. So the refusal is the same shape as `amend`'s: the op by name, and
+/// what to do instead.
+///
+/// What makes this worth driving end to end rather than asserting on the allowlist
+/// is the second half. The refusal has to happen *before* the envelope becomes
+/// durable, because a note that was refused on the way out but committed on the
+/// way in would still be offered to the live conversation by the reconciler — the
+/// operator would read a refusal and the worker would read the note. So the run's
+/// own queue is asked, and it is asked while the conversation is still live and
+/// the reconciler is still passing over it.
+#[test]
+fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
+    let world = World::new("note-monitor");
+    let run = "notemonitor";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+
+    let refused = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({
+            "version": 1,
+            "author": "monitor",
+            "commands": [note_op("build", "worker", NOTE, Some(CRITERION))],
+        })
+        .to_string(),
+    );
+    refused
+        .exited(REFUSED)
+        .err_has("'note' is not an op the monitor may issue")
+        .err_has("`context` is the note that binds nothing")
+        .err_has("Surface it to the planner instead");
+
+    // Nothing of it is durable: the queue the reconciler reads carries no note, so
+    // there is nothing for it to offer the turn that is still open — and the run
+    // recorded neither a commit nor a rejection, because the refusal was taken
+    // where the envelope arrived rather than after it became a record something
+    // downstream had to answer.
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    assert!(
+        !a_note_is_queued(&queue),
+        "a note the monitor was refused was queued anyway: {}",
+        std::fs::read_to_string(&queue).unwrap_or_default()
+    );
+    for kind in ["edit-committed", "edit-rejected"] {
+        assert!(
+            world.events_of(run, kind).is_empty(),
+            "the run recorded a `{kind}` for an envelope it refused at the boundary"
+        );
+    }
+
+    // And the same note from the author that may send it goes through against the
+    // same live node, so what was refused is the authority rather than the author.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied.exited(0);
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert_eq!(recorded(&world, run)["reached"], json!("worker"));
 }

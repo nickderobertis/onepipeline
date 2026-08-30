@@ -1941,7 +1941,7 @@ enum Submitted {
     },
 }
 
-/// Validate a reply, queue it, and report which of the two true things happened.
+/// Validate a reply, queue it, and report which of the four true things happened.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     match submit_envelope(paths, envelope)? {
         Submitted::Answered { reply } => {
