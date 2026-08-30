@@ -488,9 +488,9 @@ fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, Strin
 
 /// Offer the plan to one registered check.
 ///
-/// `Ok` is a check that **ran** — whatever its refusals list holds. Everything
-/// else is a check that could not be run: a path that is not there or not
-/// executable, a non-zero exit, or an answer this build cannot read.
+/// A refusals list is an answer rather than a failure to answer, so `Ok` covers
+/// a check that refused as well as one that accepted. Only [`Unrunnable`] is the
+/// could-not-be-run the contract reports apart from a refusal.
 fn offer(path: &Path, document: &[u8]) -> std::result::Result<Vec<Reported>, Unrunnable> {
     let named = path.display().to_string();
     let cannot = |exit_code: Option<i32>, stderr: String| Unrunnable {
@@ -669,10 +669,8 @@ fn absent_key(answered: &Value) -> Option<String> {
 /// of what it wrote has been validated.
 const MAX_ANSWER_BYTES: u64 = 1 << 20;
 
-/// One bounded read of a check's stream.
 #[derive(Default)]
 struct Bounded {
-    /// What it said, up to [`MAX_ANSWER_BYTES`].
     said: Vec<u8>,
     /// Whether there was more, which makes the answer one this build cannot
     /// read rather than a truncated one it acts on.
@@ -692,8 +690,8 @@ const DRAIN_BYTES: u64 = 8 * MAX_ANSWER_BYTES;
 /// Read one stream to the bound, and say whether it reached it.
 fn bounded(stream: &mut impl std::io::Read) -> Bounded {
     let mut said = Vec::new();
-    // One past the bound, so a stream that is exactly it is not reported as
-    // having overrun.
+    // So a stream sitting exactly on the bound is not reported as having
+    // overrun it.
     let read = stream.take(MAX_ANSWER_BYTES + 1).read_to_end(&mut said);
     let past_the_bound = read.is_ok() && said.len() as u64 > MAX_ANSWER_BYTES;
     said.truncate(usize::try_from(MAX_ANSWER_BYTES).unwrap_or(usize::MAX));
