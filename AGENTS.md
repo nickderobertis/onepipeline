@@ -48,7 +48,7 @@ and is never resolved unilaterally.
 - **Language(s):** rust (plus Bash provisioning, Node packaging scripts, and
   YAML/JSON/TOML config)
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
-  intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
+  intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, project-graph.md
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so
