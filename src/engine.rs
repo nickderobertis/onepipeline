@@ -1164,14 +1164,10 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
 
 /// Whether any node could still change state without an edit or an attestation.
 ///
-/// A node that is `ready` has not started yet and one that is `running` has not
-/// finished; either way the loop has something to wait for. A **draft-complete**
-/// one is the third: its work is done and its change is held back by a release
-/// this loop is watching for, and the loop is what lifts the draft when that
-/// release answers — so a run holding one is waiting rather than stalled, and
-/// breaking here would settle it with the pin it was launched against still in
-/// the change. Everything else is settled or gated by something only the channel
-/// delivers.
+/// `ready` and `running` are the obvious two. A **draft-complete** node is the
+/// third: this loop is what watches for the release that lifts its draft, so
+/// breaking here would settle the run with the temporary pin still in the change.
+/// Everything else is settled or gated by something only the channel delivers.
 fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| {
         matches!(
@@ -1412,20 +1408,14 @@ fn not_live(deliver: Deliver, id: &str, reason: &str) -> Result<edits::Delivery>
 /// Tell every fast-adoption node whose awaited releases have all arrived, exactly
 /// once — and by telling a **draft-complete** one, lift its draft.
 ///
-/// Delivery is the `context` mechanism a planner's own note uses, at `auto`: into
-/// the node's running turn where it has a controllable one, and onto its next
-/// dispatch where it does not. `release-adopted` is the durable record of both —
-/// which is what makes the note deliver once across a driver's death, and what
-/// the fold reattaches a deferred note from.
+/// Delivery is the `context` mechanism a planner's own note uses, at `auto`, and
+/// `release-adopted` is the durable record that makes it deliver once across a
+/// driver's death.
 ///
-/// For a node that is still running the note is a correction it can act on in
-/// flight. For one whose change is held as a draft it is the whole recovery:
-/// there is no turn to reach, so the record is the deferred note *and* the thing
-/// that returns the node to the frontier — pinned by its own settlement to the
-/// branch it already published, so what starts is a worker on that branch rather
-/// than a second branch beside it. Moving the pin is that worker's; lifting the
-/// draft is its publication's, because a publication carrying no reason is what
-/// `onevcs` lifts one on.
+/// A draft-complete node has no turn to reach, so that record is also what
+/// returns it to the frontier — on the branch its own settlement pinned it to.
+/// Moving the pin is that worker's; lifting the draft is its publication's,
+/// because a publication carrying no reason is what `onevcs` lifts one on.
 ///
 /// The note is not an edit: nobody submitted it and no author owns it, so it is
 /// recorded under its own kind rather than as an `edit-committed` attributed to a

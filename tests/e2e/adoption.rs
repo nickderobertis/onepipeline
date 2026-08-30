@@ -2856,3 +2856,138 @@ fn a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release() {
         "the host was asked to draft a published-adoption node's change: {calls:?}"
     );
 }
+
+/// A fast node whose awaited target is a **human step** is held as a draft too.
+///
+/// `released` is the one answer that lets a pin go, and there are three others
+/// that reach the publication. This is one: the dependency's work has landed and
+/// nobody has recorded the release yet, so the pin is exactly as temporary as it
+/// is against an automated target nothing has released — and landing the change
+/// would make it permanent in the same way.
+#[test]
+fn a_fast_node_awaiting_a_human_step_is_held_as_a_draft() {
+    let world = watching("adoption-draft-human-step");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&both_styles(&script));
+    // The automated target *is* released, so the only thing that can hold this
+    // node is the human-step target it consumes.
+    releases_at(&answer, "0.1.0");
+    world.script("gh.merged", "");
+
+    let mut waiting = consumer(Some("fast"));
+    waiting["consumes"] = json!({ENGINE: "wheel"});
+    let run = start(&world, "adoption-draft-human-step", vec![engine(), waiting]);
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"],
+        json!("complete-but-draft"),
+        "a node awaiting a human step landed its git pin: {settled}"
+    );
+    let detail = settled["payload"]["detail"]
+        .as_str()
+        .expect("a draft settlement says why");
+    assert!(
+        detail.starts_with(
+            "complete, and held as a draft: awaiting the wheel release of \
+             github.com/owner/engine, pinned to "
+        ),
+        "the settlement does not name the human-step target it awaits: {detail}"
+    );
+
+    let calls = gh_calls(&world);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--draft")),
+        "the change request was not opened as a draft: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.first().map(String::as_str) == Some("pr")
+                && call.get(1).map(String::as_str) == Some("merge")),
+        "a change awaiting a human step was handed to the host to merge: {calls:?}"
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// A fast node whose probe **could not answer** is held as a draft, and never
+/// landed on the strength of a question nothing came back from.
+///
+/// The third answer that reaches the publication, and the one where the safe
+/// direction has to be chosen deliberately: an unusable answer says nothing about
+/// whether the release happened, so reading it as *released* would land the pin
+/// and reading it as anything else holds the change. The draft is the second, and
+/// a person is left a change request to finish rather than a permanent pin.
+#[test]
+fn a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft() {
+    let world = watching("adoption-draft-unanswered");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A version at the landing, so the baseline the engine's publication captures
+    // is one a later answer can be compared against — and so the probe breaking is
+    // the only thing that has changed by the time the consumer publishes.
+    releases_at(&answer, "0.1.0");
+    world.script("gh.merged", "");
+    // The consumer's turn is held open, because the question this journey is about
+    // is asked at the consumer's *publication*: the probe has to break after the
+    // engine has landed and before the consumer settles.
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+
+    let run = start(
+        &world,
+        "adoption-draft-unanswered",
+        vec![engine(), consumer(Some("fast"))],
+    );
+    world.until("the engine to land its work", |world| {
+        settled_status(world, &run, ENGINE) == Some("done".to_owned())
+    });
+
+    // A probe that prints something that is not a version at all: answered
+    // unusably, which is neither released nor not released.
+    releases_at(&answer, "whatever-the-nightly-was");
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"],
+        json!("complete-but-draft"),
+        "a probe that could not answer was read as a release, and landed the pin: {settled}"
+    );
+    let calls = gh_calls(&world);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--draft")),
+        "the change request was not opened as a draft: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.first().map(String::as_str) == Some("pr")
+                && call.get(1).map(String::as_str) == Some("merge")),
+        "a change whose release nothing answered for was handed to the host to merge: {calls:?}"
+    );
+
+    // And the hold was the hold: an answer the host can read lifts it, which is
+    // what says the draft was the unusable answer rather than the probe being
+    // broken for good.
+    world.script("consumer.work", "consumer pins the released engine 0.2.0\n");
+    releases_at(&answer, "0.2.0");
+    world.until("the readable answer to finish the node", |world| {
+        settled_status(world, &run, "consumer") == Some("done".to_owned())
+    });
+    world.run(&["stop", &run]).exited(0);
+}

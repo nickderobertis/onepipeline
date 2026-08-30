@@ -1153,25 +1153,17 @@ fn renderable(value: &str) -> Option<String> {
 /// Why one fast-adoption node's change request is opened as a **draft**, asked of
 /// `onevcs` at the moment the publication is composed.
 ///
-/// The rows are the ones the node's dispatch was handed — its own reference
-/// block, which is fast adoption's alone — so what is asked about here is exactly
+/// The rows are the node's own reference block, so what is asked about is exactly
 /// what the worker was told to pin against. `None` is a node with nothing to wait
-/// for: no rows at all, or every one of them released.
+/// for.
 ///
-/// **Asked here rather than read off the reconcile loop's [`Watch`]**, and for one
-/// reason: a dispatch is long and a release can arrive in the middle of it. The
-/// question the settlement turns on is whether the pin is still temporary *now*,
-/// which is one read at the one moment it decides anything, on the dispatch's own
-/// thread. A node whose dependency had already released when it launched asks the
-/// same question and is answered released, so it settles `done` with no draft and
-/// nothing about it is a special case.
+/// **Asked here rather than off the reconcile loop's [`Watch`]** because a
+/// dispatch is long and a release can arrive in the middle of one: the question is
+/// whether the pin is still temporary *now*.
 ///
-/// A row this run cannot put a question about — no reference the sibling resolves
-/// work by, or no target that answers — is **not** drafted against. It is the same
-/// judgement [`Dependency::askable`] makes for the hold: a question that could
-/// never be put is not evidence that a release has not happened, and a draft
-/// nothing can ever lift is a change request nobody can finish. Such a node
-/// launches and settles exactly as it did before this existed.
+/// A row this run cannot put a question about is **not** drafted against — the
+/// judgement [`Dependency::askable`] already makes for the hold — because a draft
+/// nothing can ever lift is a change request nobody can finish.
 pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
     // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
     // half of `askable`: a row is only composed for a dependency that settled `done`

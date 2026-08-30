@@ -474,7 +474,8 @@ codegen-units = 1
 # stands; what holds that is the behaviour this change adds rather than a check —
 # the node holding this pin settles complete-but-draft and cannot land. Delete
 # this block and move the two requirements when the release carrying `6636404c` is
-# out; `deny.toml`'s `allow-git` entry names the same revision and goes with it.
+# out; `deny.toml`'s `allow-git` entry names the same revision and goes with it,
+# which `tests/patch_pin.rs` is what insists on.
 [patch.crates-io]
 onevcs = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
 onevcs-testing = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }

@@ -59,5 +59,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # One entry: the unreleased `onevcs` revision `Cargo.toml`'s `[patch.crates-io]`
 # links, and that block says why. The revision rather than the repository, so any
 # other is still refused, and it is deleted in the same change that moves the two
-# requirements to the release.
+# requirements to the release. `tests/patch_pin.rs` holds this list equal to that
+# block's, so neither can move — or be deleted — without the other.
 allow-git = ["https://github.com/nickderobertis/onevcs?rev=6636404c6aa3c4ebd6314e48de65ee1dd8ae629d"]

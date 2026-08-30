@@ -87,19 +87,10 @@ pub enum NodeStatus {
     /// It executed and completed, and the change it published is a **draft**
     /// because a release it adopted early has not happened yet.
     ///
-    /// The one status that is neither *settled* nor *running*. The node's work is
-    /// finished — every step ran, the branch is verified, the change request is
-    /// open — and the one thing left is outside this run: the release the node
-    /// was launched against a git pin of. Merging it now would make that pin
-    /// permanent in a base branch, so the change is held as a draft and the node
-    /// says why.
-    ///
-    /// It is not [`Done`](Self::Done), because a dependent started on it would be
-    /// built on work that cannot land; it is not [`Failed`](Self::Failed), because
-    /// nothing failed; and it is not [`Waiting`](Self::Waiting), because no person
-    /// clears it. What clears it is the release arriving, which puts a new worker
-    /// on the branch this node already has — so the loop is **not** finished with
-    /// it and a run holding one has not settled.
+    /// Neither settled nor running: merging now would make the node's temporary
+    /// git pin permanent in a base branch, so no dependent may start on it and no
+    /// run holding one has settled. What clears it is the release arriving, which
+    /// puts a new worker on the branch this node already has.
     CompleteDraft,
     /// It executed and failed.
     Failed,

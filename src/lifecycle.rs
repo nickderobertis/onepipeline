@@ -560,12 +560,10 @@ fn publish(
 
 /// The status a publication settles its node at.
 ///
-/// One line, and the whole of the difference this makes to the graph: a change the
-/// host is holding as a draft is a node whose work is complete and whose run is
-/// not finished with it. Read off what the publication **answered** rather than
-/// off the reason that was asked for, because the two can differ — a host that
-/// would not draft the change is a change that can land, and reporting it as held
-/// back would leave a landable pin reported as safe.
+/// Read off what the publication **answered** rather than off the reason that was
+/// asked for, because the two can differ: a host that would not draft the change
+/// is a change that can land, and reporting it as held back would leave a landable
+/// pin reported as safe.
 fn drafted_status(outcome: &onevcs::PublishOutcome) -> NodeStatus {
     match outcome {
         onevcs::PublishOutcome::ChangeDraft(_) => NodeStatus::CompleteDraft,

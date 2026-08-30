@@ -2554,9 +2554,18 @@ which drives a node to completion against an unreleased dependency and holds the
 settlement, the host's own `--draft`, the absence of any merge, and both views;
 by `adoption::a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_draft`,
 which drives the arrival and holds the branch, the second dispatch, and the lift;
-by `adoption::a_fast_node_whose_release_was_already_out_settles_done_with_no_draft`
+by `adoption::a_fast_node_awaiting_a_human_step_is_held_as_a_draft` and
+`adoption::a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft`, which are
+the other two answers a publication can get — neither of them *released*, and
+neither of them safe to land a pin on; by
+`adoption::a_fast_node_whose_release_was_already_out_settles_done_with_no_draft`
 and `adoption::a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release`,
 which are the two endings that must not be drafts; and, at the seam itself, by
 `onevcs_seam::every_operation_this_crate_performs_is_served_by_the_provider_seam`,
 which publishes a draft through the sibling's own supplied providers and holds
 that nothing merged it and that a publication carrying no reason lifts it.
+
+The revision the `[patch.crates-io]` block above names is written in two files,
+and `patch_pin::the_audit_permits_exactly_the_revisions_the_manifest_patches` is
+what holds them equal — including at zero, so the audit's exemption is deleted in
+the same change the patch is.

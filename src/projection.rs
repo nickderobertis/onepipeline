@@ -835,17 +835,12 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
             }
-            // And for a node whose change this run held back, the note is what
-            // ends the hold: the release it was waiting on is out, so the
-            // settlement that said "complete, and a draft" is no longer what the
-            // node is. Clearing the record returns it to the frontier — on the
-            // branch its own settlement pinned it to, so the dispatch that takes
-            // this note is a worker continuing the published branch rather than
-            // one cutting a fresh one beside the draft nothing would then lift.
-            //
-            // Only that status. A node that was running when it was told settled
-            // on whatever it went on to do, and clearing *that* would dispatch a
-            // node whose work is finished all over again.
+            // For a node this run held back, the note also ends the hold:
+            // clearing the record returns it to the frontier on the branch its own
+            // settlement pinned it to, so the dispatch that takes the note
+            // continues the published branch rather than cutting a fresh one
+            // beside a draft nothing would then lift. Only that status — clearing
+            // any other would dispatch finished work all over again.
             if state.recorded.get(node).copied().map(Recorded::status)
                 == Some(NodeStatus::CompleteDraft)
             {

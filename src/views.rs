@@ -1161,13 +1161,9 @@ pub fn status(survey: &Survey) -> String {
                 ));
             }
         }
-        // The nodes this run has deliberately stopped short of merging. Said
-        // here because this is the view somebody reads when a run has gone quiet
-        // and they are deciding whether it is stuck: a run holding one of these
-        // is **waiting on a release**, not stalled and not finished, and nothing
-        // else on this screen distinguishes the two. The line names what each is
-        // waiting on, so the decision — keep waiting, or go and cut the release —
-        // is made from here rather than from the store.
+        // Said on this view because it is the one somebody reads when a run has
+        // gone quiet and they are deciding whether it is stuck; nothing else here
+        // tells waiting-on-a-release from stalled.
         let drafted = drafted_nodes(view);
         if !drafted.is_empty() {
             out.push_str(&format!(
