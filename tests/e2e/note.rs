@@ -65,7 +65,10 @@ fn note_op(node: &str, addressee: &str, text: &str, criterion: Option<&str>) -> 
 fn held_conversation(world: &World, run: &str, nodes: Vec<Value>) {
     world.write_graphs();
     world.write_supervised_node_graph();
-    world.script("judge.asks-again", "Run the check again and report what it said.");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
     world.script("turn.hold", "hold");
     let path = world.plan(run, &plan_of(run, nodes));
     world
@@ -142,7 +145,10 @@ fn recorded(world: &World, run: &str) -> Value {
         .filter(|event| event["payload"]["command"]["op"] == "note")
         .collect();
     let [one] = &committed[..] else {
-        panic!("the run recorded {} committed notes, not one", committed.len());
+        panic!(
+            "the run recorded {} committed notes, not one",
+            committed.len()
+        );
     };
     one["payload"]["operations"][0].clone()
 }
@@ -331,7 +337,10 @@ fn a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded() {
         .filter(|event| event["payload"]["command"]["op"] == "note")
         .collect();
     let [recorded] = &rejected[..] else {
-        panic!("the run recorded {} rejected notes, not one", rejected.len());
+        panic!(
+            "the run recorded {} rejected notes, not one",
+            rejected.len()
+        );
     };
     let reason = recorded["payload"]["reason"]
         .as_str()

@@ -1196,10 +1196,9 @@ fn reconcile_edits(
         let mut applied = true;
         let mut reason = None;
         for command in &envelope.commands {
-            let compiled = crate::channel::allows(author, command)
-                .and_then(|()| {
-                    compile_and_deliver(paths, journal, state, command, launch, in_flight)
-                });
+            let compiled = crate::channel::allows(author, command).and_then(|()| {
+                compile_and_deliver(paths, journal, state, command, launch, in_flight)
+            });
             match compiled {
                 Ok(operations) => {
                     // Dropping or retrying a running node raises its

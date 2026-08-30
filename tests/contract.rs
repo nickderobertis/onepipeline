@@ -3585,8 +3585,8 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
 
     // Every addressee the seam has, spelled as the entry writes them — and the
     // spelling is the seam's own rather than a second one this crate keeps.
-    let addressees: Vec<String> = serde_json::from_value(block["addressees"].clone())
-        .expect("entry 51 names the addressees");
+    let addressees: Vec<String> =
+        serde_json::from_value(block["addressees"].clone()).expect("entry 51 names the addressees");
     for named in &addressees {
         let parsed: Addressee = serde_json::from_value(json!(named))
             .unwrap_or_else(|e| panic!("`{named}` is an addressee: {e}"));
@@ -3666,5 +3666,6 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     // The call itself is the one the entry names, asked of the compiler rather
     // than of a list beside it.
     assert_eq!(api["call"].as_str(), Some("deliver"));
-    let _: fn(&RunPaths, &str, &Note) -> onepipeline::Result<Delivered> = onepipeline::note::deliver;
+    let _: fn(&RunPaths, &str, &Note) -> onepipeline::Result<Delivered> =
+        onepipeline::note::deliver;
 }
