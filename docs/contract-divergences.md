@@ -12,11 +12,11 @@ for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
 Entries **10–22, 33, 35–40 and 46–48 are open**. Each states what the code does
-today and the proposal it is waiting on. Most are questions for a *producer* rather than for
-this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
-general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40 — are for the planner who owns the contract, and name the sentence
-in it they would change. Entry 40 is for both: its plan-schema and event-kind
+today and the proposal it is waiting on. Most are questions for a *producer*
+rather than for this crate, because `oneagentgraph` and `onevcs` are independent
+tools that expose general integration hooks only and nothing in them may know
+about this one; the rest — 36 to 40, and 46 to 48 — are for the planner who owns
+the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
 repository.

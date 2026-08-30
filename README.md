@@ -203,7 +203,6 @@ dispatch runs. Nothing beyond that is promised, and the spelling of the path lea
 of all: no consumer may derive one path from another. Not in the approved contract
 yet either: open divergence 47.
 
-
 The planner supervises over the channel:
 
 ```bash
