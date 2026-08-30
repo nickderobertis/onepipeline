@@ -2170,8 +2170,11 @@ impl MemberDeath {
 struct TurnRecords {
     /// The turn each member last opened.
     open: BTreeMap<String, u64>,
-    /// The members and turns whose close carried a [`USAGE_FIGURES`] figure.
-    with_usage: BTreeSet<(String, u64)>,
+    /// The members and turns whose close carried a **non-zero**
+    /// [`USAGE_FIGURES`] figure, which is the whole of what "billed" means here:
+    /// a close carrying no usage, or a usage whose every figure is nought, is
+    /// not in this set.
+    with_billed_usage: BTreeSet<(String, u64)>,
 }
 
 // llmlint: ignore-block[changed_behavior_has_e2e] the half a producer reaches *is* a
@@ -2203,7 +2206,7 @@ impl TurnRecords {
         } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
             && has_a_usage_figure(envelope.payload.get("usage"))
         {
-            self.with_usage.insert((member, turn));
+            self.with_billed_usage.insert((member, turn));
         }
     }
 
@@ -2217,7 +2220,7 @@ impl TurnRecords {
     fn contradicts_a_death_of(&self, member: &str) -> bool {
         self.open
             .get(member)
-            .is_some_and(|turn| self.with_usage.contains(&(member.to_owned(), *turn)))
+            .is_some_and(|turn| self.with_billed_usage.contains(&(member.to_owned(), *turn)))
     }
 } // llmlint: ignore-end[changed_behavior_has_e2e]
 

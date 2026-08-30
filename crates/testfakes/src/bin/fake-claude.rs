@@ -215,9 +215,11 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     };
     let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
     // Empty for the observer graph's turns, which are not node dispatches and are
-    // promised nothing; anything else is held to the whole promise here, where the
-    // turn is.
-    let scratch = usable_scratch(&prompt, "entered");
+    // promised nothing. This program cannot tell those two apart — the variable's
+    // absence is the only signal it has — so what refuses a *dispatch* given
+    // nothing is `fake-oneagentgraph`, which knows it is one; what happens here is
+    // that a value present is held to the whole promise, at the turn.
+    let scratch = scratch_reading(&prompt, "entered");
     fake::record(
         dir,
         "claude-turn",
@@ -249,7 +251,7 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             // one instant — the fact under test, recorded by the turns rather
             // than inferred from them.
             fake::barrier(&dir.join("turn.concurrent.arrived"), &scratch, parties);
-            usable_scratch(&prompt, "beside the others");
+            scratch_reading(&prompt, "beside the others");
         }
     }
 
@@ -350,17 +352,22 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     outcome.exit_code()
 }
 
-/// The scratch directory this turn holds right now, having proved it usable.
+/// Read the scratch directory this turn was given, prove a value present is
+/// usable, and answer what was read.
 ///
-/// A *use* rather than a look, at the moment it is called: the promise is a
+/// A *use* rather than a look, for a value that is there: the promise is a
 /// directory that is there and writable while the dispatch runs, and writing is
 /// the only way to find out. Each reading is recorded under the phase it was
 /// taken in, so a journey can compare two readings of one turn as well as two
 /// turns' readings of their own.
 ///
-/// The empty string for a turn that was promised nothing — the observer graph's,
-/// which is not a node dispatch — and that is a reading too, recorded as one.
-fn usable_scratch(prompt: &str, phase: &str) -> String {
+/// The empty string where the variable is unset, recorded as the reading it is
+/// and judged no further. That is the observer graph's turns, which are not node
+/// dispatches and are promised nothing — and this program has no way to tell one
+/// of those from a node dispatch that was wrongly given nothing, because the
+/// variable is the only thing it is told. `fake-oneagentgraph` is where that
+/// second case refuses, since a dispatch is what that program *is*.
+fn scratch_reading(prompt: &str, phase: &str) -> String {
     let dir = fake::script_dir();
     let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
     if !scratch.is_empty() {

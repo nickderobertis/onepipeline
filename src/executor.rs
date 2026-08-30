@@ -330,12 +330,17 @@ fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
         .collect();
     env.push((
         NODE_SCRATCH_DIR_ENV.to_string(),
-        node_scratch_dir(labels)?.display().to_string(),
+        make_node_scratch_dir(labels)?.display().to_string(),
     ));
     Ok(env)
 }
 
 /// Make this dispatch's own scratch directory, and answer where it is.
+///
+/// Named for the making, because that is the whole of it: this mints a number no
+/// caller has had, creates a directory under it, and answers the path — so two
+/// calls with identical arguments answer differently, and neither answer existed
+/// before the call.
 ///
 /// Under the run's own directory, so a run's scratch is thrown away with the run.
 ///
@@ -347,7 +352,7 @@ fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
 // needs a run directory that exists holding a file by that name. Both are driven against
 // the real filesystem by
 // `tests::every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one`.
-fn node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
+fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
     /// Enough numbers that walking past every directory a run has already made is
     /// never the reason a dispatch fails, and few enough that a base directory
     /// nothing can be created in fails rather than spinning.
