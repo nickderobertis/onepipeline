@@ -40,14 +40,99 @@ pub const DEFAULT_INSTRUCTION: &str = "Move from the git pin to that released ve
 /// template has reason to guard on: at a fast node's first render no release has
 /// happened, so it is empty there and a template that guards renders the other
 /// branch — which is what fast adoption *is*, rather than a gap to close.
-pub const VARIABLES: &[&str] = &[
-    "dependency",
-    "repository",
-    "branch",
-    "commit",
-    "target",
-    "version",
-];
+///
+/// Derived from [`Variable`] rather than written beside it, so the names this
+/// crate publishes and the cells it renders cannot come apart.
+pub const VARIABLES: &[&str] = &spelled(Variable::ALL);
+
+/// One variable, which is one cell of the row both sites render from.
+///
+/// A closed set rather than a name: a template names one of exactly these, and
+/// what each renders is a `match` the compiler checks rather than a lookup that
+/// can miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variable {
+    /// The dependency as the plan names it.
+    Dependency,
+    /// The repository identity its work lands in.
+    Repository,
+    /// The branch that work is on.
+    Branch,
+    /// The commit it reached its base at.
+    Commit,
+    /// The release target it is consumed at.
+    Target,
+    /// The version that release arrived at, if one has.
+    Version,
+}
+
+impl Variable {
+    /// Every one of them, in the order a refusal lists them.
+    const ALL: [Self; 6] = [
+        Self::Dependency,
+        Self::Repository,
+        Self::Branch,
+        Self::Commit,
+        Self::Target,
+        Self::Version,
+    ];
+
+    /// How a template spells this one.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dependency => "dependency",
+            Self::Repository => "repository",
+            Self::Branch => "branch",
+            Self::Commit => "commit",
+            Self::Target => "target",
+            Self::Version => "version",
+        }
+    }
+
+    /// The one a tag names, or a refusal naming it and the ones there are.
+    fn of(name: &str) -> std::result::Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|known| known.as_str() == name)
+            .ok_or_else(|| {
+                format!(
+                    "a release instruction names no variable `{name}`; it may name {}",
+                    VARIABLES
+                        .iter()
+                        .map(|known| format!("`{known}`"))
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    /// What this variable is worth for one dependency.
+    ///
+    /// A cell the run could not observe is **empty** rather than absent — the
+    /// same rule the row itself is built under — so a template naming it renders
+    /// nothing there and a template guarding on it takes the other branch.
+    fn cell(self, of: &CrossRepoReference) -> &str {
+        match self {
+            Self::Dependency => &of.dependency,
+            Self::Repository => &of.repository,
+            Self::Branch => &of.branch,
+            Self::Commit => &of.commit,
+            Self::Target => &of.release_target,
+            Self::Version => &of.version,
+        }
+    }
+}
+
+/// The names a set of variables is spelled by.
+const fn spelled<const N: usize>(all: [Variable; N]) -> [&'static str; N] {
+    let mut names = [""; N];
+    let mut at = 0;
+    while at < N {
+        names[at] = all[at].as_str();
+        at += 1;
+    }
+    names
+}
 
 /// How long a declared instruction may be, in **bytes**.
 ///
@@ -177,12 +262,12 @@ fn opens_a_section(line: &str) -> bool {
 enum Segment {
     Literal(String),
     /// `{{name}}`.
-    Variable(&'static str),
+    Variable(Variable),
     /// `{{#name}}…{{/name}}` and `{{^name}}…{{/name}}`: the guard a template
     /// needs to say one thing where a version is known and another where it is
     /// not.
     Section {
-        name: &'static str,
+        name: Variable,
         guard: Guard,
         inner: Vec<Segment>,
     },
@@ -212,27 +297,9 @@ impl Guard {
     }
 }
 
-/// The variable one tag names, or a refusal naming it and the ones there are.
-fn variable(name: &str) -> std::result::Result<&'static str, String> {
-    VARIABLES
-        .iter()
-        .copied()
-        .find(|known| *known == name)
-        .ok_or_else(|| {
-            format!(
-                "a release instruction names no variable `{name}`; it may name {}",
-                VARIABLES
-                    .iter()
-                    .map(|known| format!("`{known}`"))
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            )
-        })
-}
-
 fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
     let mut done: Vec<Segment> = Vec::new();
-    let mut open: Vec<(&'static str, Guard, Vec<Segment>)> = Vec::new();
+    let mut open: Vec<(Variable, Guard, Vec<Segment>)> = Vec::new();
     let mut literal = String::new();
     let mut rest = source;
     loop {
@@ -249,7 +316,7 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
         rest = &after[end + 2..];
         flush(&mut literal, &mut done, &mut open);
         if let Some(name) = tag.strip_prefix('/') {
-            let name = variable(name.trim())?;
+            let name = Variable::of(name.trim())?;
             match open.pop() {
                 Some((opened, guard, inner)) if opened == name => push(
                     Segment::Section {
@@ -262,27 +329,31 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
                 ),
                 Some((opened, ..)) => {
                     return Err(format!(
-                        "a release instruction closes `{{{{/{name}}}}}` where `{opened}` is open"
+                        "a release instruction closes `{{{{/{name}}}}}` where `{opened}` is open",
+                        name = name.as_str(),
+                        opened = opened.as_str(),
                     ))
                 }
                 None => {
                     return Err(format!(
-                        "a release instruction closes `{{{{/{name}}}}}`, which it never opened"
+                        "a release instruction closes `{{{{/{name}}}}}`, which it never opened",
+                        name = name.as_str(),
                     ))
                 }
             }
         } else if let Some(name) = tag.strip_prefix('#') {
-            open.push((variable(name.trim())?, Guard::WhenSet, Vec::new()));
+            open.push((Variable::of(name.trim())?, Guard::WhenSet, Vec::new()));
         } else if let Some(name) = tag.strip_prefix('^') {
-            open.push((variable(name.trim())?, Guard::WhenUnset, Vec::new()));
+            open.push((Variable::of(name.trim())?, Guard::WhenUnset, Vec::new()));
         } else {
-            push(Segment::Variable(variable(&tag)?), &mut done, &mut open);
+            push(Segment::Variable(Variable::of(&tag)?), &mut done, &mut open);
         }
     }
     flush(&mut literal, &mut done, &mut open);
     if let Some((name, ..)) = open.last() {
         return Err(format!(
-            "a release instruction opens `{{{{#{name}}}}}` and never closes it"
+            "a release instruction opens `{{{{#{name}}}}}` and never closes it",
+            name = name.as_str(),
         ));
     }
     Ok(done)
@@ -290,11 +361,7 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
 
 /// A segment read inside an open section belongs to **that** section rather than
 /// to the template, which is the whole of what makes a guard nest.
-fn push(
-    segment: Segment,
-    done: &mut Vec<Segment>,
-    open: &mut [(&'static str, Guard, Vec<Segment>)],
-) {
+fn push(segment: Segment, done: &mut Vec<Segment>, open: &mut [(Variable, Guard, Vec<Segment>)]) {
     match open.last_mut() {
         Some((.., inner)) => inner.push(segment),
         None => done.push(segment),
@@ -306,29 +373,10 @@ fn push(
 fn flush(
     literal: &mut String,
     done: &mut Vec<Segment>,
-    open: &mut [(&'static str, Guard, Vec<Segment>)],
+    open: &mut [(Variable, Guard, Vec<Segment>)],
 ) {
     if !literal.is_empty() {
         push(Segment::Literal(std::mem::take(literal)), done, open);
-    }
-}
-
-/// What one variable is worth for one dependency.
-///
-/// A cell the run could not observe is **empty** rather than absent — the same
-/// rule the row itself is built under — so a template naming it renders nothing
-/// there and a template guarding on it takes the other branch.
-fn value_of<'a>(of: &'a CrossRepoReference, name: &str) -> &'a str {
-    match name {
-        "dependency" => &of.dependency,
-        "repository" => &of.repository,
-        "branch" => &of.branch,
-        "commit" => &of.commit,
-        "target" => &of.release_target,
-        // Every name reaching here came through `variable`, so the only one left
-        // is the last. A name nothing answered would be a variable this crate
-        // published and forgot to read, which the module's own test refuses.
-        _ => &of.version,
     }
 }
 
@@ -336,9 +384,9 @@ fn render_into(segments: &[Segment], of: &CrossRepoReference, out: &mut String) 
     for segment in segments {
         match segment {
             Segment::Literal(text) => out.push_str(text),
-            Segment::Variable(name) => out.push_str(value_of(of, name)),
+            Segment::Variable(name) => out.push_str(name.cell(of)),
             Segment::Section { name, guard, inner } => {
-                if guard.holds(value_of(of, name)) {
+                if guard.holds(name.cell(of)) {
                     render_into(inner, of, out);
                 }
             }
