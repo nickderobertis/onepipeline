@@ -23,6 +23,41 @@ use crate::refusal::Refusal;
 /// The separator reserved for addressing a step within its node.
 pub const STEP_SEPARATOR: char = '/';
 
+/// The identity of a node this graph carries.
+///
+/// A newtype and never a bare `String`, because a node identity is not free text
+/// and the place that says so is here: [`validate`] refuses a plan whose node has
+/// a blank id, and this is the type that carries what that refusal established
+/// past it. [`NodeRef::of`] is the only constructor and it takes a
+/// [`Node`] — so an identity crossing a boundary as a value of this type came
+/// from a node in a graph, rather than from a field anybody could put anything
+/// in.
+///
+/// Used where a node identity leaves the reconcile loop's own scope and has to
+/// be carried rather than borrowed: a message from a dispatch thread, which is
+/// exactly where an unvalidated string would arrive at the single writer with
+/// nothing left to check it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeRef(String);
+
+impl NodeRef {
+    /// The identity of `node`, or `None` where it has none.
+    ///
+    /// Fallible rather than assumed, even though [`validate`] has already
+    /// refused a blank id on every path a plan reaches execution by: a
+    /// constructor that took the id on trust would leave the empty identity
+    /// representable again, one indirection later.
+    pub(crate) fn of(node: &Node) -> Option<Self> {
+        let id = node.id.trim();
+        (!id.is_empty()).then(|| Self(id.to_string()))
+    }
+
+    /// The identity as a graph, a journal label, and a surface spell it.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Where a node has got to.
 ///
 /// The settled statuses are recorded in the journal; [`Blocked`](Self::Blocked)
@@ -1012,6 +1047,51 @@ pub fn unblocks(graph: &Graph, id: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
+
+    /// A node identity is what a node has, and nothing else can be made into
+    /// one.
+    ///
+    /// Both directions, because the type is only worth having if the second one
+    /// holds: a node the graph would carry yields its identity, and one whose id
+    /// `validate` would refuse yields nothing to carry.
+    #[test]
+    fn a_node_identity_comes_from_a_node_and_a_blank_id_is_not_one() {
+        let named = Node {
+            id: "  service  ".into(),
+            ..Node::default()
+        };
+        assert_eq!(
+            NodeRef::of(&named).as_ref().map(NodeRef::as_str),
+            Some("service"),
+            "an identity is the node's own id, trimmed"
+        );
+        for blank in ["", "   ", "\t\n"] {
+            let unnamed = Node {
+                id: blank.into(),
+                ..Node::default()
+            };
+            assert_eq!(
+                NodeRef::of(&unnamed),
+                None,
+                "a node with no id yielded an identity: {blank:?}"
+            );
+        }
+        // And the same refusal, from the check this type carries past:
+        // `validate` is where a blank id is turned away in the first place.
+        let plan = Plan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            name: Some("blank".into()),
+            concurrency: 1,
+            goal: None,
+            tasks: vec![Node {
+                id: " ".into(),
+                task: Some("## What\nwork".into()),
+                persona: Some("engineer".into()),
+                ..Node::default()
+            }],
+        };
+        assert!(validate(&plan).is_err(), "a blank node id was accepted");
+    }
 
     /// The journal writes these words through `as_str` and the run's ledger
     /// writes them through serde. Two spellings of one vocabulary is exactly how

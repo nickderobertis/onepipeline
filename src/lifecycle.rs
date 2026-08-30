@@ -94,29 +94,9 @@ pub fn execute(
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
-    // What the attempt's own branch said about this node's criteria, read inside
-    // the attempt because the worktree is released with its session. Every
-    // ending `attempt_once` can reach past its first two lines writes it, so a
-    // re-dispatch replaces the previous attempt's reading rather than adding to
-    // it: what settles the node is what the last attempt read on that branch.
-    let mut findings: Vec<crate::criteria::Finding> = Vec::new();
     loop {
-        let preserved = match attempt_once(
-            executor,
-            paths,
-            launch,
-            &node,
-            references,
-            cancel,
-            tx,
-            &mut findings,
-        ) {
-            Attempt::Settled(settlement) => {
-                return Settlement {
-                    findings,
-                    ..*settlement
-                }
-            }
+        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
+            Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
@@ -126,10 +106,7 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
-            return Settlement {
-                findings,
-                ..stopped_retrying(&node.id, &preserved, &endings)
-            };
+            return stopped_retrying(&node.id, &preserved, &endings);
         }
         attempt = attempt.saturating_add(1);
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -146,9 +123,7 @@ pub fn execute(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "one attempt's whole context, which is `execute`'s own — see the reason there — \
-              plus what its branch said about the node's criteria, which only this function \
-              is inside the session to read"
+    reason = "one attempt's whole context, which is `execute`'s own — see the reason there"
 )]
 fn attempt_once(
     executor: &dyn Executor,
@@ -158,7 +133,6 @@ fn attempt_once(
     references: &[crate::plan::CrossRepoReference],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
-    findings: &mut Vec<crate::criteria::Finding>,
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
@@ -236,7 +210,14 @@ fn attempt_once(
             // The session stays open for them and the follow does not: dropping
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
-            *findings = crate::criteria::of_node(node, worktree.as_deref());
+            //
+            // Read against its criteria here, because this is where the node
+            // settles and the person about to act is the reader a finding is
+            // for: a branch that contradicts the bar is worth knowing *before*
+            // an approval, not after. And it is the only place: the attempt that
+            // follows an attestation dispatches nothing where the human step was
+            // last, so it opens no session and has no branch in hand to read.
+            check_criteria(node, worktree.as_deref(), tx);
             return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
@@ -295,9 +276,9 @@ fn attempt_once(
             }
         }
         if drained.settlement.status != NodeStatus::Done {
-            // Before the session goes: closing it releases the worktree, and the
-            // branch this node's criteria are read against is in it.
-            *findings = crate::criteria::of_node(node, worktree.as_deref());
+            // The node is settling on this, so the branch it settles on is read
+            // against its own criteria before the session that holds it goes.
+            check_criteria(node, worktree.as_deref(), tx);
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
             return Attempt::settled(Settlement {
                 branch,
@@ -309,11 +290,6 @@ fn attempt_once(
             completed.push(step.id.clone());
         }
     }
-
-    // Every step has run, so the branch is what this attempt made of it — and
-    // the session that holds it is still open, which is the last moment there is
-    // to read it.
-    *findings = crate::criteria::of_node(node, worktree.as_deref());
 
     let Some(token) = session else {
         // Every step declared no diff, so there is nothing to publish and the
@@ -336,8 +312,45 @@ fn attempt_once(
         &token,
         branch,
     );
+    // Only where this attempt is the node's answer. A publication that failed
+    // leaving the work on its branch is asked again, and reporting a criterion
+    // against every attempt of a node that is still being re-dispatched would
+    // put three findings on the queue for one branch nobody has settled on yet.
+    if matches!(attempted, Attempt::Settled(_)) {
+        check_criteria(node, worktree.as_deref(), tx);
+    }
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
     attempted
+}
+
+/// Hand [`crate::criteria`]'s reading of this node's branch to the loop.
+///
+/// **When**, which is all this call site decides. Every caller is a settlement
+/// `attempt_once` has already made, so nothing here can change one; and it is
+/// once per settlement rather than once per node, which differ only for a
+/// workstream held at a human step and dispatched again afterwards — two
+/// settlements, and not the same branch between them.
+///
+/// No worktree is no branch to read: every step declared no diff, the session
+/// never opened, or the remaining steps were all done on a previous attempt.
+/// Silence rather than an unread answer — nothing was named that could not be
+/// read.
+fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
+    // Both halves of "there is something to read, on behalf of somebody": a
+    // branch in hand, and a node the graph carries to report it against.
+    let (Some(worktree), Some(whose)) = (worktree, crate::graph::NodeRef::of(node)) else {
+        return;
+    };
+    for check in crate::criteria::checkable_of(node) {
+        let answer = crate::criteria::answer(worktree, &check);
+        let _ = tx.send(Message::CriterionChecked(Box::new(
+            engine::CriterionChecked {
+                node: whose.clone(),
+                check,
+                answer,
+            },
+        )));
+    }
 }
 
 /// Draft the change request's body, then publish through `onevcs`.

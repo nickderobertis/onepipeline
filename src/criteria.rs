@@ -1,117 +1,304 @@
-//! The mechanically-checkable half of a node's review bar.
+//! The mechanically checkable half of a node's acceptance criteria.
 //!
-//! A criterion that names both a file and a literal value — *"`config.yaml`
-//! carries `complete_dataset: true`"* — is checkable by reading that file, so
-//! this reads it: when a node settles, each criterion of its task is read
-//! against the tree that node's dispatch worked in.
+//! A settling lifecycle node has two things at once: a branch, checked out in
+//! the worktree its session opened, and criteria that are prose. Where one of
+//! those criteria names **a literal value in a named file**, the comparison is
+//! the cheapest check there is — read the file on the branch and look — and
+//! nothing was making it. A criterion reading "the row is `complete_dataset:
+//! true` in `tests/shared.rs`" has shipped against a branch whose file read
+//! `complete_dataset: false`, past a worker, a judge, a monitor and a manager,
+//! because every one of them read the prose rather than the file.
 //!
-//! **A mismatch is a finding and never a verdict.** A mechanical check that
+//! Two bounds, and both are the point.
+//!
+//! **What this produces is a finding, never a verdict.** A mechanical check that
 //! failed a node would be a new way for correct work to be failed on a demand
-//! nobody wrote, which is the class of mistake this exists to close — so what a
-//! mismatch produces is a non-blocking finding on the node, and the node's own
-//! settled outcome is exactly what it would have been.
+//! nobody wrote. The node settles exactly as it would have; the finding names
+//! the criterion, the file, the literal it expected and what the file holds
+//! instead, and a manager decides.
 //!
-//! The check reads only what it can be sure of: a criterion naming no file this
-//! tree holds, or naming no literal beside it, produces nothing at all. Silence
-//! on the criteria it cannot read is the price of never being wrong about the
-//! ones it can.
+//! **It recognises only what it can be sure of, and says nothing about the
+//! rest.** [`checkable`] parses a criterion into "this named file contains this
+//! literal" or declines it, and a declined criterion is not a finding, not a
+//! warning, and not a record: it is silence. A checker that guessed would raise
+//! false findings on sound work, and a tier that cries wolf is one a reader
+//! learns to skim. Missing a checkable criterion is recoverable; inventing a
+//! mismatch trains the reader to ignore the ones that are real.
+//!
+//! A file the branch will not give up — absent, unreadable, a directory, not
+//! text — is neither of those answers. It is [`Answer::Unread`], the check
+//! declining to answer, kept apart from a match and a mismatch for the same
+//! reason "not answered" is never "not released" elsewhere in this engine.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::plan::Node;
 
-/// The heading a node's per-node review bar is written under.
+/// One criterion parsed into the one shape this module can answer.
 ///
-/// The plan schema's own — `docs/contract.md` fixes it as the task's own
-/// `## Acceptance criteria`, which is what the judge is handed — so this reads
-/// the same section a reviewer reads.
-pub(crate) const HEADING: &str = "## Acceptance criteria";
-
-/// The most of one named file this reads.
-///
-/// A criterion names a source file, and a tree also holds build output and
-/// vendored archives that a mistyped path could land on. Past this the file is
-/// left unread and the criterion produces nothing, which is the same answer as
-/// any other criterion this cannot read.
-const MAX_FILE_BYTES: u64 = 1 << 20;
-
-/// One criterion whose named file does not carry the literal it names.
+/// Every field is private and there is no constructor but [`parse`], so a value
+/// of this type has been through it: the file is a [`BranchPath`] and the
+/// literal is not empty. A struct with `pub(crate)` fields would let any module
+/// in the crate assemble a criterion this module would never have recognised and
+/// then have it read off a branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Finding {
-    /// The criterion, as its author wrote it.
-    pub criterion: String,
-    /// The file that was read, relative to the tree.
-    pub file: String,
-    /// The literal it does not carry.
-    pub literal: String,
+pub(crate) struct Checkable {
+    /// The criterion as the plan wrote it, so a finding quotes the bar rather
+    /// than this module's reading of it.
+    criterion: String,
+    /// The file it named, relative to the node's branch.
+    file: BranchPath,
+    /// The literal it said that file holds. Never empty.
+    literal: String,
 }
 
-impl Finding {
-    /// What the planner is told, which names all three.
-    pub(crate) fn message(&self) -> String {
-        format!(
-            "criterion check: `{}` does not carry `{}`, which its criterion names — \"{}\". \
-             This is a finding and not a verdict: the node settled on its own outcome, and \
-             what to do about the mismatch is the planner's call.",
-            self.file, self.literal, self.criterion
-        )
+impl Checkable {
+    pub(crate) fn criterion(&self) -> &str {
+        &self.criterion
+    }
+
+    pub(crate) fn file(&self) -> &str {
+        self.file.as_str()
+    }
+
+    pub(crate) fn literal(&self) -> &str {
+        &self.literal
     }
 }
 
-/// Read one node's criteria against the tree its dispatch worked in.
+/// A path a criterion named, which is a file on the node's own branch.
 ///
-/// A node's own task prose and each of its steps': a node with `steps` carries
-/// no task of its own, and each step states what that step is held to.
-pub(crate) fn of_node(node: &Node, tree: Option<&Path>) -> Vec<Finding> {
-    findings(
-        node.task.as_deref().into_iter().chain(
-            node.steps
-                .iter()
-                .flatten()
-                .filter_map(|step| step.task.as_deref()),
-        ),
-        tree,
-    )
+/// A newtype and not a `String`, because the difference is what this check is
+/// allowed to open: an absolute path, one climbing out with `..`, a Windows
+/// drive prefix, and a path with whitespace in it are **not** files on the
+/// branch, and a bare string would leave every one of them representable after
+/// parsing and re-checkable only by whoever remembered to. [`BranchPath::named`]
+/// is the only constructor, so a value of this type has already been refused
+/// each of them.
+///
+/// It is a *lexical* promise, which is the half a string can keep. What the
+/// branch resolves it to is the other half and is checked where it is opened —
+/// see [`answer`], which refuses a symlink out of the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchPath(String);
+
+impl BranchPath {
+    /// The path a backticked span names on the branch, or `None` where the span
+    /// is not one.
+    ///
+    /// A path has no whitespace and either a directory separator or a lettered
+    /// extension. Deliberately not a version: `0.17.5` ends in a dot and a digit
+    /// and is a value, while `Cargo.toml` ends in a dot and letters and is a
+    /// file — so "the version in `Cargo.toml` is `0.17.5`" reads as the one file
+    /// and the one literal it is, rather than as two paths [`parse`] then
+    /// declines.
+    ///
+    /// The escapes are spelled here so that every host reads a criterion the
+    /// same way rather than each one reading its own separators.
+    fn named(span: &str) -> Option<Self> {
+        if span.is_empty()
+            || span.chars().any(char::is_whitespace)
+            || span.starts_with('/')
+            || span.contains('\\')
+            // A Windows drive prefix on the host that has them, and nothing a
+            // criterion means by a *file* anywhere else.
+            || span.contains(':')
+            || span.split('/').any(|segment| segment == "..")
+        {
+            return None;
+        }
+        let lettered_extension = span
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(stem, extension)| {
+                !stem.is_empty()
+                    && !extension.is_empty()
+                    && extension.chars().all(|c| c.is_ascii_alphabetic())
+            });
+        (span.contains('/') || lettered_extension).then(|| Self(span.to_string()))
+    }
+
+    /// The path as the criterion wrote it, for a payload and a finding to quote.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Read task prose against the tree its dispatch worked in.
+/// What reading the branch answered.
 ///
-/// Several pieces of prose because a node with `steps` carries its bar on them:
-/// each step's task states what that step is held to, and the node itself states
-/// nothing. No tree is no findings — there is nothing to read them against.
-pub(crate) fn findings<'a>(
-    prose: impl IntoIterator<Item = &'a str>,
-    tree: Option<&Path>,
-) -> Vec<Finding> {
-    let Some(tree) = tree else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for task in prose {
-        for criterion in criteria(task) {
-            for finding in check(&criterion, tree) {
-                if !found.contains(&finding) {
-                    found.push(finding);
-                }
+/// Three and not two: a file that cannot be read is not a file that disagrees,
+/// and a reader who could not tell them apart would chase a mismatch that was
+/// never measured. `Unread` is that third answer, and its `reason` is the words
+/// of whatever refused rather than this module's summary of them; `holds` is
+/// what the file has where the criterion's own value is not there, which is what
+/// makes a finding worth reading without opening the branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Match,
+    Mismatch { holds: String },
+    Unread { reason: String },
+}
+
+impl Answer {
+    /// The word the run's own record carries this answer under.
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Mismatch { .. } => "mismatch",
+            Self::Unread { .. } => "unread",
+        }
+    }
+}
+
+/// The most of one named file this reads.
+///
+/// A criterion names a source file, and the tree it is read against also holds
+/// build output and vendored archives that a mistyped path can land on — an
+/// extension is all [`BranchPath::named`] asks of a path, and `.rlib` is as
+/// lettered as `.toml`. Past this the file is one the branch will not give up,
+/// which is [`Answer::Unread`] like every other file this cannot read, rather
+/// than a whole artifact pulled into memory to be searched for a literal.
+const MAX_FILE_BYTES: u64 = 1 << 20;
+
+/// The heading a task states its bar under, matched exactly.
+///
+/// A section named nearly this is not the bar the worker and its judge were
+/// handed, and reading one as if it were would invent criteria nobody agreed to
+/// — which is the failure this whole module is bounded to avoid.
+const CRITERIA_HEADING: &str = "## Acceptance criteria";
+
+/// Every criterion of one node this module can answer.
+///
+/// The node's own task, the amendment binding it — which `plan` documents as
+/// part of the bar rather than as advice — and each step's task, because the
+/// steps of one lifecycle node all work on the one branch this reads.
+pub(crate) fn checkable_of(node: &Node) -> Vec<Checkable> {
+    let steps = node
+        .steps
+        .iter()
+        .flatten()
+        .filter_map(|step| step.task.as_deref());
+    let mut found: Vec<Checkable> = Vec::new();
+    for task in node
+        .task
+        .as_deref()
+        .into_iter()
+        .chain(node.amendment.as_deref())
+        .chain(steps)
+    {
+        for check in checkable(task) {
+            // A node and its steps can restate one criterion, and a criterion
+            // compared twice is two findings for one thing said once.
+            if !found.contains(&check) {
+                found.push(check);
             }
         }
     }
     found
 }
 
-/// The bullets under the task's `## Acceptance criteria` heading.
+/// The criteria of one task document this module can answer.
 ///
-/// One criterion per bullet, with its wrapped continuation lines joined onto it:
-/// a criterion written across two lines names its file on one and its literal on
-/// the other as often as not, and reading them apart would make the pair
-/// unreadable.
-fn criteria(task: &str) -> Vec<String> {
+/// Only the `## Acceptance criteria` section: what a task says elsewhere is
+/// context, and a `## What` narrating the change is not a bar anybody agreed to.
+pub(crate) fn checkable(task: &str) -> Vec<Checkable> {
+    criteria_in(task)
+        .into_iter()
+        .filter_map(|criterion| parse(&criterion))
+        .collect()
+}
+
+/// Read one criterion off the branch.
+///
+/// `root` is the worktree the node's session opened, which is that branch
+/// checked out, and what this opens is **inside it**. Two halves, because a path
+/// is two things: [`BranchPath`] refuses the spellings that leave lexically, and
+/// this refuses the ones that leave once the branch has resolved them — a
+/// committed symlink pointing at `/etc/passwd` is a relative path by every
+/// lexical rule there is. Both the root and the resolved path are canonicalized
+/// and the second must be under the first; anything else is the check declining
+/// to answer, which is what it does with every other file it cannot read.
+pub(crate) fn answer(root: &Path, check: &Checkable) -> Answer {
+    let declined = |reason: String| Answer::Unread { reason };
+    let (root, path) = match (root.canonicalize(), root.join(check.file()).canonicalize()) {
+        (Ok(root), Ok(path)) => (root, path),
+        (Err(error), _) | (_, Err(error)) => return declined(error.to_string()),
+    };
+    if !path.starts_with(&root) {
+        return declined(format!(
+            "`{}` resolves to {}, which is outside the node's branch",
+            check.file(),
+            path.display()
+        ));
+    }
+    match std::fs::metadata(&path).map(|file| file.len()) {
+        Err(error) => return declined(error.to_string()),
+        Ok(bytes) if bytes > MAX_FILE_BYTES => {
+            return declined(format!(
+                "`{}` is {bytes} bytes, past the {MAX_FILE_BYTES} this reads",
+                check.file()
+            ))
+        }
+        Ok(_) => {}
+    }
+    match std::fs::read_to_string(&path) {
+        Err(error) => declined(error.to_string()),
+        Ok(text) if text.contains(check.literal()) => Answer::Match,
+        Ok(text) => Answer::Mismatch {
+            holds: holds(&text, check.literal()),
+        },
+    }
+}
+
+/// What a file holds where it does not hold the literal.
+///
+/// The line naming the same key, where the literal is a `key: value` and the
+/// file has one — which is the case this whole check exists for, and the one
+/// where "what it holds instead" is a fact rather than a shrug. Where there is
+/// no such line, that absence is the answer and is said as one.
+fn holds(text: &str, literal: &str) -> String {
+    let key = literal
+        .split_once([':', '='])
+        .map_or(literal, |(key, _)| key)
+        .trim();
+    let named = (!key.is_empty())
+        .then(|| text.lines().find(|line| line.contains(key)))
+        .flatten();
+    match named {
+        Some(line) => format!("`{}`", one_line(line.trim())),
+        None => format!("nothing naming `{}`", one_line(key)),
+    }
+}
+
+/// A quoted fragment, bounded so a finding stays one readable sentence.
+fn one_line(text: &str) -> String {
+    const LIMIT: usize = 200;
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flattened.char_indices().nth(LIMIT) {
+        None => flattened,
+        Some((at, _)) => format!("{}…", &flattened[..at]),
+    }
+}
+
+/// The criteria of one task, as bullets, in the order they were written.
+///
+/// A bullet wrapped over several lines is one criterion: a plan is prose a
+/// person wrote, and a bar split by a line break is still one bar.
+fn criteria_in(task: &str) -> Vec<String> {
     let mut criteria: Vec<String> = Vec::new();
     let mut inside = false;
+    // Whether the last bullet is still being read. A blank line or prose at the
+    // margin **ends** it, so an indented line further down starts nothing and is
+    // stitched onto nothing: a paragraph between two bullets would otherwise
+    // make the first bullet swallow whatever came after the paragraph, and this
+    // module would then compare a sentence the plan never wrote as one.
+    let mut open = false;
     for line in task.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("##") {
-            inside = trimmed.eq_ignore_ascii_case(HEADING);
+            inside = trimmed == CRITERIA_HEADING;
+            open = false;
             continue;
         }
         if !inside {
@@ -121,257 +308,413 @@ fn criteria(task: &str) -> Vec<String> {
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            Some(bullet) => criteria.push(bullet.trim().to_owned()),
-            // A continuation belongs to the bullet above it; anything before the
-            // first bullet is prose introducing the section.
-            None if !trimmed.is_empty() => {
-                if let Some(last) = criteria.last_mut() {
+            Some(bullet) => {
+                criteria.push(bullet.trim().to_string());
+                open = true;
+            }
+            None if trimmed.is_empty() || line.starts_with(char::is_alphanumeric) => open = false,
+            // An indented continuation belongs to the bullet above it, while
+            // one is still open.
+            None => {
+                if let (true, Some(last)) = (open, criteria.last_mut()) {
                     last.push(' ');
                     last.push_str(trimmed);
                 }
             }
-            None => {}
         }
     }
     criteria
 }
 
-/// Which of a criterion's backticked tokens are files and which are values.
+/// One criterion, parsed into a file and a literal — or declined.
 ///
-/// Nothing in the prose distinguishes the two — a criterion writes both the same
-/// way — so the **tree** decides: a token naming a file this tree holds is that
-/// file, and every other token is a value one of those files has to carry.
-/// Which is also why a criterion naming no file, or naming nothing beside one,
-/// is silent: there is no pair to read.
-fn check(criterion: &str, tree: &Path) -> Vec<Finding> {
-    let quoted = backticked(criterion);
-    let mut files: Vec<(String, String)> = Vec::new();
-    let mut literals: Vec<String> = Vec::new();
-    for token in quoted {
-        match read_named(tree, &token) {
-            Some(content) => files.push((token, content)),
-            None => literals.push(token),
-        }
-    }
-    if files.is_empty() || literals.is_empty() {
-        return Vec::new();
-    }
-    let mut found = Vec::new();
-    for literal in literals {
-        // Any one of the named files carrying it satisfies the criterion: a
-        // criterion that names two files means the value is in the pair of them,
-        // and reporting the one that does not hold it would be a finding about
-        // a criterion that is met.
-        if files.iter().any(|(_, content)| content.contains(&literal)) {
-            continue;
-        }
-        for (file, _) in &files {
-            found.push(Finding {
-                criterion: criterion.to_owned(),
-                file: file.clone(),
-                literal: literal.clone(),
-            });
-        }
-    }
-    found
-}
-
-/// Every backticked run in one criterion, in the order it wrote them.
-///
-/// Empty and unterminated runs are dropped: a criterion writing a lone backtick
-/// has said nothing this can read.
-fn backticked(criterion: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut rest = criterion;
-    while let Some(open) = rest.find('`') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find('`') else {
-            break;
-        };
-        let token = rest[..close].trim();
-        if !token.is_empty() {
-            tokens.push(token.to_owned());
-        }
-        rest = &rest[close + 1..];
-    }
-    tokens
-}
-
-/// The contents of the file this token names within the tree, if it names one.
-///
-/// A token that is absolute, that climbs out of the tree, or that names anything
-/// but a plain file of a readable size names no file here — the criterion then
-/// carries it as a literal, which is what an ordinary backticked value is.
-///
-/// **Every component is read without following a link.** A criterion is prose an
-/// agent wrote and the tree is one an agent worked in, so an in-tree symlink
-/// pointing outside it would be a criterion reading a file the node never
-/// touched — and reporting *that* file's contents as this branch's is the one
-/// wrong answer this check must not give. `report::retain` refuses a symlink for
-/// the same reason: a name that delivers a different file than it states.
-fn read_named(tree: &Path, token: &str) -> Option<String> {
-    if token.is_empty() || Path::new(token).is_absolute() {
+/// Declined is the common answer and the safe one. The shape recognised is
+/// exactly two backticked spans, one of them a path and the other not, in a
+/// sentence that is not a negation: `the row in ` + a path + ` is ` + a literal.
+/// Anything else — one span, three spans, two paths, two literals, "no longer
+/// contains" — is prose this module has no business ruling on.
+fn parse(criterion: &str) -> Option<Checkable> {
+    // An odd number of backticks is a sentence whose spans nobody closed, and
+    // the fragments either side of the missing one are not what the writer
+    // quoted: "`service.md` holds `state: done" reads as two spans and means
+    // one. Declined, like every other shape this cannot be sure of.
+    if negated(criterion) || !criterion.matches('`').count().is_multiple_of(2) {
         return None;
     }
-    let mut path = PathBuf::from(tree);
-    for component in Path::new(token).components() {
-        let std::path::Component::Normal(part) = component else {
-            return None;
-        };
-        path.push(part);
-        // Each directory on the way as well as the file itself: a link halfway
-        // along the path leaves the rest of it outside the tree just as surely.
-        if std::fs::symlink_metadata(&path).ok()?.is_symlink() {
-            return None;
-        }
-    }
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+    let spans: Vec<&str> = criterion
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .collect();
+    // Exactly two, so which span is the file and which is the literal is read
+    // off the sentence rather than guessed at.
+    let [first, second] = spans[..] else {
         return None;
-    }
-    std::fs::read_to_string(&path).ok()
+    };
+    let (file, literal) = match (BranchPath::named(first), BranchPath::named(second)) {
+        (Some(file), None) => (file, second),
+        (None, Some(file)) => (file, first),
+        // Two paths, or none: nothing here says which is the value.
+        _ => return None,
+    };
+    (!literal.is_empty()).then(|| Checkable {
+        criterion: criterion.to_string(),
+        file,
+        literal: literal.to_string(),
+    })
+}
+
+/// Whether a criterion says something is *not* so.
+///
+/// A criterion demanding an absence is satisfied by the very reading — the file
+/// does not hold the literal — that this module would otherwise report as a
+/// mismatch, so a negated one is declined rather than answered backwards. The
+/// words are matched whole: "nothing" is not "not", and "cannot" is not "no".
+fn negated(criterion: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "no", "not", "never", "neither", "nor", "nothing", "none", "without", "cannot",
+    ];
+    const PHRASES: &[&str] = &["rather than", "instead of"];
+    let lowered = criterion.to_lowercase();
+    PHRASES.iter().any(|phrase| lowered.contains(phrase))
+        || lowered
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .any(|word| WORDS.contains(&word) || word.ends_with("n't"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One scratch tree, named after the test that asked for it.
-    fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("onepipeline-criteria-{name}-{}", crate::sys::pid()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch tree");
-        for (file, body) in files {
-            let path = dir.join(file);
-            std::fs::create_dir_all(path.parent().expect("a directory"))
-                .expect("the directory is made");
-            std::fs::write(path, body).expect("the file is written");
+    /// A task stating one criterion, so a case reads as the plan that would
+    /// carry it.
+    fn task(criterion: &str) -> String {
+        format!("## What\nShip it.\n\n## Acceptance criteria\n\n- {criterion}\n")
+    }
+
+    #[test]
+    fn a_criterion_naming_a_file_and_a_literal_is_the_one_shape_this_reads() {
+        let found = checkable(&task(
+            "the shared journey row in `tests/e2e/shared.rs` is `complete_dataset: true`",
+        ));
+        assert_eq!(
+            found,
+            vec![Checkable {
+                criterion: "the shared journey row in `tests/e2e/shared.rs` is \
+                            `complete_dataset: true`"
+                    .to_string(),
+                file: BranchPath("tests/e2e/shared.rs".to_string()),
+                literal: "complete_dataset: true".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_file_and_the_literal_are_read_off_the_sentence_in_either_order() {
+        let found = checkable(&task("`0.17.5` is the version `Cargo.toml` declares"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].file.as_str(), "Cargo.toml");
+        assert_eq!(found[0].literal, "0.17.5");
+    }
+
+    #[test]
+    fn a_criterion_this_cannot_parse_is_silence() {
+        for prose in [
+            // Neither half.
+            "the run is faster than it was",
+            // A file and no literal.
+            "`src/engine.rs` is tidier",
+            // A literal and no file.
+            "the row is `complete_dataset: true`",
+            // Three spans: which two are the pair is a guess.
+            "`src/a.rs` and `src/b.rs` both hold `version: 1`",
+            // Two files.
+            "`src/a.rs` matches `src/b.rs`",
+            // Two literals.
+            "`version: 1` is not `version: 2`",
+            // A negation, which this reading would answer backwards.
+            "`src/engine.rs` no longer holds `unwrap()`",
+            "`src/engine.rs` does not hold `panic!(`",
+            "`src/engine.rs` holds `expect(` rather than `unwrap(`",
+            // A path out of the worktree is not a file on the branch.
+            "`/etc/passwd` holds `root: yes`",
+            "`../elsewhere/notes.md` holds `state: done`",
+            // The same escapes as a host that spells them its own way would.
+            "`C:\\elsewhere\\notes.md` holds `state: done`",
+            "`C:notes.md` holds `state: done`",
+            // Backticks with nothing between them.
+            "`` is `state: done`",
+            // A span nobody closed. The fragments either side of the missing
+            // backtick are two spans by the split and one quotation by the
+            // writer.
+            "`notes.md` holds `state: done",
+        ] {
+            assert_eq!(
+                checkable(&task(prose)),
+                vec![],
+                "read a bar out of: {prose}"
+            );
         }
-        dir
     }
 
-    /// The one file every case here reads, and the value it holds.
-    const ROW: &[(&str, &str)] = &[("journeys.yaml", "complete_dataset: false\n")];
+    #[test]
+    fn only_the_acceptance_criteria_section_is_a_bar() {
+        let task = "## What\nThe row in `notes.md` is `state: done`.\n\n\
+                    ## Acceptance criteria\n\n- it ships\n\n\
+                    ## Additional info\n\n- `other.md` holds `state: done`\n";
+        assert_eq!(checkable(task), vec![]);
+    }
 
     #[test]
-    fn a_named_file_that_contradicts_its_literal_is_a_finding() {
-        let dir = tree("contradicts", ROW);
-        let found = findings(
-            [
-                "## What\nship it\n\n## Acceptance criteria\n- the row in `journeys.yaml` is \
-                 `complete_dataset: true`.\n",
-            ],
-            Some(&dir),
-        );
+    fn a_bullet_ends_at_a_blank_line_and_prose_after_it_joins_nothing() {
+        // The indented line is a continuation of the *paragraph*, not of the
+        // bullet two lines above it. Stitched onto that bullet it would read as
+        // "it ships in `notes.md` is `state: done`" — a criterion the plan never
+        // wrote, compared against a branch that never agreed to it.
+        let task = "## Acceptance criteria\n\n- it ships\n\nAnd separately:\n                      the row in `notes.md` is `state: done`\n";
+        assert_eq!(checkable(task), vec![]);
+    }
+
+    #[test]
+    fn a_criterion_wrapped_over_lines_is_one_criterion() {
+        let task = "## Acceptance criteria\n\n- the row in `notes.md`\n  is `state: done`\n";
+        let found = checkable(task);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].file, "journeys.yaml");
-        assert_eq!(found[0].literal, "complete_dataset: true");
-        assert!(found[0].criterion.contains("journeys.yaml"));
-        let message = found[0].message();
-        assert!(message.contains("journeys.yaml"), "{message}");
-        assert!(message.contains("complete_dataset: true"), "{message}");
-    }
-
-    #[test]
-    fn a_named_file_that_carries_its_literal_is_silent() {
-        let dir = tree("carries", &[("journeys.yaml", "complete_dataset: true\n")]);
-        assert!(findings(
-            ["## Acceptance criteria\n- `journeys.yaml` says `complete_dataset: true`.\n"],
-            Some(&dir),
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn a_criterion_naming_no_file_or_no_literal_is_silent() {
-        let dir = tree("silent", ROW);
-        // No file: every backticked token names nothing this tree holds.
-        assert!(findings(
-            ["## Acceptance criteria\n- the dataset is `complete_dataset: true`.\n"],
-            Some(&dir),
-        )
-        .is_empty());
-        // No literal beside the file.
-        assert!(findings(
-            ["## Acceptance criteria\n- `journeys.yaml` is updated.\n"],
-            Some(&dir),
-        )
-        .is_empty());
-        // No criteria section at all.
-        assert!(findings(["## What\ndo it\n"], Some(&dir)).is_empty());
-        // Nothing to read it against.
-        assert!(findings(
-            ["## Acceptance criteria\n- `journeys.yaml` says `complete_dataset: true`.\n"],
-            None,
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn only_the_criteria_section_is_read() {
-        let dir = tree("section", ROW);
-        // The same sentence under another heading is prose, not a bar.
-        assert!(findings(
-            [
-                "## What\nmake `journeys.yaml` say `complete_dataset: true`\n\n\
-                 ## Acceptance criteria\n- it ships.\n"
-            ],
-            Some(&dir),
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn a_wrapped_criterion_is_read_as_one() {
-        let dir = tree("wrapped", ROW);
-        let found = findings(
-            [
-                "## Acceptance criteria\n- the shared journey row in `journeys.yaml`\n  \
-                 reads `complete_dataset: true`.\n",
-            ],
-            Some(&dir),
+        assert_eq!(found[0].literal, "state: done");
+        assert!(
+            found[0]
+                .criterion
+                .contains("the row in `notes.md` is `state: done`"),
+            "the criterion was not rejoined: {found:?}"
         );
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].criterion.contains("reads"), "{found:?}");
     }
 
-    /// A link inside the tree names a file the node's dispatch never touched, so
-    /// the criterion carries the token as a literal instead of reading through
-    /// it — reporting that file's contents as this branch's is the one wrong
-    /// answer this check must not give.
+    #[test]
+    fn a_node_states_its_bar_in_its_task_its_amendment_and_its_steps_and_says_each_once() {
+        let node = Node {
+            id: "service".into(),
+            task: Some(task("`notes.md` holds `state: done`")),
+            amendment: Some(task("`version.txt` holds `v: 2`")),
+            steps: Some(vec![
+                crate::plan::Step {
+                    id: "one".into(),
+                    task: Some(task("`notes.md` holds `state: done`")),
+                    ..crate::plan::Step::default()
+                },
+                crate::plan::Step {
+                    id: "two".into(),
+                    task: Some(task("`rows.csv` holds `count: 3`")),
+                    ..crate::plan::Step::default()
+                },
+            ]),
+            ..Node::default()
+        };
+        let files: Vec<String> = checkable_of(&node)
+            .into_iter()
+            .map(|check| check.file.as_str().to_string())
+            .collect();
+        assert_eq!(files, ["notes.md", "version.txt", "rows.csv"]);
+    }
+
+    #[test]
+    fn a_file_that_holds_the_literal_matches_and_one_that_does_not_says_what_it_holds() {
+        let dir = tempdir("holds");
+        std::fs::write(dir.join("notes.md"), "state: done\n").expect("the file writes");
+        let check = |literal: &str| Checkable {
+            criterion: format!("`notes.md` holds `{literal}`"),
+            file: BranchPath("notes.md".into()),
+            literal: literal.into(),
+        };
+        assert_eq!(answer(&dir, &check("state: done")), Answer::Match);
+        assert_eq!(
+            answer(&dir, &check("state: shipped")),
+            Answer::Mismatch {
+                holds: "`state: done`".into()
+            }
+        );
+        // A literal the file has no line for at all: the absence is the answer.
+        assert_eq!(
+            answer(&dir, &check("owner: nobody")),
+            Answer::Mismatch {
+                holds: "nothing naming `owner`".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_the_branch_will_not_give_up_is_neither_answer() {
+        let dir = tempdir("unread");
+        std::fs::create_dir(dir.join("rows.md")).expect("a directory where a file was named");
+        let check = Checkable {
+            criterion: "`rows.md` holds `state: done`".into(),
+            file: BranchPath("rows.md".into()),
+            literal: "state: done".into(),
+        };
+        let answered = answer(&dir, &check);
+        assert_eq!(answered.as_str(), "unread", "{answered:?}");
+        // And a file that is not there at all: nothing was compared, so nothing
+        // is reported as a comparison.
+        let absent = Checkable {
+            file: BranchPath("gone.md".into()),
+            ..check
+        };
+        assert_eq!(answer(&dir, &absent).as_str(), "unread");
+    }
+
+    /// A file past the bound is one more the branch will not give up.
+    ///
+    /// An extension is all a path has to look like, and a tree holds build
+    /// output and vendored archives wearing lettered ones — so a mistyped
+    /// criterion can name an artifact, and searching one for a literal is not a
+    /// comparison anybody asked for. It declines, and the same file under the
+    /// bound is compared, so the refusal is the size and not the file.
+    #[test]
+    fn a_file_past_the_bound_is_not_read() {
+        let dir = tempdir("bounded-file");
+        let check = Checkable {
+            criterion: "`vendor/blob.rlib` holds `state: done`".into(),
+            file: BranchPath("vendor/blob.rlib".into()),
+            literal: "state: done".into(),
+        };
+        std::fs::create_dir_all(dir.join("vendor")).expect("a directory");
+        let path = dir.join("vendor/blob.rlib");
+        // The literal is in it, so a check that read it would answer `match`.
+        let padding = "-".repeat(usize::try_from(MAX_FILE_BYTES).expect("the bound fits"));
+        std::fs::write(&path, format!("state: done\n{padding}")).expect("the file writes");
+        let answered = answer(&dir, &check);
+        assert_eq!(answered.as_str(), "unread", "{answered:?}");
+        let Answer::Unread { reason } = answered else {
+            panic!("the check did not decline")
+        };
+        assert!(
+            reason.contains("vendor/blob.rlib") && reason.contains("past the"),
+            "the refusal does not say the file was too big to read: {reason}"
+        );
+
+        // The same file inside the bound is read, so what declined above is its
+        // size rather than its name.
+        std::fs::write(&path, "state: done\n").expect("the file writes");
+        assert_eq!(answer(&dir, &check), Answer::Match);
+    }
+
+    /// A path that is lexically inside the branch and resolves outside it.
+    ///
+    /// The lexical rules cannot see this one: `notes.md` names no directory and
+    /// climbs out of nothing, and what makes it an escape is a symlink somebody
+    /// committed. Unix-only because that is where the suite can commit one; the
+    /// containment check itself is platform-independent.
     #[cfg(unix)]
     #[test]
-    fn an_in_tree_symlink_pointing_outside_it_names_no_file() {
-        let outside = tree("symlink", ROW);
-        let inside = tree("symlink-tree", &[]);
-        std::os::unix::fs::symlink(outside.join("journeys.yaml"), inside.join("journeys.yaml"))
-            .expect("the link is made");
-        // The file the link delivers contradicts the criterion, so a check that
-        // followed it would report a finding about a file this tree does not
-        // hold. Silence is the answer, and it is the answer only because the
-        // link was not followed.
-        let found = findings(
-            ["## Acceptance criteria\n- `journeys.yaml` says `complete_dataset: true`.\n"],
-            Some(&inside),
-        );
+    fn a_path_the_branch_resolves_outside_the_worktree_is_not_read() {
+        let dir = tempdir("symlink");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).expect("somewhere off the branch");
+        std::fs::write(outside.join("secret.md"), "state: done\n").expect("the file writes");
+        let branch = dir.join("worktree");
+        std::fs::create_dir_all(&branch).expect("a worktree");
+        std::os::unix::fs::symlink(outside.join("secret.md"), branch.join("notes.md"))
+            .expect("a symlink out of the worktree");
+
+        let check = Checkable {
+            criterion: "`notes.md` holds `state: done`".into(),
+            file: BranchPath("notes.md".into()),
+            literal: "state: done".into(),
+        };
+        // The file it points at holds exactly what the criterion names, so a
+        // check that followed it would answer `match` on evidence off the
+        // branch. It declines instead, and says where the path went.
+        let answered = answer(&branch, &check);
+        assert_eq!(answered.as_str(), "unread", "{answered:?}");
+        let Answer::Unread { reason } = answered else {
+            panic!("the check did not decline")
+        };
         assert!(
-            found.is_empty(),
-            "a link was followed rather than left as a literal: {found:?}"
+            reason.contains("outside the node's branch"),
+            "the refusal does not say the path left the branch: {reason}"
         );
     }
 
     #[test]
-    fn a_token_that_climbs_out_of_the_tree_names_no_file() {
-        // The contradicting file is one level above the tree, so a token that
-        // climbed would reach it and report it.
-        let above = tree("climbs", ROW);
-        let inside = above.join("inside");
-        std::fs::create_dir_all(&inside).expect("the inner tree");
-        assert!(findings(
-            ["## Acceptance criteria\n- `../journeys.yaml` says `complete_dataset: true`.\n"],
-            Some(&inside),
+    fn what_a_file_holds_is_bounded_to_one_readable_line() {
+        let dir = tempdir("bounded");
+        let long = format!("state: {}\n", "x".repeat(500));
+        std::fs::write(dir.join("notes.md"), &long).expect("the file writes");
+        let Answer::Mismatch { holds } = answer(
+            &dir,
+            &Checkable {
+                criterion: "`notes.md` holds `state: done`".into(),
+                file: BranchPath("notes.md".into()),
+                literal: "state: done".into(),
+            },
+        ) else {
+            panic!("a file holding another value is a mismatch");
+        };
+        assert!(holds.ends_with("…`") || holds.ends_with('…'), "{holds}");
+        assert!(holds.chars().count() < 220, "{holds}");
+    }
+
+    /// The three answers this module spells are the three the divergence record
+    /// proposes.
+    ///
+    /// They are private vocabulary, so `tests/contract.rs` — which drives the
+    /// public surface — cannot reach them, and the entry that proposes them is
+    /// the only place they are written down. Both directions: an answer added
+    /// here without a line there fails, and so does one the entry names that
+    /// this module no longer spells.
+    #[test]
+    fn the_three_answers_are_the_ones_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
         )
-        .is_empty());
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("47."))
+            .expect("the record still carries entry 47");
+        let block = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("entry 47 carries the json block this test drives");
+        let named: Vec<String> = serde_json::from_str::<serde_json::Value>(block)
+            .ok()
+            .and_then(|block| serde_json::from_value(block["answers"].clone()).ok())
+            .expect("entry 47 names its answers");
+        // Spelled by a match rather than by a list, so an answer added to this
+        // enum has to be spelled here as well as there.
+        let spelled = |answer: &Answer| match answer {
+            Answer::Match => "match",
+            Answer::Mismatch { .. } => "mismatch",
+            Answer::Unread { .. } => "unread",
+        };
+        let mine: Vec<String> = [
+            Answer::Match,
+            Answer::Mismatch {
+                holds: String::new(),
+            },
+            Answer::Unread {
+                reason: String::new(),
+            },
+        ]
+        .iter()
+        .map(|answer| {
+            assert_eq!(spelled(answer), answer.as_str(), "{answer:?}");
+            answer.as_str().to_string()
+        })
+        .collect();
+        assert_eq!(mine, named);
+    }
+
+    /// A scratch directory of one case's own, named after it so two cases
+    /// running in the same millisecond cannot write into each other's.
+    fn tempdir(case: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-criteria-{}-{case}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
     }
 }

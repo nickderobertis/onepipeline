@@ -2094,3 +2094,113 @@ Driven end to end by
 against a producer that publishes the death on its stream and says nothing
 classifiable in its exit sentence, so the word and the cause can only have come
 from the event.
+
+## 47. A criterion naming a value in a file is checked by nobody, on a branch that holds the answer — OPEN
+
+**Proposal (for the planner who owns the contract): add one kind to this
+library's closed set, `criterion-checked`, and one sentence saying that a
+settling lifecycle node's criteria are compared against its own branch where a
+criterion names a literal value in a named file — reported as a finding, never
+as a verdict.**
+
+The contract says what settles a node and says nothing about its acceptance
+criteria being read. They are prose, and every reader of them in a run is a
+reader of prose: the worker, its judge, the observing monitor, and the manager.
+So a criterion reading *"the shared e2e journey row for this source is
+`complete_dataset: true`"* shipped against a file that read `complete_dataset:
+false` — a boolean literal, in a named file, negated, with no caveat and no
+amendment anywhere — and it passed all four, because not one of them opened the
+file.
+
+At settlement that comparison costs one read. The node's branch is checked out
+in the worktree its `onevcs` session opened, and the criterion names the file
+and the value. This build now makes it, and reports what came back.
+
+**It reports a finding on the node; it never fails the node by itself.** A
+mechanical check that could fail a node would be a new way for correct work to be
+failed on a demand nobody wrote, which is the class of failure this exists to
+close rather than to widen. The node settles on its dispatches and its
+publication exactly as it did before, and the finding — non-blocking, on the
+node's own workstream — names the criterion, the file, the literal it expected
+and what the file holds instead, so a manager rules on it.
+
+**It recognises only what it can be sure of, and says nothing about the rest.**
+A criterion is read only where it parses into "this named file holds this
+literal": exactly two backticked spans in one bullet of the task's `##
+Acceptance criteria` section, one of them shaped like a path and the other not,
+in a sentence carrying no negation. Everything else — one span, three, two
+paths, two literals, "no longer contains", a path climbing out of the worktree —
+is declined, and a declined criterion is not a finding, not a warning and not a
+record. It is silence. A checker that guessed would raise false findings on
+sound work, and a tier that cries wolf is one a reader learns to skim, which
+costs more than the tier is worth. Under-reaching is recoverable; over-reaching
+trains the reader to ignore it.
+
+**What it opens is inside the node's branch, checked twice.** A criterion's path
+is validated where it is parsed — no absolute path, no `..`, no drive prefix, no
+whitespace — and the type carrying it has no other constructor, so an unvalidated
+path is not representable past that point. That is the lexical half; the other is
+that a branch resolves paths, and a committed symlink at `notes.md` pointing at
+`/etc/passwd` is relative by every lexical rule there is. So the read
+canonicalizes the worktree and the path and refuses one that is not under the
+other, as the same third answer below rather than as a comparison against
+something off the branch.
+
+**A file the branch will not give up is a third answer.** Absent, a directory,
+not text, or past the megabyte this reads — a lettered extension is all a path has
+to look like, so a mistyped criterion can name a vendored archive, and searching an
+artifact for a literal is not a comparison anybody asked for: the check compared
+nothing, and says so. `unread` is carried through the
+run's own record as its own word beside `match` and `mismatch`, and is never
+folded into either — for the same reason entry 40's *not answered* is never *not
+released*.
+
+The three answers are **one field on one kind** rather than the presence or
+absence of a record, so a reader asking "was this criterion checked, and what
+came back" is answered the same way for all three and never has to read one of
+them off silence. `criterion-checked` carries `criterion`, `file`, `expected` and
+`answer`, plus `holds` on a mismatch and `reason` on an unread one; every text is
+inside the payload bound this library already promises. It arrives with a
+**minor** version bump, cut by `release-plz` from the `feat` commit that
+introduces it, exactly as entries 39 and 40's additions did.
+
+Scope is the lifecycle node, because the branch is: a direct agent node works in
+the project directory and has none, and a node whose every step declared no diff
+opened no session, so there is nothing to read and nothing is reported. And it is
+the **settling** attempt: a publication that failed leaving the work on its branch
+is asked again rather than read, and a node holding its branch for a human step
+has not run the steps after it — so one settled node produces one comparison per
+criterion rather than one per attempt.
+
+**The block below is the source.** `tests/contract.rs` parses it out of this
+file: every event kind named here must be one `PipelineKind` carries and the
+contract's own list does not, and the surface kind a mismatch is raised under
+must be one this build parses. The three answers are held against the enum that
+spells them by
+`criteria::tests::the_three_answers_are_the_ones_the_divergence_record_names`, in
+the module that owns them — they are private vocabulary, so the public-surface
+test cannot reach them and the gate lives where it can.
+
+```json
+{
+  "event_kinds": ["criterion-checked"],
+  "answers": ["match", "mismatch", "unread"],
+  "surface_kind": "finding"
+}
+```
+
+Driven end to end by `tests/e2e/criteria.rs`, against a real branch: a criterion
+the branch contradicts, the same criterion on a branch that holds it, a node
+whose settlement is unchanged beside the finding, prose that is reported nowhere,
+the three ways a branch withholds a file, a bar written the other way round and
+one wrapped over two lines, a bar stated in an amendment and in two steps and
+read once each, a node whose dispatch failed and one a supervisor cancelled being read all the
+same, a
+node with no branch reporting nothing, a node re-dispatched after a failed
+publication being read once at its settlement rather than once per attempt, a
+workstream read where it is held for a person and not again afterwards, and a
+symlink resolving off the branch refused rather than followed. That last journey
+needs a committed symlink and so runs on the hosts that have them; the
+containment check itself is platform-independent and
+`criteria::tests::a_path_the_branch_resolves_outside_the_worktree_is_not_read`
+holds it either way.
