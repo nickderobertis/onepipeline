@@ -219,6 +219,20 @@ fn a_plan_the_loader_takes_and_no_check_refuses_exits_zero() {
     assert_eq!(answered["accepted"], json!(true), "{answered}");
     assert_eq!(refusals(&answered), Vec::<Value>::new(), "{answered}");
     assert_eq!(unrunnable(&answered), Vec::<Value>::new(), "{answered}");
+    // A check that answers without reading its stdin at all is an accept: what
+    // this verb offers, a check is free not to take.
+    let deaf = check_script(&world, "deaf", "printf '{\"refusals\": []}'");
+    world
+        .run(&[
+            "plan",
+            "check",
+            &project,
+            "--check",
+            &as_str(&deaf),
+            "--json",
+        ])
+        .exited(0);
+
     // Checking a plan starts nothing.
     assert!(
         !world.runs.join("sound").exists(),
@@ -409,6 +423,14 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
             json!({"refusals": [{"reason": "the bar omits the appendix"}]})
         ),
     );
+    // A check whose diagnosis runs past the bound. What it said is truncated and
+    // *said to be*, because a sentence cut off at a byte count reads as the whole
+    // of it.
+    let voluble = check_script(
+        &world,
+        "voluble",
+        "cat > /dev/null\nyes 'the check broke and would not stop saying so'          | head -c 1200000 >&2\nexit 5",
+    );
     // An answer past the bound this build reads. A check is somebody else's
     // program, and one that answers with a megabyte is one nothing can act on.
     let endless = check_script(
@@ -438,6 +460,7 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         (&wordless, true, "blank"),
         (&inventive, true, "verdict"),
         (&endless, true, "bytes this build reads"),
+        (&voluble, true, "truncated at the"),
         (&terse, true, "refusals[].node"),
         (&unopenable, false, "cannot be run"),
     ] {

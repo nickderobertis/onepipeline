@@ -219,7 +219,7 @@ impl<'de> Deserialize<'de> for Reason {
 /// Read one project, run every registered check over it, and report.
 pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
     match load_and_check(args) {
-        Ok((refusals, unrunnable)) => Ok(report(args, &refusals, &unrunnable)),
+        Ok(answered) => Ok(report(args, &answered)),
         // The project could not be read at all — no binary, a store that
         // answered badly, an id naming nothing. `--json` still prints exactly
         // one object, because a consumer parses this verb's stdout without first
@@ -227,10 +227,10 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
         // other refusal this binary makes goes.
         Err(error) => {
             eprintln!("onepipeline: {error}");
-            // Not accepted: a project nothing could read is the one answer that
-            // must never look like a plan that passed.
-            print(args, false, &[], &[]);
-            Ok(NOT_ANSWERED)
+            // A project nothing could read is the one answer that must never
+            // look like a plan that passed, and it is a case of the type rather
+            // than a flag beside it.
+            Ok(report(args, &Answered::Unreadable))
         }
     }
 }
@@ -240,7 +240,7 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
 /// It **spawns** each of those checks, which is the half of this verb that is
 /// not a read at all. `Err` is the project not being readable, which is a
 /// different answer from a plan the schema refuses: see [`Load`].
-fn load_and_check(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable>)> {
+fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
     let store = Store::resolve()?;
     let project: QualifiedId = args.project.parse()?;
 
@@ -263,14 +263,18 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable
                         Err(why) => unrunnable.push(why),
                     }
                 }
-                return Ok((refusals, unrunnable));
+                return Ok(Answered::Read {
+                    refusals,
+                    unrunnable,
+                });
             }
         },
     };
     let refusal = refusal.expect("this arm is only reached where the loader refused");
-    Ok((
-        vec![engine_refusal(refusal)],
-        args.checks
+    Ok(Answered::Read {
+        refusals: vec![engine_refusal(refusal)],
+        unrunnable: args
+            .checks
             .iter()
             .map(|path| Unrunnable {
                 check: path.display().to_string(),
@@ -280,32 +284,87 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable
                     .to_owned(),
             })
             .collect(),
-    ))
+    })
 }
 
-/// Print the answer and say what the status is.
-fn report(args: &PlanCheckArgs, refusals: &[Reported], unrunnable: &[Unrunnable]) -> i32 {
-    print(
-        args,
-        refusals.is_empty() && unrunnable.is_empty(),
-        refusals,
-        unrunnable,
-    );
-    // A check that was *attempted* and could not be run is the exit-2 case: what
-    // it would have said is unknown, and nothing else in the answer stands in
-    // for it. A check the loader's own refusal stopped was never asked, and the
-    // refusal it was stopped by is what the status reports.
-    if unrunnable.iter().any(|report| report.ran.attempted()) {
-        NOT_ANSWERED
-    } else if refusals.is_empty() {
-        ACCEPTED
-    } else {
-        REFUSED
+/// What this verb has to say about one project.
+///
+/// Two cases, and acceptance is **derived** from them rather than carried
+/// beside them: a boolean argument could say a plan was accepted while the lists
+/// beside it held refusals, and that is the one answer this verb must never be
+/// able to give.
+enum Answered {
+    /// The project could not be read at all, so nothing was checked and nothing
+    /// accepted it.
+    Unreadable,
+    /// The loader ran, and so did every check it left something to hand.
+    Read {
+        /// Engine refusals first, then each check's in flag order.
+        refusals: Vec<Reported>,
+        /// Every check that could not be run, and every one the loader stopped.
+        unrunnable: Vec<Unrunnable>,
+    },
+}
+
+impl Answered {
+    /// Nothing refused it and every check ran.
+    fn accepted(&self) -> bool {
+        match self {
+            Self::Unreadable => false,
+            Self::Read {
+                refusals,
+                unrunnable,
+            } => refusals.is_empty() && unrunnable.is_empty(),
+        }
+    }
+
+    fn refusals(&self) -> &[Reported] {
+        match self {
+            Self::Unreadable => &[],
+            Self::Read { refusals, .. } => refusals,
+        }
+    }
+
+    fn unrunnable(&self) -> &[Unrunnable] {
+        match self {
+            Self::Unreadable => &[],
+            Self::Read { unrunnable, .. } => unrunnable,
+        }
+    }
+
+    /// The status this answer exits with.
+    ///
+    /// A check that was *attempted* and could not be run is the exit-2 case:
+    /// what it would have said is unknown, and nothing else in the answer stands
+    /// in for it. A check the loader's own refusal stopped was never asked, and
+    /// the refusal it was stopped by is what the status reports.
+    fn exit_code(&self) -> i32 {
+        if matches!(self, Self::Unreadable)
+            || self
+                .unrunnable()
+                .iter()
+                .any(|report| report.ran.attempted())
+        {
+            NOT_ANSWERED
+        } else if self.refusals().is_empty() {
+            ACCEPTED
+        } else {
+            REFUSED
+        }
     }
 }
 
+/// Print the answer and say what the status is.
+fn report(args: &PlanCheckArgs, answered: &Answered) -> i32 {
+    print(args, answered);
+    answered.exit_code()
+}
+
 /// Write the answer, as one JSON object or as a line per refusal.
-fn print(args: &PlanCheckArgs, accepted: bool, refusals: &[Reported], unrunnable: &[Unrunnable]) {
+fn print(args: &PlanCheckArgs, answered: &Answered) {
+    let accepted = answered.accepted();
+    let refusals = answered.refusals();
+    let unrunnable = answered.unrunnable();
     if args.json {
         // The project as it was named: an id this build could not even parse is
         // still the one the caller asked about.

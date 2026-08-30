@@ -245,9 +245,23 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
     )
     .expect("the project file is written");
 
+    // Two files a criterion may name and this check cannot read: one past the
+    // bound it reads, and one that is not text at all. Each leaves its criterion
+    // silent rather than guessed at.
+    std::fs::write(
+        world.project.join("big.yaml"),
+        "padding: yes\n".repeat(200_000),
+    )
+    .expect("the oversized file is written");
+    std::fs::write(
+        world.project.join("binary.dat"),
+        [0xff_u8, 0xfe, 0x00, 0xff],
+    )
+    .expect("the non-text file is written");
+
     let mut audit = crate::harness::agent("audit", &[]);
     audit["task"] = json!(
-        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n         ## Acceptance criteria\n* the shared journey row in `dataset.yaml` is          `complete_dataset: true`.\n"
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n         ## Acceptance criteria\n* the shared journey row in `dataset.yaml` is          `complete_dataset: true`.\n* the row in `big.yaml` is `complete_dataset: true`.\n* the row in `binary.dat` is `complete_dataset: true`.\n"
     );
 
     let name = "direct";
@@ -258,7 +272,11 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
     });
 
     let found = findings(&world, name);
-    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found.len(),
+        1,
+        "only the file this check can read produced a finding: {found:?}"
+    );
     assert_eq!(found[0].0, "audit", "{found:?}");
     assert!(found[0].1.contains("dataset.yaml"), "{found:?}");
     assert!(found[0].1.contains("complete_dataset: true"), "{found:?}");
