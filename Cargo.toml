@@ -78,7 +78,13 @@ resolver = "2"
 #   commit(s) that main does not`. That refusal is what stranded a retry on work
 #   its predecessor preserved, and 0.4.2's session reuse only reached the narrow
 #   case where the predecessor's session was still open — a closed one, or a
-#   branch somebody landed by hand, met the refusal. It is a **requirement** and
+#   branch somebody landed by hand, met the refusal. **This is the floor a retry
+#   now rests on**, rather than that session reuse: since 0.16.3 a stopped run's
+#   record is forgotten before its retry launches — no owner process, nothing
+#   working inside its run root — so the retry cuts a fresh session and reaches
+#   the stranded commit by continuing the branch from its own tip. Below 0.8.0 it
+#   would meet the refusal instead, with the work on a branch no plan could
+#   reach. It is a **requirement** and
 #   not merely a lock floor because `^0.4.1` excludes it: pre-1.0, the minor is
 #   the breaking position, so the declaration rather than the lock is what
 #   permits the resolution. The same release refuses `base_branch` equal to
@@ -201,6 +207,24 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# - `onevcs` 0.16.3 makes `session_holders` **forget** a record nobody is left to
+#   answer for: no owner process, and nothing working inside its run root. That is
+#   a read with a side effect, and `src/concurrency.rs` runs it on every launch,
+#   so this crate's own interlock is what does the forgetting. Two things this
+#   crate promised moved with it, and both are absorbed rather than worked around.
+#   A launch no longer reports such a holder — the report is for a holder an
+#   operator can act on, and seven forgotten ones above a launch made one real
+#   refusal read like seven ignorable ones; a *live* holder still refuses unless
+#   acknowledged, and a stale one somebody is still working in is still reported.
+#   And a retry onto a stopped run's branch no longer takes that run's session up,
+#   because its record is gone before the retry launches — it continues the branch
+#   from its own tip instead, which is the 0.8.0 floor above. What an operator has
+#   at stake is unchanged: the stranded commit still reaches the base.
+#   `tests/e2e/concurrency.rs` and `tests/e2e/session_reuse.rs` drive all three,
+#   the occupied halves through a real process working inside the run root, which
+#   is what the sibling reads and what a live dispatch has.
+#   `onevcs-testing` 0.4.23 requires exactly this `onevcs`, so both pins move
+#   together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -307,15 +331,6 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.13"
-# **Held at 0.16.2 while the requirement already permits 0.16.3**, so
-# `just engines-current` is red here until that gap is closed upstream rather
-# than by a `cargo update`. 0.16.3's `session_holders` deletes every record whose
-# owner process has exited with nothing working inside its run root — the state a
-# stopped run leaves — and `src/concurrency.rs` reads that enumeration on every
-# launch, so the read destroys the record a retry needs. Five journeys fail on it,
-# `session_reuse::a_retry_takes_up_the_session_a_stopped_run_left_its_work_in`
-# most plainly: the retry cuts a second session instead of taking up the one
-# holding the work. Moving the lock is a proposal to `onevcs`, not an edit here.
 onevcs = "0.16.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles

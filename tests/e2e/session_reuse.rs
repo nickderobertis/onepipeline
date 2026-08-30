@@ -1,13 +1,14 @@
 //! A node pinned to a branch a stopped run left work on.
 //!
-//! A retry arrives as the same pin the run before it carried, and `onevcs` keeps
-//! that run's session: the clone, the worktree, and the branch the work is
-//! committed on. Taking it up is the sibling's decision and `onevcs` 0.4.2 is
-//! where it makes it — below that pin every retry of a stranded node was refused
-//! before it dispatched, with the work sitting on a branch no plan could reach.
-//! What this file holds is that the engine *linked* against a sibling that takes
-//! the session up, which is a fact about `Cargo.lock` rather than about any code
-//! here: the first journey fails on the lockfile alone.
+//! A retry arrives as the same pin the run before it carried, and `onevcs` gets
+//! it back onto that run's work: the branch the commit is on, reached either by
+//! taking the stopped run's session up or by continuing a fresh one from that
+//! branch's tip. Which of the two it does is the sibling's decision — `onevcs`
+//! 0.4.2 is where it first made one, and below that pin every retry of a stranded
+//! node was refused before it dispatched, with the work sitting on a branch no
+//! plan could reach. What this file holds is that the engine *linked* against a
+//! sibling that gets there at all, which is a fact about `Cargo.lock` rather than
+//! about any code here: the first journey fails on the lockfile alone.
 //!
 //! The second journey is the boundary. Reuse is narrow on purpose — one open
 //! record, on this identity, this branch, this base, this execution checkout,
@@ -436,8 +437,16 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
         .collect()
 }
 
-/// A run stopped mid-publication, and the retry that takes up the session it left
-/// its work in.
+/// A run stopped mid-publication, and the retry that lands the work it stranded.
+///
+/// **What is asserted is the landing, not the mechanism.** A retry pinned to the
+/// stopped run's branch may reach that work by taking the stopped run's session
+/// up or by cutting a fresh one and continuing it from the branch's own tip, and
+/// which of the two the sibling does has moved with its releases — `onevcs`
+/// 0.4.2 took the session up, and 0.16.3 forgets a record with no owner process
+/// and nothing working inside its run root, which is exactly what a stopped run
+/// leaves. Neither answer costs an operator anything as long as the stranded
+/// commit reaches the base, so that is what this holds the stack to.
 ///
 /// **Unix-only for what it asserts on:** stopping a publication here is a sweep
 /// of the host's own process table and of the groups under the stopped run —
@@ -452,7 +461,7 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// child of the stopped process rather than git's grandchild.
 #[cfg(unix)]
 #[test]
-fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
+fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
     let world = World::new("session-reuse-adopt");
     // A `pre-push` hook the journey holds, which is how a run is stopped
     // *mid-publication*: `onevcs` commits the worktree onto the branch before it
@@ -535,19 +544,21 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
         why(&world, "retry")
     );
 
-    // It worked in the stopped run's own session rather than cutting a second one
-    // on the same name — the sibling says both, by the token and by saying so.
+    // It worked on the branch the plan pinned, which is where the stopped run's
+    // commit is. **Which mechanism got it there is deliberately not asserted.**
+    // The sibling may take the stopped run's own session up, or cut a fresh one
+    // and continue it from that branch's tip, and since `onevcs` 0.16.3 it does
+    // the second here: a stopped run leaves a record with no owner process and
+    // nothing working inside its run root, which the sibling now forgets as
+    // litter. A journey pinned to the token or to `reused` would fail on that
+    // and say nothing about whether an operator lost anything — so what is
+    // asserted is what an operator actually has at stake, here and below.
     let taken = opened(&world, "retry");
     assert_eq!(
-        taken["payload"]["token"].as_str(),
-        Some(stranded.as_str()),
-        "the retry cut a second session on {STRANDED} instead of taking up the one \
-         holding the work: {taken}"
-    );
-    assert_eq!(
-        taken["payload"]["reused"],
-        json!(true),
-        "the sibling did not record the session as one it took up: {taken}"
+        taken["payload"]["branch"].as_str(),
+        Some(STRANDED),
+        "the retry did not work on the branch the plan pinned, so nothing it did \
+         could reach the work session {stranded} left there: {taken}"
     );
 
     // And what that buys, which is the only thing an operator cares about: the
@@ -591,9 +602,17 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
 
     // A session nothing ever came back for, opened before the first run below so
     // that run's own opening runs the sibling's housekeeping over it. What that
-    // housekeeping does with it is case 2, and since `onevcs` 0.15.6 the answer
-    // is *nothing*.
+    // housekeeping does with it is case 2.
     let swept = abandoned_session(&world, "feature/swept");
+    // And what a live dispatch has that this fixture does not: a process working
+    // inside the run root. Since `onevcs` 0.16.3 that is what decides whether
+    // anybody is left to answer for a record — the owner of a session opened from
+    // the command line has already exited by the time the token is printed, so on
+    // its own that record is litter and is forgotten. The occupancy is the whole
+    // of the protection, and giving the fixture one is what puts case 2's premise
+    // in the shape real operation is in.
+    #[cfg(unix)]
+    let mut occupant = crate::harness::occupy(&world, run_root(&swept));
 
     // 1. Occupied. Somebody has taken the run root against the world, so the
     //    session cannot be taken up and a fresh one is cut instead.
@@ -616,25 +635,47 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // 2. Gone. The record still names a run root; the directory is not there, and
     //    with it goes every place the branch could have been continued.
     //
-    //    The sweep is this journey's, because since `onevcs` 0.15.6 the sibling
-    //    will not do it: case 1's opening ran its reclamation over this host with
-    //    the session above sitting open in it and left that run root standing.
-    //    Asserted first, both because it is the fix this build links and because
-    //    the fall-through below is only a fair test once the removal is the one
-    //    thing that reached the directory.
-    assert!(
-        run_root(&swept).is_dir(),
-        "the sibling reclaimed the run root of a session still open at {}: a session \
-         opened from the command line answers stale the moment that command exits, \
-         and reading stale as nobody is in here deletes live dispatches",
-        run_root(&swept).display()
-    );
-    std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
-        panic!(
-            "the run root at {} could not be swept: {e}",
+    //    The sweep is this journey's, because the sibling will not do it while
+    //    somebody is in there: case 1's opening ran its reclamation over this host
+    //    with the occupied session above sitting open in it, and left both the run
+    //    root and the record standing. Asserted first, both because it is the
+    //    protection this build links and because the fall-through below is only a
+    //    fair test once the removal is the one thing that reached the directory.
+    //
+    //    Unix-only, and the sibling says why: it decides occupancy by reading a
+    //    process's working directory, and Windows exposes no supported way to ask
+    //    which process holds a directory — so there every record is answered on
+    //    its owner alone and this fixture's is forgotten before this point.
+    #[cfg(unix)]
+    {
+        assert!(
+            run_root(&swept).is_dir(),
+            "the sibling reclaimed the run root of a session a process is working \
+             inside, at {}: a session opened from the command line answers stale the \
+             moment that command exits, and reading stale alone as nobody is in here \
+             deletes live dispatches",
             run_root(&swept).display()
-        )
-    });
+        );
+        // And the record that protects it, which is the half a reclamation
+        // consults: a run root is kept only while an *open* record names it, so a
+        // record forgotten here takes the directory with it on the next opening.
+        let held = onevcs(&world, &["session", "holders", "service"]);
+        assert!(
+            held.contains(&swept.token.0),
+            "the sibling forgot the record of a session a process is working inside: \
+             {held}"
+        );
+        occupant.kill().expect("the run root's occupant is ended");
+        occupant.wait().expect("the run root's occupant exits");
+    }
+    if run_root(&swept).is_dir() {
+        std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
+            panic!(
+                "the run root at {} could not be swept: {e}",
+                run_root(&swept).display()
+            )
+        });
+    }
     let (settled, session) = dispatched(&world, "swept", Some("feature/swept"));
     assert_eq!(
         settled["nodes"][0]["status"],

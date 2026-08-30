@@ -2644,6 +2644,45 @@ pub fn double(name: &str) -> PathBuf {
     held_alias(held, name)
 }
 
+/// A live process working inside a run root.
+///
+/// What a real dispatch has and what a session opened from the command line does
+/// not: since `onevcs` 0.16.3 a record whose owner process has gone is kept only
+/// while something is working inside its run root, and an agent working in a
+/// worktree for hours is exactly that. The fixture is this suite's own
+/// `outlive-the-graph` process, which parks rather than doing anything — what the
+/// sibling reads is a working directory, and nothing else about it.
+///
+/// Unix-only, and the sibling says why: it answers this by reading a process's
+/// working directory, which Windows exposes no supported way to ask. There a
+/// record is answered on its owner alone, so there is no occupancy to arrange.
+#[cfg(unix)]
+pub fn occupy(world: &World, run_root: &Path) -> std::process::Child {
+    let recorded = world.root.join(format!(
+        "occupant-{}.pid",
+        run_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let held = Command::new(double("fake-claude"))
+        .arg("outlive-the-graph")
+        .arg(&recorded)
+        .current_dir(run_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a process starts inside the run root");
+    // Started is not yet working *there*: the pid file is written from inside that
+    // directory, so waiting for it is what makes the occupancy a fact before
+    // anything asks the sibling about it.
+    world.until("the run root's occupant to be working in it", |_| {
+        recorded.is_file()
+    });
+    held
+}
+
 /// Who a commit a journey's `onevcs` makes is attributed to.
 ///
 /// Carried in the environment on every command, because a session's clone
