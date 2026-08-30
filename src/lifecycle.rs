@@ -349,14 +349,16 @@ fn attempt_once(
 /// afterwards settles once at the hold and once at its end, and the branch is
 /// not the same branch between them.
 fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
-    let Some(worktree) = worktree else {
+    // Both halves of "there is something to read, on behalf of somebody": a
+    // branch in hand, and a node the graph carries to report it against.
+    let (Some(worktree), Some(whose)) = (worktree, crate::graph::NodeRef::of(node)) else {
         return;
     };
     for check in crate::criteria::checkable_of(node) {
         let answer = crate::criteria::answer(worktree, &check);
         let _ = tx.send(Message::CriterionChecked(Box::new(
             engine::CriterionChecked {
-                node: node.id.clone(),
+                node: whose.clone(),
                 check,
                 answer,
             },

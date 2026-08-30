@@ -491,20 +491,19 @@ pub(crate) enum Message {
 /// publication exactly as it was before this check existed, and what a mismatch
 /// buys a reader is a finding beside that settlement rather than a different
 /// one.
-// llmlint: ignore-block[invalid_states_unrepresentable] the node identity is a
-// `String` because that is what every message on this channel already carries —
-// `UndraftedBody`, `Cancelling`, and `Settlement` all name their node that way, and
-// the loop looks it up in a graph keyed by the same strings. A newtype on this one
-// message would be a second spelling of an identity the engine holds one way, and
-// would have to be unwrapped at every one of those boundaries to be used.
 pub(crate) struct CriterionChecked {
     /// The node whose branch was read.
-    pub node: String,
+    ///
+    /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, because this
+    /// crosses a thread boundary: what arrives at the single writer is a value
+    /// nothing here can check any more, so it arrives already being the identity
+    /// of a node the graph carries rather than a field with a name in it.
+    pub node: crate::graph::NodeRef,
     /// The criterion, and what it said the branch holds.
     pub check: crate::criteria::Checkable,
     /// What reading the branch answered.
     pub answer: crate::criteria::Answer,
-} // llmlint: ignore-end[invalid_states_unrepresentable]
+}
 
 /// A change request whose body a configured drafting dispatch did not produce.
 ///
@@ -870,7 +869,7 @@ fn converge(
                 Message::CriterionChecked(checked) => {
                     journal.emit(
                         journal::PipelineKind::CriterionChecked,
-                        journal::labels(&paths.run, Some(&checked.node)),
+                        journal::labels(&paths.run, Some(checked.node.as_str())),
                         criterion_payload(&checked),
                     )?;
                     // A mismatch is reported *beside* the settlement and never
@@ -2670,7 +2669,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
              the file holds: {holds}\n\
              The node settled on its own work as it always would have and nothing was \
              failed on this: it is a reading of the branch, for you to rule on.",
-            node = checked.node,
+            node = checked.node.as_str(),
             criterion = bounded(checked.check.criterion()),
             file = bounded(checked.check.file()),
             expected = bounded(checked.check.literal()),
@@ -2678,7 +2677,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
         queued_at: sys::now_millis(),
-        workstream: Some(checked.node.clone()),
+        workstream: Some(checked.node.as_str().to_owned()),
     }
 }
 
