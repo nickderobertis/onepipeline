@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::controls::NodeControls;
 use crate::error::{Error, Result};
 use crate::plan::{Node, NodeKind, Plan, Step};
+use crate::refusal::Refusal;
 
 /// The separator reserved for addressing a step within its node.
 pub const STEP_SEPARATOR: char = '/';
@@ -370,11 +371,21 @@ pub fn is_cross_dag(reference: &str) -> bool {
 /// External input is validated here, at its trust boundary, so an unsatisfiable
 /// graph is refused before any provider time is spent on it.
 pub fn validate(plan: &Plan) -> Result<()> {
+    check(plan).map_err(Error::from)
+}
+
+/// The same rules, answering with what each refusal is **about**.
+///
+/// `validate` is the launch path and prints one sentence; this is the one
+/// `onepipeline plan check` reports to a program, which needs the node and the
+/// field beside that sentence. One implementation, so the two cannot disagree
+/// about what a plan is.
+pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
     if plan.tasks.is_empty() {
-        return Err(Error::Invalid("a plan needs at least one node".into()));
+        return Err(Refusal::plain("a plan needs at least one node").field("tasks"));
     }
-    validate_edited(plan)?;
-    validate_declared_version(plan)
+    check_edited(plan)?;
+    check_declared_version(plan)
 }
 
 /// The two rules a plan's **own declared version** decides.
@@ -396,9 +407,9 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// lifecycle nodes that run was launched with. Requiring a title there would
 /// refuse every later edit to those runs — a `retry` of a node clones it — which
 /// is the whole graph held hostage to a field the plan was never written with.
-fn validate_declared_version(plan: &Plan) -> Result<()> {
+fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
     for node in &plan.tasks {
-        let named = |what: String| Error::Invalid(format!("node '{}': {what}", node.id));
+        let named = |what: String| Refusal::node(&node.id, what);
         // The version is the whole of what `body` is checked for, and deliberately.
         // It is one of seven publication-only optional fields the common node shape
         // carries — `title`, `branch`, `merge_policy`, `base_branch`, `repo_type` and
@@ -411,13 +422,13 @@ fn validate_declared_version(plan: &Plan) -> Result<()> {
         // node kind does with a field it does not use is the plan shape's own convention
         // rather than a validation this field is missing.
         if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
-            return Err(named(crate::plan::body_is_newer(plan.schema_version)));
+            return Err(named(crate::plan::body_is_newer(plan.schema_version)).field("body"));
         }
         if plan.schema_version >= crate::plan::PLAN_SCHEMA_VERSION
             && node.repo.is_some()
             && node.title.is_none()
         {
-            return Err(named(crate::plan::TITLE_IS_REQUIRED.to_owned()));
+            return Err(named(crate::plan::TITLE_IS_REQUIRED.to_owned()).field("title"));
         }
     }
     Ok(())
@@ -430,6 +441,11 @@ fn validate_declared_version(plan: &Plan) -> Result<()> {
 /// do, which is a settled run rather than a malformed plan — refusing it would
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
+    check_edited(plan).map_err(Error::from)
+}
+
+/// [`validate_edited`], answering with what each refusal is about.
+pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
     // Every version this build reads, because what each newer one added is keyed
     // to the version a document declares: a plan written at an earlier one
     // describes a graph this engine executes exactly as it always did, and its
@@ -443,38 +459,42 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(Error::Invalid(format!(
+        return Err(Refusal::plain(format!(
             "plan schema_version {} is not one this build reads ({known})",
             plan.schema_version
-        )));
+        ))
+        .field("schema_version"));
     }
     if plan.concurrency == 0 {
-        return Err(Error::Invalid("concurrency must be at least 1".into()));
+        return Err(Refusal::plain("concurrency must be at least 1").field("concurrency"));
     }
     if let Some(goal) = &plan.goal {
         if goal.text.trim().is_empty() {
-            return Err(Error::Invalid("a goal needs non-empty text".into()));
+            return Err(Refusal::plain("a goal needs non-empty text").field("goal"));
         }
     }
 
     let mut seen = BTreeSet::new();
     for node in &plan.tasks {
         if node.id.trim().is_empty() {
-            return Err(Error::Invalid("every node needs a non-empty id".into()));
+            return Err(Refusal::plain("every node needs a non-empty id").field("id"));
         }
         if !seen.insert(node.id.clone()) {
-            return Err(Error::Invalid(format!("duplicate node id '{}'", node.id)));
+            return Err(
+                Refusal::about(&node.id, format!("duplicate node id '{}'", node.id)).field("id"),
+            );
         }
-        validate_node(node)?;
+        check_node(node)?;
     }
 
     for node in &plan.tasks {
         for dep in &node.deps {
             if dep == &node.id {
-                return Err(Error::Invalid(format!(
-                    "node '{}' depends on itself",
-                    node.id
-                )));
+                return Err(Refusal::about(
+                    &node.id,
+                    format!("node '{}' depends on itself", node.id),
+                )
+                .field("deps"));
             }
             if is_cross_dag(dep) {
                 continue;
@@ -483,24 +503,32 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
             // graph, so reporting it as a missing dependency would send a
             // planner looking for a node they never wrote.
             if crate::crossdag::is_malformed(dep) {
-                return Err(Error::Invalid(format!(
-                    "node '{}' depends on '{dep}', which is a malformed cross-DAG \
-                     reference; expected '{}'",
-                    node.id,
-                    crate::crossdag::SYNTAX
-                )));
+                return Err(Refusal::about(
+                    &node.id,
+                    format!(
+                        "node '{}' depends on '{dep}', which is a malformed cross-DAG \
+                         reference; expected '{}'",
+                        node.id,
+                        crate::crossdag::SYNTAX
+                    ),
+                )
+                .field("deps"));
             }
             if !seen.contains(dep) {
-                return Err(Error::Invalid(format!(
-                    "node '{}' depends on '{dep}', which is not in the plan",
-                    node.id
-                )));
+                return Err(Refusal::about(
+                    &node.id,
+                    format!(
+                        "node '{}' depends on '{dep}', which is not in the plan",
+                        node.id
+                    ),
+                )
+                .field("deps"));
             }
         }
     }
 
     if let Some(cycle) = find_cycle(&plan.tasks) {
-        return Err(Error::Invalid(format!("dependency cycle: {cycle}")));
+        return Err(Refusal::plain(format!("dependency cycle: {cycle}")).field("deps"));
     }
     Ok(())
 }
@@ -519,9 +547,14 @@ pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate
 
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
-    let named = |what: &str| Error::Invalid(format!("node '{}': {what}", node.id));
+    check_node(node).map_err(Error::from)
+}
+
+/// [`validate_node`], answering with what the refusal is about.
+pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
+    let named = |what: &str| Refusal::node(&node.id, what);
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
-        return Err(named(RESERVED_PERSONA));
+        return Err(named(RESERVED_PERSONA).field("persona"));
     }
 
     // A title is only ever the subject of a publication, and only a node that
@@ -530,7 +563,7 @@ pub fn validate_node(node: &Node) -> Result<()> {
     // title after a whole dispatch and its gate, by which point a retry can only
     // recompute the same title from the same plan and be refused identically.
     if let (Some(_), Some(title)) = (&node.repo, &node.title) {
-        validate_title(title).map_err(|why| named(&why))?;
+        validate_title(title).map_err(|why| named(&why).field("title"))?;
     }
 
     // A blank amendment is a bar nobody can clear. The `amend` op refuses one
@@ -546,7 +579,8 @@ pub fn validate_node(node: &Node) -> Result<()> {
         return Err(named(
             "`amendment` is present and says nothing — give it the ruling it carries, or leave \
              it out",
-        ));
+        )
+        .field("amendment"));
     }
 
     // `consumes` is keyed by **dependency node id**, so a key that names nothing
@@ -558,46 +592,65 @@ pub fn validate_node(node: &Node) -> Result<()> {
         if !node.deps.iter().any(|dep| dep == consumed) {
             return Err(named(&format!(
                 "`consumes` names '{consumed}', which is not one of this node's deps"
-            )));
+            ))
+            .field("consumes"));
         }
     }
 
     if node.kind == NodeKind::Human {
         if node.id.contains(STEP_SEPARATOR) {
-            return Err(named(
-                "a human id cannot contain '/', which addresses a step",
-            ));
+            return Err(named("a human id cannot contain '/', which addresses a step").field("id"));
         }
         if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
-            return Err(named("a human node needs task prose"));
+            return Err(named("a human node needs task prose").field("task"));
         }
         if node.persona.is_some() || node.max_turns.is_some() {
-            return Err(named(
-                "a human node has no dispatch, so no persona or turn budget",
-            ));
+            return Err(
+                named("a human node has no dispatch, so no persona or turn budget").field(
+                    if node.persona.is_some() {
+                        "persona"
+                    } else {
+                        "max_turns"
+                    },
+                ),
+            );
         }
         if node.repo.is_some() || node.steps.is_some() || node.expects_no_diff {
-            return Err(named("a human node has no execution fields"));
+            return Err(named("a human node has no execution fields").field(
+                if node.repo.is_some() {
+                    "repo"
+                } else if node.steps.is_some() {
+                    "steps"
+                } else {
+                    "expects_no_diff"
+                },
+            ));
         }
         if node.context.is_some() {
             return Err(named(
                 "a planner note is addressed to a dispatch, and a human node has none",
-            ));
+            )
+            .field("context"));
         }
         return Ok(());
     }
 
     if node.expects_no_diff {
         if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
-            return Err(named("an expects_no_diff node needs task prose"));
+            return Err(named("an expects_no_diff node needs task prose").field("task"));
         }
         if node.persona.is_some() || node.max_turns.is_some() {
             return Err(named(
                 "expects_no_diff settles without a dispatch, so it takes no persona or turn budget",
-            ));
+            )
+            .field(if node.persona.is_some() {
+                "persona"
+            } else {
+                "max_turns"
+            }));
         }
         if node.steps.is_some() {
-            return Err(named("expects_no_diff and steps cannot both be set"));
+            return Err(named("expects_no_diff and steps cannot both be set").field("steps"));
         }
         return Ok(());
     }
@@ -608,16 +661,16 @@ pub fn validate_node(node: &Node) -> Result<()> {
     // spent its budget under a default nobody asked for.
     NodeControls::of_node(node)
         .and_then(|controls| controls.overrides())
-        .map_err(|why| named(&why))?;
+        .map_err(|why| named(&why).field("max_turns"))?;
 
     match (&node.repo, &node.steps) {
-        (None, Some(_)) => Err(named("steps run on one branch, so they need a repo")),
+        (None, Some(_)) => Err(named("steps run on one branch, so they need a repo").field("repo")),
         (None, None) => {
             if node.persona.is_none() {
-                return Err(named("a direct agent node needs a persona"));
+                return Err(named("a direct agent node needs a persona").field("persona"));
             }
             if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
-                return Err(named("a direct agent node needs task prose"));
+                return Err(named("a direct agent node needs task prose").field("task"));
             }
             Ok(())
         }
@@ -626,18 +679,28 @@ pub fn validate_node(node: &Node) -> Result<()> {
             // steps dispatches none of its own, so one written here would reach
             // no dispatch at all. Refused rather than quietly ignored.
             if node.persona.is_some() || node.task.is_some() || node.max_turns.is_some() {
+                // The field named is the one this node actually carried, so a
+                // consumer's check acts on the key in front of it rather than on
+                // the three the sentence lists.
                 return Err(named(
                     "a node with steps takes its persona, task, and turn budget from them",
-                ));
+                )
+                .field(if node.persona.is_some() {
+                    "persona"
+                } else if node.task.is_some() {
+                    "task"
+                } else {
+                    "max_turns"
+                }));
             }
-            validate_steps(node, steps)
+            check_steps(node, steps)
         }
         (Some(_), None) => {
             if node.persona.is_none() {
-                return Err(named("a lifecycle node needs a persona or steps"));
+                return Err(named("a lifecycle node needs a persona or steps").field("persona"));
             }
             if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
-                return Err(named("a lifecycle node needs task prose"));
+                return Err(named("a lifecycle node needs task prose").field("task"));
             }
             Ok(())
         }
@@ -668,8 +731,8 @@ fn validate_title(title: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
-    let named = |what: String| Error::Invalid(format!("node '{}': {what}", node.id));
+fn check_steps(node: &Node, steps: &[Step]) -> std::result::Result<(), Refusal> {
+    let named = |what: String| Refusal::node(&node.id, what).field("steps");
     if steps.is_empty() {
         return Err(named("a steps list cannot be empty".into()));
     }
