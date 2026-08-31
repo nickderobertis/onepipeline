@@ -1,0 +1,23 @@
+{
+  "name": "onepipeline-note-journeys",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/note",
+  "tags": ["scope:tests", "lang:rust"],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "build": { "command": "just _note-build", "inputs": ["noteJourneySource"] },
+    "format": { "command": "just _note-format" },
+    "format-check": { "command": "just _note-fmt-check", "inputs": ["noteJourneySource"] },
+    "lint": { "command": "just _note-lint", "inputs": ["noteJourneySource"] },
+    "test": {
+      "command": "just _note-test",
+      "inputs": ["noteJourneySource"],
+      "dependsOn": [{ "projects": ["onepipeline"], "target": "coverage-clean" }]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

@@ -1883,6 +1883,74 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
     }
 }
 
+/// Hand one note to the conversation a member is having, and answer what became
+/// of it.
+///
+/// The whole routing is `oneagentgraph`'s and `onejudge`'s: which side of a
+/// two-party member is live, what a live turn does with a note, and how the other
+/// party receives it with that party's response are all decided there. This
+/// composes [`oneagentgraph::control::note`] and hands back what it answered.
+///
+/// It is a **library** entry point with no verb behind it, which is the one place
+/// [`BINARY_ENV`] cannot be honoured: the sibling publishes this seam as a call and
+/// its command line has no `note`, so an operator who has pinned an executable is
+/// told that rather than being quietly served by a different mechanism. A note is
+/// never half-delivered on a fall-back nobody asked for.
+///
+/// # Errors
+///
+/// [`Undelivered`], in the conversation's own words, for a note it will never read.
+pub fn note(
+    address: &TurnAddress,
+    note: &oneagentgraph::note::Note,
+) -> std::result::Result<oneagentgraph::note::Accepted, oneagentgraph::note::Undelivered> {
+    if let Some(named) = std::env::var_os(BINARY_ENV) {
+        return Err(oneagentgraph::note::Undelivered::NoConversation {
+            reason: format!(
+                "this run composes the `oneagentgraph` executable named at {BINARY_ENV} ({}), \
+                 and the note seam is a library call that command line has no verb for",
+                Path::new(&named).display()
+            ),
+        });
+    }
+    let env = process_env();
+    let addressed = oneagentgraph::run::RunId::parse(address.run())
+        .map_err(|error| error.to_string())
+        .and_then(|run_id| {
+            oneagentgraph::run::MemberName::parse(address.member())
+                .map_err(|error| error.to_string())
+                .map(|member| (run_id, member))
+        });
+    let (run_id, member) = match addressed {
+        Ok(addressed) => addressed,
+        Err(reason) => {
+            return Err(oneagentgraph::note::Undelivered::NoConversation {
+                reason: format!(
+                    "'{} {}' is not a member this run can address: {reason}",
+                    address.run(),
+                    address.member()
+                ),
+            })
+        }
+    };
+    match oneagentgraph::control::note(
+        &state_dir(&env),
+        &run_id,
+        &member,
+        note,
+        &oneharness_bin(&env),
+    ) {
+        Ok(oneagentgraph::control::NoteDelivery::Accepted(accepted)) => Ok(accepted),
+        Ok(oneagentgraph::control::NoteDelivery::Undelivered(undelivered)) => Err(undelivered),
+        // A run the sibling cannot find, or a member it does not have. Not a
+        // disposition of the conversation — there is none — so it is reported as
+        // the channel nothing ever read, which is what it is.
+        Err(error) => Err(oneagentgraph::note::Undelivered::NoConversation {
+            reason: error.to_string(),
+        }),
+    }
+}
+
 /// The `turn-interrupted` envelope this interrupt is owed, for the merged store.
 ///
 /// The library call hands back the [`Delivery`](oneagentgraph::control::Delivery)
