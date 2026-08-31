@@ -38,7 +38,17 @@ mod journal;
 mod lifecycle;
 mod live_edit;
 mod node_validator;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] measured, and the
+// measurement is why it stays here: `note` is 15.8s of this binary's 1102s of CPU —
+// 1.4% — and the whole offline suite runs 268.0s with it and 258.8s without, a 9s
+// delta that is the spread between two runs of the same suite. There is no expense
+// here to put behind an edge, and one module of thirty-three addressed separately
+// would be a structure this repository does not have: the e2e binary is deliberately
+// one target, which `just test-e2e` addresses and `.config/nextest.toml` caps the
+// concurrency of as a whole, because what these journeys really contend for is
+// process trees rather than threads.
 mod note;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod real_vcs;
 mod scratch;
