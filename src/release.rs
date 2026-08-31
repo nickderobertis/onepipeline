@@ -878,9 +878,14 @@ impl Watch {
     /// gives: a `published` node launched against those versions in the first
     /// place, so a note telling it to move off a git pin it never held is noise
     /// aimed at a worker who cannot act on it.
-    pub(crate) fn ready_to_adopt(&self, running: &[Node]) -> Vec<(String, Vec<Released>)> {
-        running
-            .iter()
+    ///
+    /// `told` is every node an arrival is owed to: the ones still running, whose
+    /// live turn it reaches, **and** the ones whose change is held as a draft,
+    /// which is where it does more than inform — the note is what puts a worker
+    /// back on that branch to move the pin, and lifting the draft is what that
+    /// worker's own publication then does.
+    pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
+        told.iter()
             .filter(|node| adoption_of(node) == Adoption::Fast)
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
@@ -1145,6 +1150,103 @@ fn renderable(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// Why one fast-adoption node's change request is opened as a **draft**, asked of
+/// `onevcs` at the moment the publication is composed.
+///
+/// The rows are the node's own reference block, so what is asked about is exactly
+/// what the worker was told to pin against. `None` is a node with nothing to wait
+/// for.
+///
+/// **Asked here rather than off the reconcile loop's [`Watch`]** because a
+/// dispatch is long and a release can arrive in the middle of one: the question is
+/// whether the pin is still temporary *now*.
+///
+/// A row this run cannot put a question about is **not** drafted against — the
+/// judgement [`Dependency::askable`] already makes for the hold — because a draft
+/// nothing can ever lift is a change request nobody can finish.
+pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
+    // half of `askable`: a row is only composed for a dependency that settled `done`
+    // in a repository declaring release targets, so it has the branch or the landing
+    // commit the run recorded, and its target cell is either one that repository
+    // declares or the one the plan's own `consumes` named — both of which parse.
+    // What the arm does is leave such a row undrafted, which is this crate behaving
+    // exactly as it did before drafting existed.
+    let unreleased: Vec<(&CrossRepoReference, &str, TargetName)> = references
+        .iter()
+        .filter_map(|row| {
+            let (reference, target) = askable(row)?;
+            Some((row, reference, target))
+        }) // llmlint: ignore-end[changed_behavior_has_e2e]
+        .filter(|(_, reference, target)| !released_already(reference, target))
+        .collect();
+    let (row, reference, target) = unreleased.first()?;
+    // One reason names one dependency, because [`onevcs::DraftReason`] carries one
+    // target — so how many are being waited on is said in the sentence a person
+    // reads rather than left for them to count.
+    Some(onevcs::DraftReason {
+        because: format!(
+            "this node adopted {identity} early and is pinned to {reference} rather than to a \
+             released version; it is one of {count} release(s) this node adopted early, and \
+             landing now would make that pin permanent",
+            identity = row.repository,
+            count = unreleased.len(),
+        ),
+        awaiting: row.repository.clone(),
+        target: target.clone(),
+        reference: (*reference).to_owned(),
+    })
+}
+
+/// What a draft reason names a settlement by, on the one line a settlement holds.
+///
+/// Three of the reason's four fields — the target, the repository, and the
+/// reference — read off the value the publication was made with, so the settlement
+/// cannot come to name a different release from the one the host is holding the
+/// change for. `because` is not among them: it is the sentence composed for a
+/// person reading the change request's own record, and a settlement's detail is
+/// read on one line beside an outcome word that has already said the node is a
+/// draft. Rendered here rather than in `src/lifecycle.rs` so there is one
+/// spelling of it.
+pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
+    format!(
+        "complete, and held as a draft: awaiting the {target} release of {awaiting}, pinned \
+         to {reference} until it arrives",
+        target = reason.target,
+        awaiting = reason.awaiting,
+        reference = reason.reference,
+    )
+}
+
+/// The pair a reference row can be asked about: what the sibling resolves the
+/// work by, and which of that repository's targets carries it.
+///
+/// Both cells are empty where the run could not name one — the block renders an
+/// empty cell rather than dropping the row — so this is where a row that cannot
+/// be a question is told from one that can.
+fn askable(row: &CrossRepoReference) -> Option<(&str, TargetName)> {
+    let reference = [row.branch.as_str(), row.commit.as_str()]
+        .into_iter()
+        .find(|value| renderable(value).is_some())?;
+    // The sibling's own conversion, which is the one thing that decides what may
+    // spell a release target — the same rule [`Released::of_payload`] reads a
+    // replayed one back through.
+    Some((reference, row.release_target.parse::<TargetName>().ok()?))
+}
+
+/// Whether the release one reference row awaits has already happened.
+///
+/// [`Answer::of`] and no second reading of the sibling: *released* is the one
+/// answer that means the pin can go, and every other — not released, awaiting a
+/// person, a probe that could not answer — leaves the change a draft. "Not
+/// answered" is never "not released" here either; what it is is a change that
+/// must not land yet, which is the safe direction and the only one.
+fn released_already(reference: &str, target: &TargetName) -> bool {
+    Answer::of(&onevcs::release_status(reference, Some(target)))
+        .version()
+        .is_some()
+}
+
 /// The note a fast-adoption node is sent when the releases it was waiting on
 /// arrive.
 ///
@@ -1212,8 +1314,12 @@ fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
 /// The nodes whose releases matter on this pass.
 ///
 /// Every node that is ready to start — which is where a hold applies and where a
-/// dispatch's reference block is composed — and every fast-adoption node still
-/// running, which is where an arrival note is delivered.
+/// dispatch's reference block is composed — every fast-adoption node still
+/// running, which is where an arrival note is delivered, and every node whose
+/// change is **held as a draft**, which is where the release that lifts it is
+/// still being watched for. The third is the one that matters after a node has
+/// stopped running: a draft nobody goes on asking about is a change request that
+/// never becomes ready.
 pub(crate) fn watching(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
@@ -1223,7 +1329,10 @@ pub(crate) fn watching(
         .graph
         .iter()
         .filter(|node| {
-            statuses.get(&node.id) == Some(&NodeStatus::Ready) || running.contains(&node.id)
+            matches!(
+                statuses.get(&node.id),
+                Some(&NodeStatus::Ready | &NodeStatus::CompleteDraft)
+            ) || running.contains(&node.id)
         })
         .cloned()
         .collect()

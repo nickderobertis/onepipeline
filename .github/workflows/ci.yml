@@ -79,7 +79,7 @@ jobs:
   # llmlint: ignore-block[comments_earn_their_place] run 32538759791 and the `main`
   # timings below are why this job has the shape it has. The leg that burned 237
   # minutes naming no test is what the two limits and the per-test reporting were
-  # added to end, and the sampled ranges are what say 20 and 30 are over twice a
+  # added to end, and the sampled ranges are what say 45 and 60 are over twice a
   # green leg's worst rather than numbers somebody picked. Neither is recoverable
   # from the keys beneath them, and without them a reader cannot tell a bound that
   # was measured from one that was guessed.
@@ -98,10 +98,30 @@ jobs:
   #
   # Two limits, because they buy different things. The step's is what bounds the
   # hang, and it is the step's rather than only the job's so that a timeout leaves
-  # the job alive for the step below to say what was still running. That step
-  # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
-  # over twice its worst. The job limit is half of what
-  # nickderobertis/onepipeline#99 asks for.
+  # the job alive for the step below to say what was still running. Both exist
+  # because nickderobertis/onepipeline#99 found no job here declaring one, so a
+  # stuck leg burned toward GitHub's 360-minute default; 60 is still a sixth of it.
+  #
+  # They are sized off what the step spends its time on, which run 33315537691's
+  # Windows leg reports: `Summary [929.332s]` inside a 17m0s step, and 3637.6s of
+  # that 3714.7s of test time is the `e2e` binary, running four at a time on the
+  # runner's four cores. So the step is *working*, not hanging, and its wall time
+  # is the e2e suite's total over a core count that does not grow with the suite —
+  # each e2e test added costs this leg another ~1.9s.
+  #
+  # Which is how 20 stopped bounding the hang and started bounding the work. Over
+  # the twelve `main` runs to 2026-08-30 the Windows step took 11m54s-17m06s when
+  # green (its job 17m18s-22m06s), and run 33338370989 was cut at test 915 of 981.
+  # The four legs of nickderobertis/onepipeline#167 and #168 were each cut at
+  # 92-94% of ~1000 tests, 16m36s into a test phase needing ~17m40s: a step that
+  # needs 21-22m. 45 and 60 are over twice both that and the worst green run —
+  # the ratio 20 and 30 held back when the step was 8m00s and the job 12m38s.
+  # macOS is unmoved by them and far inside: 9m24s-12m06s step, 11m54s-15m48s job.
+  #
+  # Splitting the suite across more jobs is the only thing that would make the leg
+  # itself shorter, and it is not available: branch protection requires `cross
+  # (macos-latest)` and `cross (windows-latest)` by rendered name, so a shard axis
+  # renames both and every open pull request waits on a context that never reports.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
     needs: changes
@@ -111,7 +131,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -129,7 +149,7 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
-        timeout-minutes: 20
+        timeout-minutes: 45
         run: just check-cross
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no

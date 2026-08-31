@@ -32,6 +32,7 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
     LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
+use onepipeline::note::{Addressee, Delivered, Note, Reached};
 use onepipeline::plan::{
     Node, NodeKind, Plan, Resume, Step, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
     PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
@@ -1265,6 +1266,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Complete { .. } => "complete",
         Edit::Context { .. } => "context",
         Edit::Amend { .. } => "amend",
+        Edit::Note { .. } => "note",
         Edit::Finding { .. } => "finding",
     }
 }
@@ -3346,6 +3348,293 @@ fn the_adoption_flags_are_exactly_the_open_divergence_the_record_names() {
         .expect_err("the proposed alternatives refuse each other");
 }
 
+/// The verb a consumer checks a plan with, and the flags the contract spells.
+///
+/// A test about the *surface* rather than about the loader: the journeys in
+/// `tests/e2e/plan_check.rs` drive what it does. This is the gate that stops the
+/// document and the argument parser drifting — a flag renamed here without the
+/// contract saying so is interface drift, and a consumer pins to the spelling.
+#[test]
+fn the_plan_check_verb_is_the_one_the_contract_spells() {
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        contract.contains("`onepipeline plan check <SOURCE:PROJECT> [--check <PATH>]... [--json]`"),
+        "the contract no longer states the `plan check` command line"
+    );
+    for claim in [
+        "first the engine's own plan loader",
+        "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+        "the registered checks do **not** run",
+        "carry `\"source\": \"engine\"`",
+    ] {
+        assert!(
+            contract.contains(claim),
+            "the contract no longer states '{claim}'"
+        );
+    }
+
+    let plan = Cli::command()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "plan")
+        .expect("the binary offers `plan`")
+        .clone();
+    let check = plan
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "check")
+        .expect("`plan` offers `check`")
+        .clone();
+    let flags: BTreeSet<String> = check
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+        .collect();
+    assert!(
+        flags.contains("check") && flags.contains("json"),
+        "{flags:?}"
+    );
+
+    // And it parses the way the contract writes it: repeatable `--check`, in the
+    // order the flags were given.
+    let parsed = Cli::parse_from([
+        "onepipeline",
+        "plan",
+        "check",
+        "otg:plan-store",
+        "--check",
+        "./first",
+        "--check",
+        "./second",
+        "--json",
+    ]);
+    let Command::Plan(onepipeline::cli::PlanCommand::Check(args)) = parsed.command else {
+        panic!("`plan check` did not parse as itself");
+    };
+    assert_eq!(args.project, "otg:plan-store");
+    assert!(args.json);
+    assert_eq!(
+        args.checks,
+        vec![PathBuf::from("./first"), PathBuf::from("./second")]
+    );
+}
+
+/// The README's own copy of the `plan check` interface, reconciled clause by
+/// clause with the contract it copies.
+///
+/// The README states the wire and the exit codes in an operator's prose, which
+/// is a second copy of the contract — and a consumer writes a check against
+/// whichever of the two it read. A gate that sampled a few phrases out of that
+/// passage would let the copy drift in everything it did not sample, so this
+/// reconciles the **whole** passage: every backticked token it writes has to be
+/// one the contract's own plan-check paragraph writes, every claim it makes in
+/// prose is paired with the contract clause that licenses it, the exit codes are
+/// asserted against the constants the binary exits with **and** against the
+/// contract, the flags against the argument parser that offers them, and the
+/// example it shows against the parser that has to accept it.
+///
+/// The contract side is that one paragraph rather than the whole document: a
+/// token this passage uses is only licensed by the passage it is a copy of.
+#[test]
+fn the_readmes_plan_check_passage_is_a_gated_copy_of_the_contract() {
+    let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    // Wrapped prose on both sides, so match on words rather than line breaks.
+    let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let contract = CONTRACT
+        .lines()
+        .find(|line| line.contains("**A plan is checkable without launching it"))
+        .expect("the contract has a plan-check paragraph")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let passage = readme
+        .split_once("A plan is checkable before it is launched")
+        .expect("the README has a plan-check passage")
+        .1
+        .split_once("The run's own record does not move")
+        .expect("that passage ends where the README says it does")
+        .0
+        .to_string();
+
+    // The invocation the passage shows is one the binary accepts, taken out of
+    // the prose so a fence marker is not read as one of its tokens. A README
+    // that showed a command the parser refuses is the drift a reader meets
+    // first.
+    let (before, rest) = passage
+        .split_once("```bash ")
+        .expect("the passage shows an example invocation");
+    let (example, after) = rest
+        .split_once(" ```")
+        .expect("that example's fence closes");
+    let parsed = Cli::try_parse_from(example.split_whitespace()).unwrap_or_else(|error| {
+        panic!("the README shows `{example}`, which does not parse: {error}")
+    });
+    assert!(
+        matches!(
+            parsed.command,
+            Command::Plan(onepipeline::cli::PlanCommand::Check(_))
+        ),
+        "the README's example is not a `plan check`: {example}"
+    );
+    let prose = format!("{before}{after}");
+
+    // The wire, mechanically: every backticked run in the passage is one the
+    // contract's own paragraph writes. No hand-picked list, so a field, a key, a
+    // flag, or a literal added to the README without the contract stating it
+    // fails here. A run the README elides with `...` is reconciled by the parts
+    // it did write, because an elision is a shortening of the contract's shape
+    // rather than a claim of its own.
+    for token in backticked_runs(&prose) {
+        for part in token
+            .split("...")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            assert!(
+                contract.contains(part),
+                "the README's plan-check passage writes `{token}`, and the contract's \
+                 plan-check paragraph does not state '{part}'"
+            );
+        }
+    }
+
+    // And the prose, clause by clause: each claim the passage makes, paired with
+    // the contract clause it is a copy of. The two are worded for different
+    // readers, so each side is asserted against its own document — and either
+    // one rewritten without the other fails this.
+    for (stated, licensed) in [
+        (
+            "every refusal `start` makes before it dispatches anything, and no other rule",
+            "every refusal `onepipeline start` would make before dispatching anything, and no other rule",
+        ),
+        (
+            "Each repeatable `--check <PATH>` names an executable, resolved against the directory the verb ran in",
+            "a repeatable `--check <PATH>` flag naming an executable, resolved against the working directory `plan check` was run from",
+        ),
+        (
+            "handed the **loaded** plan as one JSON document on its stdin",
+            "spawned with the loaded plan as a single JSON document on its **stdin**",
+        ),
+        ("every default resolved", "with every default already resolved"),
+        (
+            "each node carrying its task's own metadata map verbatim",
+            "the store's own metadata map for that task, verbatim",
+        ),
+        (
+            "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+            "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+        ),
+        (
+            "answers on stdout with `{\"refusals\": [...]}`",
+            "On **stdout** a check answers with one JSON object, `{\"refusals\":",
+        ),
+        ("and exit 0", "A check that ran answers with exit status **0**"),
+        (
+            "`node` and `field` present on each and null where it is about neither",
+            "`node` and `field` are always present and may be null",
+        ),
+        (
+            "Engine refusals come first and carry `\"source\": \"engine\"`",
+            "Engine refusals come first and carry `\"source\": \"engine\"`",
+        ),
+        (
+            "each check's follow in the order its flags were given, under the path as it was given",
+            "each check's refusals follow in flag order and carry `\"source\": \"<the path as given>\"`",
+        ),
+        (
+            "`--json` prints them as one object carrying `project`, `accepted`, `refusals` and `unrunnable`, always all four",
+            "`{\"project\": <string>, \"accepted\": <bool>, \"refusals\": [{\"source\",\"node\",\"field\",\"reason\"}, ...], \"unrunnable\":",
+        ),
+        (
+            "reported separately from a refusal",
+            "which is reported separately from a refusal",
+        ),
+        ("never read as an accept", "is never read as an accept"),
+        (
+            "A loader refusal short-circuits: there is no loaded plan to hand a check, so each is reported as not run",
+            "there is no loaded plan to hand it: the registered checks do **not** run, and each is reported as not run",
+        ),
+    ] {
+        assert!(
+            prose.contains(stated),
+            "the README's plan-check passage no longer states '{stated}'"
+        );
+        assert!(
+            contract.contains(licensed),
+            "the README states '{stated}', and the contract's plan-check paragraph \
+             no longer states '{licensed}'"
+        );
+    }
+
+    // The exit codes, which are the binary's: the README names the numbers this
+    // build actually exits with, and the contract names the same three.
+    for (code, meaning, stated) in [
+        (
+            EXIT_SUCCESS,
+            "the loader and every check accepting",
+            "**0** — the loader and every check accepted",
+        ),
+        (
+            EXIT_QUEUED,
+            "at least one refusal from either source",
+            "**1** — at least one refusal, from either source",
+        ),
+        (
+            EXIT_REFUSED,
+            "a project that could not be read",
+            "**2** — the project could not be read at all, or a registered check could not be run",
+        ),
+    ] {
+        assert!(
+            prose.contains(&format!("`{code}` is {meaning}")),
+            "the README's plan-check passage no longer maps exit {code} to {meaning}"
+        );
+        assert!(
+            contract.contains(stated),
+            "the contract's plan-check paragraph no longer states '{stated}'"
+        );
+    }
+
+    // And the flags, which are the parser's.
+    let check = Cli::command()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "plan")
+        .expect("the binary offers `plan`")
+        .clone()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "check")
+        .expect("`plan` offers `check`")
+        .clone();
+    for flag in check
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+    {
+        // Either alone or with the value it takes, which is how the passage
+        // writes the one that has a value.
+        assert!(
+            prose.contains(&format!("`--{flag}`")) || prose.contains(&format!("`--{flag} ")),
+            "the README's plan-check passage does not name `--{flag}`, which the verb takes"
+        );
+    }
+}
+
+/// Every backticked run in one piece of prose, in the order it wrote them.
+///
+/// An unterminated backtick ends the scan: what follows it is not a run, and
+/// reading to the end of the text as though it were would let any prose past
+/// this gate.
+fn backticked_runs(prose: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut rest = prose;
+    while let Some((_, after)) = rest.split_once('`') {
+        let Some((run, tail)) = after.split_once('`') else {
+            break;
+        };
+        if !run.trim().is_empty() {
+            runs.push(run.to_string());
+        }
+        rest = tail;
+    }
+    runs
+}
+
 #[test]
 fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     // The published-artifact smoke checks `--help` against a hand-written word
@@ -3523,4 +3812,147 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
             "`{view}` is not a command the binary offers"
         );
     }
+}
+
+/// The note delivery seam this build carries **beyond** the contract is exactly
+/// what the divergence record proposes.
+///
+/// The contract is committed as approved and names none of it, so entry 52 is the
+/// only place it is written down — and a divergence nothing gates quietly stops
+/// being true. The entry's own block is the source: what parses here is what a
+/// planner would type, and the refusals are what a planner would be told.
+#[test]
+fn the_note_delivery_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("52.");
+
+    // The op, as the wire carries it, and the authors it is for.
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 52 names the op it adds");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 52 says which of them the monitor may issue");
+    assert!(!fixtures.is_empty(), "{block}");
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(
+            !OPS.contains(&op),
+            "`{op}` is on the contract's own list, so it is no divergence"
+        );
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+        allows(Author::Planner, &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let verdict = allows(Author::Monitor, &edit);
+        if monitor_may.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        // Refused, and the refusal names the op and what to do instead — an
+        // observer told only "no" has nothing to act on.
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(
+            refusal.contains(op) && refusal.contains("Surface it to the planner"),
+            "the refusal does not name `{op}` and what to do instead: {refusal}"
+        );
+    }
+
+    // The whole envelope a planner sends, parsed as one: a `note` is an edit like
+    // any other and travels the same way.
+    let envelope: Reply =
+        serde_json::from_value(json!({"version": 1, "commands": block["ops"].clone()}))
+            .expect("entry 52's ops travel in a reply envelope");
+    assert_eq!(envelope.commands.len(), fixtures.len());
+
+    // Every addressee the seam has, spelled as the entry writes them — and the
+    // spelling is the seam's own rather than a second one this crate keeps.
+    let addressees: Vec<String> =
+        serde_json::from_value(block["addressees"].clone()).expect("entry 52 names the addressees");
+    for named in &addressees {
+        let parsed: Addressee = serde_json::from_value(json!(named))
+            .unwrap_or_else(|e| panic!("`{named}` is an addressee: {e}"));
+        assert_eq!(parsed.as_str(), named, "`{named}` round-trips");
+    }
+    assert!(addressees.contains(&"worker".to_string()));
+
+    // And every disposition, likewise: what a delivery can answer is the set the
+    // record carries, so a party added upstream cannot land here unnamed.
+    let reached: Vec<String> =
+        serde_json::from_value(block["reached"].clone()).expect("entry 52 names the dispositions");
+    let carried = [
+        Reached::Queued,
+        Reached::Worker,
+        Reached::Supervisor,
+        Reached::JudgedWith {
+            completion_reason: "the work is done".into(),
+        },
+    ];
+    assert_eq!(
+        carried
+            .iter()
+            .map(|one| one.as_str().to_string())
+            .collect::<Vec<_>>(),
+        reached,
+        "entry 52 names dispositions this build does not carry, or the other way round"
+    );
+    for one in &carried {
+        let written = serde_json::to_value(one).expect("a disposition serializes");
+        let read: Reached = serde_json::from_value(written.clone()).expect("and reads back");
+        assert_eq!(&read, one, "{written} did not round-trip");
+    }
+
+    // The boundary: an envelope this seam cannot act on is refused where it
+    // arrives, by the seam's own newtypes, rather than somewhere later.
+    let refused: Vec<Value> =
+        serde_json::from_value(block["refused"].clone()).expect("entry 52 names what is refused");
+    for fixture in &refused {
+        let read = serde_json::from_value::<Edit>(fixture.clone());
+        assert!(
+            read.is_err(),
+            "the envelope's boundary accepted a note it cannot deliver: {fixture}"
+        );
+    }
+
+    // The same delivery on this crate's own surface, named as the entry names it.
+    // A note carrying an unusable criterion is unrepresentable here too, so the
+    // two spellings refuse the same things.
+    let api = &block["api"];
+    assert_eq!(api["module"].as_str(), Some("onepipeline::note"));
+    let note = Note::to(Addressee::Worker, "stop editing src/old.rs");
+    assert!(!note.binds());
+    assert_eq!(note.addressee, Addressee::Worker);
+    let bound = note
+        .clone()
+        .binding("`version.txt` holds `v: 2`")
+        .expect("a criterion the seam accepts");
+    assert!(bound.binds());
+    assert!(
+        Note::new(Addressee::Worker, "  ").is_err(),
+        "a blank note is not a note"
+    );
+    // The two answers, by the names the entry proposes.
+    let answers: Vec<String> =
+        serde_json::from_value(api["answers"].clone()).expect("entry 52 names what it answers");
+    let spelled = [
+        format!("{:?}", Delivered::To(Reached::Worker)),
+        format!("{:?}", Delivered::Queued),
+    ];
+    for (answer, spelled) in answers.iter().zip(spelled.iter()) {
+        assert!(
+            spelled.starts_with(answer),
+            "entry 52 names `{answer}`, which this build spells `{spelled}`"
+        );
+    }
+    assert_eq!(answers.len(), spelled.len());
+    // The call itself is the one the entry names, asked of the compiler rather
+    // than of a list beside it.
+    assert_eq!(api["call"].as_str(), Some("deliver"));
+    let _: fn(&RunPaths, &str, &Note) -> onepipeline::Result<Delivered> =
+        onepipeline::note::deliver;
 }

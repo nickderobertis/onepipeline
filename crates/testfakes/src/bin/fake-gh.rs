@@ -69,15 +69,20 @@ const UNREACHABLE: &str = "error connecting to api.github.com\ncheck your intern
 enum Change {
     /// Opened, and the host has not landed it.
     Open,
+    /// Opened as a **draft**: the host is holding it, and it cannot land while it
+    /// is one. `pr ready` is the only thing that moves it, to
+    /// [`Open`](Change::Open).
+    Draft,
     /// The host landed it, at [`MERGE_SHA`].
     Merged,
 }
 
 impl Change {
-    /// How the state is written down, and the only two spellings read back.
+    /// How the state is written down, and the only three spellings read back.
     fn as_str(self) -> &'static str {
         match self {
             Change::Open => "open",
+            Change::Draft => "draft",
             Change::Merged => "merged",
         }
     }
@@ -85,6 +90,7 @@ impl Change {
     fn parse(recorded: &str) -> Option<Self> {
         match recorded.trim() {
             "open" => Some(Change::Open),
+            "draft" => Some(Change::Draft),
             "merged" => Some(Change::Merged),
             _ => None,
         }
@@ -114,6 +120,7 @@ fn main() -> ExitCode {
         (Some("pr"), Some("view")) => view(&args, &dir),
         (Some("pr"), Some("checks")) => checks(&args, &dir),
         (Some("pr"), Some("merge")) => merge(&args, &dir),
+        (Some("pr"), Some("ready")) => ready(&args, &dir),
         (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
@@ -374,6 +381,11 @@ fn next_number(dir: &Path) -> NonZeroU64 {
 /// it takes the host's number out of that URL's last segment, so a URL that does
 /// not end in one would be refused there rather than here.
 fn create(args: &[String], dir: &Path) -> ExitCode {
+    // `--draft` is the whole of what a draft reason does at the host — `onevcs`
+    // writes none of the reason itself here — so the shape is checked with and
+    // without it rather than by ignoring an argument this host does not take.
+    let drafted = args.iter().any(|arg| arg == "--draft");
+    let bare: &[&str] = if drafted { &["--draft"] } else { &[] };
     if let Err(refusal) = shaped(
         args,
         "pr create",
@@ -385,7 +397,7 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
             ("--title", Shape::Named),
             ("--body", Shape::Prose),
         ],
-        &[],
+        bare,
     ) {
         return refusal;
     }
@@ -403,7 +415,11 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
         &serde_json::to_string(&opened)
             .unwrap_or_else(|error| fake::fail(&format!("the record does not serialise: {error}"))),
     );
-    record(dir, &opened.number.to_string(), Change::Open);
+    record(
+        dir,
+        &opened.number.to_string(),
+        if drafted { Change::Draft } else { Change::Open },
+    );
     println!("{}", url_of(&opened));
     ExitCode::SUCCESS
 }
@@ -565,7 +581,17 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         .filter(|change| change.repo == flag("--repo"))
         .filter(|change| change.head == flag("--head"))
         .filter(|change| change.base == flag("--base"))
-        .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
+        // A **draft** is open, which is what the host reports and what makes a
+        // second publication of the same branch adopt it rather than try to open
+        // a second change request beside it — which is how a draft comes never to
+        // be lifted. `--state open` selects it on the real host too: drafts are
+        // excluded by `--draft`, never by the state.
+        .filter(|change| {
+            matches!(
+                recorded(dir, &change.number.to_string()),
+                Some(Change::Open | Change::Draft)
+            )
+        })
         .map(|change| {
             let head = head_of(dir, &change);
             serde_json::json!({
@@ -662,6 +688,12 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // just pushed — which is how a stale verdict from an earlier head
         // decided a merge path and consumed a node's last retry.
         Some("headRefOid,statusCheckRollup") => "headRefOid,statusCheckRollup",
+        // Whether the host is holding this change back. `onevcs` 0.17.1 reads it
+        // on its own before it asks a change request to merge, and refuses a
+        // response that does not carry it rather than reading silence as "not a
+        // draft" — so a host that answered every other field would land work
+        // somebody had held.
+        Some("isDraft") => "isDraft",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -678,7 +710,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Err(refusal) => return refusal,
     };
     let id = opened.number.to_string();
-    let merged = state_of_opened(dir, &opened) == Change::Merged;
+    let state = state_of_opened(dir, &opened);
+    let merged = state == Change::Merged;
     let reported = scripted_checks(dir, &id);
     let head = head_of(dir, &opened);
     println!(
@@ -688,6 +721,10 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
+            // Whether the host is holding this change back. Read off the state
+            // `pr create` and `pr ready` write, so what this answers is what this
+            // host actually did rather than what it was asked to do.
+            "isDraft": state == Change::Draft,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
@@ -956,6 +993,25 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
             }))
             .collect::<Vec<_>>())
     );
+    ExitCode::SUCCESS
+}
+
+/// `gh pr ready ID --repo R`
+///
+/// Takes a change request out of its draft state. **Idempotent**, because the
+/// real one is: a change that is not a draft is left exactly as it is, and a
+/// merged one is not reopened — which is what a second lift must not do.
+fn ready(args: &[String], dir: &Path) -> ExitCode {
+    if let Err(refusal) = shaped(args, "pr ready", 3, &[("--repo", Shape::Named)], &[]) {
+        return refusal;
+    }
+    let opened = match addressed(args, dir) {
+        Ok(opened) => opened,
+        Err(refusal) => return refusal,
+    };
+    if state_of_opened(dir, &opened) == Change::Draft {
+        record(dir, &opened.number.to_string(), Change::Open);
+    }
     ExitCode::SUCCESS
 }
 

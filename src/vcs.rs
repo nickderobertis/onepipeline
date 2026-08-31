@@ -31,11 +31,11 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use onevcs::{
-    EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome, PublishRequest,
-    Session, SessionRequest, SessionToken, Subject,
+    DraftReason, EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome,
+    PublishRequest, Session, SessionRequest, SessionToken, Subject,
 };
 
 use crate::error::{Error, Result};
@@ -98,10 +98,17 @@ pub fn publish(
     policy: Option<MergePolicy>,
     title: Option<&str>,
     body: Option<&str>,
+    draft: Option<&DraftReason>,
 ) -> Result<Publication> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
         .transpose()?;
+    // Held to the sibling's own rule where it is composed rather than where it
+    // arrives, for [`Subject`]'s reason: a reason that would not render as itself
+    // is refused before a session's work is committed against it.
+    if let Some(reason) = draft {
+        reason.checked().map_err(refusal)?;
+    }
     onevcs::publish(
         &providers(),
         token,
@@ -109,10 +116,21 @@ pub fn publish(
             policy,
             title,
             body: body.map(str::to_owned),
+            draft: draft.cloned(),
         },
     )
     .map_err(refusal)
 }
+
+/// The word a node whose change request is held open as a **draft** settles on.
+///
+/// Its own outcome beside `change-open` rather than a shade of it, because the
+/// two differ in the one fact every reader of a settlement acts on: an open change
+/// can land and a draft cannot. Folded together, a fast-adoption node that stopped
+/// short of merging its temporary git pin would report exactly as one that
+/// published a change somebody is reviewing — which is the reading that let a git
+/// pin become permanent in a base branch in the first place.
+pub const DRAFTED: &str = "change-draft";
 
 /// How a publication settles the node that made it.
 ///
@@ -124,6 +142,9 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     match outcome {
         PublishOutcome::Merged(_) => "merged",
         PublishOutcome::ChangeOpen(_) => "change-open",
+        // Its own word and not `change-open`'s, because the two differ in the one
+        // thing a reader acts on: a draft cannot land. See [`DRAFTED`].
+        PublishOutcome::ChangeDraft(_) => DRAFTED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -335,7 +356,9 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     use crate::graph::Landing;
     match outcome {
         PublishOutcome::Merged(_) => Some(Landing::Landed),
-        PublishOutcome::ChangeOpen(_) | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
+        PublishOutcome::ChangeOpen(_)
+        | PublishOutcome::ChangeDraft(_)
+        | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
@@ -384,7 +407,9 @@ pub fn proved_landed(branch: &str) -> bool {
 /// than the URL — see the `onevcs` proposal in `docs/contract-divergences.md`.
 pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
     match outcome {
-        PublishOutcome::ChangeOpen(url) | PublishOutcome::Queued(url) => Some(url.to_string()),
+        PublishOutcome::ChangeOpen(url)
+        | PublishOutcome::ChangeDraft(url)
+        | PublishOutcome::Queued(url) => Some(url.to_string()),
         _ => None,
     }
 }
@@ -715,13 +740,6 @@ fn labels_of(labels: onevcs::Labels) -> crate::event::Labels {
     }
 }
 
-/// How long a follow may keep reading after its session was closed.
-///
-/// The reader ends itself on a session it reads as closed, so this only covers
-/// the case where the close itself failed and nothing will ever mark it: a node
-/// that has already settled must not hang on its own cleanup.
-const FOLLOW_GRACE: Duration = Duration::from_secs(5);
-
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
@@ -808,7 +826,7 @@ fn settled(session: &SessionToken) -> bool {
 /// higher series hide the lower one's next record, which is a relayed record
 /// lost, and would make the per-stream `seq` gaps a consumer detects loss
 /// through describe two producers at once.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Watermarks {
     /// The highest `seq` relayed, per producing stream.
     reached: BTreeMap<String, u64>,
@@ -848,6 +866,18 @@ impl Watermarks {
     }
 }
 
+/// Whether one relayed envelope is the record a session's stream ends with.
+///
+/// Spelled through `onevcs`'s own serializer rather than as a literal, for
+/// [`kind_of`]'s reason: the vocabulary is the sibling's, and a second copy of it
+/// here is one that goes stale the release the sibling renames a kind — and this
+/// is the kind a settlement is *checked* against, so a stale copy would report
+/// every session as having ended without its terminator.
+#[must_use]
+pub fn is_terminator(envelope: &Envelope) -> bool {
+    envelope.kind == kind_of(onevcs::EventKind::SessionClosed)
+}
+
 /// One session's stream, being followed.
 ///
 /// Dropping one ends the follow. Not every caller reaches a settlement — a node
@@ -876,31 +906,24 @@ impl Drop for Follower {
 impl Follower {
     /// Stop following, and say how far into the stream it got.
     ///
-    /// Called *after* `session close`, which is what ends the follow: the reader
-    /// relays everything appended since its last pass and only then asks whether
-    /// the session closed, so waiting for it loses nothing.
+    /// Called *before* `session close`, and the flag rather than the close is
+    /// what ends it. `onevcs` refuses to release a session any live process is
+    /// working inside its run root, and asking whether the session closed is a
+    /// library call that shells out to `git` in that session's clone — so a
+    /// follow still polling at the moment of the close is, a fraction of the
+    /// time, exactly such a process, and the close fails. Waiting here is what
+    /// makes it not one: the reader relays one last batch and the join is what
+    /// says its last `git` child has been reaped.
     ///
     /// The answer is a **floor, never a promise that the rest is not there**.
-    /// Closing a session marks the record closed and only then writes the
-    /// `session-closed` event, while the follow relays what the stream holds and
-    /// *then* asks whether the session closed — so a follow can end cleanly,
-    /// successfully, with the last record of the session still unwritten.
-    /// Treating a clean end as "everything was relayed" is what dropped that
-    /// record out of the merged store; the caller reads the stream once more
-    /// from this point instead.
+    /// Everything the close itself writes — the `session-closed` record among it
+    /// — is appended after this returns, so the caller reads the stream once
+    /// more from this point instead. Treating a clean end as "everything was
+    /// relayed" is what dropped that record out of the merged store.
     ///
     /// Empty when it relayed nothing at all, which is the whole stream still to
     /// read rather than a stream that held nothing.
     pub fn finish(mut self) -> Watermarks {
-        let deadline = Instant::now() + FOLLOW_GRACE;
-        while self
-            .reader
-            .as_ref()
-            .is_some_and(|reader| !reader.is_finished())
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(FOLLOW_POLL);
-        }
         self.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
@@ -1155,6 +1178,21 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         base: node.base_branch.clone(),
         execution_checkout: node.execution_checkout.clone(),
     })
+}
+
+/// Serialises the tests that point `ONEVCS_HOME` at a scratch state root.
+///
+/// That variable is process-global and this crate's unit tests share one process,
+/// so two modules pointing it at two roots at once read each other's state. Each
+/// such test holds this for its duration instead; the guard is the whole of the
+/// protocol, which is why it is a value the caller binds rather than a pair of
+/// calls it could get half right.
+#[cfg(test)]
+pub(crate) fn scratch_home_held() -> std::sync::MutexGuard<'static, ()> {
+    static IN_USE: Mutex<()> = Mutex::new(());
+    IN_USE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -1544,6 +1582,10 @@ mod tests {
             outcome_of(&PublishOutcome::ChangeOpen(url.clone())),
             "change-open"
         );
+        assert_eq!(
+            outcome_of(&PublishOutcome::ChangeDraft(url.clone())),
+            "change-draft"
+        );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
         // A failed publication settles under the word its **kind** earns, which
@@ -1592,10 +1634,15 @@ mod tests {
             landing_of(&PublishOutcome::Merged(onevcs::Sha("abc".into()))),
             Some(Landing::Landed)
         );
-        // A change request somebody has to merge, and one the host is holding
-        // behind checks: both are a change that has not reached its base.
+        // A change request somebody has to merge, one nobody may merge yet, and
+        // one the host is holding behind checks: each is a change that has not
+        // reached its base.
         assert_eq!(
             landing_of(&PublishOutcome::ChangeOpen(url.clone())),
+            Some(Landing::Unlanded)
+        );
+        assert_eq!(
+            landing_of(&PublishOutcome::ChangeDraft(url.clone())),
             Some(Landing::Unlanded)
         );
         assert_eq!(
@@ -1681,9 +1728,12 @@ mod tests {
     /// happened. So it is exercised rather than reasoned about.
     ///
     /// One test, not three: `ONEVCS_HOME` is process-global, and separate tests
-    /// would set it from separate threads and read one another's state root.
+    /// would set it from separate threads and read one another's state root. The
+    /// other module that needs a scratch root takes turns with this one through
+    /// [`scratch_home_held`], which is held for as long as this root is pointed at.
     #[test]
     fn a_session_stream_that_is_not_whole_is_read_for_what_it_holds() {
+        let _home = super::scratch_home_held();
         let root = std::env::temp_dir().join(format!("onepipeline-stream-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");

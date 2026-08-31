@@ -1,14 +1,43 @@
-# Every test in the `e2e` binary drives a tree of real processes — the
-# `onepipeline` binary, the two sibling doubles it runs as subprocesses, and the
-# round owner one of those starts. Its true concurrency is therefore process
+# Every test in the `e2e` and `note` binaries drives a tree of real processes —
+# the `onepipeline` binary, the two sibling doubles it runs as subprocesses, and
+# the round owner one of those starts. Its true concurrency is therefore process
 # trees, not threads, and letting nextest run one per core oversubscribes the
 # machine badly enough that a test times out waiting for work that is merely
 # queued behind other tests' work.
 #
 # The cap is a statement about what these tests *are*, not a way to make a slow
 # test pass: each one still runs in under a second on an idle host.
+#
+# One group across both binaries rather than one each. The limit is what the
+# machine can hold, not what a binary may ask for, so two groups of four would be
+# eight process trees at once — the oversubscription this exists to prevent.
+# Measured: uncapped, the note journeys ran 20.6s where the capped e2e binary runs
+# them in 15.8s of CPU.
+#
+# llmlint: ignore-block[comments_earn_their_place] this number sets the
+# cross-platform legs' wall time — the leg is this suite's test-time over it — so
+# what that leg costs and what was tried against it are the only things that say
+# whether 4 is measured or liked. Neither is recoverable from the key below.
+#
+# 4 is what the Windows runner has, so on that leg this cap and nextest's own
+# per-core default are the same number and the leg's test phase is the suite's
+# total test-time over 4. Run 33368587620 reports it: 3786.5s of test-time in a
+# 970.1s phase, 3.90x. It was cancelled at 861 of 991 tests, before the `note`
+# binary ran at all, so no leg has yet reported one — projecting the tests it
+# never reached from this host at the 4.81x those two runs put between them gives
+# ~4756s, a ~20m20s test phase inside a ~22m step, against `ci.yml`'s 45m step and
+# 60m job. The nine note tests are 74.5s of that projection: 1.6%.
+#
+# Raising the cap does not buy the margin back. Pinned to four cores — this host's
+# nearest thing to that runner — 6 matched 4 (253.0s against 251.7s, because
+# nextest's global thread count binds first) and 8 failed
+# `dispatch::the_run_state_this_crate_places_is_where_the_sibling_looks_for_it`,
+# which is the paragraph above happening. What the leg actually spends its time on
+# is `adoption`: 1327.2s of those 3786.5s, at 14.4x this host against a ~2.8x
+# median across the other modules, so that is where a shorter leg would come from.
 [test-groups]
 e2e = { max-threads = 4 }
+# llmlint: ignore-end[comments_earn_their_place]
 
 [profile.default]
 # llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
@@ -54,5 +83,5 @@ status-level = "pass"
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
-filter = 'binary(e2e)'
+filter = 'binary(e2e) or binary(note)'
 test-group = 'e2e'

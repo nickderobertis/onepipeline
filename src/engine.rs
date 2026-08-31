@@ -1164,13 +1164,17 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
 
 /// Whether any node could still change state without an edit or an attestation.
 ///
-/// A node that is `ready` has not started yet and one that is `running` has not
-/// finished; either way the loop has something to wait for. Everything else is
-/// settled or gated by something only the channel delivers.
+/// `ready` and `running` are the obvious two. A **draft-complete** node is the
+/// third: this loop is what watches for the release that lifts its draft, so
+/// breaking here would settle the run with the temporary pin still in the change.
+/// Everything else is settled or gated by something only the channel delivers.
 fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
-    statuses
-        .values()
-        .any(|status| matches!(status, NodeStatus::Ready | NodeStatus::Running))
+    statuses.values().any(|status| {
+        matches!(
+            status,
+            NodeStatus::Ready | NodeStatus::Running | NodeStatus::CompleteDraft
+        )
+    })
 }
 
 /// Drain the planner's durable command queue and answer every claimed envelope.
@@ -1196,8 +1200,9 @@ fn reconcile_edits(
         let mut applied = true;
         let mut reason = None;
         for command in &envelope.commands {
-            let compiled = crate::channel::allows(author, command)
-                .and_then(|()| compile_and_deliver(journal, state, command, launch, in_flight));
+            let compiled = crate::channel::allows(author, command).and_then(|()| {
+                compile_and_deliver(paths, journal, state, command, launch, in_flight)
+            });
             match compiled {
                 Ok(operations) => {
                     // Dropping or retrying a running node raises its
@@ -1258,30 +1263,7 @@ fn reconcile_edits(
                 Err(error) => {
                     applied = false;
                     reason = Some(error.to_string());
-                    journal.emit(
-                        journal::PipelineKind::EditRejected,
-                        journal::labels(&paths.run, None),
-                        journal::payload(&[
-                            ("author", json!(author)),
-                            ("command", json!(command)),
-                            ("reason", json!(error.to_string())),
-                        ]),
-                    )?;
-                    // Every rejection is also surfaced, so no accepted command
-                    // is silently dropped.
-                    raise(
-                        paths,
-                        journal,
-                        Surface {
-                            id: 0,
-                            kind: "edit-rejected".into(),
-                            message: format!("reconciler: rejected — {error}"),
-                            source: crate::channel::source::RECONCILER.into(),
-                            blocking: false,
-                            queued_at: sys::now_millis(),
-                            workstream: None,
-                        },
-                    )?;
+                    record_rejection(paths, journal, author, command, &error)?;
                     break;
                 }
             }
@@ -1304,6 +1286,7 @@ fn reconcile_edits(
 /// reached the node is part of the mutation — a note the turn took is not also
 /// owed to the next dispatch.
 fn compile_and_deliver(
+    paths: &RunPaths,
     journal: &mut Journal,
     state: &RunState,
     command: &Command,
@@ -1327,6 +1310,28 @@ fn compile_and_deliver(
     };
     let mut candidate = state.graph.clone();
     let operations = edits::compile(&mut candidate, &frontier, command)?;
+    if let Command::Note {
+        id,
+        addressee,
+        text,
+        criterion,
+    } = command
+    {
+        // The note's own record is the delivery's, so the structural compile
+        // above contributed none: it established that the ask is one this run
+        // can act on, and this is the answer the conversation gave.
+        return deliver_manager_note(
+            paths,
+            *addressee,
+            id,
+            text,
+            criterion.as_ref(),
+            in_flight
+                .get(id)
+                .and_then(|dispatch| dispatch.control.clone())
+                .as_ref(),
+        );
+    }
     let Command::Context { id, note, deliver } = command else {
         return Ok(operations);
     };
@@ -1336,6 +1341,121 @@ fn compile_and_deliver(
     }
     let mut candidate = state.graph.clone();
     edits::compile_with(&mut candidate, &frontier, command, delivery)
+}
+
+/// Put one refused edit into the run's record: the rejection, and the surface that
+/// makes sure nobody has to go looking for it.
+///
+/// Both writers of the graph call this — the reconciler, and `reply` when nothing
+/// is driving the run and it becomes the single writer itself — because which of
+/// them judged an edit is an accident of timing and a planner reading the record
+/// afterwards should not be able to tell. A note that reached nobody is the case
+/// this matters most for: the whole point of refusing one is that the
+/// non-delivery is *said*, and a refusal recorded on one path only is silence on
+/// the other.
+///
+/// # Errors
+///
+/// The reason the run's own journal or channel could not be written.
+pub(crate) fn record_rejection(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    author: crate::channel::Author,
+    command: &Command,
+    error: &Error,
+) -> Result<()> {
+    journal.emit(
+        journal::PipelineKind::EditRejected,
+        journal::labels(&paths.run, None),
+        journal::payload(&[
+            ("author", json!(author)),
+            ("command", json!(command)),
+            ("reason", json!(error.to_string())),
+        ]),
+    )?;
+    // Every rejection is also surfaced, so no accepted command is silently
+    // dropped.
+    raise(
+        paths,
+        journal,
+        Surface {
+            id: 0,
+            kind: "edit-rejected".into(),
+            message: format!("reconciler: rejected — {error}"),
+            source: crate::channel::source::RECONCILER.into(),
+            blocking: false,
+            queued_at: sys::now_millis(),
+            workstream: None,
+        },
+    )
+}
+
+/// Hand one manager note to a node's conversation, and compile what became of it.
+///
+/// The delivery is `oneagentgraph`'s and the routing `onejudge`'s: the note goes to
+/// whichever party of the two-party member is live, and the other party receives it
+/// with that party's response. What this decides is only *which member* — the one
+/// the node's dispatch is running, live or not.
+///
+/// **Not only the live one**, and that is the point of the second address below: a
+/// note arriving after the node's dispatch has completed is still asked of the
+/// member it was for, so the refusal that comes back is the conversation's own —
+/// naming how it ended — rather than this crate's guess that there was nothing to
+/// ask. Addressing nothing at all is the one case this composes itself, and it says
+/// which case it is.
+///
+/// # Errors
+///
+/// [`Error::Refused`] carrying the conversation's own sentence, for a note it will
+/// never read. The reconciler journals that refusal and surfaces it, so a
+/// non-delivery is in the run's record and not only in the caller's exit code.
+pub(crate) fn deliver_manager_note(
+    paths: &RunPaths,
+    addressee: crate::note::Addressee,
+    id: &str,
+    text: &crate::note::NoteText,
+    criterion: Option<&crate::note::Criterion>,
+    live: Option<&TurnAddress>,
+) -> Result<Vec<edits::Operation>> {
+    let note = crate::note::of(addressee, text, criterion)
+        .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
+    let address = match live.cloned().or_else(|| last_turn_address(paths, id)) {
+        Some(address) => address,
+        None => {
+            return Err(crate::note::undelivered(
+                id,
+                &crate::note::Undelivered::NoConversation {
+                    reason: "no dispatch of this node has reported a member yet, so there is \
+                             no conversation to hand it to"
+                        .to_string(),
+                },
+            ))
+        }
+    };
+    let accepted =
+        agentgraph::note(&address, &note).map_err(|why| crate::note::undelivered(id, &why))?;
+    Ok(vec![edits::Operation::NoteDelivered {
+        node: id.to_string(),
+        addressee,
+        text: text.clone(),
+        criterion: criterion.cloned(),
+        reached: crate::note::Reached::from(&accepted),
+    }])
+}
+
+/// Where the last dispatch of `node` was addressed, read back out of the run's own
+/// merged store.
+///
+/// The same two labels [`addressed_by`] reads off a live envelope, taken from the
+/// record instead — which is what makes a note to a node whose dispatch has
+/// *finished* reach the member that had it, and be refused by that member's own
+/// account of how it ended.
+fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
+    journal::read(&paths.journal())
+        .into_iter()
+        .rev()
+        .filter(|envelope| envelope.labels.node.as_deref() == Some(node))
+        .find_map(|envelope| addressed_by(&envelope))
 }
 
 /// Carry one note into a node's running turn, as far as its mode asks.
@@ -1401,14 +1521,17 @@ fn not_live(deliver: Deliver, id: &str, reason: &str) -> Result<edits::Delivery>
     }
 }
 
-/// Tell every still-running fast-adoption node whose awaited releases have all
-/// arrived, exactly once.
+/// Tell every fast-adoption node whose awaited releases have all arrived, exactly
+/// once — and by telling a **draft-complete** one, lift its draft.
 ///
-/// Delivery is the `context` mechanism a planner's own note uses, at `auto`: into
-/// the node's running turn where it has a controllable one, and onto its next
-/// dispatch where it does not. `release-adopted` is the durable record of both —
-/// which is what makes the note deliver once across a driver's death, and what
-/// the fold reattaches a deferred note from.
+/// Delivery is the `context` mechanism a planner's own note uses, at `auto`, and
+/// `release-adopted` is the durable record that makes it deliver once across a
+/// driver's death.
+///
+/// A draft-complete node has no turn to reach, so that record is also what
+/// returns it to the frontier — on the branch its own settlement pinned it to.
+/// Moving the pin is that worker's; lifting the draft is its publication's,
+/// because a publication carrying no reason is what `onevcs` lifts one on.
 ///
 /// The note is not an edit: nobody submitted it and no author owns it, so it is
 /// recorded under its own kind rather than as an `edit-committed` attributed to a
@@ -1420,11 +1543,22 @@ fn adopt_releases(
     releases: &mut crate::release::Watch,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<()> {
-    let running: Vec<Node> = in_flight
+    let statuses = state.statuses();
+    // Every node an arrival is owed to: the dispatches in flight, and the nodes
+    // this run stopped short of merging. A node in neither has either not been
+    // told anything to correct or has already settled on what it was told.
+    let told: Vec<Node> = in_flight
         .values()
         .map(|dispatch| dispatch.node.clone())
+        .chain(
+            state
+                .graph
+                .iter()
+                .filter(|node| statuses.get(&node.id) == Some(&NodeStatus::CompleteDraft))
+                .cloned(),
+        )
         .collect();
-    let ready = releases.ready_to_adopt(&running);
+    let ready = releases.ready_to_adopt(&told);
     if ready.is_empty() {
         return Ok(());
     }
@@ -3444,6 +3578,7 @@ mod tests {
         let publications: std::collections::BTreeSet<&str> = [
             PublishOutcome::Merged(onevcs::Sha("abc".into())),
             PublishOutcome::ChangeOpen(url()),
+            PublishOutcome::ChangeDraft(url()),
             PublishOutcome::Queued(url()),
             PublishOutcome::NothingToPublish,
         ]

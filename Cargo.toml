@@ -65,6 +65,24 @@ resolver = "2"
 #   `tests/e2e/shipped.rs` reads each shipped persona through the sibling's own
 #   `Persona::parse` and layers it onto a base, so a file in the wrong spelling
 #   fails rather than reads differently.
+# - `oneagentgraph` 0.3.14 weighs a producer's provider-failure classification
+#   against the `oneharness` record for the same turn before it publishes a death,
+#   and narrows what a "terminal blocker" is in the shipped `engineer` bar. Below it
+#   a node was settled `failed` on a `rate_limit` whose own turn had exited `0` and
+#   billed — `src/engine.rs` settles a node dead off `member-died` and off nothing
+#   else — and a run that merely timed out was released as one nothing could clear.
+#   `tests/e2e/dispatch.rs` and `src/agentgraph.rs` hold the two halves against the
+#   linked library, so a pin below 0.3.14 fails rather than reads differently.
+# - `oneagentgraph` 0.3.15 publishes `oneagentgraph::control::note`, which hands
+#   one role-addressed note to a named member of a graph run and answers what that
+#   member's conversation did with it. It is the delivery half of the approved
+#   delivery-seam contract and there is no verb behind it — the sibling's command
+#   line has no `note` — so it is a **compile floor** rather than a version this
+#   build could compose an installed executable at. Below it a manager's note
+#   reaches the worker by interrupt and the judge not at all, which is the seam
+#   `src/note.rs` exists to end. `tests/note/` drives it against the real
+#   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
+#   than reads differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -201,6 +219,19 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# - `onevcs` 0.17.1 keeps a holders read from forgetting a session record nobody
+#   is left to answer for. `src/concurrency.rs` runs that read on every launch, so
+#   below it a continuation cut a fresh branch over work already committed on the
+#   preserved one, and the publication was refused as describing no change. The
+#   same release refuses `session close` on a session a live process is inside,
+#   which is why `lifecycle::end_session` stops the follow before it closes. A
+#   **requirement**: `^0.16` admits no 0.17.x, the breaking position pre-1.0.
+#   `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
+#   and the stale-holder case in `tests/e2e/concurrency.rs` hold it.
+# - `onevcs` 0.18.0 carries the release-declaration schema at **version 3**, the
+#   number `release-targets.toml` states, and the `PublishRequest.draft` /
+#   `PublishOutcome::ChangeDraft` pair `src/vcs.rs` meets. Taken because
+#   `onevcs-testing` 0.5.2 requires exactly this `onevcs`, so the two move together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -252,17 +283,39 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.13 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`,
+# `oneagentgraph` 0.3.15 requires `oneharness-core 0.12.1` and `onejudge 0.7.0`,
 # and the `onejudge` pin below is the release *that* requirement resolves to.
-# 0.6.2 still requires `oneharness-core 0.12.0`, whose caret requirement admits
-# 0.12.1, so the pins below let the graph resolve **one** turn engine. A split one
+# 0.7.0 still requires `oneharness-core 0.12.0`, whose caret requirement admits
+# 0.12.2, so the pins below let the graph resolve **one** turn engine. A split one
 # is invisible to a currency check, which reads each copy separately and calls
-# both current.
+# both current. The `onejudge` pin moved with the graph rather than lagging it:
+# pre-1.0 the minor is the breaking position, so `^0.6.2` admitted no 0.7.x and
+# the two copies could only be ended by moving the pin.
 #
-# Neither 0.3.13 nor `onejudge` 0.6.2 is a floor: nothing under either library's
-# `src/` moved in the gap below it — each is that repository's own CI and the
-# move of its release declaration into `release-targets.toml` — so no test here
-# records one.
+# **0.3.14 and 0.3.15 are both floors**, for two separate things this crate reads.
+#
+# 0.3.14 weighs a producer's provider-failure classification against the
+# `oneharness` record for the same turn before it publishes a death. `src/engine.rs`
+# settles a node **dead** off `member-died` and off nothing else, and every dispatch
+# runs under a supervisor — `graphs/node-scope.yaml`'s worker is a `kind: onejudge`
+# member — so below it a node was settled `failed` on a `rate_limit` whose own turn
+# had exited `0` and billed, and the finished work went with it. The same release
+# narrows what a "terminal blocker" is in the shipped `engineer` bar, the role
+# `src/executor.rs` names on `members.worker`, so a run that merely timed out is no
+# longer released as one nothing could clear. `tests/e2e/dispatch.rs`'s
+# `a_classification_the_harness_record_contradicts_settles_rather_than_dies` and
+# `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past`
+# hold the two halves against the linked library.
+#
+# 0.3.15 routes a **role-addressed** note to whichever side of a member is live, and
+# the `onejudge` 0.7.0 it requires is the vocabulary that comes with it:
+# `src/note.rs` calls `oneagentgraph::control::note` and re-exports its shapes.
+# `Channel::Context` carries a note to a *node* and never names a side, which is the
+# seam that op exists to end. `tests/note/`, the `note` test binary declared below,
+# drives the delivery against the real sibling and a real two-party conversation.
+#
+# Both are recorded in the floors list at the top of this file.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -282,23 +335,32 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.13"
-onevcs = "0.16.2"
+oneagentgraph = "0.3.15"
+onevcs = "0.18.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.6.2"
+#
+# 0.7.0 is a second vocabulary beside the verdicts, and a **compile floor**: it
+# publishes `onejudge::note`, whose `Addressee`, `Note`, `Criterion`, `Accepted`
+# and `Undelivered` are the approved delivery-seam contract's own shapes.
+# `src/note.rs` re-exports them through `oneagentgraph::note` rather than
+# restating them — a second declaration is a shape that drifts, and a note that
+# satisfied the copy would still be refused by the conversation it was written
+# for. `oneagentgraph` 0.3.15 requires the same release, so the one resolution
+# rule above already holds the pair together.
+onejudge = "0.7.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.6.2 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.13 requires
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.7.0 it
+# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.15 requires
 # 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
 # double writes the one its consumer parses. If onejudge's pin moves and this
 # one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
@@ -315,11 +377,11 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.22"
+onevcs-testing = "0.5.2"
 
 [package]
 name = "onepipeline"
-version = "0.18.0"
+version = "0.18.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -359,9 +421,15 @@ include = [
   "/examples/**",
 ]
 
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
+# is a verb on this binary, beside `start`, `validate` and `session` — not a new
+# command or client. The shipped shape is one library and one binary, which
+# `AGENTS.md` states and `docs/contract.md` states the verb against; a second
+# project for a subcommand would contradict both.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 [lib]
 name = "onepipeline"
@@ -441,10 +509,25 @@ fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 sha2 = "0.10"
+# `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
+# allow-git list, and what it compares are pins — so both sides are parsed as the
+# TOML they are rather than scanned for a substring that might not be one.
+toml = "1"
 
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
+
+# The conversational tier, in its own binary for the reason `smoke` is in one:
+# so a runner can name it. Each of these journeys starts a real two-party
+# conversation and holds one side's turn open, which makes them the most
+# expensive shape here, and `binary(note)` is what lets `just test-note` run
+# them alone and `tests/note/project.json` declare the Nx project the crate's
+# `test` target depends on. They stay offline, so `just test-quick` still runs
+# every one of them on the cross-platform legs.
+[[test]]
+name = "note"
+path = "tests/note/main.rs"
 
 # The real-everything tier, in its own binary so the offline gate can exclude it
 # by name: `just test`, `just test-quick`, and therefore `just gate` run

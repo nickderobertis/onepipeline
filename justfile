@@ -21,7 +21,7 @@ set positional-arguments := true
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
 # recipes whose failure needs project-level context (_crate-fmt-check,
-# _crate-test, msrv) add one explicitly.
+# _crate-coverage, msrv) add one explicitly.
 
 # The revision of `onetaskgraph` this build's own checks read their plans
 # through. A plan is one project of that store and this crate *drives* the
@@ -192,25 +192,72 @@ _crate-lint:
 # `NEXTEST_PROFILE` is no protection. `smoke-real` states its own because
 # `--no-capture` and `all` are what that journey *is*; `all` mutes nothing.
 
-# The offline tier: every binary but `smoke`, which needs a GitHub credential
-# and a scratch repository and is run by `just smoke-real` alone. Excluded by
-# name rather than by `#[ignore]`, so the journey is never a skipped test.
-offline-tiers := "not binary(smoke)"
+# The offline tier, in the two halves its two projects run — the crate and
+# `onepipeline-note-journeys`. `smoke` is in neither: it needs a GitHub credential and a scratch repository and is run by
+# `just smoke-real` alone, excluded by name rather than by `#[ignore]` so the
+# journey is never a skipped test.
+#
+# `note-tier` drops `harness::`. The note binary shares `tests/e2e/harness.rs`
+# through `#[path]`, exactly as the smoke binary does, so the harness's own
+# twelve self-tests compile into it too — and they belong to the binary that
+# owns the file. Selecting them here would run one set of tests twice in one
+# tier for 4.8s and print every name twice.
+rest-tier := "not binary(smoke) and not binary(note)"
+note-tier := "binary(note) and not test(/^harness::/)"
+
+# Their union, and the whole offline tier: what a runner that wants all of it
+# asks for, spelled once from the two halves so it cannot drift from them.
+offline-tiers := "(" + rest-tier + ") or (" + note-tier + ")"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
-# AGENTS.md.
+# AGENTS.md. It is measured over the **whole** offline tier, which is why the two
+# runs below report nothing and one merge reports both: the note journeys are
+# their own Nx project, and splitting the run must not split the floor.
+# `--profraw-only` clears the profile set they share without touching the build
+# artifacts they also share.
+_crate-coverage-clean:
+    @cargo llvm-cov clean --workspace --profraw-only
+
+# The crate's own half of the offline suite, instrumented, reporting nothing.
+_crate-test-rest:
+    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
+
+# `--failure-mode all` is load-bearing, and belongs here rather than on either
+# instrumented run: the merge is what this step does. The cancellation journeys
+# kill instrumented processes, which leaves truncated `.profraw` files in the
+# merge set, and `llvm-profdata`'s default rejects the whole merge over one of
+# them — which this recipe then reports as a test failure. `all` refuses only when
+# every profile is unmergeable; `tests/coverage.rs` plants one, so removing the
+# flag fails the recipe rather than passing quietly.
+_crate-coverage:
+    @cargo llvm-cov report --failure-mode all --fail-under-lines 95 \
+      || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
+
+# The `onepipeline-note-journeys` project's own targets, each scoped to the one
+# test binary it owns. They are not the crate's targets narrowed for show: a
+# project that declared the uniform set and ran nothing of its own would drop out
+# of every repo-wide verb while appearing to be covered by it.
 #
-# `--failure-mode all` is load-bearing. The cancellation journeys kill
-# instrumented processes, which leaves truncated `.profraw` files in the merge
-# set, and `llvm-profdata`'s default rejects the whole merge over one of them —
-# which this recipe then reports as a test failure. `all` refuses only when every
-# profile is unmergeable; `tests/coverage.rs` plants one, so removing the flag
-# fails the recipe rather than passing quietly.
-# The crate's offline suite (unit + contract + e2e) with coverage enforced.
-_crate-test:
-    @cargo llvm-cov nextest --locked --failure-mode all --fail-under-lines 95 \
-      -E '{{offline-tiers}}' --final-status-level fail \
-      || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
+# `rustfmt` and `clippy` reach `tests/e2e/harness.rs` through this binary's
+# `#[path]` include, which is right — it is part of what this binary compiles —
+# and both are idempotent with the crate's own workspace-wide pass.
+_note-build:
+    @RUSTFLAGS="-D warnings" cargo build --locked --test note --quiet
+
+_note-format:
+    @rustfmt tests/note/main.rs
+
+_note-fmt-check:
+    @rustfmt --check tests/note/main.rs \
+      || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+
+_note-lint:
+    @cargo clippy --locked --quiet --test note -- -D warnings
+
+# Instrumented and reporting nothing, so `_crate-coverage` counts these journeys
+# in the same floor as the rest of the suite.
+_note-test:
+    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{note-tier}}' --final-status-level fail
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
@@ -236,6 +283,12 @@ smoke-real:
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
 test-e2e:
     @cargo nextest run --locked -E 'binary(e2e)'
+
+# Each journey starts a real two-party conversation and holds one side's turn
+# open, which is what makes them their own binary and their own Nx project.
+# The note delivery journeys in isolation (also run by `test`/`check`).
+test-note:
+    @cargo nextest run --locked -E '{{note-tier}}'
 
 # Build the crate's docs with warnings denied.
 _crate-doc:

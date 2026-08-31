@@ -24,7 +24,7 @@ use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
     OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status, SCHEMA_VERSION,
 };
-use oneharness_core::domain::signals::Usage;
+use oneharness_core::domain::signals::{FailureKind, Usage};
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
@@ -368,7 +368,9 @@ fn work(
     // pair is what a caller reading the graph's settlement sees. Without it the
     // only failing member this suite could produce was one that refused on the
     // way in, which never reaches a settlement at all.
-    let outcome = if fake::node_script(dir, "harness", "fail").is_some()
+    let outcome = if fake::node_script(dir, "harness", "rejects").is_some() {
+        Outcome::ProviderRejected
+    } else if fake::node_script(dir, "harness", "fail").is_some()
         || (observing && fake::observe(dir) != ExitCode::SUCCESS)
     {
         Outcome::TurnFailed
@@ -438,22 +440,29 @@ fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitC
     }
 }
 
-/// The supervisor's decision: send the agent back once when a journey scripted an
+/// The supervisor's decision: send the agent back when a journey scripted an
 /// instruction for it to send, and otherwise call the work done.
 ///
-/// **Once**, and the marker file is how: each turn is its own process, so without
-/// it the conversation would only ever end at its turn ceiling. Written before
-/// the instruction is handed over, so a second ask reads it whether or not the
-/// turn it asked for got anywhere.
+/// **A bounded number of times**, counted rather than remembered by a marker:
+/// each turn is its own process, so without a bound the conversation would only
+/// ever end at its turn ceiling. Counted before the instruction is handed over,
+/// so a later ask reads it whether or not the turn it asked for got anywhere.
+///
+/// The bound is one unless a journey names another with `judge.asks-again-times`,
+/// which exists for the one shape a single ask cannot state: a supervisor
+/// decision *re-taken* — as a note delivered into a live judge turn re-takes it —
+/// that is still not the conversation's last, so the note rides a response that
+/// opens another worker turn rather than one that ends the work.
 fn supervision(dir: &std::path::Path) -> Result<String, String> {
+    hold_the_supervisor(dir);
     let asked_again = dir.join("judge.asked-again");
+    let nth = fake::count(dir, "judge-supervision");
+    let times = asks_again_times(dir)?;
     match fake::node_script(dir, "judge", "asks-again") {
-        Some(instruction) if !asked_again.exists() => {
+        Some(instruction) if nth <= times => {
             fake::record(dir, "judge-asks-again", std::slice::from_ref(&instruction));
             // Refused rather than unwrapped: a marker this process could not write
-            // is a supervisor that will ask again on every turn, which runs the
-            // conversation to its ceiling and leaves the journey reading a shape
-            // nobody scripted. Better the member dies saying so.
+            // is a journey reading a conversation whose shape it cannot see.
             std::fs::write(&asked_again, &instruction).map_err(|error| {
                 format!(
                     "cannot record the supervisor's ask at {}: {error}",
@@ -468,6 +477,46 @@ fn supervision(dir: &std::path::Path) -> Result<String, String> {
         }
         _ => Ok(SUPERVISED_COMPLETE.to_string()),
     }
+}
+
+/// How many supervisor decisions send the agent back before one calls it done.
+///
+/// One, unless `judge.asks-again-times` names another. A script holding anything
+/// that is not a count is a scenario nobody wrote, and reading it as the default
+/// would run a journey against a conversation it did not ask for.
+fn asks_again_times(dir: &std::path::Path) -> Result<usize, String> {
+    match fake::node_script(dir, "judge", "asks-again-times") {
+        None => Ok(1),
+        Some(text) => text.parse().map_err(|error| {
+            format!("judge.asks-again-times holds {text:?}, which is not a count: {error}")
+        }),
+    }
+}
+
+/// Hold this supervisor turn open, when a journey asked for one that is.
+///
+/// The judge's side of `turn.hold`, and the only way a journey can offer anything
+/// — a manager's note, in particular — while the **supervisor** is the party
+/// taking a turn: a worker hold reaches the other party and holds the wrong one.
+/// The marker is written before the wait so the journey can tell a supervisor turn
+/// that is live from one that has not opened yet, and the gate is a file rather
+/// than a clock so the note really arrives inside the turn.
+///
+/// The gate is not consumed, so a decision re-taken *because* of what arrived
+/// runs straight through: what a journey holds is the turn it is delivering into,
+/// not every turn after it.
+fn hold_the_supervisor(dir: &std::path::Path) {
+    if fake::node_script(dir, "judge", "hold").is_none() {
+        return;
+    }
+    let holding = dir.join("judge.holding");
+    if let Err(error) = std::fs::write(&holding, "holding") {
+        fake::fail(&format!(
+            "cannot say the supervisor turn is live at {}: {error}",
+            holding.display()
+        ));
+    }
+    fake::wait_for(&dir.join("judge.go"));
 }
 
 /// How onejudge opens the prompt it hands its supervisor side.
@@ -527,6 +576,14 @@ enum Outcome {
     Answered,
     /// It did not, and says so in the report as well as with a non-zero exit.
     TurnFailed,
+    /// The turn **ran, answered and was billed**, and the provider then rejected
+    /// it — declared in the same terminal record while the process exits 0. What
+    /// oneharness writes down for such a turn is a record that contradicts its own
+    /// classification: `status: ok`, `exit_code: 0` and billed usage beside
+    /// `failure_kind: rate_limit`. This double writes exactly that record, in
+    /// oneharness's own types, because it is the pair a supervisor has to
+    /// reconcile and no other outcome here can produce it.
+    ProviderRejected,
 }
 
 impl Outcome {
@@ -544,7 +601,7 @@ impl Outcome {
     /// there.
     fn text(self) -> &'static str {
         match self {
-            Self::Answered => "Ran what the task asked for.",
+            Self::Answered | Self::ProviderRejected => "Ran what the task asked for.",
             Self::TurnFailed => "The turn did the work and did not get there.",
         }
     }
@@ -552,7 +609,10 @@ impl Outcome {
     /// The `status` this turn's result carries.
     fn status(self) -> Status {
         match self {
-            Self::Answered => Status::Ok,
+            // `Ok` on the rejection too, and that is the whole point: the process
+            // ran to completion, so the record says so however the turn was
+            // classified.
+            Self::Answered | Self::ProviderRejected => Status::Ok,
             Self::TurnFailed => Status::Nonzero,
         }
     }
@@ -561,7 +621,7 @@ impl Outcome {
     /// answers with.
     fn code(self) -> i32 {
         match self {
-            Self::Answered => 0,
+            Self::Answered | Self::ProviderRejected => 0,
             Self::TurnFailed => 1,
         }
     }
@@ -571,6 +631,40 @@ impl Outcome {
         match self {
             Self::Answered => None,
             Self::TurnFailed => Some(self.text().to_string()),
+            Self::ProviderRejected => Some("API Error: 429 rate limit exceeded".to_string()),
+        }
+    }
+
+    /// What the harness classified this turn as, which is the field a supervisor
+    /// publishes a death on. `None` where the record has nothing to say.
+    fn failure_kind(self) -> Option<FailureKind> {
+        match self {
+            Self::Answered | Self::TurnFailed => None,
+            Self::ProviderRejected => Some(FailureKind::RateLimit),
+        }
+    }
+
+    /// What the provider billed for this turn.
+    ///
+    /// One token each is the ordinary reading; the rejection's is real money on a
+    /// real turn, because *billed* is the half of the record that says a turn was
+    /// paid for and got — the reading a reconciliation asks about.
+    fn usage(self) -> Usage {
+        match self {
+            Self::Answered | Self::TurnFailed => Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: None,
+            },
+            Self::ProviderRejected => Usage {
+                input_tokens: Some(41233),
+                output_tokens: Some(9812),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: Some(12.11),
+            },
         }
     }
 
@@ -584,13 +678,13 @@ impl Outcome {
     fn work(self) -> Option<RunWork> {
         match self {
             Self::Answered => None,
-            Self::TurnFailed => Some(RunWork::Done),
+            Self::TurnFailed | Self::ProviderRejected => Some(RunWork::Done),
         }
     }
 
     fn exit_code(self) -> ExitCode {
         match self {
-            Self::Answered => ExitCode::SUCCESS,
+            Self::Answered | Self::ProviderRejected => ExitCode::SUCCESS,
             Self::TurnFailed => ExitCode::from(1),
         }
     }
@@ -711,13 +805,7 @@ fn report(
             output_format: OutputFormat::StreamJson,
             text: Some(said.into()),
             text_source: Some("json:result".into()),
-            usage: Usage {
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                cost_usd: None,
-            },
+            usage: outcome.usage(),
             usage_source: Some("json".into()),
             session_id: Some("fake-oneharness-session".into()),
             events,
@@ -726,8 +814,8 @@ fn report(
             schema_valid: None,
             schema_attempts: None,
             schema_error: None,
-            failure_kind: None,
-            failure_kind_source: None,
+            failure_kind: outcome.failure_kind(),
+            failure_kind_source: outcome.failure_kind().map(|_| "stdout".to_string()),
             work: outcome.work(),
             stdout: String::new(),
             stderr: String::new(),

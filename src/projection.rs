@@ -835,6 +835,17 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
             }
+            // For a node this run held back, the note also ends the hold:
+            // clearing the record returns it to the frontier on the branch its own
+            // settlement pinned it to, so the dispatch that takes the note
+            // continues the published branch rather than cutting a fresh one
+            // beside a draft nothing would then lift. Only that status — clearing
+            // any other would dispatch finished work all over again.
+            if state.recorded.get(node).copied().map(Recorded::status)
+                == Some(NodeStatus::CompleteDraft)
+            {
+                state.recorded.remove(node);
+            }
         }
         // Reports, both: what a run is waiting on and what has arrived are
         // derived afresh by whatever is driving it, so neither changes the graph.
@@ -1064,7 +1075,15 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
 fn preserves_its_branch(status: NodeStatus) -> bool {
     matches!(
         status,
-        NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Parked
+        NodeStatus::Failed
+            | NodeStatus::Cancelled
+            | NodeStatus::Parked
+            // A draft-complete node is the one of these that is *coming back*
+            // rather than waiting to be sent back: the release it awaits lifts
+            // the draft and puts a worker on the branch again to move the pin.
+            // Unpinned, that worker would cut a fresh branch and republish it
+            // beside the draft change request nobody would then ever lift.
+            | NodeStatus::CompleteDraft
     )
 }
 

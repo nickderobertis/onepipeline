@@ -35,6 +35,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
 
 /// The reply envelope version this crate reads and writes.
@@ -125,6 +126,14 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
         Command::Amend { .. } => {
             "what a node is judged against is a decomposition decision the planner owns"
         }
+        // A note may carry a criterion, and a delivered one enters the bar the
+        // node's judge decides against — the same decision `amend` makes, taken
+        // against the conversation running now. An observer keeps `context`,
+        // which reaches the worker and binds nothing.
+        Command::Note { .. } => {
+            "a note may bind a criterion the node's judge decides against, which is the \
+             planner's decision; `context` is the note that binds nothing"
+        }
     };
     Err(crate::Error::Refused(format!(
         "'{}' is not an op the monitor may issue: {refused}. Surface it to the planner instead",
@@ -145,6 +154,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Complete { .. } => "complete",
         Command::Context { .. } => "context",
         Command::Amend { .. } => "amend",
+        Command::Note { .. } => "note",
         Command::Finding { .. } => "finding",
     }
 }
@@ -159,6 +169,7 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Cancel { id }
         | Command::Requeue { id, .. }
         | Command::Context { id, .. }
+        | Command::Note { id, .. }
         | Command::Amend { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
@@ -337,6 +348,36 @@ pub enum Command {
         /// amendment and the earlier one stops being part of the effective task.
         /// A bar that could only grow could not be corrected.
         text: String,
+    },
+    /// Deliver one note into the node's live dispatch, to whichever party of it
+    /// is speaking.
+    ///
+    /// The lever `context` and `amend` are each half of. It goes to the node's
+    /// running conversation through the delivery seam
+    /// [`oneagentgraph`](crate::note) publishes rather than through a bare
+    /// interrupt, so the party that is live takes it and the other party
+    /// receives it with that party's response; a [`criterion`](Self::Note::criterion)
+    /// it carries enters the acceptance criteria that conversation's judge
+    /// decides against. **A note that reaches nobody is refused**, naming that it
+    /// was not delivered and why, so the planner chooses relaunch, tweak, or
+    /// follow-up rather than being told nothing.
+    ///
+    /// It does not move the node's stored bar: `amend` is still the op for a
+    /// ruling that has to survive a re-dispatch.
+    Note {
+        /// The node whose live dispatch it is for.
+        id: String,
+        /// Whose task this updates. Required and never guessed: a note whose
+        /// addressee is inferred is one the judge may read as work for itself.
+        addressee: Addressee,
+        /// What the addressee reads. Blank is refused at this boundary by the
+        /// seam's own newtype rather than somewhere later.
+        text: NoteText,
+        /// The property the finished tree must have, when this note changes
+        /// that. Omitted, the note is observational: it reaches whoever is live
+        /// and touches no acceptance criterion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        criterion: Option<Criterion>,
     },
     /// Raise one finding to the planner, changing nothing about the graph.
     ///

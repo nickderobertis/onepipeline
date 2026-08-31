@@ -39,6 +39,7 @@ mod lifecycle;
 mod live_edit;
 mod node_validator;
 mod plan;
+mod plan_check;
 mod real_vcs;
 mod scratch;
 mod session;

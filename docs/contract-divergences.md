@@ -11,11 +11,11 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–50 are open**. Each states what the code does
+Entries **10–22, 33, 35–40 and 46–52 are open**. Each states what the code does
 today and the proposal it is waiting on. Most are questions for a *producer*
 rather than for this crate, because `oneagentgraph` and `onevcs` are independent
 tools that expose general integration hooks only and nothing in them may know
-about this one; the rest — 36 to 40, and 46 to 49 — are for the planner who owns
+about this one; the rest — 36 to 40, and 46 to 52 — are for the planner who owns
 the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -2146,8 +2146,11 @@ canonicalizes the worktree and the path and refuses one that is not under the
 other, as the same third answer below rather than as a comparison against
 something off the branch.
 
-**A file the branch will not give up is a third answer.** Absent, a directory, or
-not text: the check compared nothing, and says so. `unread` is carried through the
+**A file the branch will not give up is a third answer.** Absent, a directory,
+not text, or past the megabyte this reads — a lettered extension is all a path has
+to look like, so a mistyped criterion can name a vendored archive, and searching an
+artifact for a literal is not a comparison anybody asked for: the check compared
+nothing, and says so. `unread` is carried through the
 run's own record as its own word beside `match` and `mismatch`, and is never
 folded into either — for the same reason entry 40's *not answered* is never *not
 released*.
@@ -2435,3 +2438,271 @@ promises is unchanged.
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
 `store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
 `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.
+
+## 51. Fast adoption could launch against a git pin and then merge it — OPEN
+
+**Proposal (for the planner who owns the contract): add one node status to the
+settlement vocabulary, `complete-but-draft`, and one publication outcome beside
+it, `change-draft`; state that a fast-adoption node whose awaited release has not
+happened publishes its change request as a draft carrying the reason, that such a
+node holds the run rather than settling it, and that the release arriving starts a
+new worker on that node's existing branch.**
+
+Entry 40 built one half of fast adoption. A node launches on its dependencies'
+**branch** readiness, is handed their git references, and is told the moment the
+release arrives — and if it is still running when that happens, the correction
+lands in its turn and everything is well. The half that never worked is the other
+one: nothing held the node back when the release did **not** arrive in time, so it
+finished, settled `done`, went green, and merged. The temporary git pin it was
+launched against was then permanent in a base branch, where the next reader has no
+way to tell it was ever temporary.
+
+That is the worst shape a failure can have, because it is a success. Six
+repositories on this account carry release declarations and this is the ending
+each of their consumers would have reached.
+
+**A fast-adoption node whose awaited release has not happened settles
+`complete-but-draft`.** Its work is complete — every step ran, the branch is
+verified, the change request is open — and the one thing left is outside this run.
+The change request is opened as a **draft** through the surface `onevcs` now
+offers, carrying a machine-readable reason naming the repository whose release is
+awaited, which of that repository's targets, and the reference the change is
+pinned to meanwhile; nothing merges it, arms the host's own merge on it, or
+advances a base from it while the draft stands. The settlement carries the same
+reason on the one line `results` reads it back on.
+
+**The question is asked at the publication and not at the launch**, because a
+dispatch is long and a release can arrive in the middle of one. A node whose
+dependency had already released settles `done` with no draft, and is not a special
+case: it asks the same question and is answered *released*. A dependency this run
+could put no question about at all — no reference the sibling resolves work by, or
+no target that answers — is not drafted against, which is the judgement
+`Dependency::askable` already makes for entry 40's hold: a question that could
+never be put is not evidence that a release has not happened, and a draft nothing
+can ever lift is a change request nobody can finish.
+
+**The status is neither settled nor running, and that is the point.** A run whose
+nodes are all `complete-but-draft` is **not finished**: `is_terminal` is false, the
+reconcile loop goes on watching, and the views say the run is waiting on a named
+release rather than stalled or settled. Its dependents do not start, because they
+would be built on work that cannot land.
+
+**What lifts the draft is a new worker on the node's own branch.** The settlement
+pins the node to the branch it published, exactly as a preserving publication
+failure does, and records no step as completed. When the release answers, the
+arrival note entry 40 already composes is recorded against the node — which both
+owes it to the next dispatch and returns the node to the frontier — so the worker
+that starts is one continuing that branch rather than one cutting a second beside
+a change request nothing would then lift. It moves the pin, and its publication,
+carrying no reason any more, is what `onevcs` lifts the draft on. There is
+deliberately no verb for lifting: the caller that republishes with the pin moved is
+the one saying the reason no longer holds.
+
+**The draft belongs to fast adoption alone.** A `published` node is not scheduled
+until its release is out, so it launches against a version and has no temporary pin
+for a draft to hold back; drafting one would hold a change nothing is wrong with.
+
+**No event kind is added.** The two records this needs already exist: the node's
+own `node-settled`, under the new status and outcome, and entry 40's
+`release-adopted`, which for a draft-complete node is the note *and* the end of the
+hold. `onevcs`'s own `change-drafted` and `draft-lifted` reach the store through
+the session follow that already relays every other kind of that library's, unchanged
+and unrewritten.
+
+**The block below is the source.** `tests/contract.rs` parses it out of this file:
+the status word must be one `NodeStatus` carries and the contract's own list does
+not, and the outcome word must be the constant this crate publishes.
+
+```json
+{
+  "node_statuses": ["complete-but-draft"],
+  "outcomes": ["change-draft"]
+}
+```
+
+**One thing this build carries that no release does.** The `onevcs` surface all of
+this settles through — `PublishRequest.draft`, `DraftReason`,
+`PublishOutcome::ChangeDraft`, and `RemoteHost::{ready_for_review, is_draft}` — has
+landed in that repository and has not been released, so `Cargo.toml` carries a
+`[patch.crates-io]` pointing both members of that sibling at the commit that added
+it and `deny.toml` names the same revision. That is this change adopting its own
+dependency early, and it is held back by exactly the mechanism it adds: this tree
+cannot be published while the patch stands, and the node holding it settles
+`complete-but-draft`. Both go in the same change that moves the two requirements to
+the release.
+
+**What the pin also brought, and one question for `onevcs` in it.** The commit
+carrying the draft surface sits on top of `onevcs` 0.16.3, which changed two things
+about sessions: a close now commits whatever the worktree still holds under the
+incomplete-step provenance before removing it, and `session holders` **forgets** a
+record whose owner process has gone with nothing working inside its run root rather
+than listing it. Four journeys here were written against the behaviour before it and
+now state the behaviour after it, each saying so where it says it.
+
+One of the four is a **loss** rather than a restatement, and it is the sibling's to
+rule on. The contract's launch interlock is `onevcs session holders`, so asking who
+holds a repository is the first thing every launch does — and that read is now what
+prunes the record `onevcs`'s own `open_session` would have taken up. A `retry` over
+work a stopped run stranded therefore continues the branch from its own tip instead
+of resuming the session that already holds a clone and a worktree for it. The work
+still reaches the base, which is what an operator is owed; what is spent is a fresh
+clone and a fresh gate. **Proposal for `onevcs`: prune spent records somewhere other
+than the read every consumer is required to make**, or answer the enumeration
+without removing what it enumerates.
+`session_reuse::a_retry_takes_up_the_session_a_stopped_run_left_its_work_in` is where
+that is held, and it names this paragraph.
+
+Driven end to end by `adoption::a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_merges_it`,
+which drives a node to completion against an unreleased dependency and holds the
+settlement, the host's own `--draft`, the absence of any merge, and both views;
+by `adoption::a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_draft`,
+which drives the arrival and holds the branch, the second dispatch, and the lift;
+by `adoption::a_fast_node_awaiting_a_human_step_is_held_as_a_draft` and
+`adoption::a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft`, which are
+the other two answers a publication can get — neither of them *released*, and
+neither of them safe to land a pin on; by
+`adoption::a_fast_node_whose_release_was_already_out_settles_done_with_no_draft`
+and `adoption::a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release`,
+which are the two endings that must not be drafts; and, at the seam itself, by
+`onevcs_seam::every_operation_this_crate_performs_is_served_by_the_provider_seam`,
+which publishes a draft through the sibling's own supplied providers and holds
+that nothing merged it and that a publication carrying no reason lifts it.
+
+The revision the `[patch.crates-io]` block above names is written in two files,
+and `patch_pin::the_audit_permits_exactly_the_revisions_the_manifest_patches` is
+what holds them equal — including at zero, so the audit's exemption is deleted in
+the same change the patch is.
+
+## 52. A correction reaches one party of a node's dispatch, and never both — OPEN
+
+**Proposal (for the planner who owns the contract): add a `note` op to the reply
+envelope — and **not** to the `monitor` allowlist — carrying `id`, a required
+`addressee`, `text`, and an optional `criterion`; publish the same delivery on
+this crate's own surface as `onepipeline::note`; and answer a note that reached
+nobody with a refusal rather than with silence.**
+
+The two levers a manager has are each half of one job. `context` is delivered by
+interrupting the live agent turn, so it reaches the *worker* and never the judge,
+and it says of itself that it adds no acceptance criteria. `amend` becomes part of
+the node's effective task, so it binds the *judge* — and composes the task of the
+dispatch that follows it, which is exactly the turn a live correction is not.
+Neither reaches both parties, and a manager who needs one to has to kill a running
+dispatch to get it. Measured: a ruling delivered by `context` at 15:50:23Z was
+contradicted by that node's own judge at 15:57:19Z, reviewing against a task that
+never mentioned it; the worker then held two instructions of equal authority, and
+resolving it took a retry that killed a live, gate-green dispatch in order to
+change its bar.
+
+**Almost none of what a note does is this crate's.** The two-party conversation is
+`onejudge`'s, the member running it `oneagentgraph`'s, and the approved
+delivery-seam contract puts the note's shapes and its routing there: `onejudge`
+0.7.0 publishes `onejudge::note` and `oneagentgraph` 0.3.15 publishes
+`oneagentgraph::control::note`, which hands one note to a named member of a graph
+run and answers what the conversation did with it. Both are **compile floors** of
+this build. So the shapes below are that seam's, re-exported and not restated — a
+second declaration is a shape that drifts, and a note that satisfied the copy
+would still be refused by the conversation it was written for.
+
+What this crate owns is the three things that seam cannot know: **which node** a
+note is for, **which member** that node's dispatch is running, and **what the run
+records** about what came back.
+
+* It is delivered to whoever is live. The worker's live turn is reopened carrying
+  it *before the judge is consulted*, so the judge receives it together with the
+  worker's response rather than ahead of one; the judge's live turn has its
+  decision re-taken with the note in hand, and the note rides that response to the
+  worker; between turns, the next turn to open takes it.
+* The party that receives it is told **which role it is for**. `addressee` is
+  required and never inferred, because a note whose addressee is guessed is one the
+  judge may read as work for itself — so a note addressed to the worker's task is
+  presented to the judge as an update to the *worker's* task.
+* A `criterion` it carries enters the acceptance criteria that conversation's judge
+  decides against, at both of `onejudge`'s judging sites, rather than appearing
+  only as narration.
+* **Undelivered is an error.** A note arriving once the node's dispatch has
+  completed is refused, in the conversation's own words — which name how it ended
+  and what the caller can do instead — and the run records that non-delivery as an
+  `edit-rejected` and a planner surface, exactly as any other refused edit. The
+  silence it replaces has its own measured price: a note reached a node after the
+  worker had reported completion, was accepted with nothing said, the worker did
+  another forty minutes of correct work, and the node was failed for a completion
+  report that preceded its own subsequent commits.
+
+A note is asked of the member the node's **last** dispatch reported, live or not.
+That is what makes the refusal the conversation's own rather than this crate's
+guess that there was nothing to ask: a settled member answers with the outcome the
+run recorded for it. A node no dispatch has ever reported a member for is the one
+case this crate composes itself, and it says which case it is.
+
+**`context` and `amend` are unchanged**, in name and in meaning. A note does not
+move the node's stored bar: the criterion it binds is in force for the conversation
+it was delivered into, which is the conversation whose verdict the manager is
+correcting, and `amend` is still the op for a ruling that has to survive a
+re-dispatch. That the two are different ops is the whole of the distinction being
+instructed rather than merely available.
+
+It is **not** on the monitor allowlist, for `amend`'s reason: a note may bind a
+criterion the node's judge decides against, which is a decomposition decision the
+observer's own persona reserves to the planner. The observer keeps `context`, which
+reaches the worker and binds nothing.
+
+**On this crate's own surface, not only in the envelope's vocabulary.**
+`onepipeline::note::deliver(&RunPaths, node, &Note)` is the same delivery a
+consumer composing this engine makes without writing JSON — and it *is* the op: it
+submits through the same channel, is judged by the same reconciler, and is recorded
+once, so the two spellings cannot come to mean different things. It answers
+`Delivered::To(Reached)` — which party took it — or `Delivered::Queued` for an
+envelope the run's reconciler had not answered inside the reply timeout, which is
+durable and is not an instruction to send it again.
+
+`note` arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40 and 41 did.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types: the
+op named here must be one this build accepts and the contract's own list does not,
+must round-trip as written, and must be allowed for exactly the authors named; a
+blank note and an unusable criterion must be refused at the envelope's boundary;
+and the dispositions must be exactly the ones the seam's own `Accepted` carries.
+`tests/note/` drives the whole seam against the real `oneagentgraph` and a
+real two-party conversation.
+
+```json
+{
+  "ops": [
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "the reviewer asked for a smaller diff; stop editing src/old.rs",
+      "criterion": "`version.txt` holds `v: 2`"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "supervisor",
+      "text": "the four comment lines are out of scope: do not fail the node for them"
+    }
+  ],
+  "monitor_may_issue": [],
+  "addressees": ["worker", "supervisor", "both"],
+  "reached": ["queued", "worker", "supervisor", "judged-with"],
+  "refused": [
+    {"op": "note", "id": "build", "addressee": "worker", "text": "   "},
+    {"op": "note", "id": "build", "addressee": "sponsor", "text": "ship it"},
+    {"op": "note", "id": "build", "text": "ship it"},
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "ship it",
+      "criterion": "the tree pins oneagentgraph 0.3.15"
+    }
+  ],
+  "api": {
+    "module": "onepipeline::note",
+    "call": "deliver",
+    "answers": ["To", "Queued"]
+  }
+}
+```
