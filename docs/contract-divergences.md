@@ -2661,7 +2661,7 @@ op named here must be one this build accepts and the contract's own list does no
 must round-trip as written, and must be allowed for exactly the authors named; a
 blank note and an unusable criterion must be refused at the envelope's boundary;
 and the dispositions must be exactly the ones the seam's own `Accepted` carries.
-`tests/e2e/note.rs` drives the whole seam against the real `oneagentgraph` and a
+`tests/note/` drives the whole seam against the real `oneagentgraph` and a
 real two-party conversation.
 
 ```json

@@ -72,7 +72,7 @@ resolver = "2"
 #   line has no `note` — so it is a **compile floor** rather than a version this
 #   build could compose an installed executable at. Below it a manager's note
 #   reaches the worker by interrupt and the judge not at all, which is the seam
-#   `src/note.rs` exists to end. `tests/e2e/note.rs` drives it against the real
+#   `src/note.rs` exists to end. `tests/note/` drives it against the real
 #   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
 #   than reads differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
@@ -279,7 +279,7 @@ resolver = "2"
 # re-exports those shapes. `Channel::Context` carries a note to a *node* and
 # never names a side, which is the seam the `note` op beside it exists to end.
 # The floors are recorded in the list at the top of this file and driven by
-# `tests/e2e/note.rs`.
+# `tests/note/`, the `note` test binary declared below.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -475,6 +475,17 @@ toml = "1"
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
+
+# The conversational tier, in its own binary for the reason `smoke` is in one:
+# so a runner can name it. Each of these journeys starts a real two-party
+# conversation and holds one side's turn open, which makes them the most
+# expensive shape here, and `binary(note)` is what lets `just test-note` run
+# them alone and `onepipeline:test-note` be the Nx target the crate's `test`
+# declares an edge onto. They stay offline, so `just test-quick` still runs every
+# one of them on the cross-platform legs.
+[[test]]
+name = "note"
+path = "tests/note/main.rs"
 
 # The real-everything tier, in its own binary so the offline gate can exclude it
 # by name: `just test`, `just test-quick`, and therefore `just gate` run

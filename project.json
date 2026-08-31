@@ -32,10 +32,35 @@
         "crateSource"
       ]
     },
-    "test": {
-      "command": "just _crate-test",
+    "coverage-clean": {
+      "command": "just _crate-coverage-clean"
+    },
+    "test-rest": {
+      "command": "just _crate-test-rest",
       "inputs": [
         "crateSource"
+      ],
+      "dependsOn": [
+        "coverage-clean"
+      ]
+    },
+    "test-note": {
+      "command": "just _note-test",
+      "inputs": [
+        "crateSource"
+      ],
+      "dependsOn": [
+        "coverage-clean"
+      ]
+    },
+    "test": {
+      "command": "just _crate-coverage",
+      "inputs": [
+        "crateSource"
+      ],
+      "dependsOn": [
+        "test-rest",
+        "test-note"
       ]
     },
     "doc": {

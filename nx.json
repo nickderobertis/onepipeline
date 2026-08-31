@@ -58,6 +58,21 @@
         "default"
       ]
     },
+    "coverage-clean": {
+      "cache": false
+    },
+    "test-rest": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
+    "test-note": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
     "test": {
       "cache": true,
       "inputs": [

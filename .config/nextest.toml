@@ -1,12 +1,18 @@
-# Every test in the `e2e` binary drives a tree of real processes — the
-# `onepipeline` binary, the two sibling doubles it runs as subprocesses, and the
-# round owner one of those starts. Its true concurrency is therefore process
+# Every test in the `e2e` and `note` binaries drives a tree of real processes —
+# the `onepipeline` binary, the two sibling doubles it runs as subprocesses, and
+# the round owner one of those starts. Its true concurrency is therefore process
 # trees, not threads, and letting nextest run one per core oversubscribes the
 # machine badly enough that a test times out waiting for work that is merely
 # queued behind other tests' work.
 #
 # The cap is a statement about what these tests *are*, not a way to make a slow
 # test pass: each one still runs in under a second on an idle host.
+#
+# One group across both binaries rather than one each. The limit is what the
+# machine can hold, not what a binary may ask for, so two groups of four would be
+# eight process trees at once — the oversubscription this exists to prevent.
+# Measured: uncapped, the note journeys ran 20.6s where the capped e2e binary runs
+# them in 15.8s of CPU.
 [test-groups]
 e2e = { max-threads = 4 }
 
@@ -54,5 +60,5 @@ status-level = "pass"
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
-filter = 'binary(e2e)'
+filter = 'binary(e2e) or binary(note)'
 test-group = 'e2e'

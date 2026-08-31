@@ -1,6 +1,27 @@
 //! Where a manager's note lands: in the live conversation, in both parties' hands,
 //! and in the bar its judge decides against — or nowhere, said out loud.
 //!
+//! **Its own test binary, behind its own Nx edge.** These eight journeys are the
+//! most expensive shape this repository runs — each one starts a real two-party
+//! conversation, holds one side's turn open, and waits on the run's own durable
+//! queue — so they are addressed by name rather than folded into the general e2e
+//! target. The binary is `note`, which `nextest`'s `binary(note)` selects on its
+//! own; `just test-note` runs them alone; and `onepipeline:test-note` is the Nx
+//! target the crate's `test` target declares an edge onto, so the 95% floor is
+//! still merged over this run and the rest of the suite together rather than
+//! measured over half of it. What `tests/smoke/` is to the credentialled tier,
+//! this is to the conversational one.
+//!
+//! A target rather than a project, because in this workspace a project is a
+//! toolchain with an artifact — `npm/test/workspace-nx.test.mjs` holds every one
+//! of them to `bootstrap`, `build`, `format`, `format-check`, `lint`, `test` and
+//! `check` — and this tier has none of those of its own: `cargo fmt --all`,
+//! `cargo clippy --all-targets` and `cargo build --all-targets` already reach
+//! this binary as part of the crate.
+//!
+//! The cross-platform legs still run every journey here: `just test-quick`
+//! selects the whole offline tier, which this binary is part of.
+//!
 //! These journeys drive the **real** `oneagentgraph` and a real two-party
 //! conversation, because that is the only place the claim can be made: which side
 //! of a member is live, what a live turn does with a note, and what the judge is
@@ -18,6 +39,9 @@
 // makes the conversation's shape scriptable rather than billed. `harness.rs` carries the
 // same suppression and the full rationale.
 
+#[path = "../e2e/harness.rs"]
+mod harness;
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -26,7 +50,7 @@ use onepipeline::note::{deliver, Addressee, Delivered, Note, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World, REFUSED};
+use harness::{agent, plan_of, World, REFUSED};
 
 /// The correction a manager sends at the moment it matters: while the worker is
 /// still working, and before its judge has ruled on anything.
