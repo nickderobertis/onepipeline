@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use oneagentgraph::config::ConfigRef;
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::releases::TargetName;
-use onevcs::{Adoption, MergePolicy};
+use onevcs::{Adoption, InstructionTemplate, MergePolicy};
 use serde::{Deserialize, Serialize};
 
 /// The plan schema version this crate writes.
@@ -125,6 +125,67 @@ const CROSS_REPO_REFERENCES_PREAMBLE: &str =
      not change a shared interface unilaterally — propose it and keep building against the\n\
      agreed surface. When these releases arrive you will be sent a note naming the\n\
      versions; move the pin then.";
+
+/// The same, where every dependency below has already released.
+///
+/// A `published` node meets this one, and it is the **only** place that node ever
+/// sees the version it is building against: nothing sends it an arrival note,
+/// because it never held a git pin to move off. A fast-adoption node whose
+/// releases all arrived before its dispatch was composed meets it too, and for
+/// the same reason it is true of that node — the sentence is decided by what the
+/// rows say rather than by the mode the plan declared.
+const CROSS_REPO_RELEASED_PREAMBLE: &str =
+    "The work this node depends on is released, at the versions named below. Pin against\n\
+     those versions rather than against a git reference. Do not change a shared interface\n\
+     unilaterally — propose it and keep building against the agreed surface.";
+
+/// What a section reporting observed state says about its own authority.
+///
+/// One spelling, shared by the frame a carried planner note is rendered under and
+/// by the frame a producer's own adoption instruction is enclosed in. Both report
+/// where the work is and neither adds a bar, so a worker meeting the two in one
+/// task meets the same sentence rather than two that have to be read against each
+/// other.
+pub const OBSERVED_STATE: &str = "This reports observed state and adds no acceptance criteria.";
+
+/// What a producer's adoption instruction is introduced by, after
+/// [`OBSERVED_STATE`] and before the instruction itself.
+const ADOPTION_INSTRUCTIONS_OPEN: &str =
+    "What the producer of each dependency above states about adopting it:";
+
+/// What closes that frame, so an instruction cannot run on into the rest of the
+/// document as though it were part of the node's own bar.
+const ADOPTION_INSTRUCTIONS_CLOSE: &str =
+    "That is the end of what the producers state; none of it is a criterion of this node.";
+
+/// The instruction a consumer follows where the producer of a dependency declares
+/// none.
+///
+/// The engine's own default, stated **here and nowhere else**: every site that
+/// renders an adoption instruction renders it through [`adoption_instructions`],
+/// so a repository that has not adopted the templated form gives its consumers
+/// exactly the sentence they were given before a producer could declare one.
+pub const DEFAULT_ADOPTION_INSTRUCTION: &str = "Move from the git pin to that released version.";
+
+/// Every variable a producer's adoption-instruction template may name.
+///
+/// The same six at **both** render sites — the reference block a node's task
+/// carries, and the arrival note a fast-adoption node is sent when its releases
+/// arrive — because a producer writes one template and cannot know which of the
+/// two a given consumer meets it in.
+///
+/// Each is a string, and one this run has not observed is the **empty** string
+/// rather than absent: `{% if version %}` is how a template asks whether the
+/// release has happened, and at a fast-adoption node's first render the answer is
+/// that it has not.
+pub const ADOPTION_INSTRUCTION_VARIABLES: [&str; 6] = [
+    "dependency",
+    "repository",
+    "branch",
+    "commit",
+    "target",
+    "version",
+];
 
 /// A field the plan schema used to carry, and where its content goes now.
 ///
@@ -328,25 +389,98 @@ fn render_task(
     let mut rendered = match context.map(str::trim).filter(|note| !note.is_empty()) {
         None => task.to_string(),
         Some(note) => format!(
-            "{}\n\n{PLANNER_CONTEXT_HEADING}\n\
-             This reports observed state and adds no acceptance criteria.\n\n{note}\n",
+            "{}\n\n{PLANNER_CONTEXT_HEADING}\n{OBSERVED_STATE}\n\n{note}\n",
             task.trim_end()
         ),
     };
     if references.is_empty() {
         return rendered;
     }
+    // Which sentence is true of this block is decided by the rows rather than by
+    // the node's declared mode: a row carrying a version is a dependency that has
+    // released, and a block whose every row carries one is a node with nothing
+    // left to pin against git.
+    let preamble = match references
+        .iter()
+        .all(|reference| !reference.version.is_empty())
+    {
+        true => CROSS_REPO_RELEASED_PREAMBLE,
+        false => CROSS_REPO_REFERENCES_PREAMBLE,
+    };
     rendered = format!(
-        "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{CROSS_REPO_REFERENCES_PREAMBLE}\n\n\
-         | dependency | repository | branch | commit | release target |\n\
-         | --- | --- | --- | --- | --- |\n",
+        "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{preamble}\n\n\
+         | dependency | repository | branch | commit | release target | version |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
         rendered.trim_end()
     );
     for reference in references {
         rendered.push_str(&reference.row());
         rendered.push('\n');
     }
+    rendered.push('\n');
+    rendered.push_str(&adoption_instructions(references));
+    rendered.push('\n');
     rendered
+}
+
+/// What the producers of a node's out-of-repository dependencies state about
+/// adopting them, enclosed in the frame that says it adds no bar.
+///
+/// **One rendering, used at both sites** — the reference block a node's task
+/// carries and the arrival note a fast-adoption node is sent — so a producer's
+/// instruction cannot come to read one way in a task and another in a note.
+/// Empty for no dependencies at all, which is every node that has none.
+///
+/// Distinct instructions are rendered once each, in the order the rows name them:
+/// a node whose dependencies' producers all declare none gets exactly one
+/// [`DEFAULT_ADOPTION_INSTRUCTION`], which is the sentence its worker was given
+/// before there were templates. Where the rows do state different things, each is
+/// attributed to the dependency it is about, because an unattributed list of
+/// instructions is one a worker cannot act on.
+pub fn adoption_instructions(references: &[CrossRepoReference]) -> String {
+    let mut instructions: Vec<(&CrossRepoReference, String)> = Vec::new();
+    for reference in references {
+        let instruction = reference.instruction();
+        if !instructions.iter().any(|(_, said)| *said == instruction) {
+            instructions.push((reference, instruction));
+        }
+    }
+    if instructions.is_empty() {
+        return String::new();
+    }
+    let stated: Vec<String> = match instructions.len() {
+        1 => vec![instructions[0].1.clone()],
+        _ => instructions
+            .iter()
+            .map(|(reference, instruction)| format!("{} — {instruction}", reference.adopting()))
+            .collect(),
+    };
+    format!(
+        "{OBSERVED_STATE} {ADOPTION_INSTRUCTIONS_OPEN}\n\n{}\n\n{ADOPTION_INSTRUCTIONS_CLOSE}",
+        stated.join("\n\n"),
+    )
+}
+
+/// The note a node is sent when the releases it was waiting on arrive.
+///
+/// It reports what arrived and hands on what each producer states about adopting
+/// it, inside the same frame [`adoption_instructions`] encloses that instruction
+/// in everywhere else — so a note delivered into a live turn, where nothing else
+/// wraps it, says of itself what a note rendered into a task says.
+///
+/// Every row is expected to carry the [`version`](CrossRepoReference::version) it
+/// arrived at; one that does not is still named, because a note listing fewer
+/// releases than arrived is worse than one naming a version it could not read.
+pub fn arrival_note(arrived: &[CrossRepoReference]) -> String {
+    format!(
+        "The releases this node was waiting on have arrived:\n\n{lines}\n\n{instructions}",
+        lines = arrived
+            .iter()
+            .map(CrossRepoReference::arrival_line)
+            .collect::<Vec<String>>()
+            .join("\n"),
+        instructions = adoption_instructions(arrived),
+    )
 }
 
 /// One task with its node's amendment rendered into it.
@@ -638,19 +772,86 @@ pub struct CrossRepoReference {
     pub commit: String,
     /// The release target this node consumes that repository at.
     pub release_target: String,
+    /// The version the release carrying that work arrived at.
+    ///
+    /// Empty where no release has arrived — which is a fast-adoption node at its
+    /// first render, whose whole condition is that the work is finished and the
+    /// release is not out. A `published` node's rows all carry one, because it was
+    /// not started until they did, and this is the only place that node ever meets
+    /// the version it is building against.
+    pub version: String,
+    /// The template this dependency's producer instructs its consumers with,
+    /// resolved through `onevcs`'s three layers.
+    ///
+    /// Producer knowledge: the pinning rule a consuming worker could not have
+    /// known, stated by the repository that knows it. `None` is a producer that
+    /// declares none, whose consumers get [`DEFAULT_ADOPTION_INSTRUCTION`] and are
+    /// therefore unaffected by there being templates at all.
+    pub adoption_instructions: Option<InstructionTemplate>,
 }
 
 impl CrossRepoReference {
     /// The row this reference renders as, cells in the header's order.
     fn row(&self) -> String {
         format!(
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             cell(&self.dependency),
             cell(&self.repository),
             cell(&self.branch),
             cell(&self.commit),
             cell(&self.release_target),
+            cell(&self.version),
         )
+    }
+
+    /// This dependency, as a line of the arrival note names it.
+    fn arrival_line(&self) -> String {
+        format!(
+            "- {} — {} {}",
+            self.repository, self.release_target, self.version
+        )
+    }
+
+    /// This dependency, as an attributed instruction names the thing it is about.
+    fn adopting(&self) -> String {
+        match self.release_target.is_empty() {
+            true => self.repository.clone(),
+            false => format!("{} {}", self.repository, self.release_target),
+        }
+    }
+
+    /// What this dependency's producer states about adopting it, rendered.
+    ///
+    /// [`DEFAULT_ADOPTION_INSTRUCTION`] for a producer that declares no template,
+    /// and for one whose template renders to nothing or does not render at all:
+    /// the template parsed where `onevcs` read the declaration, so what is left
+    /// here is a render this host cannot complete, and an instruction that came
+    /// out empty says less to a worker than the default does. Never a refusal —
+    /// a dispatch is not failed over the sentence at the bottom of its reference
+    /// block.
+    pub fn instruction(&self) -> String {
+        let Some(template) = self.adoption_instructions.as_ref() else {
+            return DEFAULT_ADOPTION_INSTRUCTION.to_owned();
+        };
+        minijinja::Environment::new()
+            .render_str(template, self.variables())
+            .ok()
+            .map(|rendered| rendered.trim().to_owned())
+            .filter(|rendered| !rendered.is_empty())
+            .unwrap_or_else(|| DEFAULT_ADOPTION_INSTRUCTION.to_owned())
+    }
+
+    /// What a template is rendered against, keyed by
+    /// [`ADOPTION_INSTRUCTION_VARIABLES`].
+    fn variables(&self) -> BTreeMap<&'static str, &str> {
+        BTreeMap::from([
+            ("dependency", self.dependency.as_str()),
+            ("repository", self.repository.as_str()),
+            ("branch", self.branch.as_str()),
+            ("commit", self.commit.as_str()),
+            ("target", self.release_target.as_str()),
+            ("version", self.version.as_str()),
+        ])
     }
 }
 
@@ -940,6 +1141,7 @@ mod tests {
                 branch: "onevcs-release-targets".into(),
                 commit: "9f3c1ab".into(),
                 release_target: "crate".into(),
+                ..CrossRepoReference::default()
             },
             // A dependency the run cannot fully name: the cells it cannot fill
             // are empty and the row is still there, because a worker needs to see
@@ -959,11 +1161,16 @@ mod tests {
              Do\nnot change a shared interface unilaterally — propose it and keep building \
              against the\nagreed surface. When these releases arrive you will be sent a note \
              naming the\nversions; move the pin then.\n\n\
-             | dependency | repository | branch | commit | release target |\n\
-             | --- | --- | --- | --- | --- |\n\
+             | dependency | repository | branch | commit | release target | version |\n\
+             | --- | --- | --- | --- | --- | --- |\n\
              | onevcs-release-targets | github.com/nickderobertis/onevcs | \
-             onevcs-release-targets | 9f3c1ab | crate |\n\
-             | packager | github.com/nickderobertis/other |  |  |  |\n"
+             onevcs-release-targets | 9f3c1ab | crate |  |\n\
+             | packager | github.com/nickderobertis/other |  |  |  |  |\n\n\
+             This reports observed state and adds no acceptance criteria. What the producer of \
+             each dependency above states about adopting it:\n\n\
+             Move from the git pin to that released version.\n\n\
+             That is the end of what the producers state; none of it is a criterion of this \
+             node.\n"
         );
         assert_eq!(
             node.rendered_task_with(&[]),
@@ -987,7 +1194,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "a cell forged a second row:\n{rendered}");
         assert_eq!(
             rows[0],
-            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |",
+            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |  |",
             "a cell was not escaped"
         );
         assert_eq!(
@@ -1024,6 +1231,251 @@ mod tests {
             .rendered_task_with(None, &references)
             .contains(CROSS_REPO_REFERENCES_HEADING));
         assert_eq!(step.rendered_task_with(None, &[]), step.rendered_task(None));
+    }
+
+    /// One out-of-repository dependency, at whatever version the run can name and
+    /// with whatever its producer declares.
+    fn dependency(version: &str, instructions: Option<&str>) -> CrossRepoReference {
+        CrossRepoReference {
+            dependency: "engine".into(),
+            repository: "github.com/nickderobertis/onevcs".into(),
+            branch: "onevcs/s-1".into(),
+            commit: "9f3c1ab".into(),
+            release_target: "crate".into(),
+            version: version.into(),
+            adoption_instructions: instructions.map(|declared| {
+                declared
+                    .parse()
+                    .expect("a template a producer could declare")
+            }),
+        }
+    }
+
+    /// A node with one dependency, rendered.
+    fn consumer(references: &[CrossRepoReference]) -> String {
+        Node {
+            id: "consumer".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            ..Node::default()
+        }
+        .rendered_task_with(references)
+    }
+
+    /// The producer's own sentence — the pinning rule only the producer knows —
+    /// reaches **both** places a consumer meets one, rendered against the
+    /// versions that arrived.
+    #[test]
+    fn a_producers_declared_instruction_reaches_both_render_sites() {
+        let declared = "Raise the `onevcs` pin in `[workspace.dependencies]` to {{ version }} \
+                        rather than the pin twelve lines below it.";
+        let stated = "Raise the `onevcs` pin in `[workspace.dependencies]` to 0.18.0 rather than \
+                      the pin twelve lines below it.";
+        let arrived = vec![dependency("0.18.0", Some(declared))];
+
+        let block = consumer(&arrived);
+        assert!(
+            block.contains(stated),
+            "the block states nothing of the producer's:\n{block}"
+        );
+        assert!(
+            !block.contains(DEFAULT_ADOPTION_INSTRUCTION),
+            "a producer that declared one still got the engine's default:\n{block}"
+        );
+
+        let note = arrival_note(&arrived);
+        assert!(
+            note.contains(stated),
+            "the note states nothing of the producer's:\n{note}"
+        );
+        assert!(
+            !note.contains(DEFAULT_ADOPTION_INSTRUCTION),
+            "a producer that declared one still got the engine's default:\n{note}"
+        );
+
+        // Two producers saying different things are each attributed, because an
+        // unattributed pair is one a worker cannot act on. One saying the same
+        // thing twice is stated once.
+        let mut other = dependency("2.1.0", Some("Take the wheel from PyPI at {{ version }}."));
+        other.dependency = "packager".into();
+        other.repository = "github.com/nickderobertis/other".into();
+        let both = consumer(&[arrived[0].clone(), other.clone()]);
+        assert!(
+            both.contains(&format!(
+                "github.com/nickderobertis/onevcs crate — {stated}"
+            )),
+            "the first producer's instruction is not attributed to it:\n{both}"
+        );
+        assert!(
+            both.contains(
+                "github.com/nickderobertis/other crate — Take the wheel from PyPI at 2.1.0."
+            ),
+            "the second producer's instruction is not attributed to it:\n{both}"
+        );
+        let twice = consumer(&[arrived[0].clone(), arrived[0].clone()]);
+        assert_eq!(
+            twice.matches(stated).count(),
+            1,
+            "one instruction was stated twice:\n{twice}"
+        );
+    }
+
+    /// Every variable [`ADOPTION_INSTRUCTION_VARIABLES`] names is available at
+    /// **both** sites, with the same value at each.
+    ///
+    /// A producer writes one template and cannot know which of the two a given
+    /// consumer meets it in, so a variable that resolved at one site and not the
+    /// other would be a template that renders differently depending on when it is
+    /// read.
+    #[test]
+    fn every_variable_the_contract_names_is_available_at_both_render_sites() {
+        let declared: String = ADOPTION_INSTRUCTION_VARIABLES
+            .iter()
+            .map(|name| format!("{name}=[{{{{ {name} }}}}]"))
+            .collect::<Vec<String>>()
+            .join(" ");
+        let expected = "dependency=[engine] repository=[github.com/nickderobertis/onevcs] \
+                        branch=[onevcs/s-1] commit=[9f3c1ab] target=[crate] version=[0.18.0]";
+        let arrived = vec![dependency("0.18.0", Some(&declared))];
+
+        for (site, rendered) in [
+            ("the reference block", consumer(&arrived)),
+            ("the arrival note", arrival_note(&arrived)),
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{site} did not resolve every variable:\n{rendered}"
+            );
+        }
+
+        // And the published list is the whole of what a template is rendered
+        // against, so a variable this build offers and the list does not is one a
+        // producer was never told about.
+        let offered: Vec<&str> = arrived[0].variables().into_keys().collect();
+        let mut named = ADOPTION_INSTRUCTION_VARIABLES.to_vec();
+        named.sort_unstable();
+        assert_eq!(offered, named);
+    }
+
+    /// At a fast-adoption node's first render no release has happened, so the
+    /// block renders **without a version** and a template that guards on one
+    /// renders the branch's side of the question.
+    ///
+    /// That is the definition of fast adoption rather than a gap: the work is
+    /// finished and the release is not out.
+    #[test]
+    fn a_first_render_with_no_version_yet_asserts_none() {
+        let declared = "{% if version %}Move the pin to {{ version }}.\
+                        {% else %}Pin against the branch {{ branch }} until the release \
+                        arrives.{% endif %}";
+        let block = consumer(&[dependency("", Some(declared))]);
+        assert!(
+            block.contains("Pin against the branch onevcs/s-1 until the release arrives."),
+            "the block did not render the no-release-yet side:\n{block}"
+        );
+        assert!(
+            !block.contains("Move the pin to"),
+            "the block asserted a version nothing has answered:\n{block}"
+        );
+        assert!(
+            block.contains(CROSS_REPO_REFERENCES_PREAMBLE),
+            "a node with no release yet was told the work it depends on is released:\n{block}"
+        );
+        assert!(
+            block.contains(
+                "| engine | github.com/nickderobertis/onevcs | onevcs/s-1 | 9f3c1ab \
+                            | crate |  |"
+            ),
+            "the version cell is not empty:\n{block}"
+        );
+    }
+
+    /// A `published` node's block carries the version it is building against —
+    /// the only place that node ever meets one, because nothing sends it the
+    /// arrival note it never needed.
+    #[test]
+    fn a_block_whose_dependencies_have_all_released_carries_their_versions() {
+        let block = consumer(&[dependency("0.18.0", None)]);
+        assert!(
+            block.contains(
+                "| engine | github.com/nickderobertis/onevcs | onevcs/s-1 | 9f3c1ab \
+                            | crate | 0.18.0 |"
+            ),
+            "the block does not carry the version:\n{block}"
+        );
+        assert!(
+            block.contains(CROSS_REPO_RELEASED_PREAMBLE),
+            "a node whose dependencies all released was told they had not:\n{block}"
+        );
+        // A block with one row still awaiting a release is the other one, because
+        // the sentence is decided by what every row says.
+        let mixed = consumer(&[dependency("0.18.0", None), dependency("", None)]);
+        assert!(mixed.contains(CROSS_REPO_REFERENCES_PREAMBLE), "{mixed}");
+    }
+
+    /// A producer that declares no template gets the engine's own default, at
+    /// both sites and from one place in the code — so a repository that has not
+    /// adopted this leaves its consumers exactly where they were.
+    #[test]
+    fn a_producer_declaring_no_template_falls_back_to_the_engines_own_default() {
+        for (site, rendered) in [
+            ("the reference block", consumer(&[dependency("", None)])),
+            (
+                "the arrival note",
+                arrival_note(&[dependency("0.18.0", None)]),
+            ),
+        ] {
+            assert!(
+                rendered.contains(DEFAULT_ADOPTION_INSTRUCTION),
+                "{site} carries no default instruction:\n{rendered}"
+            );
+        }
+        // A template this host cannot finish rendering is the same case: the
+        // declaration parsed where `onevcs` read it, so what is left is a render
+        // that failed or came out empty, and neither says as much as the default.
+        // `{% extends %}` is among them — the two-layer composition `onevcs`
+        // documents on the declaration is a template name this build does not
+        // register, so a host override written that way falls back rather than
+        // refusing a dispatch over the sentence under its reference table.
+        for unrenderable in [
+            "{{ dependency",
+            "{% if version %}{% endif %}",
+            "{% extends \"producer\" %}",
+        ] {
+            let rendered = CrossRepoReference {
+                adoption_instructions: unrenderable.parse().ok(),
+                ..dependency("0.18.0", None)
+            }
+            .instruction();
+            assert_eq!(rendered, DEFAULT_ADOPTION_INSTRUCTION, "{unrenderable:?}");
+        }
+    }
+
+    /// Whatever a producer states, it is delivered **inside** the frame that says
+    /// it reports observed state and adds no acceptance criteria — at both sites,
+    /// so no rendering escapes the frame into a bar a worker has to clear.
+    #[test]
+    fn a_rendered_instruction_is_enclosed_by_the_frame_that_states_it_adds_no_bar() {
+        let declared = "Raise the pin to {{ version }}.";
+        let arrived = vec![dependency("0.18.0", Some(declared))];
+        for (site, rendered) in [
+            ("the reference block", consumer(&arrived)),
+            ("the arrival note", arrival_note(&arrived)),
+        ] {
+            let opened = rendered
+                .find(OBSERVED_STATE)
+                .unwrap_or_else(|| panic!("{site} states no observed-state frame:\n{rendered}"));
+            let instruction = rendered
+                .find("Raise the pin to 0.18.0.")
+                .unwrap_or_else(|| panic!("{site} carries no instruction:\n{rendered}"));
+            let closed = rendered
+                .find(ADOPTION_INSTRUCTIONS_CLOSE)
+                .unwrap_or_else(|| panic!("{site} does not close the frame:\n{rendered}"));
+            assert!(
+                opened < instruction && instruction < closed,
+                "{site} renders the instruction outside the frame:\n{rendered}"
+            );
+        }
     }
 
     /// Both new fields are optional, load at schema 3, and are omitted from what

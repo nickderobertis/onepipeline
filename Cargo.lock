@@ -940,6 +940,7 @@ dependencies = [
  "clap",
  "fs4",
  "libc",
+ "minijinja",
  "oneagentgraph",
  "onejudge",
  "onepipeline-testfakes",
