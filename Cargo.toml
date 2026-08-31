@@ -232,6 +232,9 @@ resolver = "2"
 #   number `release-targets.toml` states, and the `PublishRequest.draft` /
 #   `PublishOutcome::ChangeDraft` pair `src/vcs.rs` meets. Taken because
 #   `onevcs-testing` 0.5.2 requires exactly this `onevcs`, so the two move together.
+#   It is the exact release containing onevcs #117, #119, #121, and #123: the
+#   live-worktree close refusal and dirty-tree rescue, draft change requests,
+#   preserved holder records, and producer-declared adoption instructions.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
