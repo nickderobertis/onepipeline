@@ -2815,6 +2815,19 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
 /// as one that could prove nothing: the failure names the *previous* run's board and
 /// looks nothing like the timing it is.
 ///
+/// **Asked at the rate the window closes at, not at the rate a run settles.** What a
+/// replacement leaves behind is a *window* rather than a duration — the document is whole
+/// only between the write that finished it and the open that truncates it again — so what
+/// decides whether this ever lands in that window is how *often* it asks, not how long it
+/// is willing to wait. A 20 ms cadence spends a 5 s budget on about 250 samples, and the
+/// worst of 200 asks measured against a writer replacing the document back to back needed
+/// 66 of them. A margin under four is a lottery, and it was losing about one ask in 200
+/// here and two in 200 on CI. The same half second asked at 100 µs buys about 4 000.
+///
+/// The slower cadence still follows it, because the two phases answer different
+/// questions: the first is a writer caught *inside* one replacement, the second one that
+/// is slow *between* them.
+///
 /// A document that never settles is still a defect, and is still named by the same four
 /// reasons — the wait only decides how long "never" is. It costs nothing in the ordinary
 /// case, where the first read answers, and the budget once for a fixture that really is
@@ -2822,20 +2835,28 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
 fn settled_title(path: &Path) -> Result<String, String> {
     let mut settled = None;
     let mut last = "its project document was never read".to_owned();
-    waited_for(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(20),
-        || match title_of(path) {
-            Ok(title) => {
-                settled = Some(title);
-                true
-            }
-            Err(why) => {
-                last = why;
-                false
-            }
-        },
+    let mut ask = || match title_of(path) {
+        Ok(title) => {
+            settled = Some(title);
+            true
+        }
+        Err(why) => {
+            last = why;
+            false
+        }
+    };
+    let crossed = waited_for(
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_micros(100),
+        &mut ask,
     );
+    if !crossed {
+        waited_for(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            &mut ask,
+        );
+    }
     settled.ok_or(last)
 }
 
