@@ -76,10 +76,10 @@ jobs:
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
 
-  # llmlint: ignore-block[comments_earn_their_place] run 32538759791 and the `main`
-  # timings below are why this job has the shape it has. The leg that burned 237
-  # minutes naming no test is what the two limits and the per-test reporting were
-  # added to end, and the sampled ranges are what say 20 and 30 are over twice a
+  # llmlint: ignore-block[comments_earn_their_place] run 32538759791 and the
+  # measurements below are why this job has the shape it has. The leg that burned
+  # 237 minutes naming no test is what the two limits and the per-test reporting
+  # were added to end, and the samples are what say 45 and 60 are over twice a
   # green leg's worst rather than numbers somebody picked. Neither is recoverable
   # from the keys beneath them, and without them a reader cannot tell a bound that
   # was measured from one that was guessed.
@@ -98,9 +98,22 @@ jobs:
   #
   # Two limits, because they buy different things. The step's is what bounds the
   # hang, and it is the step's rather than only the job's so that a timeout leaves
-  # the job alive for the step below to say what was still running. That step
-  # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
-  # over twice its worst. The job limit is half of what
+  # the job alive for the step below to say what was still running.
+  #
+  # They are 45 and 60 because that is what this suite costs now. They were 20 and
+  # 30 against a step of 5m49s-8m00s and a job of 8m13s-12m38s on `main`, and the
+  # suite has since grown past them: #168's `cross (windows-latest)` leg was cut by
+  # the 20-minute step limit having reported 923 of 990 tests and **no** failure,
+  # which puts a green step at about 21.5 minutes however that step divided between
+  # `fmt-check`, `lint` and the tests. The tests had 20-F of the 20 minutes and got
+  # 93.2% of the way through in it, so the whole step needs F + (20-F)/0.932 —
+  # 21.5 - 0.073F, which is 21 to 21.5 for every F the step can have spent
+  # elsewhere. The bound was under what the suite costs rather than over twice it.
+  #
+  # Nor is a cheaper suite the lever: `just check-cross` is 299s green on a Linux
+  # workstation, 268s of it the tests, and running it without the 9 tests #168 adds
+  # gives 259s — a 9s delta, the same size as the spread between two identical runs
+  # of the whole suite. 45 is over twice 21.5, and 60 is what
   # nickderobertis/onepipeline#99 asks for.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
@@ -111,7 +124,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -129,7 +142,7 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
-        timeout-minutes: 20
+        timeout-minutes: 45
         run: just check-cross
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
