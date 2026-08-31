@@ -400,13 +400,25 @@ fn render_task(
     // the node's declared mode: a row carrying a version is a dependency that has
     // released, and a block whose every row carries one is a node with nothing
     // left to pin against git.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] the two sentences are each
+    // driven end to end by `tests/e2e/adoption.rs` — the git-pin one by
+    // `a_fast_node_pins_against_git_and_is_told_when_the_release_arrives` and the
+    // released one by `a_published_node_is_held_until_the_release_answers_and_by_
+    // nothing_else` — but a **mixed** set is not reachable from a first dispatch,
+    // which is where a journey composes a block: a fast node's rows are frozen
+    // before any probe has answered, so none of them carries a version, and a
+    // published node is not started until every one of them does. It arises only
+    // where a node is dispatched again between two arrivals, and what this arm
+    // does there is keep the git-pin sentence — the safe direction, and the one
+    // that journey already reads.
     let preamble = match references
         .iter()
         .all(|reference| !reference.version.is_empty())
     {
         true => CROSS_REPO_RELEASED_PREAMBLE,
         false => CROSS_REPO_REFERENCES_PREAMBLE,
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     rendered = format!(
         "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{preamble}\n\n\
          | dependency | repository | branch | commit | release target | version |\n\

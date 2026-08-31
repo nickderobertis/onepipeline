@@ -101,6 +101,29 @@ fn two_that_release(engine: &str, other_alias: &str, other: &str) -> String {
     )
 }
 
+/// The same two-repository document, with **each** target declaring its own
+/// instruction.
+///
+/// The second is written in the two-layer `{% extends "producer" %}` form
+/// `onevcs` documents on the declaration and this build does not register, so it
+/// is a template this host cannot finish rendering — which falls back to the
+/// engine's own default rather than failing a dispatch over the sentence under a
+/// table.
+fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
+    format!(
+        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
+         \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         \x20     adoption_instructions: '{{% extends \"producer\" %}}'\n\
+         default:\n\x20 adoption: fast\n",
+        repositories(engine),
+    )
+}
+
 /// The document's version and its one rule for the engine repository, up to but
 /// not including whatever a journey states after them.
 fn repositories(script: &str) -> String {
@@ -2113,6 +2136,102 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
             event["payload"]["status"],
             json!("failed"),
             "a node the wait held was failed: {event}"
+        );
+    }
+}
+
+/// Two producers, each stating its **own** instruction, and one block that
+/// attributes each to the dependency it is about.
+///
+/// The one thing a single-dependency journey cannot show: with two, an
+/// unattributed pair of instructions is one a worker cannot act on, so each is
+/// named against the repository and target it belongs to. The second producer
+/// writes its template in the two-layer `{% extends "producer" %}` form this build
+/// does not register, which is a render this host cannot finish — and the block
+/// carries the engine's own default for it rather than the dispatch failing over
+/// the sentence under its table.
+#[test]
+fn two_producers_state_their_own_instructions_and_each_is_attributed_to_it() {
+    let world = watching("adoption-two-producers");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_instruct(&script, "tool", &tool_script));
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut waiting = consumer(Some("published"));
+    waiting["deps"] = json!([ENGINE, "packager"]);
+    let run = start(
+        &world,
+        "adoption-two-producers",
+        vec![engine(), packager, waiting],
+    );
+    world.until("both producing nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node was dispatched with its dependencies unreleased"
+    );
+
+    // Both releases arrive, so the held node starts against both versions.
+    releases_at(&answer, "0.2.0");
+    releases_at(&tool_answer, "3.4.0");
+    world.until("the held node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 3
+    });
+
+    let task = task_of(&world, "consumer");
+    let block = task
+        .split_once(CROSS_REPO_REFERENCES_HEADING)
+        .map(|(_, rest)| rest.to_owned())
+        .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
+    for (dependency, version) in [("engine", "0.2.0"), ("packager", "3.4.0")] {
+        let row = block
+            .lines()
+            .find(|line| line.starts_with(&format!("| {dependency} |")))
+            .unwrap_or_else(|| panic!("no row for {dependency}:\n{block}"));
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        assert_eq!(cells[5], version, "row: {row}");
+    }
+    assert!(
+        block.contains(
+            "github.com/owner/engine crate — Raise the engine pin in [workspace.dependencies] \
+             to 0.2.0, not the twelve pins below it."
+        ),
+        "the first producer's instruction is not attributed to it:\n{block}"
+    );
+    assert!(
+        block.contains(
+            "github.com/owner/tool crate — Move from the git pin to that released version."
+        ),
+        "a template this host cannot render did not fall back to the default, attributed to \
+         the producer that declared it:\n{block}"
+    );
+    // Neither producer's instruction escaped the frame that says it adds no bar.
+    let opened = block
+        .find("This reports observed state and adds no acceptance criteria.")
+        .unwrap_or_else(|| panic!("the block states no observed-state frame:\n{block}"));
+    let closed = block
+        .find("none of it is a criterion of this node")
+        .unwrap_or_else(|| panic!("the block does not close the frame:\n{block}"));
+    for stated in ["Raise the engine pin", "Move from the git pin"] {
+        let at = block.find(stated).expect("the instruction is in the block");
+        assert!(
+            opened < at && at < closed,
+            "{stated:?} is rendered outside the frame:\n{block}"
+        );
+    }
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a node was failed over the sentence under its reference table: {event}"
         );
     }
 }

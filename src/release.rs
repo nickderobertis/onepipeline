@@ -1206,10 +1206,21 @@ impl Released {
                     // non-empty, bounded, and parsing as a template — is decided
                     // by the type the producer declared it as. One that does not
                     // is dropped, which renders this engine's own default.
+                    //
+                    // llmlint: ignore-block[changed_behavior_has_e2e] a record no
+                    // run of this build writes is not reachable from a journey:
+                    // every field of this payload is checked the same way for the
+                    // same reason, and `docs/contract-divergences.md` entry 40
+                    // records why what a driver takes up out of this record is
+                    // held by a fold rather than by a journey. Both deliveries
+                    // either side of it — the producer's own instruction reaching
+                    // a live turn, and reaching the next dispatch — are driven end
+                    // to end by `tests/e2e/adoption.rs`.
                     instructions: entry
                         .get("instructions")
                         .and_then(Value::as_str)
                         .and_then(|declared| declared.parse::<InstructionTemplate>().ok()),
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                 })
             })
             .collect()
