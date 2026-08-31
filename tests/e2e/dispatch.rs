@@ -591,9 +591,10 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
 }
 
 /// The plan's persona is a graph setting, not merely a label on the dispatch.
-/// The real sibling's content-addressed run record proves that it resolved the
-/// requested persona while preparing the member that subsequently ran. That is
-/// evidence from the actual graph invocation, not this crate's event label.
+/// The real sibling's content-addressed run record, read back through the
+/// sibling's own `history` reader, proves that it resolved the requested persona
+/// while preparing the member that subsequently ran. That is evidence from the
+/// actual graph invocation, not this crate's event label.
 #[test]
 fn a_plan_persona_reaches_the_member_that_actually_runs() {
     let world = World::new("real-plan-persona");
@@ -616,31 +617,41 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
         "the node's member never ran: {turns:?}"
     );
 
-    // llmlint: ignore-block[tests_mirror_real_usage] the run record is not an
-    // internal persistence detail: it is the sibling's own published record, what
-    // `oneagentgraph history` reads and what `history::show` returns, and the
-    // journey two tests below reads it through that very verb. It is read here
-    // rather than off this crate's events for the reason the doc comment above
-    // gives — a persona is a *graph* setting, so this crate's own label saying it
-    // was requested would prove only that this crate wrote its own label. The
-    // product interface is driven above: the launch is the compiled binary and
-    // the member's turn is asserted before this.
-    // Read until the record says so, rather than once. The sibling publishes
-    // `graph-settled` *before* it writes the run record's final copy, and that
-    // write truncates `record.json` in place — so the launch this journey drove
-    // can be back with the file momentarily empty. A single read taken here
-    // then parses nothing at all, and an empty list reads exactly like a
-    // persona that was never resolved: that is how this journey failed on a
-    // loaded runner while the persona had in fact reached the member. The
-    // assertion below is the same one either way, over whatever was last
-    // readable, so a persona that really never arrives still fails with the
-    // records that prove it.
+    // Read the record back through `oneagentgraph history`, which is the reader
+    // the sibling publishes for it — `history` lists the runs under the state
+    // directory and `history show` prints one record whole. Nothing here opens a
+    // file under that directory: where the record is kept, and whether it is a
+    // file at all, is the sibling's to change.
+    //
+    // And read until it answers, rather than once. The sibling publishes
+    // `graph-settled` *before* it writes the record's final copy, and that write
+    // replaces the record in place — so the launch this journey drove can be back
+    // while `history` still parses nothing, and a listing taken here is empty. An
+    // empty listing reads exactly like a persona that never reached the member,
+    // which is how this journey failed on a loaded runner while the persona had
+    // in fact reached it. The assertion is the same one either way, over whatever
+    // the sibling last handed back, so a persona that really never arrives still
+    // fails with the records that prove it.
+    //
+    // A quarter-second between reads, not the usual 20ms: each one starts the
+    // sibling once per run it lists, and polling a process boundary that hard
+    // takes the process-start capacity the run being watched is still using.
+    let state = world.graph_state();
+    let sibling = |args: &[&str]| -> std::process::Output {
+        std::process::Command::new(crate::harness::oneagentgraph_binary())
+            .args(args)
+            .env("ONEAGENTGRAPH_STATE_DIR", &state)
+            .output()
+            .expect("the real oneagentgraph runs")
+    };
     let records = || -> Vec<Value> {
-        std::fs::read_dir(world.root.join("graph-state"))
-            .expect("oneagentgraph wrote its state root")
-            .filter_map(Result::ok)
-            .filter_map(|entry| std::fs::read_to_string(entry.path().join("record.json")).ok())
-            .filter_map(|text| serde_json::from_str(&text).ok())
+        let listed = sibling(&["history"]);
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter_map(|line| line.split('\t').next().map(str::to_string))
+            .filter_map(|run| {
+                serde_json::from_slice(&sibling(&["history", "show", &run]).stdout).ok()
+            })
             .collect()
     };
     let resolved = |records: &[Value]| {
@@ -654,14 +665,13 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut seen = records();
     while !resolved(&seen) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(250));
         seen = records();
     }
     assert!(
         resolved(&seen),
         "the graph that dispatched the member did not resolve the plan's persona: {seen:?}"
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// Node-scope overrides survive losing the driver that originally launched the
