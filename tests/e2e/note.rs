@@ -700,3 +700,88 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
     });
     assert_eq!(recorded(&world, run)["reached"], json!("worker"));
 }
+
+/// The four shapes of note the envelope cannot carry, each refused where it
+/// arrives, and nothing of any of them left durable.
+///
+/// The rules are the seam's own newtypes rather than checks this crate keeps:
+/// `addressee` is required and closed, a note's text refuses a blank, and a
+/// criterion is refused by the rules the judging side already applies to authored
+/// criteria — a version literal among them, because a release cut between the note
+/// being written and the work being judged makes finished work fail against it.
+///
+/// What only an end-to-end journey can show is that all four hold at the **wire**,
+/// on the envelope a manager really sends, rather than on a constructor a test can
+/// call. A malformed note that parsed and became durable would still be offered to
+/// the live conversation by the reconciler: the manager would read a refusal and
+/// the worker would read the note. So the conversation is held open across all
+/// four, and the queue is asked while the reconciler is still passing over it.
+#[test]
+fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued() {
+    let world = World::new("note-boundary");
+    let run = "noteboundary";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+
+    // Each one, with the words its refusal owes a manager: which field, and what
+    // about it. A bare `missing field` would say a note was rejected; these say
+    // what to send instead.
+    let refused = [
+        (
+            json!({"op": "note", "id": "build", "addressee": "worker", "text": "   \n"}),
+            "this one was blank",
+        ),
+        (
+            json!({"op": "note", "id": "build", "addressee": "sponsor", "text": NOTE}),
+            "unknown variant `sponsor`",
+        ),
+        (
+            json!({"op": "note", "id": "build", "text": NOTE}),
+            "missing field `addressee`",
+        ),
+        (
+            note_op(
+                "build",
+                "worker",
+                NOTE,
+                Some("the tree pins oneagentgraph 0.3.15"),
+            ),
+            "names a version literal",
+        ),
+    ];
+    for (op, named) in refused {
+        world
+            .run_with_stdin_on(world.agentgraph_cmd(&["reply", run]), &envelope(op))
+            .exited(REFUSED)
+            .err_has(named);
+    }
+
+    // Nothing of any of them is durable, asked while the held turn is still open:
+    // the queue the reconciler reads carries no note, and the run recorded neither
+    // a commit nor a rejection, because each refusal was taken where the envelope
+    // arrived rather than after it became a record something downstream had to
+    // answer.
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    assert!(
+        !a_note_is_queued(&queue),
+        "a note the envelope refused was queued anyway: {}",
+        std::fs::read_to_string(&queue).unwrap_or_default()
+    );
+    for kind in ["edit-committed", "edit-rejected"] {
+        assert!(
+            world.events_of(run, kind).is_empty(),
+            "the run recorded a `{kind}` for an envelope it refused at the wire"
+        );
+    }
+
+    // And the conversation those four never reached runs to its own end, so what
+    // was refused is the envelope rather than the node it named.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(
+        worked(&world).iter().all(|prompt| !prompt.contains(NOTE)),
+        "a note the wire refused was handed to the worker anyway"
+    );
+}

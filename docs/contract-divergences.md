@@ -2687,7 +2687,14 @@ real two-party conversation.
   "refused": [
     {"op": "note", "id": "build", "addressee": "worker", "text": "   "},
     {"op": "note", "id": "build", "addressee": "sponsor", "text": "ship it"},
-    {"op": "note", "id": "build", "text": "ship it"}
+    {"op": "note", "id": "build", "text": "ship it"},
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "ship it",
+      "criterion": "the tree pins oneagentgraph 0.3.15"
+    }
   ],
   "api": {
     "module": "onepipeline::note",
