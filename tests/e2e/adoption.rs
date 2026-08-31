@@ -2297,6 +2297,10 @@ fn two_producers_that_state_the_same_instruction_are_coalesced() {
         1,
         "the shared instruction was not coalesced:\n{block}"
     );
+    assert!(
+        block.contains("github.com/owner/engine crate, github.com/owner/tool crate — Refresh the workspace lockfile."),
+        "coalescing the shared instruction discarded one producer's attribution:\n{block}"
+    );
 }
 
 /// Nodes awaiting **one** release put one question between them, are answered

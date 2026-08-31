@@ -443,30 +443,42 @@ fn render_task(
 /// instruction cannot come to read one way in a task and another in a note.
 /// Empty for no dependencies at all, which is every node that has none.
 ///
-/// Distinct instructions are rendered once each, in the order the rows name them:
-/// a node whose dependencies' producers all declare none gets exactly one
+/// Distinct instructions are rendered once each, in the order the rows name them,
+/// with every producer that resolved to that text named beside it. A node whose
+/// dependencies' producers all declare none gets exactly one
 /// [`DEFAULT_ADOPTION_INSTRUCTION`], which is the sentence its worker was given
-/// before there were templates. Where the rows do state different things, each is
-/// attributed to the dependency it is about, because an unattributed list of
-/// instructions is one a worker cannot act on.
+/// before there were templates. Attribution is kept even when rows state the same
+/// thing, because coalescing text must not discard which dependencies it governs.
 pub fn adoption_instructions(references: &[CrossRepoReference]) -> String {
-    let mut instructions: Vec<(&CrossRepoReference, String)> = Vec::new();
+    let mut instructions: Vec<(String, Vec<&CrossRepoReference>)> = Vec::new();
     for reference in references {
         let instruction = reference.instruction();
-        if !instructions.iter().any(|(_, said)| *said == instruction) {
-            instructions.push((reference, instruction));
+        match instructions
+            .iter_mut()
+            .find(|(said, _)| *said == instruction)
+        {
+            Some((_, producers)) => producers.push(reference),
+            None => instructions.push((instruction, vec![reference])),
         }
     }
     if instructions.is_empty() {
         return String::new();
     }
-    let stated: Vec<String> = match instructions.len() {
-        1 => vec![instructions[0].1.clone()],
-        _ => instructions
-            .iter()
-            .map(|(reference, instruction)| format!("{} — {instruction}", reference.adopting()))
-            .collect(),
-    };
+    let attribute = references.len() > 1;
+    let stated: Vec<String> = instructions
+        .iter()
+        .map(|(instruction, producers)| match attribute {
+            false => instruction.clone(),
+            true => format!(
+                "{} — {instruction}",
+                producers
+                    .iter()
+                    .map(|reference| reference.adopting())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })
+        .collect();
     format!(
         "{OBSERVED_STATE} {ADOPTION_INSTRUCTIONS_OPEN}\n\n{}\n\n{ADOPTION_INSTRUCTIONS_CLOSE}",
         stated.join("\n\n"),
@@ -1178,7 +1190,8 @@ mod tests {
              | packager | github.com/nickderobertis/other |  |  |  |  |\n\n\
              This reports observed state and adds no acceptance criteria. What the producer of \
              each dependency above states about adopting it:\n\n\
-             Move from the git pin to that released version.\n\n\
+             github.com/nickderobertis/onevcs crate, github.com/nickderobertis/other — Move from \
+             the git pin to that released version.\n\n\
              That is the end of what the producers state; none of it is a criterion of this \
              node.\n"
         );
