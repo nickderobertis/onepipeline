@@ -12,6 +12,10 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
+use std::path::Path;
+
+use serde_json::Value;
+
 use crate::harness::{agent, human, plan_of, reaped_pid, Run, World};
 
 use crate::harness::lifecycle;
@@ -1935,22 +1939,55 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
 /// naming the process, and the moment it was dispatched — so that is what the
 /// journey below compares.
 ///
+/// So the identity is **read out of** the entry rather than taken as its bytes.
+/// Two records the executor wrote a moment apart differ in fields this journey is
+/// not comparing, and an entry that carried neither of the two it *is* comparing
+/// would still compare unequal to every other — which is exactly a fresh dispatch
+/// reported by a registry that never recorded one. Both fields are required of
+/// every record the ledger writes, so an entry missing either is a fault here
+/// rather than a value to go on.
+///
 /// An entry that is **gone** between the listing and the read is one that is not
 /// there: the registry is written while this polls it, and a dispatch that
 /// removes its own entry as it ends is a state the wait below is entitled to
 /// see. Any other reason an entry will not read is a fault, and fails here rather
 /// than quietly shrinking the set this journey is comparing — which is the one
-/// way this helper could report a fresh dispatch that never registered.
-fn registry_of(world: &World, run: &str) -> Vec<String> {
+/// other way this helper could report a fresh dispatch that never registered.
+fn registry_of(world: &World, run: &str) -> Vec<(String, String)> {
     world
         .dispatch_records(run)
         .iter()
         .filter_map(|entry| match std::fs::read_to_string(entry) {
-            Ok(held) => Some(held),
+            Ok(held) => Some(identity_of(&held, entry)),
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
             Err(why) => panic!("cannot read the registry entry {}: {why}", entry.display()),
         })
         .collect()
+}
+
+/// The start token and dispatch moment one registry entry names, or a panic
+/// saying which entry could not name them.
+fn identity_of(held: &str, at: &Path) -> (String, String) {
+    let record: Value = serde_json::from_str(held).unwrap_or_else(|why| {
+        panic!(
+            "the registry entry {} is not the record it must be: {why}: {held}",
+            at.display()
+        )
+    });
+    let field = |name: &str| {
+        record[name]
+            .as_str()
+            .filter(|held| !held.trim().is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the registry entry {} names no `{name}`, so nothing here says which dispatch \
+                     it is: {record}",
+                    at.display()
+                )
+            })
+            .to_string()
+    };
+    (field("started"), field("dispatched_at"))
 }
 
 /// And a run stopped and then **adopted** is running what its fresh driver

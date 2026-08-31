@@ -1,23 +1,22 @@
 //! Where a manager's note lands: in the live conversation, in both parties' hands,
 //! and in the bar its judge decides against — or nowhere, said out loud.
 //!
-//! **Its own test binary, behind its own Nx edge.** These eight journeys are the
-//! most expensive shape this repository runs — each one starts a real two-party
+//! **Its own test binary, and its own Nx project.** These journeys are the most
+//! expensive shape this repository runs — each one starts a real two-party
 //! conversation, holds one side's turn open, and waits on the run's own durable
 //! queue — so they are addressed by name rather than folded into the general e2e
 //! target. The binary is `note`, which `nextest`'s `binary(note)` selects on its
-//! own; `just test-note` runs them alone; and `onepipeline:test-note` is the Nx
-//! target the crate's `test` target declares an edge onto, so the 95% floor is
-//! still merged over this run and the rest of the suite together rather than
-//! measured over half of it. What `tests/smoke/` is to the credentialled tier,
-//! this is to the conversational one.
+//! own and `just test-note` runs alone; `project.json` beside this file declares
+//! `onepipeline-note-journeys`, whose seven targets each scope to this binary,
+//! and whose inputs are `noteJourneySource` rather than the crate's whole
+//! `crateSource` — so a change to `docs/`, to `examples/`, or to another test
+//! file no longer re-runs them. What `tests/smoke/` is to the credentialled
+//! tier, this is to the conversational one.
 //!
-//! A target rather than a project, because in this workspace a project is a
-//! toolchain with an artifact — `npm/test/workspace-nx.test.mjs` holds every one
-//! of them to `bootstrap`, `build`, `format`, `format-check`, `lint`, `test` and
-//! `check` — and this tier has none of those of its own: `cargo fmt --all`,
-//! `cargo clippy --all-targets` and `cargo build --all-targets` already reach
-//! this binary as part of the crate.
+//! The crate declares the edge back: its `test` target depends on this project's,
+//! so the 95% floor is merged over this run and the rest of the suite together
+//! rather than measured over half of it, and it lists this project under
+//! `implicitDependencies` so a change here brings the floor with it.
 //!
 //! The cross-platform legs still run every journey here: `just test-quick`
 //! selects the whole offline tier, which this binary is part of.

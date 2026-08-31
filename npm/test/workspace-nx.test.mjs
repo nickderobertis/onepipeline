@@ -29,9 +29,11 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Every project's Nx declaration, by the name Nx knows it as. */
-const projects = ["project.json", join("npm", "project.json")].map((path) =>
-  JSON.parse(readFileSync(join(root, path), "utf8")),
-);
+const projects = [
+  "project.json",
+  join("npm", "project.json"),
+  join("tests", "note", "project.json"),
+].map((path) => JSON.parse(readFileSync(join(root, path), "utf8")));
 
 const justfile = readFileSync(join(root, "justfile"), "utf8");
 const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));

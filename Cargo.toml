@@ -480,9 +480,9 @@ path = "tests/e2e/main.rs"
 # so a runner can name it. Each of these journeys starts a real two-party
 # conversation and holds one side's turn open, which makes them the most
 # expensive shape here, and `binary(note)` is what lets `just test-note` run
-# them alone and `onepipeline:test-note` be the Nx target the crate's `test`
-# declares an edge onto. They stay offline, so `just test-quick` still runs every
-# one of them on the cross-platform legs.
+# them alone and `tests/note/project.json` declare the Nx project the crate's
+# `test` target depends on. They stay offline, so `just test-quick` still runs
+# every one of them on the cross-platform legs.
 [[test]]
 name = "note"
 path = "tests/note/main.rs"

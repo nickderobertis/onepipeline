@@ -44,15 +44,6 @@
         "coverage-clean"
       ]
     },
-    "test-note": {
-      "command": "just _note-test",
-      "inputs": [
-        "crateSource"
-      ],
-      "dependsOn": [
-        "coverage-clean"
-      ]
-    },
     "test": {
       "command": "just _crate-coverage",
       "inputs": [
@@ -60,7 +51,12 @@
       ],
       "dependsOn": [
         "test-rest",
-        "test-note"
+        {
+          "projects": [
+            "onepipeline-note-journeys"
+          ],
+          "target": "test"
+        }
       ]
     },
     "doc": {
@@ -84,5 +80,8 @@
         "doc"
       ]
     }
-  }
+  },
+  "implicitDependencies": [
+    "onepipeline-note-journeys"
+  ]
 }

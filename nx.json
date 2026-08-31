@@ -31,6 +31,21 @@
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/examples/**/*",
       "sharedGlobals"
+    ],
+    "noteJourneySource": [
+      "{workspaceRoot}/src/**/*",
+      "{workspaceRoot}/crates/**/*",
+      "{workspaceRoot}/tests/note/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/.config/nextest.toml",
+      "sharedGlobals"
     ]
   },
   "targetDefaults": {
@@ -62,12 +77,6 @@
       "cache": false
     },
     "test-rest": {
-      "cache": true,
-      "inputs": [
-        "default"
-      ]
-    },
-    "test-note": {
       "cache": true,
       "inputs": [
         "default"
