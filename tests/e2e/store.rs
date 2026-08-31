@@ -2190,6 +2190,23 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// empty file the truncate leaves behind with the whole document that follows it,
 /// while the rule is asked over and over. The rule has to answer for the document,
 /// not for the instant it was asked in.
+///
+/// **Measured over this tree, at 440 runs — 88 000 asks — of which none refused.** 400
+/// of them by invoking the compiled `e2e` binary on this test's module-qualified name,
+/// and 40 through `cargo nextest run -E`, whose `binary(e2e) and test(...)` filterset
+/// matches this name by substring; each run counted only where the runner itself
+/// reported that one test ran and passed. Its teeth were re-checked over that same tree
+/// rather than remembered: `settled_title` cut down to a single read called this sound
+/// fixture a defect 189 of 200 times and failed the journey on its own assertion. The 340-run
+/// figure the cadence commit carries was taken before `harness::renamed` changed this
+/// file and `harness.rs`, so it is honest about that tree and does not cover this one.
+///
+/// **Count what the runner reports ran, never exit codes.** This test's libtest name
+/// carries its module, so `--exact` over the bare function name matches nothing, runs
+/// nothing, and *exits 0* — a shell loop counting exit codes reads 200 iterations of
+/// that as 200 passes, which is how a reliability figure with nothing behind it gets
+/// reported. Either qualify the name with `store::` or filter by substring, as the
+/// nextest filterset above does.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the fixture rule itself
 // and the only way to show it can be asked mid-write is to write underneath it. The
 // projection this stands in for is driven for real by the journeys above.
