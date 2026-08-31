@@ -1,36 +1,18 @@
 //! Where a manager's note lands: in the live conversation, in both parties' hands,
 //! and in the bar its judge decides against — or nowhere, said out loud.
 //!
-//! **Its own test binary, and its own Nx project.** These journeys are the most
-//! expensive shape this repository runs — each one starts a real two-party
-//! conversation, holds one side's turn open, and waits on the run's own durable
-//! queue — so they are addressed by name rather than folded into the general e2e
-//! target. The binary is `note`, which `nextest`'s `binary(note)` selects on its
-//! own and `just test-note` runs alone; `project.json` beside this file declares
-//! `onepipeline-note-journeys`, whose seven targets each scope to this binary,
-//! and whose inputs are `noteJourneySource` rather than the crate's whole
-//! `crateSource` — so a change to `docs/`, to `examples/`, to
-//! `release-targets.toml`, or to another test file no longer re-runs them. What
-//! `tests/smoke/` is to the credentialled tier, this is to the conversational
-//! one.
+//! **Its own test binary and its own Nx project**, `onepipeline-note-journeys`,
+//! because each journey starts a real two-party conversation and holds one side's
+//! turn open — the most expensive shape this repository runs.
 //!
-//! `src/**` and `crates/**` stay in those inputs, and cannot come out. Every
-//! journey here drives the compiled binary as a subprocess and runs the doubles
-//! that crate builds, so a change to either is a change to what is under test:
-//! dropping them would let Nx report a cached pass over a binary that no longer
-//! exists, which is the silent-skip hole `scripts/nx-affected.sh` fails closed to
-//! avoid. Narrowing to a hand-listed subset of `src` would be the same hole with
-//! a delay on it — the plan these journeys write is parsed by `graph.rs`, the
-//! verdict they read is composed by `report.rs`, and the list would rot at the
-//! first module that joined the path.
-//!
-//! The crate declares the edge back: its `test` target depends on this project's,
-//! so the 95% floor is merged over this run and the rest of the suite together
-//! rather than measured over half of it, and it lists this project under
-//! `implicitDependencies` so a change here brings the floor with it.
-//!
-//! The cross-platform legs still run every journey here: `just test-quick`
-//! selects the whole offline tier, which this binary is part of.
+//! Two things about that split are not recoverable from the files that make it.
+//! The 95% floor is still measured over the *whole* offline tier: the two
+//! instrumented runs report nothing and one merge reports both, so splitting the
+//! run does not split the floor. And `src/**` and `crates/**` cannot come out of
+//! this project's inputs, however narrow the rest of them are — every journey
+//! here drives the compiled binary and the doubles that crate builds, so dropping
+//! either would let Nx report a cached pass over a binary that no longer exists,
+//! and a hand-listed subset of `src` is the same hole with a delay on it.
 //!
 //! These journeys drive the **real** `oneagentgraph` and a real two-party
 //! conversation, because that is the only place the claim can be made: which side

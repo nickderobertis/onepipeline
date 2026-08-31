@@ -220,7 +220,7 @@ _crate-coverage-clean:
 
 # The crate's own half of the offline suite, instrumented, reporting nothing.
 _crate-test-rest:
-    @cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
+    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{rest-tier}}' --final-status-level fail
 
 # `--failure-mode all` is load-bearing, and belongs here rather than on either
 # instrumented run: the merge is what this step does. The cancellation journeys
@@ -257,7 +257,7 @@ _note-lint:
 # Instrumented and reporting nothing, so `_crate-coverage` counts these journeys
 # in the same floor as the rest of the suite.
 _note-test:
-    @cargo llvm-cov --no-report nextest --locked -E '{{note-tier}}' --final-status-level fail
+    @RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E '{{note-tier}}' --final-status-level fail
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
