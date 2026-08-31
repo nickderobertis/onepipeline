@@ -2029,6 +2029,16 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the adopting driver starts");
+    // llmlint: ignore-block[tests_mirror_real_usage] the *behaviour* under test is
+    // driven the way an operator drives it — `stop`, then `adopt`, then `host` below —
+    // and nothing about it is manufactured here. What this waits on is a file the
+    // product itself writes, read rather than written, because the one thing a journey
+    // may not synchronise on is the command it is about to assert: polling `host`
+    // until it reports the fresh dispatch would pass the moment the assertion would,
+    // which is a test that can only succeed. `status` is no better — its liveness is
+    // decided from this same registry by the same code the defect was in, so waiting
+    // on it would wait on the answer under test one command over.
+    //
     // Waited for on the registry rather than on the journal: the record naming
     // the process the work is in is written by the executor as the dispatch
     // starts, and it is what the view below is read from. Read as an entry the
@@ -2044,6 +2054,7 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
                 .any(|entry| !stopped.contains(entry))
         },
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["host"]);
     rendered.exited(0).out_has("retaken").out_has("build");

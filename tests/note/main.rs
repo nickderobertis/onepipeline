@@ -9,9 +9,20 @@
 //! own and `just test-note` runs alone; `project.json` beside this file declares
 //! `onepipeline-note-journeys`, whose seven targets each scope to this binary,
 //! and whose inputs are `noteJourneySource` rather than the crate's whole
-//! `crateSource` — so a change to `docs/`, to `examples/`, or to another test
-//! file no longer re-runs them. What `tests/smoke/` is to the credentialled
-//! tier, this is to the conversational one.
+//! `crateSource` — so a change to `docs/`, to `examples/`, to
+//! `release-targets.toml`, or to another test file no longer re-runs them. What
+//! `tests/smoke/` is to the credentialled tier, this is to the conversational
+//! one.
+//!
+//! `src/**` and `crates/**` stay in those inputs, and cannot come out. Every
+//! journey here drives the compiled binary as a subprocess and runs the doubles
+//! that crate builds, so a change to either is a change to what is under test:
+//! dropping them would let Nx report a cached pass over a binary that no longer
+//! exists, which is the silent-skip hole `scripts/nx-affected.sh` fails closed to
+//! avoid. Narrowing to a hand-listed subset of `src` would be the same hole with
+//! a delay on it — the plan these journeys write is parsed by `graph.rs`, the
+//! verdict they read is composed by `report.rs`, and the list would rot at the
+//! first module that joined the path.
 //!
 //! The crate declares the edge back: its `test` target depends on this project's,
 //! so the 95% floor is merged over this run and the rest of the suite together
