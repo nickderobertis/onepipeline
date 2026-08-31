@@ -816,7 +816,6 @@ impl CrossRepoReference {
         )
     }
 
-    /// This dependency, as a line of the arrival note names it.
     fn arrival_line(&self) -> String {
         format!(
             "- {} — {} {}",
@@ -824,7 +823,6 @@ impl CrossRepoReference {
         )
     }
 
-    /// This dependency, as an attributed instruction names the thing it is about.
     fn adopting(&self) -> String {
         match self.release_target.is_empty() {
             true => self.repository.clone(),

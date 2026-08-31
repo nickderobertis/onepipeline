@@ -1152,7 +1152,6 @@ impl Released {
         entry
     }
 
-    /// The row this release renders as, at both sites the instruction reaches.
     pub(crate) fn row(&self) -> CrossRepoReference {
         CrossRepoReference {
             dependency: self.dep.clone(),

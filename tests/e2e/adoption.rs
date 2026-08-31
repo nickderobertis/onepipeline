@@ -62,6 +62,8 @@ const INSTRUCTION: &str = "{% if version %}Raise the engine pin in [workspace.de
                            {{ version }}, not the twelve pins below it.{% else %}Pin engine by \
                            git at {{ branch }} until the release arrives.{% endif %}";
 
+const SHARED_INSTRUCTION: &str = "Refresh the workspace lockfile.";
+
 /// The same, plus a **human-step** target beside the automated one — a target no
 /// probe can answer, whose version is whatever a person records afterwards.
 fn both_styles(script: &str) -> String {
@@ -111,7 +113,7 @@ fn two_that_release(engine: &str, other_alias: &str, other: &str) -> String {
 /// table.
 fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
     format!(
-        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
+        "{}\x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
          \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
          \x20   default_target: crate\n\
          \x20   targets:\n\
@@ -119,6 +121,22 @@ fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
          \x20     style: automated\n\
          \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
          \x20     adoption_instructions: '{{% extends \"producer\" %}}'\n\
+         default:\n\x20 adoption: fast\n",
+        repositories(engine),
+    )
+}
+
+/// Two releasing repositories that state the same instruction.
+fn two_that_share_instruction(engine: &str, other_alias: &str, other: &str) -> String {
+    format!(
+        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
+         \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         \x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
          default:\n\x20 adoption: fast\n",
         repositories(engine),
     )
@@ -2234,6 +2252,51 @@ fn two_producers_state_their_own_instructions_and_each_is_attributed_to_it() {
             "a node was failed over the sentence under its reference table: {event}"
         );
     }
+}
+
+/// Equal rendered instructions are stated once rather than repeated for every
+/// dependency that declares them.
+#[test]
+fn two_producers_that_state_the_same_instruction_are_coalesced() {
+    let world = watching("adoption-shared-instruction");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_share_instruction(&script, "tool", &tool_script));
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut waiting = consumer(Some("published"));
+    waiting["deps"] = json!([ENGINE, "packager"]);
+    let run = start(
+        &world,
+        "adoption-shared-instruction",
+        vec![engine(), packager, waiting],
+    );
+    world.until("both producing nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+
+    releases_at(&answer, "0.2.0");
+    releases_at(&tool_answer, "3.4.0");
+    world.until("the held node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 3
+    });
+
+    let task = task_of(&world, "consumer");
+    let block = task
+        .split_once(CROSS_REPO_REFERENCES_HEADING)
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
+    assert_eq!(
+        block.matches(SHARED_INSTRUCTION).count(),
+        1,
+        "the shared instruction was not coalesced:\n{block}"
+    );
 }
 
 /// Nodes awaiting **one** release put one question between them, are answered
