@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/nickderobertis/onepipeline/compare/v0.18.2...v0.18.3) - 2026-08-31
+
+### Added
+
+- render the producer's adoption instruction at both places a consumer reads one ([#174](https://github.com/nickderobertis/onepipeline/pull/174))
+- check a plan through the engine's own loader, with consumer checks plugged in ([#172](https://github.com/nickderobertis/onepipeline/pull/172))
+
 ## [0.18.2](https://github.com/nickderobertis/onepipeline/compare/v0.18.1...v0.18.2) - 2026-08-31
 
 ### Added
