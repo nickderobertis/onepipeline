@@ -608,34 +608,32 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     node["persona"] = Value::from("./requested-reviewer.yaml");
     let path = world.plan("plan-persona", &plan_of("plan-persona", vec![node]));
 
-    let started = world.run_on_agentgraph(&["start", &path, "--attach"]);
-    started.exited(0).settled();
-
-    let turns = world.turns();
-    assert!(
-        turns.iter().any(|turn| turn.prompt.contains("Do review.")),
-        "the node's member never ran: {turns:?}"
-    );
+    // Held open, and launched detached, so the record is read at the one moment
+    // it has no writer. The sibling resolves every ref and records the inventory
+    // *before* it starts a member, and replaces that record in place once more as
+    // the run settles — on a process the dispatch's own teardown is by then
+    // entitled to end. A journey that read afterwards was racing that
+    // replacement, and a record it caught part way through parses as nothing,
+    // which reads exactly like a persona that never arrived: that is how this
+    // journey failed twice on a loaded runner while the persona had in fact
+    // reached the member. With the turn held there is no writer left to race —
+    // the inventory is on disk and nothing touches it again until this journey
+    // lets the turn go.
+    world.script("turn.hold", "");
+    let launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    world.run_on(launch, "start plan-persona").exited(0);
+    world.until("the node's member to take its turn", |world| {
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do review."))
+    });
 
     // Read the record back through `oneagentgraph history`, which is the reader
     // the sibling publishes for it — `history` lists the runs under the state
     // directory and `history show` prints one record whole. Nothing here opens a
     // file under that directory: where the record is kept, and whether it is a
     // file at all, is the sibling's to change.
-    //
-    // And read until it answers, rather than once. The sibling publishes
-    // `graph-settled` *before* it writes the record's final copy, and that write
-    // replaces the record in place — so the launch this journey drove can be back
-    // while `history` still parses nothing, and a listing taken here is empty. An
-    // empty listing reads exactly like a persona that never reached the member,
-    // which is how this journey failed on a loaded runner while the persona had
-    // in fact reached it. The assertion is the same one either way, over whatever
-    // the sibling last handed back, so a persona that really never arrives still
-    // fails with the records that prove it.
-    //
-    // A quarter-second between reads, not the usual 20ms: each one starts the
-    // sibling once per run it lists, and polling a process boundary that hard
-    // takes the process-start capacity the run being watched is still using.
     let state = world.graph_state();
     let sibling = |args: &[&str]| -> std::process::Output {
         std::process::Command::new(crate::harness::oneagentgraph_binary())
@@ -644,34 +642,51 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
             .output()
             .expect("the real oneagentgraph runs")
     };
-    let records = || -> Vec<Value> {
-        let listed = sibling(&["history"]);
-        String::from_utf8_lossy(&listed.stdout)
-            .lines()
-            .filter_map(|line| line.split('\t').next().map(str::to_string))
-            .filter_map(|run| {
-                serde_json::from_slice(&sibling(&["history", "show", &run]).stdout).ok()
+    // Each read is asserted rather than skipped on, because the member is running
+    // and the run it belongs to therefore exists: a listing that answers with
+    // nothing, and a record the sibling cannot print, are two different faults and
+    // neither of them is a persona that failed to arrive. Reported as themselves,
+    // with what the sibling said, so a failure here names the fault it is.
+    let listed = sibling(&["history"]);
+    let runs: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').next().map(str::to_string))
+        .collect();
+    assert!(
+        !runs.is_empty(),
+        "the sibling lists no run at all while its member is taking a turn: it exited {:?} \
+         saying {:?}",
+        listed.status.code(),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let records: Vec<Value> = runs
+        .iter()
+        .map(|run| {
+            let shown = sibling(&["history", "show", run]);
+            serde_json::from_slice(&shown.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "the sibling cannot print the record it listed for {run}: {error}; it exited \
+                     {:?} saying {:?}",
+                    shown.status.code(),
+                    String::from_utf8_lossy(&shown.stderr)
+                )
             })
-            .collect()
-    };
-    let resolved = |records: &[Value]| {
+        })
+        .collect();
+    assert!(
         records.iter().any(|record| {
             record["refs"].as_array().is_some_and(|refs| {
                 refs.iter()
                     .any(|reference| reference["origin"] == "./requested-reviewer.yaml")
             })
-        })
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut seen = records();
-    while !resolved(&seen) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        seen = records();
-    }
-    assert!(
-        resolved(&seen),
-        "the graph that dispatched the member did not resolve the plan's persona: {seen:?}"
+        }),
+        "the graph that dispatched the member did not resolve the plan's persona: {records:?}"
     );
+
+    // Let the held turn finish, so the run this journey started ends the way any
+    // other does rather than being taken down with the world.
+    world.release("turn.go");
+    world.release("turn.settle");
 }
 
 /// Node-scope overrides survive losing the driver that originally launched the
