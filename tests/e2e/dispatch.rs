@@ -616,6 +616,15 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
         "the node's member never ran: {turns:?}"
     );
 
+    // llmlint: ignore-block[tests_mirror_real_usage] the run record is not an
+    // internal persistence detail: it is the sibling's own published record, what
+    // `oneagentgraph history` reads and what `history::show` returns, and the
+    // journey two tests below reads it through that very verb. It is read here
+    // rather than off this crate's events for the reason the doc comment above
+    // gives — a persona is a *graph* setting, so this crate's own label saying it
+    // was requested would prove only that this crate wrote its own label. The
+    // product interface is driven above: the launch is the compiled binary and
+    // the member's turn is asserted before this.
     // Read until the record says so, rather than once. The sibling publishes
     // `graph-settled` *before* it writes the run record's final copy, and that
     // write truncates `record.json` in place — so the launch this journey drove
@@ -652,6 +661,7 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
         resolved(&seen),
         "the graph that dispatched the member did not resolve the plan's persona: {seen:?}"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// Node-scope overrides survive losing the driver that originally launched the
