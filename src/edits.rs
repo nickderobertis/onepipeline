@@ -143,6 +143,33 @@ pub enum Operation {
         #[serde(default)]
         delivery: Delivery,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] `node` is the `String` every
+    // neighbouring variant spells a node id with, narrowed where it is judged by
+    // `compile_note`; the note's own two narrowable values are **not** strings here — the
+    // addressee is a closed enum and the text and criterion are the seam's validated
+    // newtypes, so a record this build did not write is refused by their own conversions.
+    /// A manager's note was delivered into a node's live conversation.
+    ///
+    /// Recorded for what only this event says: a note is delivered to whichever
+    /// party is live, so *which* party took it is the answer a reader of the run
+    /// has no second source for. It mutates nothing — the note went into a
+    /// conversation rather than onto the graph — so replay reconstructs it by
+    /// changing nothing, exactly as the reconciler did.
+    NoteDelivered {
+        /// The node whose conversation took it.
+        node: String,
+        /// Whose task it said it was updating.
+        addressee: crate::note::Addressee,
+        /// What that party read.
+        text: crate::note::NoteText,
+        /// The criterion it bound, when it bound one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        criterion: Option<crate::note::Criterion>,
+        /// Which party of the conversation actually took it.
+        #[serde(flatten)]
+        reached: crate::note::Reached,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// How a planner note actually reached its node.
@@ -806,6 +833,12 @@ fn compile_into(
         }]),
         Command::Context { id, note, .. } => compile_context(graph, frontier, id, note, delivery),
         Command::Amend { id, text } => compile_amend(graph, frontier, id, text),
+        Command::Note {
+            id,
+            addressee,
+            text,
+            criterion,
+        } => compile_note(graph, id, *addressee, text, criterion.as_ref()),
         Command::Finding {
             message,
             blocking,
@@ -1282,6 +1315,35 @@ fn compile_context(
     }])
 }
 
+/// Validate one note, and record nothing.
+///
+/// The two halves of a note are judged in two places, deliberately. **Whether the
+/// ask is one this run can act on** is a question about the graph and is answered
+/// here: a node the graph does not hold has no conversation to reach, and the
+/// note's own text and criterion were already refused by their newtypes at the
+/// envelope's boundary if they were unusable. **Whether it was delivered** is a
+/// question only the conversation can answer, so it is asked where the delivery is
+/// made and recorded there — which is why nothing comes back from here.
+///
+/// Notably *not* refused here: a node that has settled. A `context` note to one is
+/// turned away by this module because it would attach to a dispatch that will never
+/// run; a *note* is not attached to anything, it is handed to a conversation, and
+/// the conversation's own answer — which names how it ended — is a better refusal
+/// than this module could compose. Refusing here would also record nothing, and a
+/// non-delivery the run does not record is the silence this seam exists to end.
+fn compile_note(
+    graph: &mut Graph,
+    id: &str,
+    _addressee: crate::note::Addressee,
+    _text: &crate::note::NoteText,
+    _criterion: Option<&crate::note::Criterion>,
+) -> Result<Vec<Operation>> {
+    if !graph.contains(id) {
+        return Err(refuse(format!("note: no node '{id}'")));
+    }
+    Ok(Vec::new())
+}
+
 /// Validate one amendment and record it: the node's whole amendment, replacing
 /// whatever it carried.
 ///
@@ -1390,9 +1452,11 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         }
         Operation::ContextAdded { .. } => {}
         // None mutates the graph: an attestation settles a node, a completion
-        // request is journalled for audit, and a finding went to the planner's
-        // queue, all folded elsewhere.
-        Operation::HumanAttested { .. }
+        // request is journalled for audit, a finding went to the planner's
+        // queue, and a note went into a conversation — all folded elsewhere, or
+        // nowhere.
+        Operation::NoteDelivered { .. }
+        | Operation::HumanAttested { .. }
         | Operation::CompletionRequested { .. }
         | Operation::FindingRaised { .. }
         | Operation::RetryRequested { .. } => {}

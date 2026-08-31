@@ -51,6 +51,7 @@ pub mod error;
 pub mod event;
 pub mod executor;
 pub mod filter;
+pub mod note;
 pub mod plan;
 pub mod report;
 pub mod rules;

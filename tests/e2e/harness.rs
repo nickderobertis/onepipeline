@@ -2243,6 +2243,130 @@ fn waited_for(
     false
 }
 
+/// Move `from` onto `to`, waiting out a holder that has not let go of it yet.
+///
+/// The store journeys rename the store's folder away and back while the run under test
+/// keeps writing to it. Windows refuses to rename a directory at all while any handle
+/// beneath it is open — `PermissionDenied` — so that write is what refuses the move,
+/// and it is gone a moment later. A folder that never moves still fails, under the
+/// caller's own words and carrying the last refusal.
+pub fn renamed(from: &Path, to: &Path, what: &str) {
+    renamed_within(from, to, what, std::time::Duration::from_secs(30));
+}
+
+/// The same move under a stated budget, for
+/// [`a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words`] — which asks
+/// what happens when the holder never lets go, and cannot spend the real budget finding
+/// out.
+fn renamed_within(from: &Path, to: &Path, what: &str, within: std::time::Duration) {
+    let mut refused = None;
+    let moved = waited_for(
+        within,
+        std::time::Duration::from_millis(20),
+        || match std::fs::rename(from, to) {
+            Ok(()) => true,
+            Err(why) => {
+                refused = Some(why);
+                false
+            }
+        },
+    );
+    assert!(
+        moved,
+        "{what}: {} never moved to {}: {}",
+        from.display(),
+        to.display(),
+        refused.expect("a wait that ran out asked at least once"),
+    );
+}
+
+/// A move something still holds happens once the holder lets go.
+///
+/// The holder here is a name that is occupied rather than a handle that is open,
+/// because an open handle is only refused on the one platform this cannot run on: a
+/// non-empty directory in the way refuses the move on every platform the suite runs on,
+/// and stops refusing it the moment it is emptied. That is the shape the Windows leg
+/// meets — a refusal that is about *now* rather than about the move — so it is the shape
+/// worth driving where it can be driven.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding
+// rather than a journey: the property is what the harness does when the host refuses a
+// move, which the journeys built on it cannot assert about themselves. Those journeys —
+// `store.rs`'s six store outages — do drive the binary.
+#[test]
+fn a_move_something_still_holds_happens_once_the_holder_lets_go() {
+    let world = World::new("harness-rename-held");
+    let store = world.root.join("held-store");
+    std::fs::create_dir_all(store.join("projects")).expect("a store to move");
+    let onto = world.root.join("held-store-moved");
+    std::fs::create_dir_all(&onto).expect("an occupied name to move onto");
+    let holder = onto.join("still-here");
+    std::fs::write(&holder, "what holds the name").expect("the holder is written");
+
+    let letting_go = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_file(&holder).expect("the holder lets go");
+    });
+    renamed(&store, &onto, "the held store moves");
+    letting_go.join().expect("the holder ends");
+
+    assert!(
+        onto.join("projects").is_dir(),
+        "the move reported success without moving the store"
+    );
+    assert!(!store.exists(), "the store is still where it started");
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A move nothing ever lets go of fails, under the caller's own words and carrying the
+/// refusal that kept it.
+///
+/// What a journey reads in a CI log is this line, so it says which of that journey's
+/// several moves this was, both paths, and what the host actually said — the last of
+/// those being the whole difference between a store somebody still holds and a store
+/// that was never there.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: the subject is the harness's
+// own refusal, which is not something a journey can assert about itself.
+#[test]
+fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
+    let world = World::new("harness-rename-refused");
+    let store = world.root.join("stuck-store");
+    std::fs::create_dir_all(store.join("projects")).expect("a store to move");
+    let onto = world.root.join("stuck-store-moved");
+    std::fs::create_dir_all(&onto).expect("an occupied name to move onto");
+    std::fs::write(onto.join("still-here"), "what never lets go").expect("the holder is written");
+
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        renamed_within(
+            &store,
+            &onto,
+            "the stuck store becomes unreachable",
+            std::time::Duration::from_millis(200),
+        );
+    }))
+    .expect_err("a move onto a name nothing releases was reported as done");
+    let said = refused
+        .downcast_ref::<String>()
+        .expect("the refusal is a message");
+
+    assert!(
+        said.contains("the stuck store becomes unreachable"),
+        "the refusal does not say which move it was: {said}"
+    );
+    assert!(
+        said.contains(&store.display().to_string()) && said.contains(&onto.display().to_string()),
+        "the refusal does not name both paths: {said}"
+    );
+    let host = std::fs::rename(&store, &onto).expect_err("the name is still occupied");
+    assert!(
+        said.contains(&host.to_string()),
+        "the refusal does not carry what the host said, which is the whole difference \
+         between a store somebody still holds and a store that was never there: {said}"
+    );
+    assert!(
+        store.join("projects").is_dir(),
+        "the refused move took the store anyway"
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// How many worlds this process still holds.
 ///
 /// The doubles this process linked are shared by all of them, so they are
@@ -2815,6 +2939,19 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
 /// as one that could prove nothing: the failure names the *previous* run's board and
 /// looks nothing like the timing it is.
 ///
+/// **Asked at the rate the window closes at, not at the rate a run settles.** What a
+/// replacement leaves behind is a *window* rather than a duration — the document is whole
+/// only between the write that finished it and the open that truncates it again — so what
+/// decides whether this ever lands in that window is how *often* it asks, not how long it
+/// is willing to wait. A 20 ms cadence spends a 5 s budget on about 250 samples, and the
+/// worst of 200 asks measured against a writer replacing the document back to back needed
+/// 66 of them. A margin under four is a lottery, and it was losing about one ask in 200
+/// here and two in 200 on CI. The same half second asked at 100 µs buys about 4 000.
+///
+/// The slower cadence still follows it, because the two phases answer different
+/// questions: the first is a writer caught *inside* one replacement, the second one that
+/// is slow *between* them.
+///
 /// A document that never settles is still a defect, and is still named by the same four
 /// reasons — the wait only decides how long "never" is. It costs nothing in the ordinary
 /// case, where the first read answers, and the budget once for a fixture that really is
@@ -2822,20 +2959,28 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
 fn settled_title(path: &Path) -> Result<String, String> {
     let mut settled = None;
     let mut last = "its project document was never read".to_owned();
-    waited_for(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(20),
-        || match title_of(path) {
-            Ok(title) => {
-                settled = Some(title);
-                true
-            }
-            Err(why) => {
-                last = why;
-                false
-            }
-        },
+    let mut ask = || match title_of(path) {
+        Ok(title) => {
+            settled = Some(title);
+            true
+        }
+        Err(why) => {
+            last = why;
+            false
+        }
+    };
+    let crossed = waited_for(
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_micros(100),
+        &mut ask,
     );
+    if !crossed {
+        waited_for(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            &mut ask,
+        );
+    }
     settled.ok_or(last)
 }
 

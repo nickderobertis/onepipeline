@@ -19,7 +19,8 @@
 // suppression and the full rationale.
 
 use crate::harness::{
-    agent, double, lifecycle, onetaskgraph_binary, plan_of, World, REFUSED, STORE_BINARY_ENV,
+    agent, double, lifecycle, onetaskgraph_binary, plan_of, renamed, World, REFUSED,
+    STORE_BINARY_ENV,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -508,7 +509,11 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     });
 
     let unavailable = world.root.join("plan-store-unavailable");
-    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable",
+    );
     world
         .run_with_stdin(
             &["reply", "writeback-retry"],
@@ -524,7 +529,7 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
             log.contains("onetaskgraph write-back failed") && log.contains("retrying")
         })
     });
-    std::fs::rename(&unavailable, world.store()).expect("the store returns");
+    renamed(&unavailable, &world.store(), "the store returns");
     world.until("write-back recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
@@ -539,7 +544,11 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     // Take it away again for terminal settlement. It remains unreachable until
     // the journal says the graph is complete and the terminal publication has
     // failed, then returns while that failed publication is retryable.
-    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable again");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable again",
+    );
 
     // The engine remains live and its own journal, not a read from the missing
     // store, still decides what executes. Both nodes settle while the store is
@@ -571,7 +580,11 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     // Bring the store back inside the worker's bounded closeout window. It must
     // retry the failed terminal publication and project both settlements
     // without revisiting execution.
-    std::fs::rename(&unavailable, world.store()).expect("the store returns after settlement");
+    renamed(
+        &unavailable,
+        &world.store(),
+        "the store returns after settlement",
+    );
     world.until("terminal write-back recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
             .is_ok_and(|log| log.matches("onetaskgraph write-back recovered").count() >= 2)
@@ -807,7 +820,11 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
     });
 
     let unavailable = world.root.join("plan-store-reverted-edit-unavailable");
-    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable",
+    );
     let reparent = |deps: &[&str]| {
         world
             .run_with_stdin(
@@ -834,7 +851,7 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
             == 2
     });
 
-    std::fs::rename(&unavailable, world.store()).expect("the store recovers");
+    renamed(&unavailable, &world.store(), "the store recovers");
     world.until("write-back to report recovery", |world| {
         std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
@@ -904,7 +921,11 @@ fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
     });
 
     let unavailable = world.root.join("plan-store-unavailable-through-closeout");
-    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable",
+    );
     let released = std::time::Instant::now();
     world.release("work.go");
     world.until(
@@ -2004,7 +2025,11 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
     // The store goes, and stays gone through settlement: this is the run whose *terminal*
     // projection fails, which is exactly the run a person then reads as the record.
     let unavailable = world.root.join("plan-store-gone");
-    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable",
+    );
     world.release("work.go");
     world.until("the run to settle without its store", |world| {
         world.run_file(name, "result.json").is_file()
@@ -2165,6 +2190,23 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// empty file the truncate leaves behind with the whole document that follows it,
 /// while the rule is asked over and over. The rule has to answer for the document,
 /// not for the instant it was asked in.
+///
+/// **Measured over this tree, at 440 runs — 88 000 asks — of which none refused.** 400
+/// of them by invoking the compiled `e2e` binary on this test's module-qualified name,
+/// and 40 through `cargo nextest run -E`, whose `binary(e2e) and test(...)` filterset
+/// matches this name by substring; each run counted only where the runner itself
+/// reported that one test ran and passed. Its teeth were re-checked over that same tree
+/// rather than remembered: `settled_title` cut down to a single read called this sound
+/// fixture a defect 189 of 200 times and failed the journey on its own assertion. The 340-run
+/// figure the cadence commit carries was taken before `harness::renamed` changed this
+/// file and `harness.rs`, so it is honest about that tree and does not cover this one.
+///
+/// **Count what the runner reports ran, never exit codes.** This test's libtest name
+/// carries its module, so `--exact` over the bare function name matches nothing, runs
+/// nothing, and *exits 0* — a shell loop counting exit codes reads 200 iterations of
+/// that as 200 passes, which is how a reliability figure with nothing behind it gets
+/// reported. Either qualify the name with `store::` or filter by substring, as the
+/// nextest filterset above does.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the fixture rule itself
 // and the only way to show it can be asked mid-write is to write underneath it. The
 // projection this stands in for is driven for real by the journeys above.
