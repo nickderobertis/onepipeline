@@ -39,7 +39,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use onevcs::releases::{ReleaseStyle, RepositoryReleases, TargetName};
-use onevcs::{Adoption, ReleaseStatus};
+use onevcs::{Adoption, InstructionTemplate, ReleaseStatus};
 use serde_json::{json, Value};
 
 use crate::channel::Surface;
@@ -228,6 +228,13 @@ pub(crate) struct Dependency {
     pub style: Option<ReleaseStyle>,
     /// What a person has to do, for a human-step target.
     pub action: Option<String>,
+    /// What that repository states about adopting this target, as `onevcs`
+    /// resolved it through the three layers.
+    ///
+    /// Producer knowledge, carried rather than composed here: `None` is a
+    /// producer that declares none, whose consumers get this engine's own
+    /// default.
+    pub instructions: Option<InstructionTemplate>,
 }
 
 impl Dependency {
@@ -255,8 +262,9 @@ impl Dependency {
         self.reference().is_some() && self.style.is_some()
     }
 
-    /// The row this dependency renders as in a fast-adoption node's task.
-    fn row(&self) -> CrossRepoReference {
+    /// The row this dependency renders as in the node's task, at whatever version
+    /// the run can name — empty where no release has answered yet.
+    fn row(&self, version: Option<&str>) -> CrossRepoReference {
         CrossRepoReference {
             dependency: self.dep.clone(),
             repository: self.identity.clone(),
@@ -267,6 +275,8 @@ impl Dependency {
                 .as_ref()
                 .map(TargetName::to_string)
                 .unwrap_or_default(),
+            version: version.unwrap_or_default().to_owned(),
+            adoption_instructions: self.instructions.clone(),
         }
     }
 
@@ -522,17 +532,28 @@ impl Watch {
 
     /// The rows a node's dispatch is handed, in the order its `deps` name them.
     ///
-    /// **Fast adoption only.** A `published` node is not started until every one
-    /// of these has answered released, so it launches against versions rather
-    /// than against a git pin — and the block's own words say it launched under
-    /// fast adoption, which for that node would not be true.
+    /// **Both adoption modes**, because the block serves both. A fast-adoption
+    /// node meets it as the git references it pins against, with the version cell
+    /// empty because that is its whole condition; a `published` node — which was
+    /// not started until every one of these answered released — meets it as the
+    /// versions it is building against, and this is the **only** place that node
+    /// ever sees one, since nothing sends it an arrival note it never needed.
+    /// Which of the two the block says of itself is decided by the rows.
     pub(crate) fn references(&self, node: &Node) -> Vec<CrossRepoReference> {
-        if adoption_of(node) != Adoption::Fast {
-            return Vec::new();
-        }
         self.dependencies
             .get(&node.id)
-            .map(|dependencies| dependencies.iter().map(Dependency::row).collect())
+            .map(|dependencies| {
+                dependencies
+                    .iter()
+                    .map(|dependency| {
+                        dependency.row(
+                            self.answers
+                                .get(&(node.id.clone(), dependency.dep.clone()))
+                                .and_then(Answer::version),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -902,7 +923,10 @@ impl Watch {
             .iter()
             .filter_map(|dependency| {
                 Some(Released {
+                    dep: dependency.dep.clone(),
                     identity: dependency.identity.clone(),
+                    branch: dependency.branch.clone().unwrap_or_default(),
+                    commit: dependency.commit.clone().unwrap_or_default(),
                     target: dependency
                         .target
                         .as_ref()
@@ -913,6 +937,7 @@ impl Watch {
                         .get(&(node.to_owned(), dependency.dep.clone()))
                         .and_then(Answer::version)?
                         .to_owned(),
+                    instructions: dependency.instructions.clone(),
                 })
             })
             .collect()
@@ -1036,13 +1061,14 @@ impl Watch {
         // dependency, and a `published` node still waits — an unanswerable
         // question is not an answer that the release has happened.
         let selected = releases.select(named.as_ref()).ok();
-        let (target, style, action) = match selected {
+        let (target, style, action, instructions) = match selected {
             Some(target) => (
                 Some(target.name.clone()),
                 Some(target.style()),
                 target.action().map(str::to_owned),
+                target.adoption_instructions.clone(),
             ),
-            None => (named, None, None),
+            None => (named, None, None, None),
         };
         Resolution::Outside(Dependency {
             dep: dep.to_owned(),
@@ -1052,6 +1078,7 @@ impl Watch {
             target,
             style,
             action,
+            instructions,
         })
     }
 }
@@ -1080,23 +1107,61 @@ enum Resolution {
 /// One release a node was waiting on, as the note and the event name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Released {
+    /// The dependency, as the plan names it.
+    pub dep: String,
     /// The repository identity that released it.
     pub identity: String,
+    /// The branch the work was on, where the run recorded one.
+    pub branch: String,
+    /// The commit that work reached its base at, where the run observed one.
+    pub commit: String,
     /// The target that carries the work.
     pub target: String,
     /// The version it arrived at.
     pub version: String,
+    /// What that repository states about adopting the target.
+    pub instructions: Option<InstructionTemplate>,
 }
 
 impl Released {
     /// The payload entry this release is recorded as.
+    ///
+    /// The three the note has always named are always written. The four beside
+    /// them are what a producer's own instruction is rendered against, and each is
+    /// **omitted when empty** — so a run with nothing to say about a branch, a
+    /// commit, or an instruction writes the record it always wrote, and a build
+    /// that predates them reads one that carries them exactly as it read one that
+    /// did not.
     pub(crate) fn payload(&self) -> Value {
-        json!({"identity": self.identity, "target": self.target, "version": self.version})
+        let mut entry = json!({
+            "identity": self.identity,
+            "target": self.target,
+            "version": self.version,
+        });
+        let mut put = |key: &str, value: &str| {
+            if !value.is_empty() {
+                entry[key] = json!(value);
+            }
+        };
+        put("dep", &self.dep);
+        put("branch", &self.branch);
+        put("commit", &self.commit);
+        if let Some(instructions) = &self.instructions {
+            entry["instructions"] = json!(instructions);
+        }
+        entry
     }
 
-    /// This release, as the note names it.
-    fn line(&self) -> String {
-        format!("- {} — {} {}", self.identity, self.target, self.version)
+    pub(crate) fn row(&self) -> CrossRepoReference {
+        CrossRepoReference {
+            dependency: self.dep.clone(),
+            repository: self.identity.clone(),
+            branch: self.branch.clone(),
+            commit: self.commit.clone(),
+            release_target: self.target.clone(),
+            version: self.version.clone(),
+            adoption_instructions: self.instructions.clone(),
+        }
     }
 
     /// The releases an event payload recorded, read back.
@@ -1128,6 +1193,33 @@ impl Released {
                         .ok()?
                         .to_string(),
                     version: field("version")?,
+                    // The four a record may not carry: a run that could not name
+                    // one wrote nothing, and a build older than they are wrote
+                    // none of them. Absent is empty rather than a record skipped,
+                    // because what a note has to name is the release.
+                    dep: field("dep").unwrap_or_default(),
+                    branch: field("branch").unwrap_or_default(),
+                    commit: field("commit").unwrap_or_default(),
+                    // The sibling's own conversion again, for the same reason: a
+                    // template is external input here, and what may spell one —
+                    // non-empty, bounded, and parsing as a template — is decided
+                    // by the type the producer declared it as. One that does not
+                    // is dropped, which renders this engine's own default.
+                    //
+                    // llmlint: ignore-block[changed_behavior_has_e2e] a record no
+                    // run of this build writes is not reachable from a journey:
+                    // every field of this payload is checked the same way for the
+                    // same reason, and `docs/contract-divergences.md` entry 40
+                    // records why what a driver takes up out of this record is
+                    // held by a fold rather than by a journey. Both deliveries
+                    // either side of it — the producer's own instruction reaching
+                    // a live turn, and reaching the next dispatch — are driven end
+                    // to end by `tests/e2e/adoption.rs`.
+                    instructions: entry
+                        .get("instructions")
+                        .and_then(Value::as_str)
+                        .and_then(|declared| declared.parse::<InstructionTemplate>().ok()),
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                 })
             })
             .collect()
@@ -1174,6 +1266,13 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
     // exactly as it did before drafting existed.
     let unreleased: Vec<(&CrossRepoReference, &str, TargetName)> = references
         .iter()
+        // A row the run already has the version of is a pin that is not temporary:
+        // that is every row a `published` node carries, since it was not started
+        // until each of them released. Filtered on what the row says rather than on
+        // the mode the plan declared, because asking a probe about an arrived
+        // release again would let one transient "not answered" open a change
+        // request as a draft against a pin that node never held.
+        .filter(|row| row.version.is_empty())
         .filter_map(|row| {
             let (reference, target) = askable(row)?;
             Some((row, reference, target))
@@ -1252,19 +1351,17 @@ fn released_already(reference: &str, target: &TargetName) -> bool {
 ///
 /// It **adds no bar**: it reports observed state and says what to do with it, in
 /// the same frame a carried planner note is rendered in, so no worker can read it
-/// as a new acceptance criterion. One function, called both where the note is
-/// delivered and where a journalled delivery is folded back, so a note replayed
-/// from the record is the note that was sent.
+/// as a new acceptance criterion. What it says to do with it is the **producer's
+/// own** instruction, rendered by [`crate::plan::arrival_note`] against the
+/// versions that arrived — the one rendering the reference block uses too, so an
+/// instruction cannot read one way in a note and another in a task.
+///
+/// One function, called both where the note is delivered and where a journalled
+/// delivery is folded back, so a note replayed from the record is the note that
+/// was sent — which is why the record carries what the template is rendered
+/// against and not only the rendering.
 pub(crate) fn arrival_note(released: &[Released]) -> String {
-    format!(
-        "The releases this node was waiting on have arrived:\n\n{}\n\nMove from the git pin to \
-         that released version.",
-        released
-            .iter()
-            .map(Released::line)
-            .collect::<Vec<String>>()
-            .join("\n"),
-    )
+    crate::plan::arrival_note(&released.iter().map(Released::row).collect::<Vec<_>>())
 }
 
 /// The distinct questions one pass has to put, and every wait each one answers.
@@ -1386,6 +1483,7 @@ mod tests {
             action: style
                 .filter(|style| *style == ReleaseStyle::HumanStep)
                 .map(|_| "cut a release on PyPI".to_owned()),
+            instructions: None,
         }
     }
 
@@ -1499,7 +1597,7 @@ mod tests {
     /// A cell the run cannot name is **empty**, and the row is still there.
     #[test]
     fn a_dependency_the_run_cannot_fully_name_is_rendered_with_the_cell_empty() {
-        let named = dependency(Some("crate"), Some(ReleaseStyle::Automated)).row();
+        let named = dependency(Some("crate"), Some(ReleaseStyle::Automated)).row(None);
         assert_eq!(named.repository, "github.com/owner/engine");
         assert_eq!(named.branch, "onevcs/s-1");
         assert_eq!(named.commit, "9f3c1ab");
@@ -1510,7 +1608,7 @@ mod tests {
         let mut unnamed = dependency(None, None);
         unnamed.branch = None;
         unnamed.commit = None;
-        let row = unnamed.row();
+        let row = unnamed.row(None);
         assert_eq!(row.dependency, "engine");
         assert_eq!(row.repository, "github.com/owner/engine");
         assert!(row.branch.is_empty() && row.commit.is_empty() && row.release_target.is_empty());
@@ -1531,23 +1629,41 @@ mod tests {
         assert_eq!(branchless.reference(), None);
     }
 
-    /// The note reports observed state and adds no bar, and round-trips through
-    /// the payload it is journalled as.
-    #[test]
-    fn the_arrival_note_names_the_versions_and_states_no_criterion() {
-        let released = vec![Released {
+    /// One release, as the note and the record name it.
+    fn arrival(instructions: Option<&str>) -> Released {
+        Released {
+            dep: "engine".to_owned(),
             identity: "github.com/nickderobertis/onevcs".to_owned(),
+            branch: "onevcs/s-1".to_owned(),
+            commit: "9f3c1ab".to_owned(),
             target: "crate".to_owned(),
             version: "0.13.0".to_owned(),
-        }];
+            instructions: instructions.map(|declared| {
+                declared
+                    .parse()
+                    .expect("a template the producer could declare")
+            }),
+        }
+    }
+
+    /// The note reports observed state and adds no bar, and round-trips through
+    /// the payload it is journalled as.
+    ///
+    /// A producer that declares no template gets the engine's own default, which
+    /// is the sentence the note carried before a producer could declare one.
+    #[test]
+    fn the_arrival_note_names_the_versions_and_states_no_criterion() {
+        let released = vec![arrival(None)];
         let note = arrival_note(&released);
         assert_eq!(
             note,
             "The releases this node was waiting on have arrived:\n\n\
              - github.com/nickderobertis/onevcs — crate 0.13.0\n\n\
-             Move from the git pin to that released version."
+             This reports observed state and adds no acceptance criteria. What the producer of \
+             each dependency above states about adopting it:\n\n\
+             Move from the git pin to that released version.\n\n\
+             That is the end of what the producers state; none of it is a criterion of this node."
         );
-        assert!(!note.to_lowercase().contains("acceptance criteria"));
         assert!(!note.to_lowercase().contains("must"));
 
         let payload = json!(released.iter().map(Released::payload).collect::<Vec<_>>());
@@ -1556,6 +1672,65 @@ mod tests {
             note,
             "a note replayed from the record is not the note that was sent"
         );
+
+        // The producer's own instruction is what the note says to do, and it
+        // round-trips too — because what the record carries is what the template
+        // is rendered against rather than the rendering, so a note replayed by a
+        // fresh driver is the note the node was told.
+        let declared = vec![arrival(Some(
+            "Raise the `onevcs` pin to {{ version }}; the branch pin at {{ branch }} goes.",
+        ))];
+        let stated = "Raise the `onevcs` pin to 0.13.0; the branch pin at onevcs/s-1 goes.";
+        let declared_note = arrival_note(&declared);
+        assert!(
+            declared_note.contains(stated),
+            "the producer's own instruction did not reach the note:\n{declared_note}"
+        );
+        assert!(
+            !declared_note.contains(crate::plan::DEFAULT_ADOPTION_INSTRUCTION),
+            "a producer that declared one still got the engine's default:\n{declared_note}"
+        );
+        let record = json!(declared.iter().map(Released::payload).collect::<Vec<_>>());
+        assert_eq!(
+            arrival_note(&Released::of_payload(&record)),
+            declared_note,
+            "a note replayed from the record lost the producer's own instruction"
+        );
+        // Every cell the record has to carry for that rendering is in it, and the
+        // ones a run had nothing to say about are omitted rather than written
+        // empty — so a build that predates them reads what it always read.
+        assert_eq!(record[0]["dep"], json!("engine"));
+        assert_eq!(record[0]["branch"], json!("onevcs/s-1"));
+        assert_eq!(record[0]["commit"], json!("9f3c1ab"));
+        let mut bare = arrival(None);
+        bare.dep = String::new();
+        bare.branch = String::new();
+        bare.commit = String::new();
+        assert_eq!(
+            bare.payload(),
+            json!({
+                "identity": "github.com/nickderobertis/onevcs",
+                "target": "crate",
+                "version": "0.13.0",
+            }),
+            "a record gained a key about something the run could not name"
+        );
+        // And a replayed template this build would refuse to read is dropped
+        // rather than rendered, which leaves the engine's own default.
+        for refused in [json!(""), json!("{{ unclosed"), json!(42)] {
+            let entry = json!([{
+                "identity": "a", "target": "crate", "version": "0.13.0",
+                "instructions": refused,
+            }]);
+            assert_eq!(
+                Released::of_payload(&entry)
+                    .first()
+                    .expect("the release itself still reads")
+                    .instructions,
+                None,
+                "{refused} was read as a template"
+            );
+        }
 
         // A record this build cannot read whole is skipped rather than rendered
         // with a blank where the version should be: a journal is external input,

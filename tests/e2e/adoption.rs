@@ -42,6 +42,28 @@ fn automated(script: &str) -> String {
     document(script, "")
 }
 
+/// The same document, with the engine's target declaring **what a consumer does**
+/// when a release of it arrives.
+///
+/// Producer knowledge, and the whole point of the templated form: the pinning rule
+/// lives in the repository that knows it rather than in a sentence its consumers'
+/// engine composes for them. It guards on `version` because a consumer meets it at
+/// two moments — before the release, pinned to a branch, and after it — and the
+/// producer writes one template for both.
+fn instructed(script: &str) -> String {
+    format!(
+        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\ndefault:\n\x20 adoption: fast\n",
+        repositories(script)
+    )
+}
+
+/// What the engine repository states about adopting its crate.
+const INSTRUCTION: &str = "{% if version %}Raise the engine pin in [workspace.dependencies] to \
+                           {{ version }}, not the twelve pins below it.{% else %}Pin engine by \
+                           git at {{ branch }} until the release arrives.{% endif %}";
+
+const SHARED_INSTRUCTION: &str = "Refresh the workspace lockfile.";
+
 /// The same, plus a **human-step** target beside the automated one — a target no
 /// probe can answer, whose version is whatever a person records afterwards.
 fn both_styles(script: &str) -> String {
@@ -76,6 +98,45 @@ fn two_that_release(engine: &str, other_alias: &str, other: &str) -> String {
          \x20   - name: crate\n\
          \x20     style: automated\n\
          \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n",
+        repositories(engine),
+    )
+}
+
+/// The same two-repository document, with **each** target declaring its own
+/// instruction.
+///
+/// The second is written in the two-layer `{% extends "producer" %}` form
+/// `onevcs` documents on the declaration and this build does not register, so it
+/// is a template this host cannot finish rendering — which falls back to the
+/// engine's own default rather than failing a dispatch over the sentence under a
+/// table.
+fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
+    format!(
+        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
+         \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         \x20     adoption_instructions: '{{% extends \"producer\" %}}'\n\
+         default:\n\x20 adoption: fast\n",
+        repositories(engine),
+    )
+}
+
+/// Two releasing repositories that state the same instruction.
+fn two_that_share_instruction(engine: &str, other_alias: &str, other: &str) -> String {
+    format!(
+        "{}\x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
+         \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         \x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
          default:\n\x20 adoption: fast\n",
         repositories(engine),
     )
@@ -1397,7 +1458,10 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
+    // The engine declares what a consumer of it does, so both the block and the
+    // note below carry the *producer's* own instruction rather than this
+    // engine's default sentence.
+    world.releases(&instructed(&script));
     // What is released when the engine's work lands, which is the baseline the
     // arrival is measured against.
     releases_at(&answer, "0.1.0");
@@ -1426,7 +1490,7 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
         .map(|(_, rest)| rest.to_owned())
         .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
     assert!(
-        block.contains("| dependency | repository | branch | commit | release target |"),
+        block.contains("| dependency | repository | branch | commit | release target | version |"),
         "the block carries no table:\n{block}"
     );
     let row = block
@@ -1443,8 +1507,30 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     );
     assert_eq!(cells[4], "crate", "row: {row}");
     assert!(
+        cells[5].is_empty(),
+        "a node that launched before the release was shown a version: {row}"
+    );
+    assert!(
         task.contains("Pin against the git references below rather than against a version"),
         "the block does not say what it is for:\n{task}"
+    );
+    // And the block hands on the producer's own instruction, rendered for the
+    // moment this node is in: no release yet, so the template's own no-version
+    // side, naming the branch it was told to pin to.
+    assert!(
+        block.contains(&format!(
+            "Pin engine by git at {branch} until the release arrives.",
+            branch = cells[2]
+        )),
+        "the block does not carry the producer's own instruction:\n{block}"
+    );
+    assert!(
+        !block.contains("Move from the git pin to that released version"),
+        "a producer that declared an instruction still got the engine's default:\n{block}"
+    );
+    assert!(
+        block.contains("This reports observed state and adds no acceptance criteria."),
+        "the producer's instruction is not framed as observed state:\n{block}"
     );
 
     // Nothing has arrived yet: the probe answers exactly the baseline.
@@ -1479,9 +1565,17 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
         json!("live"),
         "the note did not reach the running turn"
     );
-    assert_eq!(
-        adopted[0]["payload"]["versions"],
-        json!([{"identity": "github.com/owner/engine", "target": "crate", "version": "0.2.0"}])
+    let versions = &adopted[0]["payload"]["versions"][0];
+    assert_eq!(versions["identity"], json!("github.com/owner/engine"));
+    assert_eq!(versions["target"], json!("crate"));
+    assert_eq!(versions["version"], json!("0.2.0"));
+    assert_eq!(versions["dep"], json!("engine"));
+    // What the producer's template is rendered against is in the record, not the
+    // rendering: that is what lets a fresh driver replay the note that was sent.
+    assert_eq!(versions["instructions"], json!(INSTRUCTION));
+    assert!(
+        versions["branch"].is_string() && versions["commit"].is_string(),
+        "the record cannot re-render the instruction it was sent with: {versions}"
     );
 
     // The lever really was pulled, and the sibling's own record of it reached the
@@ -1510,14 +1604,30 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     // Its own task prose cannot have carried this — it was rendered before the
     // release existed — so the redirection is the only way it got there.
     let note = redirected(&world, &run, "consumer");
+    let stated = "Raise the engine pin in [workspace.dependencies] to 0.2.0, not the twelve \
+                  pins below it.";
     assert!(
-        note.contains("github.com/owner/engine — crate 0.2.0")
-            && note.contains("Move from the git pin to that released version"),
-        "the running turn was not told which version arrived:\n{note}"
+        note.contains("github.com/owner/engine — crate 0.2.0") && note.contains(stated),
+        "the running turn was not told which version arrived, in the producer's own \
+         words:\n{note}"
     );
     assert!(
-        !note.to_lowercase().contains("acceptance criteria"),
-        "the arrival note reads as a new bar:\n{note}"
+        !note.contains("Move from the git pin to that released version"),
+        "a producer that declared an instruction still got the engine's default:\n{note}"
+    );
+    // It still adds no bar: the producer's instruction is delivered inside the
+    // frame that says so, in the note itself — a note redirected into a live turn
+    // has no task section around it to borrow one from.
+    let framed = note
+        .find("This reports observed state and adds no acceptance criteria.")
+        .unwrap_or_else(|| panic!("the arrival note states no observed-state frame:\n{note}"));
+    let closed = note
+        .find("none of it is a criterion of this node")
+        .unwrap_or_else(|| panic!("the arrival note does not close the frame:\n{note}"));
+    let instruction = note.find(stated).expect("the instruction is in the note");
+    assert!(
+        framed < instruction && instruction < closed,
+        "the arrival note renders the instruction outside the frame:\n{note}"
     );
 }
 
@@ -1923,7 +2033,11 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
+    // The engine declares what a consumer does with a release of it. A published
+    // node never holds a git pin and is never sent an arrival note, so its
+    // reference block is the only place that instruction — or the version it
+    // names — can ever reach it.
+    world.releases(&instructed(&script));
     releases_at(&answer, "0.1.0");
 
     let run = start(
@@ -1994,12 +2108,45 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
         world.events_of(&run, "node-settled").len() == 2
     });
     assert!(dispatched(&world, &run, "consumer"));
-    // It launched *after* the release, so it has a version to pin against and no
-    // git reference block telling it otherwise.
+    // It launched *after* the release, so its block names the version it is
+    // building against rather than a git pin — and this is the only place that
+    // version ever reaches it, because nothing sends a published node the arrival
+    // note it never needed.
     let task = task_of(&world, "consumer");
+    let block = task
+        .split_once(CROSS_REPO_REFERENCES_HEADING)
+        .map(|(_, rest)| rest.to_owned())
+        .unwrap_or_else(|| panic!("a published node's task carries no reference block:\n{task}"));
+    let row = block
+        .lines()
+        .find(|line| line.starts_with("| engine |"))
+        .unwrap_or_else(|| panic!("no row for the engine dependency:\n{block}"));
+    let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+    assert_eq!(cells[1], "github.com/owner/engine", "row: {row}");
+    assert_eq!(cells[4], "crate", "row: {row}");
+    assert_eq!(
+        cells[5], "0.2.0",
+        "a node that waited for the release was not told the version it got: {row}"
+    );
     assert!(
-        !task.contains(CROSS_REPO_REFERENCES_HEADING),
-        "a node that waited for the release was told it had launched without one:\n{task}"
+        block.contains("those versions rather than against a git reference"),
+        "a node whose dependency released was told it had launched without one:\n{block}"
+    );
+    assert!(
+        block.contains(
+            "Raise the engine pin in [workspace.dependencies] to 0.2.0, not the twelve pins \
+             below it."
+        ),
+        "the producer's own instruction did not reach the published node:\n{block}"
+    );
+    assert!(
+        block.contains("This reports observed state and adds no acceptance criteria."),
+        "the producer's instruction is not framed as observed state:\n{block}"
+    );
+    // And no note: the arrival mechanism filters to fast adoption, correctly.
+    assert!(
+        world.events_of(&run, "release-adopted").is_empty(),
+        "a published node, which never held a git pin, was told to move off one"
     );
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {
@@ -2009,6 +2156,151 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
             "a node the wait held was failed: {event}"
         );
     }
+}
+
+/// Two producers, each stating its **own** instruction, and one block that
+/// attributes each to the dependency it is about.
+///
+/// The one thing a single-dependency journey cannot show: with two, an
+/// unattributed pair of instructions is one a worker cannot act on, so each is
+/// named against the repository and target it belongs to. The second producer
+/// writes its template in the two-layer `{% extends "producer" %}` form this build
+/// does not register, which is a render this host cannot finish — and the block
+/// carries the engine's own default for it rather than the dispatch failing over
+/// the sentence under its table.
+#[test]
+fn two_producers_state_their_own_instructions_and_each_is_attributed_to_it() {
+    let world = watching("adoption-two-producers");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_instruct(&script, "tool", &tool_script));
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut waiting = consumer(Some("published"));
+    waiting["deps"] = json!([ENGINE, "packager"]);
+    let run = start(
+        &world,
+        "adoption-two-producers",
+        vec![engine(), packager, waiting],
+    );
+    world.until("both producing nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node was dispatched with its dependencies unreleased"
+    );
+
+    // Both releases arrive, so the held node starts against both versions.
+    releases_at(&answer, "0.2.0");
+    releases_at(&tool_answer, "3.4.0");
+    world.until("the held node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 3
+    });
+
+    let task = task_of(&world, "consumer");
+    let block = task
+        .split_once(CROSS_REPO_REFERENCES_HEADING)
+        .map(|(_, rest)| rest.to_owned())
+        .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
+    for (dependency, version) in [("engine", "0.2.0"), ("packager", "3.4.0")] {
+        let row = block
+            .lines()
+            .find(|line| line.starts_with(&format!("| {dependency} |")))
+            .unwrap_or_else(|| panic!("no row for {dependency}:\n{block}"));
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        assert_eq!(cells[5], version, "row: {row}");
+    }
+    assert!(
+        block.contains(
+            "github.com/owner/engine crate — Raise the engine pin in [workspace.dependencies] \
+             to 0.2.0, not the twelve pins below it."
+        ),
+        "the first producer's instruction is not attributed to it:\n{block}"
+    );
+    assert!(
+        block.contains(
+            "github.com/owner/tool crate — Move from the git pin to that released version."
+        ),
+        "a template this host cannot render did not fall back to the default, attributed to \
+         the producer that declared it:\n{block}"
+    );
+    // Neither producer's instruction escaped the frame that says it adds no bar.
+    let opened = block
+        .find("This reports observed state and adds no acceptance criteria.")
+        .unwrap_or_else(|| panic!("the block states no observed-state frame:\n{block}"));
+    let closed = block
+        .find("none of it is a criterion of this node")
+        .unwrap_or_else(|| panic!("the block does not close the frame:\n{block}"));
+    for stated in ["Raise the engine pin", "Move from the git pin"] {
+        let at = block.find(stated).expect("the instruction is in the block");
+        assert!(
+            opened < at && at < closed,
+            "{stated:?} is rendered outside the frame:\n{block}"
+        );
+    }
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a node was failed over the sentence under its reference table: {event}"
+        );
+    }
+}
+
+/// Equal rendered instructions are stated once rather than repeated for every
+/// dependency that declares them.
+#[test]
+fn two_producers_that_state_the_same_instruction_are_coalesced() {
+    let world = watching("adoption-shared-instruction");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_share_instruction(&script, "tool", &tool_script));
+    releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
+
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut waiting = consumer(Some("published"));
+    waiting["deps"] = json!([ENGINE, "packager"]);
+    let run = start(
+        &world,
+        "adoption-shared-instruction",
+        vec![engine(), packager, waiting],
+    );
+    world.until("both producing nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+
+    releases_at(&answer, "0.2.0");
+    releases_at(&tool_answer, "3.4.0");
+    world.until("the held node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 3
+    });
+
+    let task = task_of(&world, "consumer");
+    let block = task
+        .split_once(CROSS_REPO_REFERENCES_HEADING)
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("the dispatched task carries no reference block:\n{task}"));
+    assert_eq!(
+        block.matches(SHARED_INSTRUCTION).count(),
+        1,
+        "the shared instruction was not coalesced:\n{block}"
+    );
+    assert!(
+        block.contains("github.com/owner/engine crate, github.com/owner/tool crate — Refresh the workspace lockfile."),
+        "coalescing the shared instruction discarded one producer's attribution:\n{block}"
+    );
 }
 
 /// Nodes awaiting **one** release put one question between them, are answered

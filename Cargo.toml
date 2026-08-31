@@ -437,6 +437,12 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+# A release target's adoption instructions are a minijinja template the producer
+# wrote, which `onevcs` carries through the three layers and parses but never
+# renders — where a template renders, and against what, is the consumer's. This
+# is that renderer, at the pin the sibling already resolves so the build carries
+# one copy of it.
+minijinja = "2.24"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
 # envelope or reply carries its payload's fields in the order they arrived —

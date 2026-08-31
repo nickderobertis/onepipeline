@@ -2706,3 +2706,95 @@ real two-party conversation.
   }
 }
 ```
+
+## 53. The one sentence that tells a consumer what to do is composed by the consumer, which does not know it — OPEN
+
+**Proposal (for the planner who owns the contract): render the adoption
+instruction a node is given from the **producer's own** declared template —
+`onevcs` 0.18.0's `DeclaredTarget::adoption_instructions`, resolved through that
+library's three layers — at both places a consumer meets one, and keep this
+engine's own sentence as the default a producer that declares none falls back
+to.**
+
+`arrival_note` composed one hardcoded sentence: *"Move from the git pin to that
+released version."* It is the only line in the whole release mechanism that tells
+a worker to **do** something, and it is the one line this crate is least placed to
+write: what a consumer does with a release is producer knowledge. One repository on
+this account states its pinning rule in its own manifest, twelve lines above the
+pins it governs, and workers who could not have known it got it wrong twice.
+
+**Both sites, because there are two adoption modes and each meets exactly one.**
+
+* The **initial context** — the `## Cross-repository references` block — is
+  rendered for a `fast` node *and* for a `published` one. It was fast-only before,
+  on the reasoning that the block's own words claim fast adoption; the words are
+  now decided by what the rows say rather than by the mode the plan declared, so a
+  block whose every row carries a version says so. For a `published` node this is
+  the **only** place the version ever appears, because nothing sends it an arrival
+  note: it never held a git pin to move off.
+* The **arrival note** stays fast-only, for that same reason.
+
+**Every variable is available at both sites**, because a producer writes one
+template and cannot know which of the two a given consumer meets it in. At a fast
+node's first render `version` is genuinely empty — that is the definition of fast
+adoption rather than a gap — so `{% if version %}` is how a template asks whether
+the release has happened, and the block renders sensibly either way.
+
+The rendered instruction **adds no acceptance criterion**. It is enclosed, at both
+sites, by the frame that states it reports observed state and adds none — the same
+sentence a carried planner note is rendered under — and closed by a line saying the
+frame has ended, so no rendering escapes into a bar a worker has to clear. The note
+carries that frame itself rather than borrowing it from the section it lands in,
+because a note delivered into a live turn has no section around it.
+
+A producer that declares no template gets `DEFAULT_ADOPTION_INSTRUCTION`, which is
+the sentence its consumers were given before there were templates — stated in one
+place in the code and rendered through the same path as every other instruction, so
+a repository that has not adopted this is unaffected. So is a template this host
+cannot finish rendering: `onevcs` parses a declaration where it reads it, so what
+is left here is a render that failed or came out empty, and a dispatch is not
+failed over the sentence under its reference table. **`{% extends "producer" %}`
+is among those** — the two-layer composition `onevcs` documents on the declaration
+is a template name this build does not register, and supporting it is a second
+proposal rather than part of this one.
+
+`release-adopted` gains four optional payload keys — `dep`, `branch`, `commit`,
+and `instructions` — each **omitted when empty**, because a note is replayed out of
+that record and what has to round-trip is what the template renders against rather
+than the rendering. A build that predates them reads a record carrying them exactly
+as it read one that did not, and a run with nothing to say about a branch writes the
+record it always wrote. The table gains a `version` column for the same round-trip
+reason: it is what the published node's block is *for*.
+
+This arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40, 41 and 52 did.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and drives it through the public
+types: the template written here is one `onevcs` accepts, renders at both sites to
+the text written here, resolves every variable named here, and lands inside the
+frame — and the three sentences named here must be the constants this crate
+publishes.
+
+```json
+{
+  "adoption_instructions": "Raise the `onevcs` pin in `[workspace.dependencies]` to {{ version }} rather than the pin twelve lines below it.",
+  "variables": ["dependency", "repository", "branch", "commit", "target", "version"],
+  "row": {
+    "dependency": "engine",
+    "repository": "github.com/nickderobertis/onevcs",
+    "branch": "onevcs/s-1",
+    "commit": "9f3c1ab",
+    "release_target": "crate",
+    "version": "0.18.0"
+  },
+  "rendered": "Raise the `onevcs` pin in `[workspace.dependencies]` to 0.18.0 rather than the pin twelve lines below it.",
+  "default_instruction": "Move from the git pin to that released version.",
+  "observed_state": "This reports observed state and adds no acceptance criteria.",
+  "heading": "## Cross-repository references",
+  "api": {
+    "module": "onepipeline::plan",
+    "calls": ["adoption_instructions", "arrival_note"]
+  }
+}
+```

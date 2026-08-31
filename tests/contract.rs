@@ -34,8 +34,10 @@ use onepipeline::filter::{
 };
 use onepipeline::note::{Addressee, Delivered, Note, Reached};
 use onepipeline::plan::{
-    Node, NodeKind, Plan, Resume, Step, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
-    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, Resume, Step,
+    ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
+    DEFAULT_ADOPTION_INSTRUCTION, OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION,
+    PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -3318,6 +3320,116 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
         );
     }
     assert!(CONTRACT.contains("executor_has_capacity"));
+}
+
+/// The templated adoption instruction this build renders is exactly what the
+/// divergence record proposes, at both sites and inside the frame.
+///
+/// The contract is committed as approved and names none of it, so entry 53 is the
+/// only place it is written down — and a divergence nothing gates quietly stops
+/// being true. The entry's own block is the source: the template written there is
+/// one a producer could declare, and what it renders to is what a worker reads.
+#[test]
+fn the_templated_adoption_instruction_is_what_the_divergence_record_names() {
+    let block = divergence_block("53.");
+
+    // The three sentences the entry names are this crate's own constants, so a
+    // build that reworded one fails here rather than leaving the record wrong.
+    assert_eq!(
+        block["default_instruction"].as_str(),
+        Some(DEFAULT_ADOPTION_INSTRUCTION),
+        "entry 53 names a different default instruction than this crate publishes"
+    );
+    assert_eq!(
+        block["observed_state"].as_str(),
+        Some(OBSERVED_STATE),
+        "entry 53 names a different observed-state frame than this crate publishes"
+    );
+    assert_eq!(
+        block["heading"].as_str(),
+        Some(CROSS_REPO_REFERENCES_HEADING),
+    );
+    let variables: Vec<String> =
+        serde_json::from_value(block["variables"].clone()).expect("entry 53 names its variables");
+    assert_eq!(
+        variables, ADOPTION_INSTRUCTION_VARIABLES,
+        "entry 53 names a different variable set than this crate publishes"
+    );
+
+    // The row, and the producer's own template on it. Both are the entry's.
+    let row = &block["row"];
+    let field = |key: &str| {
+        row[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("entry 53's row states `{key}`"))
+            .to_owned()
+    };
+    let reference = CrossRepoReference {
+        dependency: field("dependency"),
+        repository: field("repository"),
+        branch: field("branch"),
+        commit: field("commit"),
+        release_target: field("release_target"),
+        version: field("version"),
+        adoption_instructions: Some(
+            block["adoption_instructions"]
+                .as_str()
+                .expect("entry 53 states the template")
+                .parse()
+                .expect("the template entry 53 states is one `onevcs` accepts"),
+        ),
+    };
+    let rendered = block["rendered"]
+        .as_str()
+        .expect("entry 53 states what its template renders to");
+    assert_eq!(
+        reference.instruction(),
+        rendered,
+        "the template entry 53 states does not render what it says it does"
+    );
+
+    // Both sites, through this crate's own API rather than through a dispatch:
+    // the block a node's task carries, and the note its arrival is delivered as.
+    let node = Node {
+        id: "consumer".into(),
+        persona: Some("engineer".into()),
+        task: Some("## What\nbuild against the released engine".into()),
+        ..Node::default()
+    };
+    let references = [reference];
+    let calls: Vec<String> =
+        serde_json::from_value(block["api"]["calls"].clone()).expect("entry 53 names its calls");
+    assert_eq!(calls, ["adoption_instructions", "arrival_note"]);
+    assert_eq!(block["api"]["module"].as_str(), Some("onepipeline::plan"));
+
+    for (site, text) in [
+        ("the reference block", node.rendered_task_with(&references)),
+        ("the arrival note", arrival_note(&references)),
+    ] {
+        assert!(
+            text.contains(rendered),
+            "{site} does not carry the producer's own instruction:\n{text}"
+        );
+        // And it is enclosed by the frame, so a worker cannot read it as a bar.
+        let opened = text
+            .find(OBSERVED_STATE)
+            .unwrap_or_else(|| panic!("{site} states no observed-state frame:\n{text}"));
+        assert!(
+            opened < text.find(rendered).expect("the instruction is there"),
+            "{site} renders the instruction ahead of the frame that holds it:\n{text}"
+        );
+    }
+    // The one rendering both sites share, reachable on its own.
+    assert!(adoption_instructions(&references).contains(rendered));
+    assert!(adoption_instructions(&[]).is_empty());
+
+    // A producer that declares none is unaffected: the same call, the engine's
+    // own default, and no template anywhere in it.
+    let undeclared = CrossRepoReference {
+        adoption_instructions: None,
+        ..references[0].clone()
+    };
+    assert!(adoption_instructions(&[undeclared]).contains(DEFAULT_ADOPTION_INSTRUCTION));
 }
 
 /// The adoption flags are the one CLI extension the contract has not yet
