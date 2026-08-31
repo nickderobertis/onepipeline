@@ -413,11 +413,27 @@ fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_sessio
         .expect("the release is acknowledged")
     });
 
-    for kind in ["release-observed", "release-acknowledged"] {
-        world.until(&format!("a {kind} to reach the run"), |world| {
-            !world.events_of(&run, kind).is_empty()
-        });
-    }
+    // Wait for both observations, not merely the first one to arrive. The
+    // automated target is observed while the probe answers and the human step's
+    // when it is acknowledged, and the two reach the run one after the other —
+    // so waiting for *a* `release-observed` is satisfied by the crate's and
+    // returns while the wheel's is still in flight, which is what the
+    // assertions below then read. That is a wait weaker than what it guards,
+    // and it failed this journey with `["crate"]` on a loaded host.
+    let observed_targets = |world: &World| -> Vec<String> {
+        world
+            .events_of(&run, "release-observed")
+            .iter()
+            .filter_map(|event| event["payload"]["target"].as_str().map(str::to_string))
+            .collect()
+    };
+    world.until("both targets' releases to reach the run", |world| {
+        let targets = observed_targets(world);
+        ["crate", "wheel"]
+            .iter()
+            .all(|target| targets.iter().any(|seen| seen == target))
+            && !world.events_of(&run, "release-acknowledged").is_empty()
+    });
 
     // Read back through the same public reader the run relays through, and held
     // field for field: what is in the store is what the producer wrote, with the

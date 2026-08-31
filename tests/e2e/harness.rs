@@ -309,7 +309,7 @@ pub const MEMBER_TASK: &str = "{task}\n\nReport on this run and change nothing a
 /// spelling directly would be asserting that *this host's* temporary directory
 /// is reached without a symlink — true on Linux, false on macOS, and nothing to
 /// do with the crate under test.
-fn resolved(path: &Path) -> PathBuf {
+pub fn resolved(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path)
         .unwrap_or_else(|error| panic!("{} cannot be resolved: {error}", path.display()));
     plain(&canonical)
@@ -518,6 +518,22 @@ impl World {
     pub fn run(&self, args: &[&str]) -> Run {
         Run::of(
             self.cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
+    /// The same, from a chosen working directory.
+    ///
+    /// For the one journey whose claim is about *where* a path is resolved: a
+    /// command that inherited this test process's directory would resolve a
+    /// relative path against the crate root and prove nothing.
+    pub fn run_from(&self, dir: &Path, args: &[&str]) -> Run {
+        Run::of(
+            self.cmd(args)
+                .current_dir(dir)
+                .output()
+                .expect("the binary runs"),
             args,
             self,
         )
@@ -980,11 +996,25 @@ impl World {
     /// state root is process-global, so two worlds asking at once would otherwise
     /// read one another's.
     pub fn on_onevcs<T>(&self, ask: impl FnOnce() -> T) -> T {
-        static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = ASKING.lock().unwrap_or_else(|held| held.into_inner());
+        let _held = self.pointed_at_this_world();
+        ask()
+    }
+
+    /// Point the process-global `ONEVCS_HOME`/`GIT_CONFIG_GLOBAL` pair at this
+    /// world, and hold the one lock over them until the caller is done.
+    ///
+    /// **One lock across every caller**, because they set the same two variables:
+    /// a lock of its own guards a caller against its own kind and against nothing
+    /// else, so a registration ran with another world's state root between its
+    /// `set_var` and its call and landed in that world's registry — which the
+    /// launch then met as `"engine" is not a registered repository`, naming the
+    /// repository whichever thread had lost the race.
+    fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
+        static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
         std::env::set_var("ONEVCS_HOME", self.onevcs_home());
         std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
-        ask()
+        held
     }
 
     /// Register a checkout with `onevcs`, **in this process**.
@@ -995,10 +1025,7 @@ impl World {
     /// would otherwise write into each other's registry.
     pub fn register(&self, checkout: &Path, origin: Option<&str>) {
         use clap::Parser;
-        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = REGISTERING.lock().unwrap_or_else(|held| held.into_inner());
-        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
-        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        let _held = self.pointed_at_this_world();
         let mut argv: Vec<String> = vec![
             "onevcs".to_owned(),
             "register".to_owned(),
@@ -1052,10 +1079,7 @@ impl World {
     ///
     /// Under the same lock and for the same reason as [`register`](World::register).
     pub fn identity(&self, repo: &Path) -> onevcs::Identity {
-        static RESOLVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = RESOLVING.lock().unwrap_or_else(|held| held.into_inner());
-        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
-        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        let _held = self.pointed_at_this_world();
         onevcs::Providers::real()
             .vcs
             .resolve_identity(&repo.to_string_lossy())
@@ -2804,6 +2828,45 @@ pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
     held_alias(held, name)
+}
+
+/// A live process working inside a run root.
+///
+/// What a real dispatch has and a session opened from the command line does not:
+/// `onevcs session open` prints a token and exits, so its record answers stale
+/// from that instant while an agent works in the worktree for hours. A journey
+/// asserting what the sibling does with an abandoned record needs the occupancy
+/// too, or it is asserting against a shape no dispatch is ever in.
+///
+/// The fixture is this suite's own `outlive-the-graph` process, which parks
+/// rather than doing anything: what the sibling reads is a working directory.
+/// Unix-only, because that is how it reads one, and Windows exposes no supported
+/// way to ask which process holds a directory.
+#[cfg(unix)]
+pub fn occupy(world: &World, run_root: &Path) -> std::process::Child {
+    let recorded = world.root.join(format!(
+        "occupant-{}.pid",
+        run_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let held = Command::new(double("fake-claude"))
+        .arg("outlive-the-graph")
+        .arg(&recorded)
+        .current_dir(run_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a process starts inside the run root");
+    // Started is not yet working *there*: the pid file is written from inside that
+    // directory, so waiting for it is what makes the occupancy a fact before
+    // anything asks the sibling about it.
+    world.until("the run root's occupant to be working in it", |_| {
+        recorded.is_file()
+    });
+    held
 }
 
 /// Who a commit a journey's `onevcs` makes is attributed to.

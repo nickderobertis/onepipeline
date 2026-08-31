@@ -31,6 +31,7 @@ use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
 use crate::plan::{Node, Plan};
+use crate::refusal::Refusal;
 
 /// The environment variable naming the `onetaskgraph` executable.
 ///
@@ -205,6 +206,23 @@ impl Store {
     /// plan field answers to, a task carrying no node id, and a dependency edge
     /// whose far end this plan cannot name.
     pub fn plan(&self, project: &QualifiedId) -> Result<Plan> {
+        self.load(project)
+            .map(|read| read.plan)
+            .map_err(Error::from)
+    }
+
+    /// The same read, keeping both halves a checker needs.
+    ///
+    /// The loaded plan, and each task's own metadata map **verbatim** — including
+    /// the keys outside this consumer's reserved namespace, which the mapping
+    /// above drops because no plan field answers to them. A consumer's check
+    /// reads keys this engine does not, so what it is handed is the engine's
+    /// resolved node beside the store's own record of the task it came from.
+    pub(crate) fn read_plan(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
+        self.load(project)
+    }
+
+    fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let held = self.project(project)?;
         let tasks = self.tasks(project)?;
 
@@ -214,7 +232,11 @@ impl Store {
                 continue;
             };
             if field == "tasks" {
-                return Err(refused(project.as_str(), TASKS_ARE_THE_PROJECTS.to_owned()));
+                return Err(
+                    refused_plan(project.as_str(), TASKS_ARE_THE_PROJECTS.to_owned())
+                        .field("tasks")
+                        .into(),
+                );
             }
             document.insert(field.to_owned(), value.clone());
         }
@@ -234,12 +256,14 @@ impl Store {
         let mut claimed: BTreeMap<String, String> = BTreeMap::new();
         for task in &tasks {
             let id = node_id(&task.item)
-                .map_err(|why| refused(task.id.as_str(), format!("it {why}")))?;
+                .map_err(|why| refused(task.id.as_str(), format!("it {why}")).field("id"))?;
             if let Some(first) = claimed.insert(id.clone(), task.id.to_string()) {
                 return Err(refused(
                     task.id.as_str(),
                     format!("`{ID_KEY}` '{id}' is already the id of another task, '{first}'"),
-                ));
+                )
+                .field("id")
+                .into());
             }
             ids.insert(task.id.as_str().to_owned(), id);
         }
@@ -252,7 +276,7 @@ impl Store {
 
         let document = Value::Object(document);
         if let Some(retired) = crate::plan::retired_field_refusal(&document) {
-            return Err(refused(project.as_str(), retired));
+            return Err(refused_plan(project.as_str(), retired).into());
         }
         // Each node on its own first, so a refusal names the task it is about;
         // the whole document afterwards, which is what refuses a plan-level key
@@ -272,19 +296,29 @@ impl Store {
                 )
             })?;
         }
-        read::<Plan>(document).map_err(|error| {
-            refused(
+        let plan: Plan = read::<Plan>(document).map_err(|error| {
+            refused_plan(
                 project.as_str(),
                 format!(
                     "{error} — a plan's settings are the reserved `{RESERVED}<field>` \
                      metadata keys on its project"
                 ),
             )
-        })
+        })?;
+        // Keyed by node id, which the walk above has already established is
+        // unique within the project: a plan that got this far has one task per
+        // node and one node per task.
+        let metadata = plan
+            .tasks
+            .iter()
+            .map(|node| node.id.clone())
+            .zip(tasks.iter().map(|task| task.item.metadata.clone()))
+            .collect();
+        Ok(Read { plan, metadata })
     }
 
     /// One node, assembled out of its task.
-    fn node(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Value> {
+    fn node(&self, task: &Qualified<TaskItem>, ids: &Ids) -> std::result::Result<Value, Load> {
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
             if key == SETTLEMENT_KEY {
@@ -302,7 +336,9 @@ impl Store {
                     format!(
                         "`{RESERVED}{field}` is not a node field: a node's `{field}` is {whence}"
                     ),
-                ));
+                )
+                .field(field)
+                .into());
             }
             node.insert(field.to_owned(), value.clone());
         }
@@ -324,7 +360,9 @@ impl Store {
                          lands in one repository, and `{REPO_KEY}` is only for an identity a \
                          normalized origin cannot hold"
                     ),
-                ))
+                )
+                .field("repo")
+                .into())
             }
             (Some(repository), None) => {
                 node.insert(
@@ -339,8 +377,9 @@ impl Store {
         // A cross-DAG reference names another run's DAG, which is an item of no
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
-            let listed: Vec<String> = serde_json::from_value(carried)
-                .map_err(|error| refused(task.id.as_str(), format!("`{RESERVED}deps` {error}")))?;
+            let listed: Vec<String> = serde_json::from_value(carried).map_err(|error| {
+                refused(task.id.as_str(), format!("`{RESERVED}deps` {error}")).field("deps")
+            })?;
             for reference in listed {
                 // Anything spelled as a cross-DAG reference is carried, well
                 // formed or not: a malformed one is answered by the graph
@@ -350,7 +389,9 @@ impl Store {
                     return Err(refused(
                         task.id.as_str(),
                         format!("`{RESERVED}deps` names '{reference}': {DEPS_ARE_EDGES}"),
-                    ));
+                    )
+                    .field("deps")
+                    .into());
                 }
                 deps.push(reference);
             }
@@ -365,7 +406,11 @@ impl Store {
     }
 
     /// The node ids this task's own dependency edges point at.
-    fn deps(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Vec<String>> {
+    fn deps(
+        &self,
+        task: &Qualified<TaskItem>,
+        ids: &Ids,
+    ) -> std::result::Result<Vec<String>, Load> {
         let mut deps = Vec::new();
         for edge in self.edges(&task.id)? {
             if edge.from.kind != ItemKind::Task {
@@ -376,7 +421,8 @@ impl Store {
                          a {}",
                         task.id, edge.from.kind
                     ),
-                });
+                }
+                .into());
             }
             // The near end is the task whose dependencies were asked for. An
             // edge answering about a different one would put another task's
@@ -390,7 +436,8 @@ impl Store {
                          '{}'",
                         task.id, edge.from.id
                     ),
-                });
+                }
+                .into());
             }
             if edge.kind != DependencyKind::Blocks {
                 continue;
@@ -401,7 +448,9 @@ impl Store {
                 return Err(refused(
                     task.id.as_str(),
                     format!("{both}, which is a {} and not a node of a plan", far.kind),
-                ));
+                )
+                .field("deps")
+                .into());
             }
             let resolved = match ids.get(far.id.as_str()) {
                 Some(id) => id.clone(),
@@ -416,9 +465,11 @@ impl Store {
                             task.id.as_str(),
                             format!("{both}, which could not be read: {error}"),
                         )
+                        .field("deps")
                     })?;
                     node_id(&far_task.item).map_err(|why| {
                         refused(task.id.as_str(), format!("{both}, and the far task {why}"))
+                            .field("deps")
                     })?
                 }
             };
@@ -589,8 +640,61 @@ fn read<T: serde::de::DeserializeOwned>(document: Value) -> std::result::Result<
     })
 }
 
-fn refused(id: &str, what: String) -> Error {
-    Error::Invalid(format!("{id}: {what}"))
+/// A refusal about one **task** of the project, named by the store id it has.
+///
+/// The store id and not the node id: a task carrying no `onepipeline.id` has no
+/// node id to be named by, and the two halves of that mistake are both in the
+/// store.
+fn refused(id: &str, what: String) -> Refusal {
+    Refusal::about(id, format!("{id}: {what}"))
+}
+
+/// A refusal about the **project**, which is no node of the plan it holds.
+fn refused_plan(id: &str, what: String) -> Refusal {
+    Refusal::plain(format!("{id}: {what}"))
+}
+
+/// One project, read.
+pub(crate) struct Read {
+    /// The plan the engine loaded, every default resolved.
+    pub plan: Plan,
+    /// Each task's own metadata map, verbatim, by node id.
+    pub metadata: BTreeMap<String, Map<String, Value>>,
+}
+
+/// Why a project did not become a plan.
+///
+/// The two are different answers and are kept apart: the schema **refused** what
+/// the project says, or the project could not be **read** at all — an absent
+/// binary, a store that answered badly, a project that names nothing. A caller
+/// that collapsed them would report a store outage as a plan its author has to
+/// fix.
+pub(crate) enum Load {
+    /// The schema refused it, and this is what about.
+    Refused(Refusal),
+    /// It could not be read.
+    Unreadable(Error),
+}
+
+impl From<Refusal> for Load {
+    fn from(refusal: Refusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+impl From<Error> for Load {
+    fn from(error: Error) -> Self {
+        Self::Unreadable(error)
+    }
+}
+
+impl From<Load> for Error {
+    fn from(load: Load) -> Self {
+        match load {
+            Load::Refused(refusal) => refusal.into(),
+            Load::Unreadable(error) => error,
+        }
+    }
 }
 
 /// Every id in this module: a `<source>:<native>` pair, parsed once where it

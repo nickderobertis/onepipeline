@@ -591,9 +591,10 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
 }
 
 /// The plan's persona is a graph setting, not merely a label on the dispatch.
-/// The real sibling's content-addressed run record proves that it resolved the
-/// requested persona while preparing the member that subsequently ran. That is
-/// evidence from the actual graph invocation, not this crate's event label.
+/// The real sibling's content-addressed run record, read back through the
+/// sibling's own `history` reader, proves that it resolved the requested persona
+/// while preparing the member that subsequently ran. That is evidence from the
+/// actual graph invocation, not this crate's event label.
 #[test]
 fn a_plan_persona_reaches_the_member_that_actually_runs() {
     let world = World::new("real-plan-persona");
@@ -607,29 +608,85 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     node["persona"] = Value::from("./requested-reviewer.yaml");
     let path = world.plan("plan-persona", &plan_of("plan-persona", vec![node]));
 
-    let started = world.run_on_agentgraph(&["start", &path, "--attach"]);
-    started.exited(0).settled();
+    // Held open, and launched detached, so the record is read at the one moment
+    // it has no writer. The sibling resolves every ref and records the inventory
+    // *before* it starts a member, and replaces that record in place once more as
+    // the run settles — on a process the dispatch's own teardown is by then
+    // entitled to end. A journey that read afterwards was racing that
+    // replacement, and a record it caught part way through parses as nothing,
+    // which reads exactly like a persona that never arrived: that is how this
+    // journey failed twice on a loaded runner while the persona had in fact
+    // reached the member. With the turn held there is no writer left to race —
+    // the inventory is on disk and nothing touches it again until this journey
+    // lets the turn go.
+    world.script("turn.hold", "");
+    let launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    world.run_on(launch, "start plan-persona").exited(0);
+    world.until("the node's member to take its turn", |world| {
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do review."))
+    });
 
-    let turns = world.turns();
-    assert!(
-        turns.iter().any(|turn| turn.prompt.contains("Do review.")),
-        "the node's member never ran: {turns:?}"
-    );
-
-    let records: Vec<Value> = std::fs::read_dir(world.root.join("graph-state"))
-        .expect("oneagentgraph wrote its state root")
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("record.json")).ok())
-        .filter_map(|text| serde_json::from_str(&text).ok())
+    // Read the record back through `oneagentgraph history`, which is the reader
+    // the sibling publishes for it — `history` lists the runs under the state
+    // directory and `history show` prints one record whole. Nothing here opens a
+    // file under that directory: where the record is kept, and whether it is a
+    // file at all, is the sibling's to change.
+    let state = world.graph_state();
+    let sibling = |args: &[&str]| -> std::process::Output {
+        std::process::Command::new(crate::harness::oneagentgraph_binary())
+            .args(args)
+            .env("ONEAGENTGRAPH_STATE_DIR", &state)
+            .output()
+            .expect("the real oneagentgraph runs")
+    };
+    // Each read is asserted rather than skipped on, because the member is running
+    // and the run it belongs to therefore exists: a listing that answers with
+    // nothing, and a record the sibling cannot print, are two different faults and
+    // neither of them is a persona that failed to arrive. Reported as themselves,
+    // with what the sibling said, so a failure here names the fault it is.
+    let listed = sibling(&["history"]);
+    let runs: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').next().map(str::to_string))
         .collect();
     assert!(
-        records
-            .iter()
-            .any(|record| record["refs"].as_array().is_some_and(|refs| refs
-                .iter()
-                .any(|reference| { reference["origin"] == "./requested-reviewer.yaml" }))),
+        !runs.is_empty(),
+        "the sibling lists no run at all while its member is taking a turn: it exited {:?} \
+         saying {:?}",
+        listed.status.code(),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let records: Vec<Value> = runs
+        .iter()
+        .map(|run| {
+            let shown = sibling(&["history", "show", run]);
+            serde_json::from_slice(&shown.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "the sibling cannot print the record it listed for {run}: {error}; it exited \
+                     {:?} saying {:?}",
+                    shown.status.code(),
+                    String::from_utf8_lossy(&shown.stderr)
+                )
+            })
+        })
+        .collect();
+    assert!(
+        records.iter().any(|record| {
+            record["refs"].as_array().is_some_and(|refs| {
+                refs.iter()
+                    .any(|reference| reference["origin"] == "./requested-reviewer.yaml")
+            })
+        }),
         "the graph that dispatched the member did not resolve the plan's persona: {records:?}"
     );
+
+    // Let the held turn finish, so the run this journey started ends the way any
+    // other does rather than being taken down with the world.
+    world.release("turn.go");
+    world.release("turn.settle");
 }
 
 /// Node-scope overrides survive losing the driver that originally launched the
@@ -2577,6 +2634,106 @@ fn a_retained_driver_carries_a_failing_graphs_own_exit_code() {
         "the graph never started a member, so its code is not a settlement:\n{}",
         failed.stdout
     );
+}
+
+/// A classification the harness's own record contradicts does not kill the
+/// member: the turn that record describes is carried as a settlement instead.
+///
+/// The loss this is named for, and why this crate cares rather than only the
+/// sibling. A `member-died` is the one event a node is settled **dead** on —
+/// `src/engine.rs` reads the producer's cause straight off it — so a node was
+/// settled `failed` on `{"cause":"rate_limit"}` while the harness's record for
+/// the same turn read `status: ok`, `exit_code: 0` and billed usage, and the
+/// finished work went with it. `oneagentgraph` 0.3.14 weighs the two before it
+/// publishes a death, and that is a floor **this build links** rather than a rule
+/// written here: below it this journey fails rather than reading differently.
+///
+/// Driven through the real supervisor: the real sibling drives a real two-party
+/// member, and the contradiction is a record `oneharness`'s own double writes in
+/// that library's own types — `status: ok`, `exit_code: 0`, billed usage, beside
+/// `failure_kind: rate_limit`. Nothing is asserted at a seam: what this reads is
+/// the sibling's published events and the report it stored.
+#[test]
+fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
+    let world = World::new("drive-reconciled");
+    world.write_graphs();
+    // Two-party, because the reconciliation is the supervisor's: a classification
+    // is only ever weighed against a record where there is a judge to publish a
+    // death in place of a settlement.
+    world.write_supervised_node_graph();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven-reconciled");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    world.script("harness.rejects", "");
+    let driven = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Be billed for a turn the provider then rejects.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive a graph whose classification its own record contradicts",
+    );
+    let published: Vec<Value> = driven
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    // Still a member that did not reach its bar — so still the sibling's own
+    // member-failed code — but one that *failed its task* rather than one that
+    // died, which is the whole of the distinction a node is settled on.
+    assert_eq!(
+        driven.code,
+        oneagentgraph::error::EXIT_MEMBER_FAILED,
+        "a driver did not carry its graph's own exit code:\nstdout: {}\nstderr: {}",
+        driven.stdout,
+        driven.stderr
+    );
+    assert!(
+        !published.iter().any(|event| event["kind"] == "member-died"),
+        "a turn the harness recorded as completed and billed was published as a \
+         death, which is what a node destroys finished work on:\n{}",
+        driven.stdout
+    );
+    let settled: Vec<&Value> = published
+        .iter()
+        .filter(|event| event["kind"] == "member-settled")
+        .collect();
+    assert_eq!(
+        settled.len(),
+        1,
+        "the carried turn did not settle exactly once:\n{}",
+        driven.stdout
+    );
+    assert_eq!(
+        settled[0]["payload"]["completed"],
+        json!(false),
+        "a turn that never reached its bar settled as one that did: {}",
+        settled[0]
+    );
+
+    // And the reconciliation is on the stored report rather than left for nobody
+    // to find: the classification, and the record's own facts beside it.
+    let stored = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settle named no stored report: {}", settled[0]));
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(stored).expect("the stored report is readable"),
+    )
+    .expect("the stored report is JSON");
+    let why = report["settled_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the carried turn said nothing about why: {report}"));
+    for said in ["rate_limit", "status ok", "exit code 0"] {
+        assert!(
+            why.contains(said),
+            "the carried turn's reason does not name {said:?}: {why}"
+        );
+    }
 }
 
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was

@@ -2146,8 +2146,11 @@ canonicalizes the worktree and the path and refuses one that is not under the
 other, as the same third answer below rather than as a comparison against
 something off the branch.
 
-**A file the branch will not give up is a third answer.** Absent, a directory, or
-not text: the check compared nothing, and says so. `unread` is carried through the
+**A file the branch will not give up is a third answer.** Absent, a directory,
+not text, or past the megabyte this reads — a lettered extension is all a path has
+to look like, so a mistyped criterion can name a vendored archive, and searching an
+artifact for a literal is not a comparison anybody asked for: the check compared
+nothing, and says so. `unread` is carried through the
 run's own record as its own word beside `match` and `mismatch`, and is never
 folded into either — for the same reason entry 40's *not answered* is never *not
 released*.

@@ -97,7 +97,7 @@ pub fn execute(
     let mut attempt = std::num::NonZeroU32::MIN;
     loop {
         let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
-            Attempt::Settled(settlement) => return settlement,
+            Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
@@ -138,7 +138,7 @@ fn attempt_once(
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
     let Some(request) = crate::vcs::request_for(node) else {
-        return Attempt::Settled(Settlement {
+        return Attempt::settled(Settlement {
             detail: Some("a lifecycle node needs a repo".into()),
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
         });
@@ -162,7 +162,7 @@ fn attempt_once(
     let steps = match dispatchable_steps(node) {
         Ok(steps) => steps,
         Err(reason) => {
-            return Attempt::Settled(Settlement {
+            return Attempt::settled(Settlement {
                 detail: Some(reason),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
             })
@@ -219,7 +219,7 @@ fn attempt_once(
             // follows an attestation dispatches nothing where the human step was
             // last, so it opens no session and has no branch in hand to read.
             check_criteria(node, worktree.as_deref(), tx);
-            return Attempt::Settled(Settlement {
+            return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..Settlement::plain(&node.id, NodeStatus::Waiting, None)
@@ -281,7 +281,7 @@ fn attempt_once(
             // against its own criteria before the session that holds it goes.
             check_criteria(node, worktree.as_deref(), tx);
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
-            return Attempt::Settled(Settlement {
+            return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..drained.settlement
@@ -295,7 +295,7 @@ fn attempt_once(
     let Some(token) = session else {
         // Every step declared no diff, so there is nothing to publish and the
         // node settles on the existing no-changes outcome.
-        return Attempt::Settled(Settlement {
+        return Attempt::settled(Settlement {
             branch,
             ..Settlement::plain(&node.id, NodeStatus::Done, Some(engine::NO_CHANGES))
         });
@@ -419,7 +419,7 @@ fn publish(
     // `failed_publication` below instead, which is where the word and the routing
     // are decided together.
     let publication_failed = |detail: String| {
-        Attempt::Settled(Settlement {
+        Attempt::settled(Settlement {
             branch: branch.clone(),
             detail: Some(with_undrafted(detail)),
             ..Settlement::plain(
@@ -512,7 +512,7 @@ fn publish(
             let drafted = matches!(published.outcome, onevcs::PublishOutcome::ChangeDraft(_))
                 .then(|| draft.as_ref().map(crate::release::drafted_detail))
                 .flatten();
-            Attempt::Settled(Settlement {
+            Attempt::settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
                 detail: drafted
@@ -680,7 +680,7 @@ fn unread_merge_path(
         "the merge path was read {reads} time{} and never answered",
         if reads.get() == 1 { "" } else { "s" }
     );
-    Attempt::Settled(Settlement {
+    Attempt::settled(Settlement {
         branch,
         head: crate::vcs::branch_head_in(token),
         detail: Some(compose(
@@ -700,8 +700,17 @@ fn unread_merge_path(
 /// needs exists only on the second and would otherwise be `Option`s on every
 /// settlement this crate makes.
 enum Attempt {
-    Settled(Settlement),
+    Settled(Box<Settlement>),
     Preserving(Box<Preserved>),
+}
+
+impl Attempt {
+    /// One settled attempt, boxed as the other case is: a settlement is much the
+    /// larger of the two, and an enum carrying it inline would move that whole
+    /// value through every return between here and the loop.
+    fn settled(settlement: Settlement) -> Self {
+        Self::Settled(Box::new(settlement))
+    }
 }
 
 /// A publication that failed and handed its branch back.
@@ -752,7 +761,7 @@ fn failed_publication(
     let failure = crate::vcs::failure_of(kind);
     let handed_back = matches!(retained, Some(onevcs::Retention::HandedBack(_)));
     let settled = || {
-        Attempt::Settled(Settlement {
+        Attempt::settled(Settlement {
             branch: branch.clone(),
             detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
@@ -1183,12 +1192,19 @@ const TERMINATOR_POLL: Duration = Duration::from_millis(250);
 
 /// Close the session, and collect what its stream said.
 ///
-/// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record — so a follow can end cleanly having relayed everything
-/// but the tail, and the stream is read again afterwards from the point it
-/// reached. **Again, rather than once more**: every way a read can go badly hands
-/// back an empty batch, so one read made the last record conditional on that read
-/// having gone well, and a node settled in silence with a hole in its record.
+/// **The follow ends first, and the close comes after it.** `onevcs` refuses to
+/// release a session while any live process is working inside its run root, and
+/// the follow's own poll asks the library whether the session closed — a call
+/// that shells out to `git` in that session's clone. Closed first, as this once
+/// was, the close raced the follow's own children and lost intermittently: the
+/// session stayed open and the refusal was the only account of why.
+///
+/// Closing is still what writes the session's last record, so a follow can end
+/// having relayed everything but the tail, and the stream is read again
+/// afterwards from the point it reached. **Again, rather than once more**: every
+/// way a read can go badly hands back an empty batch, so one read made the last
+/// record conditional on that read having gone well, and a node settled in
+/// silence with a hole in its record.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -1196,10 +1212,10 @@ fn end_session(
     node: &Labels,
     filter: Option<&EventFilter>,
 ) {
-    let refused = close(token);
     // Empty from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    let refused = close(token);
     relay_session_events(tx, token, node, followed_through, filter, refused);
 }
 

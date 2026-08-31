@@ -72,11 +72,11 @@ help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
 # `the_smoke_scripts_command_list_is_the_binarys_whole_surface` parses this very
 # line and asserts it equals the binary's subcommands, so a command added or
 # renamed fails the gate here rather than leaving a published artifact unchecked.
-for command in start adopt channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
+for command in start plan adopt channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \
-         "the installed binary predates that command — reinstall the version under test, or drop '$command' from this list if the contract no longer names it" ;;
+         "reinstall the version under test — 'pip install --force-reinstall onepipeline-cli${expect_version:+==$expect_version}' or 'npm install -g onepipeline-cli${expect_version:+@$expect_version}' — or, if the contract no longer names '$command', drop it from the 'for command in' list above" ;;
   esac
 done
 

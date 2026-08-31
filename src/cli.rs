@@ -40,6 +40,9 @@ pub struct Cli {
 pub enum Command {
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
+    /// Read a plan without launching it.
+    #[command(subcommand)]
+    Plan(PlanCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
     /// The channel's server side.
@@ -88,6 +91,36 @@ pub enum Command {
     /// and a task, exactly as the sibling's own `run` takes them.
     #[command(hide = true, name = crate::agentgraph::DRIVE_VERB)]
     Drive(DriveArgs),
+}
+
+/// What a plan may be asked, short of running it.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
+pub enum PlanCommand {
+    /// Run the engine's own plan loader, and every registered check, over one
+    /// project.
+    Check(PlanCheckArgs),
+}
+
+/// `onepipeline plan check`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct PlanCheckArgs {
+    /// The qualified onetaskgraph project id the plan is read from,
+    /// `<source>:<native>`, exactly as `start` takes it.
+    pub project: String,
+    /// One executable to offer the loaded plan to, repeatable and run in the
+    /// order the flags are given.
+    ///
+    /// Resolved against the working directory this command was run from. The
+    /// plan crosses its stdin as one JSON document, with
+    /// `ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment; it answers on
+    /// stdout with `{"refusals": [...]}` and exit 0. Naming none runs the
+    /// loader alone.
+    #[arg(long = "check", value_name = "PATH")]
+    pub checks: Vec<PathBuf>,
+    /// Print one JSON object rather than a line per refusal.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `onepipeline start`.

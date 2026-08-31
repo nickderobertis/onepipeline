@@ -680,7 +680,6 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         .map(|pair| pair[1].as_str())
     {
         Some("headRefOid") => "headRefOid",
-        Some("isDraft") => "isDraft",
         Some("state,mergeCommit") => "state,mergeCommit",
         Some("statusCheckRollup") => "statusCheckRollup",
         // The rollup *and* the commit it was reported against, in one read.
@@ -689,6 +688,12 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // just pushed — which is how a stale verdict from an earlier head
         // decided a merge path and consumed a node's last retry.
         Some("headRefOid,statusCheckRollup") => "headRefOid,statusCheckRollup",
+        // Whether the host is holding this change back. `onevcs` 0.17.1 reads it
+        // on its own before it asks a change request to merge, and refuses a
+        // response that does not carry it rather than reading silence as "not a
+        // draft" — so a host that answered every other field would land work
+        // somebody had held.
+        Some("isDraft") => "isDraft",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(

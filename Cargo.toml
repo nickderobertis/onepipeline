@@ -65,6 +65,14 @@ resolver = "2"
 #   `tests/e2e/shipped.rs` reads each shipped persona through the sibling's own
 #   `Persona::parse` and layers it onto a base, so a file in the wrong spelling
 #   fails rather than reads differently.
+# - `oneagentgraph` 0.3.14 weighs a producer's provider-failure classification
+#   against the `oneharness` record for the same turn before it publishes a death,
+#   and narrows what a "terminal blocker" is in the shipped `engineer` bar. Below it
+#   a node was settled `failed` on a `rate_limit` whose own turn had exited `0` and
+#   billed — `src/engine.rs` settles a node dead off `member-died` and off nothing
+#   else — and a run that merely timed out was released as one nothing could clear.
+#   `tests/e2e/dispatch.rs` and `src/agentgraph.rs` hold the two halves against the
+#   linked library, so a pin below 0.3.14 fails rather than reads differently.
 # - `oneagentgraph` 0.3.15 publishes `oneagentgraph::control::note`, which hands
 #   one role-addressed note to a named member of a graph run and answers what that
 #   member's conversation did with it. It is the delivery half of the approved
@@ -211,6 +219,19 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# - `onevcs` 0.17.1 keeps a holders read from forgetting a session record nobody
+#   is left to answer for. `src/concurrency.rs` runs that read on every launch, so
+#   below it a continuation cut a fresh branch over work already committed on the
+#   preserved one, and the publication was refused as describing no change. The
+#   same release refuses `session close` on a session a live process is inside,
+#   which is why `lifecycle::end_session` stops the follow before it closes. A
+#   **requirement**: `^0.16` admits no 0.17.x, the breaking position pre-1.0.
+#   `lifecycle::a_continuation_skips_the_steps_the_preserved_branch_already_carries`
+#   and the stale-holder case in `tests/e2e/concurrency.rs` hold it.
+# - `onevcs` 0.18.0 carries the release-declaration schema at **version 3**, the
+#   number `release-targets.toml` states, and the `PublishRequest.draft` /
+#   `PublishOutcome::ChangeDraft` pair `src/vcs.rs` meets. Taken because
+#   `onevcs-testing` 0.5.2 requires exactly this `onevcs`, so the two move together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -271,15 +292,30 @@ resolver = "2"
 # pre-1.0 the minor is the breaking position, so `^0.6.2` admitted no 0.7.x and
 # the two copies could only be ended by moving the pin.
 #
-# 0.3.14 is not a floor: it reconciles a member death against the record beside
-# it — a correction under the stream this crate already relays, rather than an
-# answer it newly asks for. **0.3.15 is one**, and so is `onejudge` 0.7.0 beside
-# it: 0.3.15 routes a **role-addressed** note to whichever side of a member is
-# live and 0.7.0 is the vocabulary for it, and `src/note.rs` calls that seam and
-# re-exports those shapes. `Channel::Context` carries a note to a *node* and
-# never names a side, which is the seam the `note` op beside it exists to end.
-# The floors are recorded in the list at the top of this file and driven by
-# `tests/note/`, the `note` test binary declared below.
+# **0.3.14 and 0.3.15 are both floors**, for two separate things this crate reads.
+#
+# 0.3.14 weighs a producer's provider-failure classification against the
+# `oneharness` record for the same turn before it publishes a death. `src/engine.rs`
+# settles a node **dead** off `member-died` and off nothing else, and every dispatch
+# runs under a supervisor — `graphs/node-scope.yaml`'s worker is a `kind: onejudge`
+# member — so below it a node was settled `failed` on a `rate_limit` whose own turn
+# had exited `0` and billed, and the finished work went with it. The same release
+# narrows what a "terminal blocker" is in the shipped `engineer` bar, the role
+# `src/executor.rs` names on `members.worker`, so a run that merely timed out is no
+# longer released as one nothing could clear. `tests/e2e/dispatch.rs`'s
+# `a_classification_the_harness_record_contradicts_settles_rather_than_dies` and
+# `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past`
+# hold the two halves against the linked library.
+#
+# 0.3.15 routes a **role-addressed** note to whichever side of a member is live, and
+# the `onejudge` 0.7.0 it requires is the vocabulary that comes with it:
+# `src/note.rs` calls `oneagentgraph::control::note` and re-exports its shapes.
+# `Channel::Context` carries a note to a *node* and never names a side, which is the
+# seam that op exists to end. `tests/note/`, the `note` test binary declared below,
+# drives the delivery against the real sibling and a real two-party conversation.
+#
+# Both are recorded in the floors list at the top of this file.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -300,7 +336,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.16.3"
+onevcs = "0.18.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -341,7 +377,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.23"
+onevcs-testing = "0.5.2"
 
 [package]
 name = "onepipeline"
@@ -385,9 +421,15 @@ include = [
   "/examples/**",
 ]
 
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] `plan check`
+# is a verb on this binary, beside `start`, `validate` and `session` — not a new
+# command or client. The shipped shape is one library and one binary, which
+# `AGENTS.md` states and `docs/contract.md` states the verb against; a second
+# project for a subcommand would contradict both.
 [[bin]]
 name = "onepipeline"
 path = "src/main.rs"
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
 
 [lib]
 name = "onepipeline"
@@ -501,22 +543,3 @@ path = "tests/smoke/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
-
-# The draft surface `src/lifecycle.rs` settles a complete-but-draft node through —
-# `PublishRequest.draft`, `DraftReason`, `PublishOutcome::ChangeDraft`,
-# `RemoteHost::{ready_for_review, is_draft}` — has landed in `onevcs` and is in no
-# release, so this build links the commit. A **patch** rather than a git
-# requirement above, so the requirement still states the newest release the
-# registry carries and the lock still records what is linked, `source =
-# "git+…?rev=…"`. Both members come from the one revision: two copies of `onevcs`
-# is a compile error.
-#
-# `cargo publish` ignores `[patch]`, so this tree must not be published while it
-# stands; what holds that is the behaviour this change adds rather than a check —
-# the node holding this pin settles complete-but-draft and cannot land. Delete
-# this block and move the two requirements when the release carrying `6636404c` is
-# out; `deny.toml`'s `allow-git` entry names the same revision and goes with it,
-# which `tests/patch_pin.rs` is what insists on.
-[patch.crates-io]
-onevcs = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
-onevcs-testing = { git = "https://github.com/nickderobertis/onevcs", rev = "6636404c6aa3c4ebd6314e48de65ee1dd8ae629d" }
