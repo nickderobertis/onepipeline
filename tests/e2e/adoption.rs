@@ -113,7 +113,7 @@ fn two_that_release(engine: &str, other_alias: &str, other: &str) -> String {
 /// table.
 fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
     format!(
-        "{}\x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
+        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
          \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
          \x20   default_target: crate\n\
          \x20   targets:\n\
@@ -129,7 +129,7 @@ fn two_that_instruct(engine: &str, other_alias: &str, other: &str) -> String {
 /// Two releasing repositories that state the same instruction.
 fn two_that_share_instruction(engine: &str, other_alias: &str, other: &str) -> String {
     format!(
-        "{}\x20     adoption_instructions: \"{INSTRUCTION}\"\n\
+        "{}\x20     adoption_instructions: \"{SHARED_INSTRUCTION}\"\n\
          \x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
          \x20   default_target: crate\n\
          \x20   targets:\n\
