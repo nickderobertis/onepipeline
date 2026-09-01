@@ -413,6 +413,138 @@ fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_kn
     );
 }
 
+/// A settlement reaches a store whose answer **stopped** carrying a field this build
+/// never read.
+///
+/// The other half of the same change, and the behaviour it altered that growth does not
+/// cover. A project's `status` and `repositories`, a task's `status`, and the page's own
+/// `plan` were enumerated here only because a mirror of a deny-unknown response has to
+/// enumerate the whole of one — the projection reads none of them, and a plan is not what
+/// states any of them. Dropping them from the mirror also stopped *requiring* them, so an
+/// answer that no longer carries one is now read where it used to be refused. That is the
+/// release this journey serves the real store at, and the settlement still has to arrive
+/// with everything the plan does not declare still on the destination after it.
+#[test]
+fn a_settlement_reaches_a_store_whose_answer_dropped_a_field_this_build_never_read() {
+    let world = World::new("store-writeback-dropped");
+    let name = "writeback-dropped";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let identifier = crate::harness::project_id(name);
+    amend(
+        &world
+            .store()
+            .join("projects")
+            .join(format!("{identifier}.md")),
+        |front| {
+            front.insert("labels".to_owned(), json!(["planning"]));
+            front
+                .entry("metadata")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("a project's metadata is a mapping")
+                .insert("authored.note".to_owned(), json!("keep this value"));
+        },
+    );
+
+    // What the release this build *was* written against answers, read raw off the real
+    // binary rather than through the harness's own typed read: a journey that took away a
+    // field the store had already stopped carrying would move nothing and prove nothing.
+    let served = world
+        .store_cmd(&["project", "show", &project, "--json"])
+        .output()
+        .expect("the real onetaskgraph reads the project");
+    let served: Value =
+        serde_json::from_slice(&served.stdout).expect("project show answers in JSON");
+    for present in [&served["plan"], &served["items"][0]["item"]["status"]] {
+        assert!(
+            !present.is_null(),
+            "the store already answers without a field this journey takes away, so it \
+             cannot tell a build that requires one from a build that does not: {served}"
+        );
+    }
+
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    // Fields of the page and of the item, and none the projection or the plan reader
+    // consumes. The double refuses a name this answer does not carry, so a fixture that
+    // moved nothing here fails rather than passing as a plain delegated answer.
+    world.script(
+        "onetaskgraph.project-show.shrink",
+        "plan status repositories\n",
+    );
+    world.script("onetaskgraph.task-list.shrink", "plan status\n");
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    let before = world.store_project(&project)["items"][0]["item"].clone();
+    let labels_before = world.store_task_labels(&project);
+    let tasks_before = preserved_tasks(&world, &project);
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until_store("the settlement to reach the project", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+
+    // And this journey could have failed: the bytes the projection actually parsed are the
+    // ones the worker kept, and they are missing what a build that required them refuses.
+    let shown = world.run_json(name, "writeback-project-show.stdout");
+    let listed = world.run_json(name, "writeback-task-list.stdout");
+    for absent in [
+        &shown["plan"],
+        &shown["items"][0]["item"]["status"],
+        &shown["items"][0]["item"]["repositories"],
+        &listed["plan"],
+        &listed["items"][0]["item"]["status"],
+    ] {
+        assert!(
+            absent.is_null(),
+            "the answers this projection read still carry the fields this journey took \
+             away, so they could not have told a lenient read from a required one: \
+             {shown} {listed}"
+        );
+    }
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        !log.contains("onetaskgraph write-back failed"),
+        "a projection failed against a store that had only dropped a field it never \
+         read: {log}"
+    );
+
+    // And the absence changed nothing about what was written.
+    let after = world.store_project(&project)["items"][0]["item"].clone();
+    assert_eq!(
+        preserved(&after),
+        preserved(&before),
+        "settlement changed something the plan does not declare"
+    );
+    assert_eq!(
+        preserved_tasks(&world, &project),
+        tasks_before,
+        "settlement changed something a task's plan does not declare"
+    );
+    assert_eq!(
+        world.store_task_labels(&project),
+        labels_before,
+        "settlement changed a task's labels"
+    );
+    assert_ne!(
+        preserved(&after),
+        preserved(&without(&before, "authored.note")),
+        "the complement assertion cannot fail on a deleted field, so it proves nothing"
+    );
+}
+
 /// Tolerating a field this build does not know is not tolerating anything: an answer
 /// **missing** a field the projection reads is still refused, and the refusal names it.
 ///

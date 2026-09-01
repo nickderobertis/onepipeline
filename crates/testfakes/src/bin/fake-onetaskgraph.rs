@@ -46,17 +46,23 @@
 //!   project item is the real one — onetaskgraph 0.2.14 added it.
 //! * `onetaskgraph.<verb>.shrink` — the opposite, and the reason growth may not be
 //!   answered by reading nothing at all: the whitespace-separated field names an
-//!   item of that verb's answer **stopped** carrying. A field the projection reads
-//!   going missing is still a refusal, and this is what makes a journey able to
-//!   tell the two apart.
+//!   item or page of that verb's answer **stopped** carrying. A field the
+//!   projection reads going missing is still a refusal, and this is what makes a
+//!   journey able to tell the two apart.
 //! * `onetaskgraph.<verb>.retype` — the third shape, and the other half of that
 //!   same point: a JSON object naming fields an item of that verb's answer carries
 //!   at **another JSON type** — `{"labels": "planning, q3"}` for a list answered as
 //!   a string. Only a field the item already holds is moved, because a retype is
 //!   not an addition; `.grow` is where an addition goes.
+//!
+//! `.shrink` and `.retype` name fields of an answer that exists, so a name nothing
+//! in the answer carries is **refused** rather than applied to nothing: a fixture
+//! that moved nothing hands a journey the real store's own answer while it asserts
+//! against a moved one, which is the one thing these two exist to rule out.
 
 use onepipeline_testfakes as fake;
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -126,12 +132,15 @@ impl Release {
         }
     }
 
-    fn apply(&self, object: &mut Value) {
+    /// Move one object of the answer, recording every field this actually took away.
+    fn apply(&self, object: &mut Value, moved: &mut Moved) {
         let Some(object) = object.as_object_mut() else {
             return;
         };
         for field in &self.shrunk {
-            object.remove(field);
+            if object.remove(field).is_some() {
+                moved.shrunk.insert(field.clone());
+            }
         }
         for (key, value) in &self.grown {
             object.insert(key.clone(), value.clone());
@@ -143,50 +152,106 @@ impl Release {
     /// Only a field already held is moved: a retype says what an answer's own field is
     /// answered as, and one that added a field nothing carries would be `.grow` wearing
     /// another name.
-    fn retype(&self, object: &mut Value) {
+    fn retype(&self, object: &mut Value, moved: &mut Moved) {
         let Some(object) = object.as_object_mut() else {
             return;
         };
         for (key, value) in &self.retyped {
             if let Some(held) = object.get_mut(key) {
                 *held = value.clone();
+                moved.retyped.insert(key.clone());
             }
         }
     }
 
-    /// The delegated answer as this release would have written it.
+    /// The delegated answer as this release would have written it, or a refusal naming
+    /// what the scenario asked for and this answer does not carry.
+    ///
+    /// A `.shrink` or `.retype` member naming a field nothing in the answer holds is a
+    /// fixture nobody applied — a misspelling, or a field of another verb's shape — and
+    /// applying it silently would hand the journey the real store's own answer while it
+    /// asserted against a moved one. That is the one failure this program exists to rule
+    /// out, so a name that moved nothing is refused here rather than dropped. `.grow` has
+    /// no such rule: adding a member nothing carries is the whole of what it is for.
     ///
     /// An answer that is not one of this store's paged JSON responses is handed back
     /// byte for byte: there is no item shape to move, and rewriting it would put this
     /// program between a journey and bytes the real binary wrote.
-    fn answered(&self, stdout: &[u8]) -> Vec<u8> {
-        let Ok(Value::Object(mut response)) = serde_json::from_slice::<Value>(stdout) else {
-            return stdout.to_owned();
+    fn answered(&self, stdout: &[u8]) -> Result<Vec<u8>, String> {
+        let Ok(Value::Object(response)) = serde_json::from_slice::<Value>(stdout) else {
+            return Ok(stdout.to_owned());
         };
+        let mut moved = Moved::default();
+        let mut response = Value::Object(response);
         if let Some(items) = response.get_mut("items").and_then(Value::as_array_mut) {
             for entry in items {
-                self.apply(entry);
+                self.apply(entry, &mut moved);
                 if let Some(item) = entry.get_mut("item") {
-                    self.apply(item);
-                    self.retype(item);
+                    self.apply(item, &mut moved);
+                    self.retype(item, &mut moved);
                     if let Some(labels) = item.get_mut("labels").and_then(Value::as_array_mut) {
                         for label in labels {
-                            self.apply(label);
+                            self.apply(label, &mut moved);
                         }
                     }
                 }
             }
         }
-        for (key, value) in &self.grown {
-            response.insert(key.clone(), value.clone());
-        }
-        match serde_json::to_vec(&Value::Object(response)) {
-            Ok(mut written) => {
+        // The page's own members last, so a release that grew or dropped a field of the
+        // response rather than of an item — `plan`, `next` — is scriptable too.
+        self.apply(&mut response, &mut moved);
+        moved.against(self)?;
+        serde_json::to_vec(&response)
+            .map(|mut written| {
                 written.push(b'\n');
                 written
-            }
-            Err(_) => stdout.to_owned(),
+            })
+            .map_err(|error| format!("the moved answer could not be written: {error}"))
+    }
+}
+
+/// What moving one answer actually took away or retyped, against what was scripted.
+#[derive(Default)]
+struct Moved {
+    shrunk: BTreeSet<String>,
+    retyped: BTreeSet<String>,
+}
+
+impl Moved {
+    /// The refusal for a scripted field this answer never carried, naming every one.
+    fn against(&self, release: &Release) -> Result<(), String> {
+        let absent = |named: Vec<&String>| -> String {
+            named
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let unshrunk: Vec<&String> = release
+            .shrunk
+            .iter()
+            .filter(|field| !self.shrunk.contains(*field))
+            .collect();
+        if !unshrunk.is_empty() {
+            return Err(format!(
+                "`.shrink` names {}, which this answer does not carry, so the release it \
+                 scripts is not the one this answer was moved to",
+                absent(unshrunk)
+            ));
         }
+        let unretyped: Vec<&String> = release
+            .retyped
+            .keys()
+            .filter(|field| !self.retyped.contains(*field))
+            .collect();
+        if !unretyped.is_empty() {
+            return Err(format!(
+                "`.retype` names {}, which no item of this answer carries, so the release \
+                 it scripts is not the one this answer was moved to",
+                absent(unretyped)
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -200,6 +265,10 @@ fn delegate(dir: &Path, args: &[String], release: Option<&Release>) -> Option<Ex
         return Some(code(status.code()));
     };
     let answered = Command::new(binary).args(args).output().ok()?;
+    let moved = match release.answered(&answered.stdout) {
+        Ok(moved) => moved,
+        Err(why) => return Some(fake::refuse(&why)),
+    };
     // Flushed here rather than left to process exit, where a failure is silent: a caller
     // reading a truncated machine answer under the delegate's own success code is the one
     // ending a proxy must not have, so a stream this program could not hand on is a
@@ -209,7 +278,7 @@ fn delegate(dir: &Path, args: &[String], release: Option<&Release>) -> Option<Ex
         stderr.write_all(&answered.stderr)?;
         stderr.flush()?;
         let mut stdout = std::io::stdout();
-        stdout.write_all(&release.answered(&answered.stdout))?;
+        stdout.write_all(&moved)?;
         stdout.flush()
     })();
     if let Err(error) = handed {
