@@ -1165,9 +1165,16 @@ fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_int
     );
 }
 
-/// A stop arriving while the worker is waiting out an interval is honoured on the
-/// operator's own timescale, not the schedule's — and the worker it woke asks the
-/// destination nothing more.
+/// A stop asked for while a projection is waiting out a long interval answers on the
+/// operator's own timescale, not the schedule's, and the destination is asked nothing more
+/// for the run that was stopped.
+///
+/// What this cannot see is the worker's own half of it: `stop` signals the whole process
+/// tree, so the driver holding that worker is gone whatever the worker would have done
+/// with the request. That half — a worker leaving a wait it was part-way through, watched
+/// after its stop was asked for — is
+/// `writeback::tests::a_stop_reaches_a_worker_that_is_waiting_out_a_retry_interval`, which
+/// holds its process open across the stop precisely because a journey cannot.
 #[test]
 fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
     let run = "writeback-backoff-stop";

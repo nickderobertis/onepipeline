@@ -1093,14 +1093,18 @@ fn encoded(value: &str) -> String {
 mod tests {
     use super::{
         projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
-        Pending, ProjectedStatus, Snapshot, WorkerState, CHANGE_URL_KEY, LANDING_COMMIT_KEY,
-        LANDING_KEY,
+        Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
+        LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::graph::NodeStatus;
+    use crate::ledger::{LaunchRecord, RunPaths};
     use crate::plan::Node;
+    use crate::projection::RunState;
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn snapshot(status: NodeStatus) -> Snapshot {
         Fixture::new("queue").snapshot_with(|snapshot| {
@@ -1124,6 +1128,114 @@ mod tests {
 
         assert!(pending.queue(first.clone()));
         assert!(pending.latest.as_ref() == Some(&first));
+    }
+
+    /// A run's own end, arriving while the worker is waiting out a retry interval, is
+    /// honoured then rather than once the interval nobody is waiting for has run out.
+    ///
+    /// In this process on purpose. The stop an operator types signals the whole process
+    /// tree, so the journey beside this one — `a_stop_during_a_long_retry_interval_is_...`
+    /// in `tests/e2e/store.rs` — cannot tell a worker that left because it was told from
+    /// one the kill took with it whatever it was doing. Proving the worker's own half means
+    /// watching it *after* its stop is requested, and only something holding this process
+    /// open across that request can.
+    ///
+    /// What it watches is real: the thread [`Writeback::start`] spawns, the schedule that
+    /// thread keeps, and its own reference to the state it shares — which it lets go of
+    /// when, and only when, `worker` returns. The destination refuses at the same
+    /// subprocess boundary a rate-limited one does, because the binary the run names is not
+    /// installed, which is a refusal this test can arrange without a store at all.
+    #[test]
+    fn a_stop_reaches_a_worker_that_is_waiting_out_a_retry_interval() {
+        let dir = scratch("stop-mid-wait");
+        let paths = RunPaths {
+            run: "stopmidwait".to_owned(),
+            dir: dir.clone(),
+        };
+        let launch = a_launch(&paths);
+        let writeback =
+            Writeback::start(dir.join("onetaskgraph-nobody-installed"), &paths, &launch)
+                .expect("a write-back worker");
+        writeback.publish(&paths, &launch, &RunState::default());
+
+        // Four attempts in, the interval the worker is now waiting out is longer than every
+        // one before it — so the last one this test actually watched is a lower bound on
+        // what a stop would have to sit through if it were not honoured.
+        let waited = intervals_between_attempts(&paths, 4);
+        let outstanding = *waited.last().expect("an interval between attempts");
+        assert!(
+            outstanding >= Duration::from_secs(2),
+            "the streak is not deep enough for a stop to have anything to wait out: {waited:?}"
+        );
+
+        // The stop itself: what a run's end sends the worker, and nothing else.
+        let shared = Arc::clone(&writeback.pending);
+        let asked = Instant::now();
+        drop(writeback);
+        while Arc::strong_count(&shared) > 1 {
+            assert!(
+                asked.elapsed() < outstanding,
+                "the worker was still running {:?} after its stop was requested, with an \
+                 interval of at least {outstanding:?} outstanding",
+                asked.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !attempt_capture(&paths).exists(),
+            "the worker asked the destination again on its way out"
+        );
+    }
+
+    /// The wall-clock intervals between the worker's next `count` attempts.
+    ///
+    /// An attempt is counted where the destination's side of the boundary is: the capture
+    /// file the worker creates for the store command it is about to run. This takes each
+    /// one away again, so the next one appearing is the next attempt rather than the same
+    /// file read twice — which a modification time this filesystem may round would not tell
+    /// apart.
+    fn intervals_between_attempts(paths: &RunPaths, count: usize) -> Vec<Duration> {
+        let capture = attempt_capture(paths);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut at: Vec<Instant> = Vec::new();
+        while at.len() < count {
+            assert!(
+                Instant::now() < deadline,
+                "the worker made {} attempts, not the {count} this test reads its intervals \
+                 off",
+                at.len()
+            );
+            if capture.exists() {
+                at.push(Instant::now());
+                std::fs::remove_file(&capture).expect("the capture file is taken away");
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        at.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    /// Where the worker captures what its first store command said, which it recreates for
+    /// every attempt.
+    fn attempt_capture(paths: &RunPaths) -> PathBuf {
+        paths.dir.join("writeback-project-show.stderr")
+    }
+
+    /// A launch record naming a project to project into, and nothing else this worker reads.
+    fn a_launch(paths: &RunPaths) -> LaunchRecord {
+        serde_json::from_value(json!({
+            "run_id": paths.run,
+            "project": "plans:stop-mid-wait",
+            "dir": paths.dir,
+            "launcher": "test",
+            "session": "test",
+            "pid": crate::sys::pid(),
+            "host": "test",
+            "started": "linux-proc-stat:1",
+            "started_at": "2026-09-01T00:00:00Z",
+            "heartbeat_interval": 1_800,
+        }))
+        .expect("a launch record")
     }
 
     /// Every word this projection writes, in the one arrangement that states them:
