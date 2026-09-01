@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4](https://github.com/nickderobertis/onepipeline/compare/v0.18.3...v0.18.4) - 2026-09-01
+
+### Fixed
+
+- *(writeback)* back off a failing plan-store projection instead of retrying it four times a second ([#176](https://github.com/nickderobertis/onepipeline/pull/176))
+
 ## [0.18.3](https://github.com/nickderobertis/onepipeline/compare/v0.18.2...v0.18.3) - 2026-08-31
 
 ### Added
