@@ -58,6 +58,25 @@ Rules:
   retained report is a rendering rather than a promise, and the segment
   sanitiser behind `report_for` stays private so nobody restates it.
 
+The loop **waits**; it does not poll. A pass runs when a dispatch thread says
+something, when the planner's channel moves, when something outside this run
+moves — an upstream ledger, an answered release probe, a failed projection — or
+when the longest interval it may go without a pass comes due, and on nothing
+else. A wake that finds none of those goes straight back to waiting, so a
+converged run runs no passes at all. Restoring a per-pass read of whole state —
+`state.statuses()`, `writeback.publish`, `upstreams.resolve`,
+`projection::fold` — puts back the sink this replaced: a driver was measured at
+01:39:24 of CPU over 9,007 seconds on a run with one node in flight.
+
+`ONEPIPELINE_LOOP_STATS` is how that is *checked* rather than claimed. Set to
+anything non-empty, a driver writes `loop-stats.json` into the run's own
+directory: passes, statuses derived, boards published, upstream ledgers read,
+releases asked about, and bytes read out of a run store. `src/loopstats.rs` owns
+it and `tests/e2e/loopcost.rs` is what reads it. The counters are always
+incremented — a relaxed atomic beside a subprocess spawn costs nothing, and one
+that only existed under a flag would be one nothing had proven counts the real
+path.
+
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 
 - `start_ready` runs **before** the terminal check. A ready human action derives
@@ -68,6 +87,9 @@ Two ordering rules in `engine.rs` are load-bearing and easy to undo:
   record. A driver that wrote its pid there and then lost the race for the lock
   would leave the record naming a process that is gone, and every reader would
   call the run undriven while the driver that won was still working.
+- `holds_now` runs **after** `start_ready`, so what a concurrency hold names as
+  ahead of it is what is really in flight and a node the pass just dispatched is
+  not reported as held by the run it just joined.
 
 ## The siblings
 

@@ -2875,6 +2875,8 @@ Driven end to end by `tests/e2e/holds.rs`, against real run stores: a node behin
 several dependencies finishing one at a time and naming the shrinking set, a node
 the concurrency holds for many passes reported once per transition rather than
 once per pass, a node held two ways at once losing one reason and keeping the
-other, a decision hold and a release hold each naming their reference without
-copying the record that owns it, and the two nodes nothing is holding — a
-dispatchable one and a human action — carrying no record at all.
+other, a decision hold naming its reference without copying the record that owns
+it, and the two nodes nothing is holding — a dispatchable one and a human action —
+carrying no record at all. The release hold is driven by
+`adoption::a_published_node_is_held_until_the_release_answers_and_by_nothing_else`,
+beside the real probe and the real release-targets document that produce one.

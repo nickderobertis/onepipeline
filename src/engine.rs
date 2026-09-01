@@ -902,11 +902,11 @@ fn converge(
             }
         }
 
-        // Nothing more to do until something happens. What the wait is *for* is
-        // stated here rather than inside it: the two
-        // paced reads, and the earliest stall threshold. Each is `Duration::MAX`
-        // where this run can never need it — a graph naming no cross-DAG edge, a
-        // run with no release business, nothing in flight — so a converged driver
+        // Nothing more to do until something happens. The longest this loop may go
+        // without a pass is stated here rather than inside the wait: the two paced
+        // reads, and the earliest stall threshold. Each is `Duration::MAX` where
+        // this run can never need it — a graph naming no cross-DAG edge, a run
+        // with no release business, nothing in flight — so a converged driver
         // waits on the channel alone.
         let next = [
             if has_upstreams {
@@ -926,10 +926,11 @@ fn converge(
         // the closure's borrows end with the wait, before the messages it hands
         // back are applied.
         let arrived = {
-            // What the loop can be woken by that nothing here writes: an upstream
-            // ledger that grew, and a release probe that answered. Both are read
-            // the cheap way — a `stat`, and a queue this thread already owns the
-            // other end of — so a wake that finds neither costs two syscalls.
+            // What the loop can be woken by that nothing here writes: a release
+            // probe that answered, a projection that failed, and an upstream
+            // ledger that grew. Each is read the cheap way — two queues this
+            // thread already owns the other end of, and a `stat` — so a wake that
+            // finds none of them goes straight back to waiting.
             let mut outside = || {
                 if releases.answers_arrived() {
                     return true;
