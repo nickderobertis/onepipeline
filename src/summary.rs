@@ -579,13 +579,27 @@ impl Maintainer {
     /// Called after the record has reached the file, so a read of the store —
     /// the answer to a record this state cannot place — reads a store that
     /// already holds it.
-    pub(crate) fn appended(&mut self, event: &Envelope, bytes: u64) {
+    ///
+    /// `healed` is what the same append cut off the file *before* writing that
+    /// record — a fragment a dead writer left, which
+    /// [`ledger::append_line_healed`] reports. It is subtracted first, because
+    /// this state's count is a byte offset into the store and a heal moves every
+    /// boundary past it: counting on regardless would leave the offset inside a
+    /// record, and the tail read from there drops the record it starts in and
+    /// then stamps the document **fresh** — a run recorded as never stopped, on
+    /// a store whose last record says it was. Where the arithmetic does not come
+    /// out exactly — a fragment this state never counted, or an appender that
+    /// landed across the heal — the store is read again rather than folded from
+    /// an offset nothing can place. That is a whole read on the rarest path
+    /// there is, and the alternative is a wrong row served as a current one.
+    pub(crate) fn appended(&mut self, event: &Envelope, healed: u64, bytes: u64) {
         let len = journal_stamp(&self.paths).0;
+        self.accounted = self.accounted.saturating_sub(healed);
         if len == self.accounted + bytes {
             // Ours alone: the file grew by exactly this record, so what is folded
             // here and what the file holds are the same store.
             self.fold(event, bytes);
-        } else if len > self.accounted {
+        } else if healed == 0 && len > self.accounted {
             // Somebody else appended beside us, which is the ordinary shape of a
             // run being driven: the relay thread writes the observer's envelopes
             // while the engine thread writes the graph's. What the store grew by
@@ -595,9 +609,10 @@ impl Maintainer {
             // to remove, reintroduced at the writer.
             self.catch_up();
         } else {
-            // The file is shorter than what this state accounted for: a tail was
-            // healed off it, or it was replaced. Nothing here can be placed
-            // against it.
+            // The file is not the file this state was holding: it is shorter than
+            // what was accounted for — replaced, or healed of a fragment nobody
+            // here counted — or a heal has moved the boundaries a tail read would
+            // start from. Nothing here can be placed against it.
             *self = Self::of(&self.paths);
         }
         self.write();

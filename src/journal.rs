@@ -117,14 +117,16 @@ impl Journal {
         // trusting a length another appender may have moved. See
         // `summary::Stamp`.
         let bytes = line.len() as u64 + 1;
-        ledger::append_line(&self.paths.journal(), &line)?;
+        // And what the same call cut off in front of it, which the summary's own
+        // count is a byte offset past: `ledger::append_line_healed`.
+        let healed = ledger::append_line_healed(&self.paths.journal(), &line)?;
         // After the record has reached the file, so the summary never describes a
         // store that does not hold what it describes — and so a read of the
         // store, which is the answer to a record this state cannot place, reads
         // a store that already holds it. An append that failed took its own
         // bytes back off the file and returned above, with no summary written
         // for them.
-        self.summary.appended(envelope, bytes);
+        self.summary.appended(envelope, healed, bytes);
         Ok(())
     }
 }

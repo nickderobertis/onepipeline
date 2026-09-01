@@ -973,11 +973,34 @@ pub struct Record {
 // output a caller chooses. A name carrying both would be describing the two failures this
 // function exists to survive rather than the operation every caller asks for.
 pub fn append_line(path: &Path, line: &str) -> Result<()> {
+    append_line_healed(path, line).map(|_| ())
+}
+
+/// [`append_line`], answering **how many bytes the heal in front of it
+/// discarded**.
+///
+/// Zero where there was no fragment, which is every append but the one after a
+/// writer died mid-record.
+///
+/// The journal writer is the one caller that has to know. It keeps the run's
+/// summary current by *counting*: the document is stamped with the bytes of the
+/// store it has accounted for, and every append moves that count up by the
+/// record it just wrote. A heal moves it **down**, by bytes the record does not
+/// replace — and a writer that did not hear about it goes on counting from an
+/// offset the file no longer has a record boundary at, which is
+/// [`read_records_from`]'s one precondition. Every other caller appends to a
+/// file nothing accounts for and takes the shorter form above.
+///
+/// An append that failed still reports nothing: the error is what happened, and
+/// the heal in front of it is recorded in the loss log either way. What the
+/// writer does then is leave its count alone, which reads as stale — a fold,
+/// never a wrong answer.
+pub fn append_line_healed(path: &Path, line: &str) -> Result<u64> {
     let (healed, appended) = append_line_locked(path, line);
-    if let Some(torn) = healed {
-        report_torn_tail(path, &torn);
+    if let Some(torn) = &healed {
+        report_torn_tail(path, torn);
     }
-    appended
+    appended.map(|()| healed.map_or(0, |torn| torn.bytes))
 }
 
 /// The append itself: what it healed, and whether it wrote.

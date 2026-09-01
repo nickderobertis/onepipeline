@@ -40,13 +40,13 @@ fn paths_of(world: &World, run: &str) -> RunPaths {
 /// Take a run's summary document away, leaving the run recorded by a build that
 /// never wrote one.
 ///
-/// llmlint: ignore[tests_mirror_real_usage] no verb of this build removes the document its
-/// journal writer maintains, and there is no interface that would: the run recorded by a
-/// build predating it is the state under test, and taking the document off a run this
-/// build's own CLI recorded is the only way to hold one. Every claim either side of this
-/// is read through the public reader over the store the real binary wrote.
+/// The run recorded by a build predating the document is the state under test, and
+/// taking it off a run this build's own CLI recorded is the only way to hold one.
 fn recorded_before_the_document(paths: &RunPaths) {
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb removes the document its
+    // journal writer maintains, and there is no interface that would.
     std::fs::remove_file(paths.summary()).expect("the document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// A run driven through the CLI keeps a summary beside its result, and the row
@@ -252,6 +252,9 @@ fn a_summary_this_build_cannot_read_folds_rather_than_taking_the_run_away() {
 }
 
 /// Copy a run root, as an operator keeping one aside does.
+// llmlint: ignore-block[tests_mirror_real_usage] copying a run root is something an
+// operator does to a directory on disk, and there is no verb for it; what is copied is a
+// directory this build's own CLI wrote.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     std::fs::create_dir_all(to).expect("the copy's directory");
     for entry in std::fs::read_dir(from).expect("the run root") {
@@ -264,6 +267,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
         }
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A summary the store has since moved past is **refolded**, not served.
 ///
@@ -327,6 +331,121 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
         "a document written against a store that has since been rewritten to its \
          own length was served"
     );
+}
+
+/// A record appended over a **torn tail** leaves the summary current, not stale.
+///
+/// The one append that does two things: healing the fragment a dead writer left
+/// and then writing its own record. The writer keeps the document by counting
+/// bytes, and the heal moves every boundary past its count — so a writer that
+/// only heard about the record it added would go on counting from an offset the
+/// store no longer has a boundary at, fold the tail from inside a record, drop
+/// the record it started in, and stamp the document current over the row it just
+/// lost. The run below is one a `stop` really landed on, listed as never
+/// stopped.
+///
+/// What is asserted is the whole of the accounting: the document's stamp is the
+/// healed store's own length and modification time, the row carries the record
+/// that healed it, a reader serves that row without opening the store at all,
+/// and the fold of the store says the same thing.
+#[test]
+fn a_record_that_heals_a_torn_tail_leaves_the_summary_current() {
+    let world = World::new("summary-heal");
+    let run = settled(&world, "healed", vec![agent("build", &[])]);
+    let paths = paths_of(&world, &run);
+    let before = RunSummary::of(&paths).expect("the run reads");
+    assert!(!before.stop_recorded);
+
+    // The state the heal exists for, on disk as the dead writer left it: bytes
+    // with no terminator after them. Shorter than the record that lands on top
+    // of it, which is what puts the writer's count *inside* that record rather
+    // than behind the store.
+    let fragment = leave_a_fragment(&paths);
+
+    // The next record, appended through the run's own journal writer by the
+    // binary that owns it — which is the append that heals.
+    world
+        .run(&["stop", &run, "--force"])
+        .exited(0)
+        .out_has(r#""stopped":true"#)
+        .err_has("record fragment");
+    let store = std::fs::read_to_string(paths.journal()).expect("the store reads");
+    assert!(
+        !store.contains(&fragment),
+        "the fragment is still in the store, so nothing healed: {store}"
+    );
+
+    // The document the writer left, read as the file it is: a reader that folded
+    // would answer this correctly whatever the writer counted, and what is under
+    // test is the writer's count.
+    let document: RunSummary = serde_json::from_str(
+        &std::fs::read_to_string(paths.summary()).expect("the document reads"),
+    )
+    .expect("the document the writer maintained");
+    assert!(
+        document.stop_recorded,
+        "the record that healed the store is not in the row the writer maintained \
+         across the heal: {document:?}"
+    );
+    assert_eq!(document.event_count, before.event_count + 1);
+    assert_eq!(
+        document.journal_len,
+        std::fs::metadata(paths.journal()).expect("a store").len(),
+        "the document is stamped at a length the healed store does not have"
+    );
+    assert_eq!(document.journal_mtime_ms, journal_mtime_ms(&paths));
+
+    // And a reader serves it: the stamp is the store's own, so nothing sends the
+    // read to the journal — which is measured the way the bounded read is, over a
+    // store no byte of which can be opened.
+    #[cfg(unix)]
+    {
+        let instrument = Unopenable::over(&paths);
+        let opened = std::fs::File::open(paths.journal());
+        assert!(
+            matches!(&opened, Err(refusal) if refusal.kind() == std::io::ErrorKind::PermissionDenied),
+            "this process opened a store carrying no read permission, so nothing below is \
+             measured: {opened:?}"
+        );
+        assert_eq!(
+            RunSummary::of(&paths).expect(
+                "the run reads: serving the healed run's row \
+                 opened a store no byte of which can be read"
+            ),
+            document,
+            "the row served after the heal is not the row the writer maintained"
+        );
+        drop(instrument);
+    }
+
+    // And what the writer counted is what the store says: the fold of the healed
+    // store is the same row.
+    recorded_before_the_document(&paths);
+    assert_eq!(
+        RunSummary::of(&paths).expect("the run folds"),
+        document,
+        "the row the writer maintained across the heal is not the row the store folds to"
+    );
+}
+
+/// Leave a fragment on a run's store, as a writer killed between the two halves
+/// of a record does.
+///
+/// No interface leaves one, and none may: an append this build makes takes its own
+/// bytes back off the file when it fails, so the state the healing exists for is one
+/// *another* writer left — an older build, or a process the host killed mid-record.
+fn leave_a_fragment(paths: &RunPaths) -> String {
+    let fragment = format!(r#"{{"dead-writer":"{}""#, "0".repeat(20));
+    // llmlint: ignore-block[tests_mirror_real_usage] a journey that waited for this
+    // binary to leave a fragment would be waiting for the defect to come back; the
+    // record that lands on these bytes is appended by the compiled binary.
+    let mut store = std::fs::OpenOptions::new()
+        .append(true)
+        .open(paths.journal())
+        .expect("the store");
+    std::io::Write::write_all(&mut store, fragment.as_bytes()).expect("a fragment");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    fragment
 }
 
 /// A listing answers **most recently written first**, and says where a run that
@@ -572,7 +691,6 @@ impl Drop for Unopenable {
 
 /// A run's store's modification time as a summary stamps it: milliseconds since
 /// the epoch.
-#[cfg(unix)]
 fn journal_mtime_ms(paths: &RunPaths) -> u64 {
     std::fs::metadata(paths.journal())
         .and_then(|about| about.modified())
