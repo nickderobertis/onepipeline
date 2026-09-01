@@ -107,6 +107,27 @@ fn operations(world: &World, run: &str) -> Vec<Value> {
         .collect()
 }
 
+/// One node's reserved metadata, as the plan store holds it after the run has
+/// projected its graph.
+///
+/// The one place the *replayed* graph reaches a reader: the writeback publishes
+/// from the state this crate folds out of the journal, so a target a live edit
+/// moved and replay did not is a target the board disagrees with the run about.
+/// `None` is a node the board does not hold at all, which is never the same
+/// answer as one it holds with no targets.
+fn board_metadata(world: &World, run: &str, node: &str) -> Option<Value> {
+    world
+        .store_tasks(&format!("plans:{}", crate::harness::project_id(run)))
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .map(|task| task["item"]["metadata"].clone())
+}
+
+/// The targets one node consumes its deps at, as the board holds them.
+fn consumes_on_the_board(world: &World, run: &str, node: &str) -> Option<Value> {
+    board_metadata(world, run, node).map(|metadata| metadata["onepipeline.consumes"].clone())
+}
+
 #[test]
 fn add_reparent_and_context_are_applied_and_reported_applied() {
     let world = World::new("edit-apply");
@@ -748,6 +769,13 @@ fn a_node_another_node_consumes_is_retried_and_its_target_follows_the_edge() {
         "the superseded node's edge was not recorded as removed"
     );
 
+    // And the graph the run projects out of that record says the same, which is
+    // where a reader meets it: the rekey survived the round trip through the
+    // journal rather than living only in the reconciler's own copy.
+    world.until_store("the rekeyed target to reach the project", |world| {
+        consumes_on_the_board(world, &run, "adopt") == Some(json!({"engine-2": "crate"}))
+    });
+
     world.release("engine.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
@@ -953,6 +981,14 @@ fn an_add_and_a_reparent_carry_the_targets_of_the_edges_they_move() {
         "the discarded dep's edge was not recorded as removed"
     );
 
+    // The graph the run projects out of those records agrees: the discarded
+    // dep's target is gone and the survivor's is untouched, and the added node
+    // carries what it stated.
+    world.until_store("both edits to reach the project", |world| {
+        consumes_on_the_board(world, &run, "ship") == Some(json!({"packager": "wheel"}))
+            && consumes_on_the_board(world, &run, "extra") == Some(json!({"packager": "crate"}))
+    });
+
     world.release("slow.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
@@ -993,6 +1029,14 @@ fn a_detaching_drop_takes_its_dependents_target_with_the_edge() {
         added_edges(&world, &run).is_empty(),
         "a detaching drop re-added an edge, and with it a target"
     );
+
+    // And the projected graph holds the dependent with no target at all — which
+    // is a different answer from not holding it, so the board is asked for the
+    // node first and for its targets second.
+    world.until_store("the detach to reach the project", |world| {
+        board_metadata(world, &run, "dependent")
+            .is_some_and(|metadata| metadata["onepipeline.consumes"].is_null())
+    });
 
     world.release("slow.go");
     world.release("victim.go");
