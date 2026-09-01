@@ -1438,38 +1438,33 @@ fn unplaceable_now() -> String {
     format!("{}+00:00", fake::now().trim_end_matches('Z'))
 }
 
+/// One record a scenario asks this producer to publish out of its own order.
+///
+/// Both fields are the scenario's to choose because both are what a producer
+/// chooses: the pair is the whole of what a consumer has to place a record by. A
+/// closed shape, like every other scenario this double reads — a misspelled key
+/// is a scenario that would otherwise act out something it did not ask for.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutOfOrder {
+    /// Milliseconds from now to stamp it, behind where it is negative.
+    ms: i64,
+    /// The sequence number it claims on this producer's stream.
+    seq: u64,
+}
+
 /// The records a scenario asks this producer to publish out of its own order.
 ///
-/// `<key>.out-of-order` is a JSON array of `{"ms": <signed offset>, "seq": <n>}`:
-/// one envelope each, stamped that many milliseconds from now and claiming that
-/// sequence number. Both are the scenario's to choose because both are what a
-/// producer chooses — the pair is the whole of what a consumer has to place a
-/// record by.
-fn out_of_order(dir: &std::path::Path, key: &str) -> Vec<(i64, u64)> {
+/// `<key>.out-of-order` is a JSON array of [`OutOfOrder`], one envelope each.
+fn out_of_order(dir: &std::path::Path, key: &str) -> Vec<OutOfOrder> {
     let Some(script) = fake::node_script(dir, key, "out-of-order") else {
         return Vec::new();
     };
-    let records: Vec<serde_json::Value> = serde_json::from_str(&script).unwrap_or_else(|error| {
+    serde_json::from_str(&script).unwrap_or_else(|error| {
         fake::fail(&format!(
             "an out-of-order script holds a JSON array of {{ms, seq}}: {error}"
         ))
-    });
-    records
-        .iter()
-        .map(|record| {
-            let ms = record["ms"].as_i64().unwrap_or_else(|| {
-                fake::fail(&format!(
-                    "an out-of-order record names `ms`, a signed millisecond offset: {record}"
-                ))
-            });
-            let seq = record["seq"].as_u64().unwrap_or_else(|| {
-                fake::fail(&format!(
-                    "an out-of-order record names `seq`, the sequence it claims: {record}"
-                ))
-            });
-            (ms, seq)
-        })
-        .collect()
+    })
 }
 
 /// The turn is over, so nothing can be delivered into it any more.
@@ -1709,13 +1704,14 @@ fn emit(
     // written. A consumer folding this stream one record at a time has to place
     // each arrival somewhere or read the stream again, and this is what asks it
     // to.
-    for (ms, seq) in out_of_order(dir, key) {
+    for record in out_of_order(dir, key) {
+        let (ms, seq) = (record.ms, record.seq);
         let kind = oneagentgraph::event::EventKind::TurnActivity;
         println!(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": fake::ahead_by(ms),
+                "ts": fake::moved_by(ms),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
