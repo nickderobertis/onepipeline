@@ -72,23 +72,33 @@ struct Release {
 }
 
 impl Release {
-    /// What a journey scripted for one verb, or `None` where it scripted neither half.
-    fn scripted(dir: &Path, name: &str) -> Option<Self> {
-        let grown = std::fs::read_to_string(dir.join(format!("{name}.grow")))
-            .ok()
-            .map(|scripted| match serde_json::from_str(&scripted) {
-                Ok(Value::Object(members)) => members,
-                _ => panic!(
-                    "`{name}.grow` states the members a later release added, as a JSON object"
-                ),
-            });
+    /// What a journey scripted for one verb, `None` where it scripted neither half, and a
+    /// refusal to say where it scripted one this program cannot read.
+    ///
+    /// A scenario file is external input like any other, so a `.grow` that is not a JSON
+    /// object is reported as the scripting mistake it is rather than crashed on: a panic
+    /// here would reach the journey as a store that died, which is a different fixture
+    /// from the one it asked for.
+    fn scripted(dir: &Path, name: &str) -> Result<Option<Self>, String> {
+        let grown = match std::fs::read_to_string(dir.join(format!("{name}.grow"))) {
+            Err(_) => None,
+            Ok(scripted) => match serde_json::from_str(&scripted) {
+                Ok(Value::Object(members)) => Some(members),
+                _ => {
+                    return Err(format!(
+                        "`{name}.grow` states the members a later release added to this \
+                         answer, as a JSON object"
+                    ))
+                }
+            },
+        };
         let shrunk = std::fs::read_to_string(dir.join(format!("{name}.shrink")))
             .ok()
             .map(|scripted| scripted.split_whitespace().map(ToOwned::to_owned).collect());
-        (grown.is_some() || shrunk.is_some()).then(|| Self {
+        Ok((grown.is_some() || shrunk.is_some()).then(|| Self {
             grown: grown.unwrap_or_default(),
             shrunk: shrunk.unwrap_or_default(),
-        })
+        }))
     }
 
     fn apply(&self, object: &mut Value) {
@@ -148,10 +158,23 @@ fn delegate(dir: &Path, args: &[String], release: Option<&Release>) -> Option<Ex
         return Some(code(status.code()));
     };
     let answered = Command::new(binary).args(args).output().ok()?;
-    std::io::stderr().write_all(&answered.stderr).ok()?;
-    std::io::stdout()
-        .write_all(&release.answered(&answered.stdout))
-        .ok()?;
+    // Flushed here rather than left to process exit, where a failure is silent: a caller
+    // reading a truncated machine answer under the delegate's own success code is the one
+    // ending a proxy must not have, so a stream this program could not hand on is a
+    // refusal instead.
+    let handed = (|| -> std::io::Result<()> {
+        let mut stderr = std::io::stderr();
+        stderr.write_all(&answered.stderr)?;
+        stderr.flush()?;
+        let mut stdout = std::io::stdout();
+        stdout.write_all(&release.answered(&answered.stdout))?;
+        stdout.flush()
+    })();
+    if let Err(error) = handed {
+        return Some(fake::refuse(&format!(
+            "the delegated answer could not be handed on: {error}"
+        )));
+    }
     Some(code(answered.status.code()))
 }
 
@@ -215,8 +238,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         None if dir.join("onetaskgraph.delegate").is_file() => {
-            delegate(&dir, &args, Release::scripted(&dir, &name).as_ref())
-                .unwrap_or_else(|| fake::refuse("the scripted onetaskgraph delegate could not run"))
+            match Release::scripted(&dir, &name) {
+                Err(why) => fake::refuse(&why),
+                Ok(release) => delegate(&dir, &args, release.as_ref()).unwrap_or_else(|| {
+                    fake::refuse("the scripted onetaskgraph delegate could not run")
+                }),
+            }
         }
         None => fake::refuse(&format!(
             "no scenario scripts `{name}`, so this double has no store to answer for"

@@ -252,6 +252,16 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these two
+// need is the crate under test: each drives the compiled `onepipeline` binary against its
+// own write-back worker, reading a real store through the real installed `onetaskgraph`,
+// so a project of their own would declare the same dependency and skip nothing. Every e2e
+// journey in this repository lives in this one binary for that reason — the block at
+// `a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned` records
+// the same finding on the same grounds — and the single project that was split out,
+// `onepipeline-note-journeys`, was split for a test binary it needs rather than a narrower
+// edge. Splitting these two would invent a per-topic test project, which is a change to
+// how this repository's graph and gate are shaped rather than to what this change does.
 /// A settlement reaches a store at a release this build was **not** written against.
 ///
 /// `onetaskgraph` grows its own machine answers in patch releases — `location` arrived on
@@ -481,6 +491,7 @@ fn a_store_answer_missing_a_field_the_projection_reads_is_still_refused_by_name(
     let result = world.run_json(name, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A destination that **refuses** a write whose labels differ from the ones it holds still
 /// accepts this projection, run after run.
