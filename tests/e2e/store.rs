@@ -1118,14 +1118,15 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
     );
 }
 
-/// The one attempt a closing run has left is made at its closeout, rather than on a
-/// schedule written for a run that is still going.
+/// A closing run's terminal snapshot is projected inside its closeout window, rather than
+/// on a schedule written for a run that is still going.
 ///
 /// The spacing exists to stop a refusing destination being asked again and again while a
-/// run lasts. A run that is ending asks once more, inside a window bounded whatever the
-/// store does — and a terminal snapshot left to sit out a minute-long interval inside a
-/// two-second window is a board that stays wrong for good, which is the record an operator
-/// reads to see what became of their plan.
+/// run lasts, and a run that is ending is the opposite case: the window it has left is
+/// bounded whatever the store does, so the schedule is suspended inside it. A terminal
+/// snapshot left to sit out a minute-long interval inside a two-second window is a board
+/// that stays wrong for good, which is the record an operator reads to see what became of
+/// their plan.
 #[test]
 fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_interval() {
     let run = "writeback-backoff-closeout";
