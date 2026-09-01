@@ -428,13 +428,11 @@ impl Listing {
 /// recorded.
 #[derive(Debug, Default, Clone)]
 struct Folded {
-    /// The store's projection.
     state: RunState,
-    /// Its clock and usage.
     aggregate: telemetry::Aggregate,
-    /// How many records it holds.
     events: u64,
-    /// The kind of the record the merge order ends with.
+    /// The kind of the record the **merge order** ends with, which for a store
+    /// folded in that order is whatever was taken last.
     last_event_kind: Option<String>,
 }
 
@@ -479,17 +477,23 @@ impl Folded {
 /// onto a copy, which is bounded by one instant's records rather than by the
 /// run's length.
 ///
-/// A record stamped *behind* the newest instant does not belong anywhere this
-/// can place it, and the answer there is to read the store again. That is a real
-/// case — a producer's clock is not this one's — and a rare one, which is what
-/// makes reading again affordable.
+/// Two arrivals do not belong anywhere this can place them, and the answer to
+/// both is to read the store again. One is a record stamped *behind* the newest
+/// instant — a producer's clock is not this one's. The other is a record whose
+/// stream has already had a **higher** `seq` folded and settled: a stream is
+/// merged in its own `seq` order whatever its stamps say, so a producer that
+/// publishes `seq` 10 stamped before its `seq` 5 puts the later record first in
+/// the merge and there is no instant this can hold it at. Both are real — the
+/// second is what an `oneharness-session` record does, published out of band and
+/// stamped when its session opened — and both are rare, which is what makes
+/// reading again affordable.
 #[derive(Debug)]
 pub(crate) struct Maintainer {
-    /// Where the run's state lives.
     paths: RunPaths,
-    /// The fold of every record stamped before [`open_ts`](Self::open_ts).
+    /// The fold of every record stamped **before** [`open_ts`](Self::open_ts).
     settled: Folded,
-    /// The records stamped **at** it, in the order they arrived.
+    /// The records stamped **at** it, unfolded, so one arriving beside them can
+    /// still sort in front of them.
     open: Vec<Envelope>,
     /// The newest instant this store has recorded. Empty for a store with
     /// nothing in it, which every stamp is past.
@@ -497,6 +501,11 @@ pub(crate) struct Maintainer {
     /// How many bytes of the journal this state has accounted for. See
     /// [`Stamp`].
     accounted: u64,
+    /// The highest `seq` each stream has **settled**, which is what an arriving
+    /// record of that stream has to be past: the merge orders a stream by its own
+    /// `seq` and by nothing else, so a lower one arriving now belongs in front of
+    /// a record this state has already frozen.
+    settled_seq: BTreeMap<String, u64>,
 }
 
 impl Maintainer {
@@ -533,8 +542,10 @@ impl Maintainer {
             .rposition(|event| event.ts != open_ts)
             .map_or(0, |before| before + 1);
         let mut settled = Folded::new();
+        let mut settled_seq = BTreeMap::new();
         for event in &events[..opened] {
             settled.take(paths, event);
+            seq_reached(&mut settled_seq, event);
         }
         Self {
             paths: paths.clone(),
@@ -542,6 +553,7 @@ impl Maintainer {
             open: events[opened..].to_vec(),
             open_ts,
             accounted: before.min(after),
+            settled_seq,
         }
     }
 
@@ -598,18 +610,32 @@ impl Maintainer {
     /// nothing left to fold and must stop rather than fold the same records
     /// twice.
     fn fold(&mut self, event: &Envelope, bytes: u64) -> Rebuilt {
-        match event.ts.cmp(&self.open_ts) {
-            std::cmp::Ordering::Greater => {
-                self.settled = self.current();
-                self.open_ts = event.ts.clone();
-                self.open = vec![event.clone()];
-            }
-            std::cmp::Ordering::Equal => self.open.push(event.clone()),
-            std::cmp::Ordering::Less => {
-                *self = Self::of(&self.paths);
-                return Rebuilt::Yes;
-            }
+        let settled_past_it = self
+            .settled_seq
+            .get(&event.stream)
+            .is_some_and(|reached| event.seq <= *reached);
+        // A record stamped later than the instant still open closes that instant,
+        // so one whose own stream is *already* further on inside it cannot be
+        // placed either: the merge would put this record in front of one about to
+        // be frozen behind it.
+        let closing_over_it = event.ts > self.open_ts
+            && self
+                .open
+                .iter()
+                .any(|held| held.stream == event.stream && held.seq > event.seq);
+        if settled_past_it || closing_over_it || event.ts < self.open_ts {
+            *self = Self::of(&self.paths);
+            return Rebuilt::Yes;
         }
+        if event.ts > self.open_ts {
+            self.settled = self.current();
+            for settled in &self.open {
+                seq_reached(&mut self.settled_seq, settled);
+            }
+            self.open_ts = event.ts.clone();
+            self.open.clear();
+        }
+        self.open.push(event.clone());
         self.accounted += bytes;
         Rebuilt::No
     }
@@ -702,12 +728,21 @@ impl Maintainer {
     }
 }
 
-/// Whether folding a record took the whole store again.
+/// Record how far a stream has been folded, keeping the highest `seq` seen.
+///
+/// The highest rather than the last, because a producer may publish its own
+/// records out of `seq` order and the question this answers is what the merge
+/// has already placed.
+fn seq_reached(reached: &mut BTreeMap<String, u64>, event: &Envelope) {
+    let held = reached.entry(event.stream.clone()).or_insert(event.seq);
+    *held = (*held).max(event.seq);
+}
+
+/// Whether folding a record took the whole store again — which is what a caller
+/// walking a tail has to stop on, or it folds the same records twice.
 #[derive(Debug, PartialEq, Eq)]
 enum Rebuilt {
-    /// It was folded where it belonged.
     No,
-    /// It did not belong there, and the store was read again.
     Yes,
 }
 
@@ -1025,6 +1060,102 @@ mod tests {
             folded.timing.wall_ms > 0,
             "a record stamped years before the store left no wall clock"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A producer that publishes its records out of its own `seq` order.
+    ///
+    /// Not a hypothetical: `oneagentgraph` relays an `oneharness-session` record
+    /// out of band, stamped when the session opened and carrying a `seq` far past
+    /// the turn records around it — so one stream arrives `2, 3, 10, 4, 5` with
+    /// `10` stamped *before* `5`. The merge orders a stream by its own `seq` and
+    /// by nothing else, so `10` belongs after `5` however it is stamped, and
+    /// there is no instant a state folding forward can hold it at. What the
+    /// writer does is read the store again — and what this holds is that it does,
+    /// by holding its row equal to the fold's.
+    ///
+    /// **Both ways the record can be reached**, because they are caught by
+    /// different readings and only one of them was: the out-of-order `seq` can
+    /// arrive while the instant it belongs behind is still open, and it can
+    /// arrive after something else has already closed that instant.
+    #[test]
+    fn a_producer_publishing_out_of_its_own_seq_order_leaves_one_account_not_two() {
+        let root = scratch("out-of-seq");
+        // The stream, exactly as it arrives, and then the same stream with a
+        // record of *another* producer closing the instant in between.
+        let closed_by_another = |also: bool| -> Vec<(&'static str, u64, &'static str, bool)> {
+            let mut relayed = vec![
+                ("a-sibling", 2, "turn-activity", false),
+                ("a-sibling", 3, "turn-message", false),
+                // The record out of `seq` order, and one that means something: it
+                // opens the judge side's turn, so where it is folded decides
+                // whose the run's last stretch of clock is.
+                ("a-sibling", 10, "member-started", true),
+                ("a-sibling", 4, "turn-completed", false),
+            ];
+            if also {
+                relayed.push(("b-sibling", 0, "turn-activity", false));
+            }
+            relayed.push(("a-sibling", 5, crate::report::MEMBER_SETTLED, false));
+            relayed
+        };
+
+        for (run, relayed) in [
+            ("still-open", closed_by_another(false)),
+            ("already-closed", closed_by_another(true)),
+        ] {
+            let paths = a_run(&root, run);
+            let mut engine = Journal::open(&paths);
+            engine
+                .emit(
+                    PipelineKind::RunStarted,
+                    crate::journal::labels(run, None),
+                    crate::journal::payload(&[("plan", json!(plan(&["build"])))]),
+                )
+                .expect("appended");
+            emit(
+                &mut engine,
+                PipelineKind::NodeDispatched,
+                Some("build"),
+                run,
+            );
+
+            let mut relay = Journal::open(&paths);
+            let base = sys::now_millis();
+            let instant = sys::rfc3339_from_millis(base);
+            let later = sys::rfc3339_from_millis(base + 5);
+            for (stream, seq, kind, judge) in relayed {
+                let mut record = event(PipelineKind::NodeReady, run, stream, seq);
+                record.source = Source::Agentgraph;
+                record.kind = EventKind(kind.into());
+                // The two records past the burst are stamped at the later
+                // instant; everything in the burst shares the first one.
+                record.ts = if seq == 5 || stream == "b-sibling" {
+                    later.clone()
+                } else {
+                    instant.clone()
+                };
+                if judge {
+                    record.payload.insert("role".into(), json!("judge"));
+                }
+                relay.relay(&record).expect("relayed");
+            }
+            // Far enough after that the span the run's clock ends on is a real
+            // one: the record out of `seq` order is stamped *before* the one
+            // merged in front of it, so where the two orders leave the clock is
+            // where they differ — and a span of nought would hide it.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            emit(&mut engine, PipelineKind::NodeSettled, Some("build"), run);
+
+            let served = RunSummary::of(&paths).expect("the run reads");
+            std::fs::remove_file(paths.summary()).expect("the document");
+            assert_eq!(
+                served,
+                RunSummary::of(&paths).expect("the run folds"),
+                "on '{run}' a producer's out-of-order `seq` left the maintained row \
+                 and the folded row apart"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

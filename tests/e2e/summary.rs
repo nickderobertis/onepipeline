@@ -14,7 +14,7 @@
 
 use crate::harness::{agent, plan_of, World};
 
-use onepipeline::views::{Listing, RunPaths, RunSummary, SUMMARY_SCHEMA_VERSION};
+use onepipeline::views::{Listing, Party, RunPaths, RunSummary, SUMMARY_SCHEMA_VERSION};
 
 /// How many nodes the live-writer journey drives.
 ///
@@ -61,11 +61,16 @@ fn recorded_before_the_document(paths: &RunPaths) {
 fn a_run_driven_through_the_cli_serves_the_row_its_own_fold_produces() {
     let world = World::new("summary-agrees");
     world.script("build.work", "the worker wrote this\n");
-    let run = settled(
-        &world,
-        "recorded",
-        vec![agent("build", &[]), agent("ship", &["build"])],
-    );
+    // Six dispatches, because six is what makes the run's judge cost a number
+    // that distinguishes reading it back from *nearly* reading it back: summed
+    // one settlement at a time it is `0.12000000000000001`, which serde_json
+    // writes out in full and — without `float_roundtrip` — parses back as
+    // `0.12`. The equality below is what would catch that, and with two nodes it
+    // would not have anything to catch.
+    let nodes: Vec<serde_json::Value> = (0..NODES)
+        .map(|nth| agent(&format!("step{nth:02}"), &[]))
+        .collect();
+    let run = settled(&world, "recorded", nodes);
     let paths = paths_of(&world, &run);
     assert!(
         paths.summary().is_file(),
@@ -78,7 +83,7 @@ fn a_run_driven_through_the_cli_serves_the_row_its_own_fold_produces() {
     // What the run actually was, read off the store the CLI wrote rather than
     // restated: the row and the journal beside it count the same records.
     assert_eq!(served.event_count as usize, world.journal(&run).len());
-    assert_eq!(served.node_counts.get("done"), Some(&2));
+    assert_eq!(served.node_counts.get("done"), Some(&NODES));
     assert!(
         served.graph_complete,
         "a settled run is not complete: {served:?}"
@@ -94,7 +99,14 @@ fn a_run_driven_through_the_cli_serves_the_row_its_own_fold_produces() {
     // And the run's aggregate clock, so a consumer no longer starts a process
     // per listed row to get it.
     assert_eq!(served.timing.run_id, run);
-    assert_eq!(served.timing.settled_done, 2);
+    assert_eq!(served.timing.settled_done, NODES);
+    // The cost read back off the document is the cost that was written, to the
+    // last bit — see the note above the plan.
+    assert_eq!(
+        served.timing.usage[&Party::Judge].cost_usd,
+        Some(0.12000000000000001),
+        "the cost read back is not the cost the run recorded"
+    );
 
     // The same row, folded from nothing: the document is taken away, so the
     // reader has no choice but the reading every listing did before it existed.
@@ -218,6 +230,39 @@ fn a_summary_this_build_cannot_read_folds_rather_than_taking_the_run_away() {
         .expect("a document a writer left half-finished");
     // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(RunSummary::of(&paths).expect("the run folds"), whole);
+
+    // And a document that reads perfectly and is about **another run**: a run
+    // root copied aside keeps the copy's own name and the original's document,
+    // and a reader that served it would answer every question about the copy
+    // with the original's row.
+    // llmlint: ignore-block[tests_mirror_real_usage] copying a run root is something an
+    // operator does to a directory on disk — to keep one, to move one between hosts — and
+    // there is no verb for it here; the directory copied is the one this build's own CLI
+    // wrote.
+    let copy = world.runs.join("copied-aside");
+    copy_tree(&world.runs.join(&run), &copy);
+    std::fs::write(copy.join("summary.json"), &document).expect("the original's document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let copied = RunSummary::of(&RunPaths::under(&world.runs, "copied-aside"))
+        .expect("the copied run reads");
+    assert_eq!(
+        copied.run_id, "copied-aside",
+        "a document about another run was served for this one"
+    );
+}
+
+/// Copy a run root, as an operator keeping one aside does.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("the copy's directory");
+    for entry in std::fs::read_dir(from).expect("the run root") {
+        let entry = entry.expect("an entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("a file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("a copied file");
+        }
+    }
 }
 
 /// A summary the store has since moved past is **refolded**, not served.
@@ -258,6 +303,30 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
     // rather than a patch on a stale one.
     recorded_before_the_document(&paths);
     assert_eq!(refolded, RunSummary::of(&paths).expect("the run folds"));
+
+    // And the half a length cannot see: a store rewritten to its own size — the
+    // shape a heal of a torn tail leaves — moves only its modification time, and
+    // that is enough to say the document no longer describes it.
+    // llmlint: ignore-block[tests_mirror_real_usage] a store healed back to a record
+    // boundary by an append that met a dead writer's fragment is left by a *crash*, not by
+    // an interface; what is written back here is the store's own bytes, unchanged.
+    let store = std::fs::read(paths.journal()).expect("the store");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    std::fs::write(paths.journal(), &store).expect("a store rewritten to its own length");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let after = RunSummary::of(&paths).expect("the run reads");
+    let stamped = std::fs::metadata(paths.journal())
+        .and_then(|about| about.modified())
+        .expect("the store's modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a time after the epoch")
+        .as_millis() as u64;
+    assert_eq!(after.journal_len, refolded.journal_len);
+    assert_eq!(
+        after.journal_mtime_ms, stamped,
+        "a document written against a store that has since been rewritten to its \
+         own length was served"
+    );
 }
 
 /// A reader never sees a half-written summary.
@@ -268,6 +337,15 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
 /// state after it: never a partial document, never a parse failure, never an
 /// error. What makes that true is the write being a rename over the target
 /// rather than a write through it, and this is what holds it true.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey costs 7.5s and
+// is the *third* fastest of the six in this file — the same tier, the same binary, and the
+// same real `onepipeline` subprocess every other journey under `tests/e2e/` drives. The
+// deadline below is a failure bound rather than a cost: the run settles in a couple of
+// seconds and the loop leaves the moment it does. The separately-edged project this
+// repository does have, `onepipeline-note-journeys`, is edged on *conversational* cost —
+// each of its journeys holds a two-party turn open — which is a different thing from wall
+// time, and moving a seven-second journey behind that edge would put it where a change to
+// this file does not run it.
 #[test]
 fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
     let world = World::new("summary-concurrent");
