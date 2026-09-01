@@ -767,14 +767,17 @@ fn a_node_another_node_consumes_is_retried_and_its_target_follows_the_edge() {
 }
 
 /// A replacement that states no dependencies of its own inherits the superseded
-/// node's — and inherits the targets it consumes them at on the same condition.
+/// node's — and inherits the targets it consumes them at on the same condition —
+/// while one that states its own is answered with what it stated.
 ///
 /// The half the rewiring journey above cannot show: there the superseded node had
 /// no dependencies of its own, so nothing was inherited. Here the node being
 /// retried is the *consumer*, and what has to survive the supersession is the
-/// pair of targets its plan stated.
+/// pair of targets its plan stated. Both halves in one run, because the
+/// distinction between them is that the inheritance is a default rather than an
+/// override, and one retry alone cannot show a default being overridden.
 #[test]
-fn a_replacement_that_states_no_deps_inherits_the_targets_it_inherits_deps_with() {
+fn a_replacement_inherits_the_targets_it_inherits_deps_with_or_states_its_own() {
     let world = World::new("edit-consumes-inherit");
     let mut build = agent("build", &["engine", "packager"]);
     build["consumes"] = json!({"engine": "crate", "packager": "wheel"});
@@ -790,6 +793,9 @@ fn a_replacement_that_states_no_deps_inherits_the_targets_it_inherits_deps_with(
             .iter()
             .any(|event| event["labels"]["node"] == "build")
     });
+    // The replacement is held too, so the second retry below has a live node to
+    // supersede rather than one that has already settled.
+    world.script("build-2.wait", "hold");
 
     world
         .run_with_stdin(
@@ -826,7 +832,51 @@ fn a_replacement_that_states_no_deps_inherits_the_targets_it_inherits_deps_with(
         "the replacement did not inherit the targets it inherited its deps with"
     );
 
+    // And a replacement that states its own deps and targets is answered with
+    // what it stated: `packager` at a different target than the plan named, and
+    // `engine` not consumed at all.
+    world.until("the replacement to be in flight", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build-2")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry",
+                "id": "build-2",
+                "node": {
+                    "id": "build-3",
+                    "persona": "engineer",
+                    "task": "## What\nonce more",
+                    "deps": ["packager"],
+                    "consumes": {"packager": "crate"},
+                },
+            }])),
+        )
+        .exited(0);
+    world.until("the second retry to commit", |world| {
+        committed(world, &run).len() == 2
+    });
+
+    let stated: Vec<_> = added_edges(&world, &run)
+        .into_iter()
+        .filter(|(_, to, _)| to == "build-3")
+        .collect();
+    assert_eq!(
+        stated,
+        vec![(
+            "packager".to_string(),
+            "build-3".to_string(),
+            Some("crate".to_string())
+        )],
+        "the replacement was answered with the superseded node's targets over its own"
+    );
+
     world.release("build.go");
+    world.release("build-2.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
