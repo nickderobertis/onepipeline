@@ -832,6 +832,19 @@ fn stops_refusing(world: &World) {
         .expect("the destination stops refusing");
 }
 
+/// How many outages reached the planner, in the words the driver raises them in.
+fn outages_raised(world: &World, run: &str) -> usize {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("did not take this run's projection"))
+        })
+        .count()
+}
+
 fn streaks_reported(world: &World, run: &str) -> usize {
     std::fs::read_to_string(world.run_file(run, "driver.log"))
         .map(|log| log.matches("onetaskgraph write-back failed").count())
@@ -1115,6 +1128,17 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
         dispatched(&world, run),
         ["work", "later"],
         "the refusing destination changed what executed"
+    );
+
+    // And the planner was told, which is what makes a projection nobody took something
+    // anyone can fix. A run that settles under an outage is exactly the run whose record a
+    // reader trusts, so the outage reaches the planner from inside the schedule rather than
+    // being dropped when the run ends part-way through an interval.
+    assert_eq!(
+        outages_raised(&world, run),
+        1,
+        "the planner was told {} times about the outage this run settled under",
+        outages_raised(&world, run)
     );
 }
 

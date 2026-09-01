@@ -145,7 +145,6 @@ pub(crate) struct Unprojected {
     pub reason: String,
 }
 
-/// What the worker is doing, which is what the closeout window waits on.
 #[derive(Default, PartialEq, Eq)]
 enum WorkerState {
     #[default]
@@ -166,7 +165,6 @@ enum RunPhase {
     /// suspends the retry schedule: a terminal snapshot left sitting out a minute's
     /// interval inside a two-second window would never be projected at all.
     ClosingOut,
-    /// The run is over and the worker is to stop, whatever it was waiting for.
     Stopping,
 }
 
@@ -386,26 +384,18 @@ fn worker(
                         RETRY_CEILING.as_secs()
                     );
                 }
-                // The planner hears about the outage *before* the wait rather than after
-                // it: the interval grows into the tens of seconds, and a surface that
-                // waited for it would reach the reconcile loop long after the board it
-                // reports on went stale.
-                {
-                    let (lock, _) = &*pending;
-                    let Ok(mut state) = lock.lock() else { return };
-                    if first {
-                        state.unprojected.push(Unprojected {
-                            project: snapshot.project.clone(),
-                            items: snapshot.nodes.keys().cloned().collect(),
-                            reason: error,
-                        });
-                    }
-                }
                 if !should_retry_after(&pending, retry_after(failures)) {
                     return;
                 }
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
+                if first {
+                    state.unprojected.push(Unprojected {
+                        project: snapshot.project.clone(),
+                        items: snapshot.nodes.keys().cloned().collect(),
+                        reason: error,
+                    });
+                }
                 if state.phase == RunPhase::Stopping {
                     return;
                 }
@@ -1214,8 +1204,6 @@ mod tests {
         at.windows(2).map(|pair| pair[1] - pair[0]).collect()
     }
 
-    /// Where the worker captures what its first store command said, which it recreates for
-    /// every attempt.
     fn attempt_capture(paths: &RunPaths) -> PathBuf {
         paths.dir.join("writeback-project-show.stderr")
     }
