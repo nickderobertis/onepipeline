@@ -329,6 +329,135 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
     );
 }
 
+/// A listing answers **most recently written first**, and says where a run that
+/// has written nothing goes.
+///
+/// The order is why `last_write_at` is stored at all: a listing that sorted by
+/// it would otherwise drag the fold it exists to avoid back in for every row.
+/// The two tie-breakers are here because a total order is what a paged listing
+/// needs — a run nothing can date sorts last rather than first, and two runs
+/// that stopped in the same millisecond sort by name.
+#[test]
+fn a_listing_answers_most_recently_written_first() {
+    let world = World::new("summary-order");
+    let first = settled(&world, "aaa-oldest", vec![agent("build", &[])]);
+    let second = settled(&world, "bbb-newer", vec![agent("build", &[])]);
+    let third = settled(&world, "ccc-newest", vec![agent("build", &[])]);
+
+    // A run that exists and has recorded nothing: a launch record written, and
+    // the store not yet.
+    // llmlint: ignore-block[tests_mirror_real_usage] a run root between its launch record
+    // and its first record is a state that exists for a few milliseconds inside `start` and
+    // that a crash leaves behind for good; there is no verb that stops there. The record
+    // put in it is the one this build's own CLI wrote.
+    let unwritten = world.runs.join("zzz-unwritten");
+    for beside in ["channel", "dispatches"] {
+        std::fs::create_dir_all(unwritten.join(beside)).expect("a run root");
+    }
+    let mut record = world.run_json(&first, "launch.json");
+    record["run_id"] = serde_json::json!("zzz-unwritten");
+    std::fs::write(unwritten.join("launch.json"), record.to_string()).expect("a launch record");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let listing = Listing::of(&world.runs);
+    assert_eq!(
+        listing
+            .summaries
+            .iter()
+            .map(|row| row.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            third.as_str(),
+            second.as_str(),
+            first.as_str(),
+            "zzz-unwritten",
+        ],
+        "the listing is not most recently written first, with the undated run last"
+    );
+    assert_eq!(listing.summaries[3].last_write_at, None);
+    // And the order is strictly what the rows themselves say, so a consumer can
+    // page it: every dated row is at or before the one in front of it.
+    for pair in listing.summaries.windows(2) {
+        assert!(
+            pair[0].last_write_at >= pair[1].last_write_at,
+            "{:?} came before {:?}",
+            pair[0].run_id,
+            pair[1].run_id
+        );
+    }
+}
+
+/// The bounded read, at the surface a consumer reads it through.
+///
+/// The claim is that serving a run's row does not grow with that run's journal,
+/// and the control is the reading it replaces: the **same** store, folded, right
+/// beside it. Machine speed cancels between the two, so what is left is the
+/// ratio — and twenty bounded reads costing less than one fold is not a margin a
+/// loaded host closes.
+#[test]
+fn a_summary_read_stays_bounded_as_a_run_journal_grows() {
+    let world = World::new("summary-bounded");
+    let small = settled(&world, "small", vec![agent("build", &[])]);
+    let large = settled(&world, "large", vec![agent("build", &[])]);
+    let (small, large) = (paths_of(&world, &small), paths_of(&world, &large));
+
+    // A journal the size a host's real ones reach. Written rather than driven:
+    // the records are this run's own, replayed, and driving twenty thousand of
+    // them through the CLI would be the same file at fifty times the cost.
+    // llmlint: ignore-block[tests_mirror_real_usage] the store is an append-only file of
+    // this run's own records, and no verb writes twenty thousand of them; what is under
+    // test is a *reader* meeting a journal that size, which is the ordinary state of a run
+    // on the host this was written for.
+    let recorded = std::fs::read(large.journal()).expect("the store");
+    let mut grown = std::fs::OpenOptions::new()
+        .append(true)
+        .open(large.journal())
+        .expect("the store");
+    for _ in 0..2_000 {
+        std::io::Write::write_all(&mut grown, &recorded).expect("a longer store");
+    }
+    drop(grown);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let (small_len, large_len) = (
+        std::fs::metadata(small.journal()).expect("a store").len(),
+        std::fs::metadata(large.journal()).expect("a store").len(),
+    );
+    assert!(
+        large_len > 1_000 * small_len,
+        "the two stores are {large_len} and {small_len}, which is not orders of magnitude"
+    );
+
+    // The first read of the grown run folds — its document no longer describes
+    // the store — and caches. Everything measured below is the read a consumer
+    // makes afterwards.
+    RunSummary::of(&large).expect("the run reads");
+
+    let timed = |paths: &RunPaths, reads: u32| {
+        let began = std::time::Instant::now();
+        for _ in 0..reads {
+            RunSummary::of(paths).expect("the run reads");
+        }
+        began.elapsed()
+    };
+    const READS: u32 = 20;
+    let bounded_large = timed(&large, READS);
+    let bounded_small = timed(&small, READS);
+
+    // The control: the same store, folded, which is what every listing did
+    // before this document existed.
+    recorded_before_the_document(&large);
+    let folded_once = timed(&large, 1);
+
+    assert!(
+        bounded_large < folded_once,
+        "{READS} bounded reads of a {large_len}-byte store took {bounded_large:?},          against {folded_once:?} for one fold of it"
+    );
+    assert!(
+        bounded_large < 10 * bounded_small,
+        "reading the summary of a {large_len}-byte store took {bounded_large:?}          against {bounded_small:?} for one a thousandth the size, so the read grows          with the journal"
+    );
+}
+
 /// A reader never sees a half-written summary.
 ///
 /// One process lists the root continuously while **another** — the detached
