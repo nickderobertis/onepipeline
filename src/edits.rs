@@ -1458,20 +1458,29 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                 node.deps.retain(|dep| dep != from);
             }
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] the `None` half has no
+        // invocation a user can type behind it, and it changes nothing: a record
+        // stating no target needs a journal an *older build* wrote, and what this
+        // arm does with one is byte-for-byte what that build's own `apply` did —
+        // push the dep, touch no target. The removals were moved off
+        // `edge-removed` so that stays true, which is what
+        // `a_record_written_before_an_edge_carried_a_target_replays_unchanged`
+        // holds over the real `apply`. What a user *can* reach is the `Some` half,
+        // driven end to end through the compiled binary by the four journeys in
+        // `tests/e2e/live_edit.rs` that read a target back out of the record.
         Operation::EdgeAdded { from, to, target } => {
             if let Some(node) = graph.get_mut(to) {
                 if !node.deps.contains(from) {
                     node.deps.push(from.clone());
                 }
-                // Only where the record states one. A record that states none
-                // is an edge with no target — which is every edge written
-                // before this field existed — and the node's own definition,
-                // which `node-added` carried whole, is left as it stands.
+                // Only where the record states one, so a node's own definition —
+                // which `node-added` carried whole — is left as it stands.
                 if let Some(target) = target {
                     node.consumes.insert(from.clone(), target.clone());
                 }
             }
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Operation::NodeParked { node } => {
             if let Some(node) = graph.get_mut(node) {
                 node.parked = true;
@@ -3329,6 +3338,43 @@ mod tests {
             ship.consumes,
             BTreeMap::from([("packager".to_string(), target("wheel"))]),
             "replaying an older record lost a target it has no way to restore"
+        );
+
+        // The same for the other two ops that move `deps`. An older build
+        // accepted these only where no surviving node consumed what left, so a
+        // target it did carry is one keyed on a dependency neither edit touched —
+        // and it survives both, exactly as it did before this field existed.
+        for operation in [
+            Operation::EdgeRemoved {
+                from: "docs".into(),
+                to: "ship".into(),
+            },
+            Operation::NodeDropped {
+                node: "docs".into(),
+                dependents: Dependents::Detach,
+            },
+            Operation::EdgeRemoved {
+                from: "packager".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeAdded {
+                from: "packager-2".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::NodeDropped {
+                node: "packager".into(),
+                dependents: Dependents::Detach,
+            },
+        ] {
+            apply(&mut graph, &operation);
+        }
+        let ship = graph.get("ship").expect("the node both edits moved");
+        assert_eq!(ship.deps, vec!["packager-2".to_string()]);
+        assert!(
+            ship.consumes.is_empty(),
+            "replaying older records left a target keyed on a node that has gone: {:?}",
+            ship.consumes
         );
     }
 
