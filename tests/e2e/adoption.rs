@@ -2077,6 +2077,34 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
         entries[0].get("action").is_none(),
         "an automated wait carries an action nobody has to perform: {entries:?}"
     );
+    // And the hold itself is on the run's own record, naming which dependency's
+    // release is holding it and nothing more: what that wait *is* — the identity,
+    // the target, the style, how long it has been on — stays on `release-wait`,
+    // which is the only account of it.
+    let holds: Vec<Value> = world
+        .events_of(&run, "node-held")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .collect();
+    let hold = holds
+        .last()
+        .unwrap_or_else(|| panic!("a released hold was not reported: {holds:?}"));
+    // The dependency that produces the release held it first, while that node was
+    // still running; what holds it now is the release itself.
+    assert_eq!(
+        hold["payload"]["reasons"],
+        json!([{ "kind": "release", "awaiting": [ENGINE] }]),
+        "the hold does not name the dependency whose release it waits on: {holds:?}"
+    );
+    let entry = hold["payload"]["reasons"][0]
+        .as_object()
+        .expect("one reason");
+    assert_eq!(
+        entry.keys().collect::<Vec<&String>>(),
+        vec!["kind", "awaiting"],
+        "the hold copies the wait's own account of itself"
+    );
+
     let surface = wait_surface(&world, &run, "consumer");
     assert!(
         surface.contains("automated release") && surface.contains("waiting on 1 release"),
@@ -2102,12 +2130,31 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
         "waiting longer is what started a held node"
     );
 
-    // Only the release does.
+    // Only the release does — and the node proceeds well inside the minute the
+    // loop promises for one, because the answer wakes it rather than waiting for
+    // an interval of the loop's own.
+    let arrived = std::time::Instant::now();
     releases_at(&answer, "0.2.0");
     world.until("the held node to run", |world| {
         world.events_of(&run, "node-settled").len() == 2
     });
+    let waited = arrived.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(60),
+        "a held node waited {waited:?} for a release that had arrived"
+    );
     assert!(dispatched(&world, &run, "consumer"));
+    // The hold cleared carrying what had been holding it.
+    let unheld: Vec<Value> = world
+        .events_of(&run, "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .collect();
+    assert_eq!(unheld.len(), 1, "{unheld:?}");
+    assert_eq!(
+        unheld[0]["payload"]["released"],
+        json!([{ "kind": "release", "awaiting": [ENGINE] }])
+    );
     // It launched *after* the release, so its block names the version it is
     // building against rather than a git pin — and this is the only place that
     // version ever reaches it, because nothing sends a published node the arrival
