@@ -252,6 +252,236 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
     }
 }
 
+/// A settlement reaches a store at a release this build was **not** written against.
+///
+/// `onetaskgraph` grows its own machine answers in patch releases — `location` arrived on
+/// the project item at 0.2.14 — and this projection reads those answers through types of
+/// its own. While those types denied unknown fields, the first field the store added
+/// turned every projection into a parse failure; and because write-back is best-effort the
+/// run still settled `complete`, so the only evidence was one line on a driver log that a
+/// detached run writes where nobody opens it. A consuming host could not adopt any release
+/// from 0.2.14 onward without silently losing every settlement projection, which is the
+/// worst shape this failure could have taken.
+///
+/// So the store here is the real one, over the real folder of Markdown, served at a
+/// release carrying a field this build has never heard of — on the response, on each item
+/// of it, on that item's own body, and on every label it holds. The settlement has to
+/// arrive anyway, and everything the plan does not declare has to still be there after it.
+#[test]
+fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know() {
+    let world = World::new("store-writeback-grown");
+    let name = "writeback-grown";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let identifier = crate::harness::project_id(name);
+
+    // A board a person has made their own: labels and metadata of their own on the
+    // project, a label on the plan's task, and a description. None of it is declared by a
+    // plan, so all of it is what the projection has to carry through.
+    let document = world
+        .store()
+        .join("projects")
+        .join(format!("{identifier}.md"));
+    amend(&document, |front| {
+        front.insert("labels".to_owned(), json!(["planning", "q3"]));
+        front
+            .entry("metadata")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("a project's metadata is a mapping")
+            .insert("authored.note".to_owned(), json!("keep this value"));
+    });
+    let authored = std::fs::read_to_string(&document).expect("the authored project document");
+    std::fs::write(
+        &document,
+        format!("{authored}A person's own description.\n"),
+    )
+    .expect("the project's description is authored");
+    label(
+        &world
+            .store()
+            .join("tasks")
+            .join(&identifier)
+            .join("000-work.md"),
+        &["needs-review"],
+    );
+
+    // The release the store is served at. Every read and write below is the real binary's,
+    // against that same folder of Markdown — what this adds is the one thing an install on
+    // this host cannot be asked to be, an answer from a release later than the one this
+    // build was written against.
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    let grown = json!({"location": {"kind": "board", "url": "https://example.invalid/boards/1"}});
+    world.script("onetaskgraph.project-show.grow", &grown.to_string());
+    world.script("onetaskgraph.task-list.grow", &grown.to_string());
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    // Read through the real binary, which is where the assertions of this journey live:
+    // the growth is the run's variable and never the fixture's own state.
+    let before = world.store_project(&project)["items"][0]["item"].clone();
+    let labels_before = world.store_task_labels(&project);
+    let tasks_before = preserved_tasks(&world, &project);
+    assert!(
+        before["location"].is_null(),
+        "the store's own answer already carries the field this journey adds, so nothing \
+         here is about a field this build does not know: {before}"
+    );
+    assert_eq!(
+        before["labels"],
+        json!([
+            {"id": "planning", "name": "planning", "color": null},
+            {"id": "q3", "name": "q3", "color": null},
+        ]),
+        "the fixture authored no project labels, so a label read through a grown shape \
+         proves nothing"
+    );
+    assert_eq!(
+        labels_before,
+        std::collections::BTreeMap::from([(
+            "work".to_owned(),
+            json!([{"id": "needs-review", "name": "needs-review", "color": null}])
+        )]),
+        "the fixture authored no task labels"
+    );
+
+    // Detached, so a projection failure would be on the driver's log this journey reads —
+    // which is exactly where it went unread.
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until_store("the settlement to reach the project", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+
+    // And this journey could have failed: the bytes the projection actually parsed are the
+    // ones the worker kept, and they carry the field. Against a write-back that denies
+    // unknown fields, no settlement above ever arrives.
+    let answered = world.run_json(name, "writeback-project-show.stdout");
+    assert!(
+        answered["items"][0]["item"]["location"].is_object(),
+        "the answer this projection read carried no field this build does not know, so it \
+         could not have told a tolerant write-back from a strict one: {answered}"
+    );
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        !log.contains("onetaskgraph write-back failed"),
+        "a projection failed against a store that had only grown a field: {log}"
+    );
+
+    // The field changed nothing about what was written: everything the plan does not
+    // declare is still there, and the field itself was not carried onto the destination.
+    let after = world.store_project(&project)["items"][0]["item"].clone();
+    assert_eq!(
+        preserved(&after),
+        preserved(&before),
+        "settlement changed something the plan does not declare"
+    );
+    assert_eq!(
+        preserved_tasks(&world, &project),
+        tasks_before,
+        "settlement changed something a task's plan does not declare"
+    );
+    assert_eq!(
+        world.store_task_labels(&project),
+        labels_before,
+        "settlement changed a task's labels"
+    );
+    assert_ne!(
+        preserved(&after),
+        preserved(&without(&before, "authored.note")),
+        "the complement assertion cannot fail on a deleted field, so it proves nothing"
+    );
+    assert!(
+        after["location"].is_null(),
+        "a field this build does not know was read off one release and written onto \
+         another: {after}"
+    );
+}
+
+/// Tolerating a field this build does not know is not tolerating anything: an answer
+/// **missing** a field the projection reads is still refused, and the refusal names it.
+///
+/// The store is the same real one, served at a release whose project item stopped carrying
+/// `labels` — a field the projection reads off the destination and writes back, and one
+/// the plan reader never looks at, so what this journey moves is the write-back's own read
+/// and nothing else. A projection that read it as absent would write a project with no
+/// labels, which is the deletion the strict-destination journey exists to stop.
+#[test]
+fn a_store_answer_missing_a_field_the_projection_reads_is_still_refused_by_name() {
+    let world = World::new("store-writeback-shrunk");
+    let name = "writeback-shrunk";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    world.script("onetaskgraph.project-show.shrink", "labels\n");
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until("the projection failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
+    });
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        log.contains("missing field `labels`"),
+        "the refusal does not name the field the store's answer stopped carrying: {log}"
+    );
+
+    // And the planner heard what was wrong, rather than only the log a detached run writes
+    // where nobody opens it.
+    let raised: Vec<Value> = world
+        .events_of(name, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("did not take this run's projection"))
+        })
+        .collect();
+    assert!(
+        raised.iter().any(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("missing field `labels`"))
+        }),
+        "the planner was told a projection failed without being told what was wrong: \
+         {raised:?}"
+    );
+
+    // Nothing was projected out of what survived: a read this build cannot act on is a
+    // refusal, not a projection assembled from the fields that were still there.
+    assert!(
+        world
+            .store_tasks(&project)
+            .iter()
+            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_null()),
+        "a settlement was projected out of an answer the projection had refused"
+    );
+
+    // The run itself is untouched, because write-back is best-effort and settles nothing.
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
 /// A destination that **refuses** a write whose labels differ from the ones it holds still
 /// accepts this projection, run after run.
 ///
