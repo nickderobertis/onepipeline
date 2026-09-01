@@ -72,7 +72,6 @@ fn added_edges(world: &World, run: &str) -> Vec<(String, String, Option<String>)
         .collect()
 }
 
-/// The `edge-removed` operations a run recorded, as `(from, to)`.
 fn removed_edges(world: &World, run: &str) -> Vec<(String, String)> {
     operations(world, run)
         .into_iter()
@@ -86,7 +85,6 @@ fn removed_edges(world: &World, run: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Every operation the reconciler committed, in order.
 fn operations(world: &World, run: &str) -> Vec<Value> {
     world
         .events_of(run, "edit-committed")

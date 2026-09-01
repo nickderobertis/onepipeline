@@ -3353,8 +3353,6 @@ fn the_consumes_divergence_quotes_a_sentence_the_contract_still_carries() {
         contract.contains(&quoted),
         "entry 54 names a sentence the contract no longer carries: {quoted}"
     );
-    // And it is still open for the reason it says: the contract states the
-    // rewiring without saying what becomes of the target keyed on it.
     assert!(
         !contract.contains("consumes` with it"),
         "the contract now states what an edit does to `consumes`; entry 54 has been ruled on"

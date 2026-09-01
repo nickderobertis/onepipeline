@@ -1080,16 +1080,16 @@ fn compile_retry(
         // the replacement takes the target keyed on the superseded id with it.
         // Rekeyed rather than re-derived: the value is the one the plan or an
         // accepted edit stated, carried across unchanged.
-        let mut target = None;
+        let mut carried = None;
         if let Some(node) = graph.get_mut(dependent) {
             for dep in &mut node.deps {
                 if dep == id {
                     dep.clone_from(&replacement.id);
                 }
             }
-            target = node.consumes.remove(id);
-            if let Some(target) = target.clone() {
-                node.consumes.insert(replacement.id.clone(), target);
+            carried = node.consumes.remove(id);
+            if let Some(carried) = carried.clone() {
+                node.consumes.insert(replacement.id.clone(), carried);
             }
         }
         operations.push(Operation::EdgeRemoved {
@@ -1099,7 +1099,7 @@ fn compile_retry(
         operations.push(Operation::EdgeAdded {
             from: replacement.id.clone(),
             to: dependent.clone(),
-            target,
+            target: carried,
         });
     }
     // The superseded node leaves the graph, exactly as a `drop` would take it:
