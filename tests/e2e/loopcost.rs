@@ -118,6 +118,13 @@ fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
 /// another run's ledger — over a minute in which the run wrote not one record.
 /// The tree before this change performed roughly 2,400 passes in that minute,
 /// each folding the journal four times over.
+// llmlint: ignore[tests_mirror_real_usage] the claim is that a converged driver does no
+// scheduling work, and there is no user-facing representation of work that did not happen: a
+// loop that publishes nothing and folds nothing writes no record, so a journey reading the CLI
+// alone cannot tell it from the 40-passes-a-second loop this replaced. Everything a user does
+// is real here — the shipped binary, a real plan store, a real dispatch, the shipped intervals
+// — and the counters are the driver's own account of the one thing left, which the host
+// otherwise only feels as CPU a loaded machine hands out as it likes.
 #[test]
 fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
     let world = measured("loopcost-idle");
@@ -174,6 +181,11 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 /// interval — because neither reads anything at all. The tree before this change
 /// refolded the whole journal on every pass, so the larger run's driver read
 /// hundreds of times what the smaller one's did.
+// llmlint: ignore[tests_mirror_real_usage] what this compares is how much two real drivers
+// read out of two real run stores, which no CLI output reports: the defect it holds off — a
+// pass that refolds the journal — is invisible to every user-facing surface and shows only as
+// a run that costs more the longer it has been running. The runs, the plans, the dispatches
+// and the binary are the real ones; the byte count is the only observation of the property.
 #[test]
 fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
     let world = measured("loopcost-scale");
@@ -249,6 +261,11 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 
 /// The two things a pass does about whole state are paid once per recorded state
 /// change, not once per pass.
+// llmlint: ignore[tests_mirror_real_usage] "at most one publication and one status
+// derivation per recorded state change" is a ratio between what the run journalled, which is
+// read the user's way, and what the loop did to produce it, which nothing outside the process
+// reports. The journey drives the real CLI end to end and reads the real journal for one half
+// of the ratio; the counters are the only account of the other half.
 #[test]
 fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
     let world = measured("loopcost-changes");
@@ -316,6 +333,11 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
 /// number a burst either side of the interval can reach without the rate having
 /// moved at all.
+// llmlint: ignore[tests_mirror_real_usage] the property is that another run's ledger is read
+// on a stated interval rather than on the loop's pass rate — a statement about how often a
+// real driver reads a real upstream store, which produces no record either way. Both runs,
+// both stores and both drivers are real and the shipped intervals are unchanged; the counters
+// are what makes "how often" observable at all.
 #[test]
 fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     let world = measured("loopcost-paced");
@@ -558,4 +580,54 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
     world.until("the run to settle", |world| {
         world.run_file("unprojected", "result.json").is_file()
     });
+}
+
+/// A driver asked for the counts and unable to write them says so, naming the
+/// file, instead of going on as though it had written them.
+///
+/// The failure path of the measurement every other journey here reads. The counts
+/// exist because a host asked this driver for them, so a write it cannot do is
+/// that host's answer going missing: swallowing it leaves a caller reading a file
+/// frozen at an earlier pass with nothing anywhere saying why. Driven through the
+/// real CLI over a real run store, and read where a detached driver's failures
+/// are read — the run's own driver log.
+#[test]
+fn a_driver_that_cannot_write_the_counts_it_was_asked_for_says_so() {
+    let world = measured("loopcost-unwritable");
+    world.script("hold.wait", "hold");
+    let plan = world.plan(
+        "unwritable",
+        &plan_of("unwritable", vec![agent("hold", &[])]),
+    );
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    // The driver has written the counts once, so the path it writes them to is
+    // the path this obstructs rather than one guessed before the run existed.
+    reporting(&world, "unwritable");
+
+    // A non-empty directory where the counts go, so both halves of the atomic
+    // write refuse: the temporary lands beside it, and the rename onto it cannot
+    // happen. This is what a host that had mounted something there, or left a
+    // directory of that name behind, does to the next write.
+    let obstruction = world.run_file("unwritable", "loop-stats.json");
+    std::fs::remove_file(&obstruction).expect("the counts are replaced");
+    std::fs::create_dir_all(&obstruction).expect("the obstruction is placed");
+    std::fs::write(obstruction.join("held"), "not the counts").expect("the obstruction holds");
+
+    world.until("the driver to report what it could not write", |world| {
+        std::fs::read_to_string(world.run_file("unwritable", "driver.log"))
+            .unwrap_or_default()
+            .contains("loop-stats.json")
+    });
+    // And it stopped rather than carrying on with the host's question
+    // unanswered: the node it was holding open is still unsettled.
+    assert!(
+        !recorded(&world, "unwritable", "node-settled", "hold"),
+        "the driver went on running after refusing"
+    );
+    assert!(
+        obstruction.is_dir() && obstruction.join("held").is_file(),
+        "the run wrote over the obstruction it refused on"
+    );
+
+    world.release("hold.go");
 }

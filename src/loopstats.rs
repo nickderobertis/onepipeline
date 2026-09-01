@@ -80,12 +80,16 @@ fn asked() -> bool {
 /// Write the counts into the run's own directory, if this process was launched
 /// to report them.
 ///
-/// Best effort and deliberately silent: a measurement file that could not be
-/// written is not a reason to fail the run being measured, and the journey
-/// reading it fails on the count it never saw.
-pub(crate) fn flush(paths: &crate::ledger::RunPaths) {
+/// **A write that failed is returned rather than swallowed.** A run nobody asked
+/// to measure never opens the file at all, so the only way here is a host that
+/// asked this driver for the counts — and answering that with silence leaves the
+/// caller reading a file that is absent or frozen at an earlier pass, with
+/// nothing anywhere saying why. The error names the path and what the filesystem
+/// said, and the driver hands it back the way it hands back any other write into
+/// the run's own directory.
+pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()> {
     if !asked() {
-        return;
+        return Ok(());
     }
     let document = json!({
         "passes": PASSES.load(Ordering::Relaxed),
@@ -95,7 +99,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) {
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
     });
-    let _ = crate::ledger::write_json(&paths.dir.join(STATS_FILE), &document);
+    crate::ledger::write_json(&paths.dir.join(STATS_FILE), &document)
 }
 
 #[cfg(test)]
@@ -114,9 +118,10 @@ mod tests {
         assert!(!asked(), "an empty setting asks for nothing");
         std::env::remove_var(STATS_ENV);
         // And the flush is a no-op rather than a panic when nobody asked, which is
-        // what makes counting free on every run but a measured one.
+        // what makes counting free on every run but a measured one. It answers
+        // `Ok` without looking at the directory, which here does not exist.
         let paths = crate::ledger::RunPaths::under(&std::env::temp_dir(), "nobody");
-        flush(&paths);
+        flush(&paths).expect("an unmeasured run writes nothing and cannot fail");
         assert!(!paths.dir.join(STATS_FILE).exists());
     }
 
@@ -134,7 +139,7 @@ mod tests {
         upstream_read();
         release_asked();
         store_read(7);
-        flush(&paths);
+        flush(&paths).expect("the counts are written");
         std::env::remove_var(STATS_ENV);
         let written: serde_json::Value = crate::ledger::read_json_opt(&paths.dir.join(STATS_FILE))
             .expect("the counts are written");

@@ -981,7 +981,7 @@ fn converge(
                 &mut channel_seen,
                 deadline,
                 &mut outside,
-            )
+            )?
         };
         let Some(arrived) = arrived else {
             break;
@@ -1095,7 +1095,7 @@ fn converge(
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
     let settled = statuses_of(&mut derived, state);
-    crate::loopstats::flush(paths);
+    crate::loopstats::flush(paths)?;
     if let Some(writeback) = &writeback {
         writeback.publish(paths, launch, state, &settled);
         writeback.wait_briefly();
@@ -1154,8 +1154,9 @@ fn statuses_of(
 /// them **goes back to waiting**, which is what makes a converged run run no
 /// passes at all rather than one per look.
 ///
-/// `None` when every dispatch thread has gone and no message can ever arrive
-/// again, which is the loop's own `Disconnected`.
+/// `Ok(None)` when every dispatch thread has gone and no message can ever arrive
+/// again, which is the loop's own `Disconnected`. `Err` when a driver that was
+/// asked to report what its loop did could not write the report.
 fn wait_for_work(
     paths: &RunPaths,
     rx: &Receiver<Message>,
@@ -1163,13 +1164,16 @@ fn wait_for_work(
     seen: &mut crate::channel::Fingerprint,
     deadline: Duration,
     outside: &mut dyn FnMut() -> bool,
-) -> Option<Vec<Message>> {
+) -> Result<Option<Vec<Message>>> {
     let waiting_since = Instant::now();
     loop {
         // The one place a measured driver reports what its loop has done: every
-        // wait, so a journey reading the file sees a live count rather than one
-        // frozen at whatever the driver last got round to.
-        crate::loopstats::flush(paths);
+        // wait rather than every pass, because the counts a wait is long enough
+        // to change are the ones another thread keeps — a release probe answers
+        // while this loop sits here. A write that fails is handed back: the only
+        // way to reach it is a host that asked for the counts, and it is owed an
+        // answer rather than a file that never appears.
+        crate::loopstats::flush(paths)?;
         let left = deadline.saturating_sub(waiting_since.elapsed());
         match rx.recv_timeout(CHANNEL_POLL.min(left)) {
             Ok(message) => {
@@ -1188,21 +1192,21 @@ fn wait_for_work(
                     };
                     batch.push(message);
                 }
-                return Some(batch);
+                return Ok(Some(batch));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
         }
         let now = channel.fingerprint();
         if now != *seen {
             *seen = now;
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         if outside() {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         if waiting_since.elapsed() >= deadline {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
     }
 }

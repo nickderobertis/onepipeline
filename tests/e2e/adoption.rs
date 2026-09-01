@@ -2542,6 +2542,12 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 ///
 /// The shipped bounds throughout — nothing here shortens the poll interval — so
 /// what is measured is what an operator's run does.
+// llmlint: ignore[tests_mirror_real_usage] what a held run costs its host is the number of
+// probe subprocesses it starts, and a probe that answered "not released" leaves nothing behind
+// for a CLI to report — the hold reads identically at one ask a minute and at forty a second.
+// The journey is otherwise entirely real: the shipped binary, two real runs, a real release
+// probe against a real repository, and the shipped poll interval. The counter is the only
+// place the number of asks exists.
 #[test]
 fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs() {
     let world = World::new("adoption-pacing").with_env(LOOP_STATS_ENV, "1");
