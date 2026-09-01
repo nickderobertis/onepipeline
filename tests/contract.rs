@@ -2359,7 +2359,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 24, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 26, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2368,7 +2368,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "54."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

@@ -421,6 +421,7 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
             // acknowledgement record. There is no spelling of this that could
             // start a subprocess for a human-step target, because the probe
             // lives on the other variant.
+            crate::loopstats::release_asked();
             let answer = Answer::of(&onevcs::release_status(
                 &question.reference,
                 question.target.as_ref(),
@@ -470,6 +471,8 @@ pub(crate) struct Watch {
     /// When the release records were last read. `None` before the first read,
     /// which is due immediately.
     relayed: Option<Instant>,
+    /// Whether a node the last refresh watched could not be described yet.
+    unresolved: bool,
     asker: Asker,
 }
 
@@ -523,6 +526,7 @@ impl Watch {
             adopted,
             arrived,
             surfaced: BTreeMap::new(),
+            unresolved: false,
             surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
@@ -557,17 +561,99 @@ impl Watch {
             .unwrap_or_default()
     }
 
+    /// How long the loop may go without taking this watch up.
+    ///
+    /// An arriving *answer* does not wait for it —
+    /// [`answers_arrived`](Self::answers_arrived) is what the loop waits on, and
+    /// it wakes within a fifth of a second of the asker answering. What this
+    /// paces is the work that is due on a clock rather than on an answer:
+    /// re-surfacing a wait that has not ended, and re-reading what the sibling
+    /// recorded about this run's own landed work. So it is the shorter of those
+    /// two intervals, held to a minute — which is the bound this loop promises
+    /// for an arriving release, and the ceiling a host that configures neither
+    /// falls back to.
+    pub(crate) fn take_up_every(&self) -> Duration {
+        self.surface_every
+            .min(self.relay_every)
+            .min(Duration::from_secs(60))
+    }
+
+    /// Take up whatever the asker has answered, and say whether it answered
+    /// anything.
+    ///
+    /// What the reconcile loop waits on. The asker runs on its own thread at its
+    /// own pace, so an answer arrives without anything about this run changing —
+    /// and this is how it wakes the loop, rather than the loop going back and
+    /// asking on a timer of its own.
+    pub(crate) fn answers_arrived(&mut self) -> bool {
+        let mut arrived = false;
+        for (keys, answer) in self.asker.answered() {
+            arrived = true;
+            for key in keys {
+                self.answers.insert(key, answer.clone());
+            }
+        }
+        arrived
+    }
+
+    /// Whether any node in this run is waiting on an out-of-repository release.
+    ///
+    /// What it decides is whether the loop wakes for a release at all. A run
+    /// whose nodes name no dependency outside their own repository has nothing to
+    /// ask about and nothing to take up, so it never pays the interval above —
+    /// which is most runs.
+    pub(crate) fn awaits_anything(&self) -> bool {
+        self.unresolved || self.dependencies.values().any(|of| !of.is_empty())
+    }
+
+    /// Whether anything this run landed could have a release recorded against it.
+    ///
+    /// The same question [`relay_releases`](Self::relay_releases) asks per node,
+    /// asked of the run: a repository declaring no release target has nothing
+    /// recorded about it, so there is nothing to go and read. Answered off the
+    /// per-driver cache, so asking again costs nothing.
+    pub(crate) fn relays_anything(&mut self, state: &RunState) -> bool {
+        let repositories: Vec<String> = state
+            .sessions
+            .keys()
+            .filter_map(|node| state.graph.get(node).and_then(|node| node.repo.clone()))
+            .collect();
+        repositories.into_iter().any(|repo| {
+            self.repositories
+                .of(&repo)
+                .is_some_and(|releases| !releases.targets.is_empty())
+        })
+    }
+
+    /// The dependencies one node is still waiting on the release of, by id.
+    ///
+    /// The ids alone. What each of those waits *is* — its identity, its target,
+    /// its style, how long it has been on — is
+    /// [`ReleaseWait`](journal::PipelineKind::ReleaseWait)'s account of it and is
+    /// not copied anywhere else.
+    pub(crate) fn awaited_deps(&self, node: &str) -> Vec<String> {
+        self.dependencies
+            .get(node)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|dependency| {
+                self.answers
+                    .get(&(node.to_owned(), dependency.dep.clone()))
+                    .and_then(Answer::version)
+                    .is_none()
+            })
+            .map(|dependency| dependency.dep.clone())
+            .collect()
+    }
+
     /// Take up the answers that have arrived, and ask about what is awaited now.
     ///
     /// `watching` is the nodes whose releases matter this pass: every node that
     /// is ready to start, and every fast-adoption node still running. Neither
     /// blocks on anything.
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
-        for (keys, answer) in self.asker.answered() {
-            for key in keys {
-                self.answers.insert(key, answer.clone());
-            }
-        }
+        self.answers_arrived();
         let now = crate::sys::now_millis();
         let mut waits: Vec<(Key, Dependency)> = Vec::new();
         for node in watching {
@@ -577,6 +663,13 @@ impl Watch {
                 waits.push((key, dependency));
             }
         }
+        // A node whose dependencies this run could not describe yet is answered
+        // again rather than left: what it is waiting on may be another run's
+        // ledger, which moves without anything here changing, so the loop has to
+        // keep coming back for it.
+        self.unresolved = watching
+            .iter()
+            .any(|node| !self.dependencies.contains_key(&node.id));
         self.asker.ask(questions_of(&waits));
     }
 
@@ -711,6 +804,7 @@ impl Watch {
         paths: &RunPaths,
         journal: &mut Journal,
         state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
         filter: Option<&crate::filter::EventFilter>,
     ) -> Result<()> {
         if !self
@@ -720,7 +814,6 @@ impl Watch {
             return Ok(());
         }
         self.relayed = Some(Instant::now());
-        let statuses = state.statuses();
         let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that

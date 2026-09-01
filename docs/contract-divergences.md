@@ -2798,3 +2798,83 @@ publishes.
   }
 }
 ```
+
+## 54. A ready node that is not running is a gap in the timeline nothing accounts for — OPEN
+
+**Proposal (for the planner who owns the contract): add two kinds to this
+library's closed set, `node-held` and `node-unheld`, and one sentence saying that
+a node the loop is not running and has not settled is journalled with every
+reason holding it, on transition.**
+
+The contract says `node-ready` is emitted when a node's dependencies settle and
+`node-dispatched` when its dispatch starts, and says nothing about the span
+between them. That span is where an operator's question lives. A node held
+because the run reached its concurrency, a node held because its dependency has
+not settled, a node held by a decision point and a node held by a release all
+look **identical** on a timeline: empty space. So the one question an operator
+opens a timeline to answer — *was my run queued behind my own other work, or is
+it stuck?* — is the one question the record cannot answer.
+
+**The subject is wider than concurrency, deliberately.** A node whose
+dependencies have not settled is as much a queued span as one the concurrency is
+holding, and both belong on a timeline — so the record is about any node this
+loop is neither running nor settled on, whatever status the graph derives for it.
+It is **not** about every such node: it is written for a node one of four stated
+reasons is holding, so a node that is dispatchable and merely awaiting the pass
+that will start it, and a human action awaiting the person who has to take it,
+carry none. Neither is held by this loop.
+
+**The reasons compose, and that is the point.** A node can be behind three
+running nodes *and* waiting on a dependency, and a reader has to tell that from
+either alone — so one record carries one entry per reason holding the node at
+once, and a hold that loses one reason while another still holds is a new record
+carrying only what remains. Nothing has to be joined to read it.
+
+**Two of the four are already reported, and this does not restate them.**
+`decision-pending` stays the authoritative account of what a decision is — its
+kind, and the subtree it holds — and `release-wait` stays the authoritative
+account of what a release wait is — each awaited release's identity, target,
+style and age. The `decision` entry names only the reference and the `release`
+entry only the dependency ids: this record is authoritative for the *hold*, and
+each of those for the thing doing the holding.
+
+**On transition only.** The loop diffs the hold set against the last pass exactly
+as it diffs the decisions and the ready announcements, and says nothing on a pass
+where a node is held by what it was held by before. A record per pass would have
+been about forty a second per held node before this plan's pacing work and one
+per settlement after it, and either would bury the journal it exists to explain.
+
+**What a reader gets is the shrinking set.** A node behind three running
+dependencies is held first by all three, then by the two that are left, then by
+the last, and then it dispatches — three successive spans and a `node-unheld`,
+which falls out of the emission rule and needs no arithmetic per node.
+
+It arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40, 47 and 53's additions did.
+A consumer in another repository reads these field names, so the block below is
+the source: `tests/contract.rs` parses it out of this file, and every event kind
+named here must be one `PipelineKind` carries and the contract's own list does
+not.
+
+```json
+{
+  "event_kinds": ["node-held", "node-unheld"],
+  "reason_kinds": ["dependencies", "concurrency", "decision", "release"],
+  "fields": {
+    "dependencies": ["blocking"],
+    "concurrency": ["ahead", "limit"],
+    "decision": ["reference"],
+    "release": ["awaiting"]
+  },
+  "held_payload": "reasons",
+  "unheld_payload": "released"
+}
+```
+
+Driven end to end by `tests/e2e/holds.rs`, against real run stores: a node behind
+several dependencies finishing one at a time and naming the shrinking set, a node
+the concurrency holds for many passes reported once per transition rather than
+once per pass, a node held two ways at once losing one reason and keeping the
+other, a decision hold and a release hold each naming their reference without
+copying the record that owns it, and the two nodes nothing is holding — a
+dispatchable one and a human action — carrying no record at all.

@@ -579,6 +579,7 @@ impl RunState {
         &self,
         upstream: &dyn Fn(&str) -> Option<NodeStatus>,
     ) -> BTreeMap<String, NodeStatus> {
+        crate::loopstats::statuses_derived();
         crate::graph::derive(&self.graph, &self.statuses_recorded(), upstream)
     }
 }

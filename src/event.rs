@@ -197,6 +197,17 @@ pub enum PipelineKind {
     RunStopped,
     /// An in-flight dispatch recorded nothing past the stall threshold.
     QuietWorker,
+    /// The loop is not running a node it has not settled, and this is why.
+    ///
+    /// Written when a hold **begins**, again when what the node is held by
+    /// **changes**, and never on a pass where it is held by what it was held by
+    /// before. `reasons` carries one entry per reason holding it at once, so a
+    /// node behind three running nodes and a node whose dependency has not
+    /// settled and a node that is both are three answers a reader tells apart
+    /// without joining another record.
+    NodeHeld,
+    /// That hold cleared, carrying the reasons that were holding it.
+    NodeUnheld,
     /// A blocking surface began holding a subtree of dependents back.
     DecisionPending,
     /// That surface was cleared, and the subtree it held was released.
@@ -255,6 +266,8 @@ impl PipelineKind {
             Self::DriverAdopted => "driver-adopted",
             Self::RunStopped => "run-stopped",
             Self::QuietWorker => "quiet-worker",
+            Self::NodeHeld => "node-held",
+            Self::NodeUnheld => "node-unheld",
             Self::DecisionPending => "decision-pending",
             Self::DecisionCleared => "decision-cleared",
             Self::CrossDagSatisfied => "cross-dag-satisfied",
@@ -308,6 +321,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::DriverAdopted,
     PipelineKind::RunStopped,
     PipelineKind::QuietWorker,
+    PipelineKind::NodeHeld,
+    PipelineKind::NodeUnheld,
     PipelineKind::DecisionPending,
     PipelineKind::DecisionCleared,
     PipelineKind::CrossDagSatisfied,

@@ -556,6 +556,32 @@ pub(crate) struct QueuedCommands {
     pub commands: Vec<Command>,
 }
 
+/// What the reconcile loop last saw of the channel's two files.
+///
+/// Compared rather than read: see [`ChannelState::fingerprint`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Fingerprint {
+    /// The surface queue.
+    queue: Option<(u64, std::time::SystemTime)>,
+    /// The durable command log.
+    commands: Option<(u64, std::time::SystemTime)>,
+}
+
+/// One file's length and modification time, or `None` where there is no file.
+///
+/// A modification time the platform declines to report reads as the epoch, so a
+/// host with no such clock falls back to comparing lengths — which is the whole
+/// answer for the append-only half and is never *worse* than not looking.
+fn mark(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((
+        metadata.len(),
+        metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    ))
+}
+
 /// The reconciler's answer to one submitted envelope.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandOutcome {
@@ -578,6 +604,29 @@ impl ChannelState {
 
     fn queue_path(&self) -> std::path::PathBuf {
         self.paths.channel("queue.json")
+    }
+
+    /// A cheap look at everything the reconcile loop reads off this channel.
+    ///
+    /// Two `stat` calls and no read at all, which is what lets a converged
+    /// driver check for an arriving edit five times a second without costing the
+    /// host anything: the loop compares this against what it last saw and
+    /// reconciles only when it moved.
+    ///
+    /// The two files are exactly the two that loop reads — the surface queue,
+    /// which is what says whether a blocking decision is outstanding, and the
+    /// durable command log an edit is submitted to. A file that is not there yet
+    /// fingerprints as absent, which is a value like any other: the moment one
+    /// appears the fingerprint has changed.
+    ///
+    /// Length **and** modification time, because neither alone is enough: a
+    /// command log only grows, so its length answers for it, while the queue is
+    /// rewritten whole and can come back the same size.
+    pub(crate) fn fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            queue: mark(&self.queue_path()),
+            commands: mark(&self.paths.channel("commands.jsonl")),
+        }
     }
 
     /// The live queue.

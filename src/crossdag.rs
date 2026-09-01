@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::{json, Value};
 
@@ -94,6 +95,7 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
     if !paths.exists() {
         return None;
     }
+    crate::loopstats::upstream_read();
     Some(ledger::read_lines(&paths.journal()).len() as u64)
 }
 
@@ -108,6 +110,7 @@ fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
     if !paths.exists() {
         return None;
     }
+    crate::loopstats::upstream_read();
     ledger::read_lines(&paths.journal())
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -185,6 +188,31 @@ impl Observer {
             state.cross_dag_baselines.clone(),
             state.cross_dag_reported.clone(),
         )
+    }
+
+    /// A cheap look at every upstream ledger this graph's edges are answered by.
+    ///
+    /// Length and modification time, and no read at all. A run's ledger is
+    /// append-only and its length *is* the extent this observer measures against,
+    /// so a `stat` answers the only question a re-read could: has that run done
+    /// anything since we last looked? The reconcile loop waits on this and reads
+    /// the ledger only when it moved, which is what keeps a consumer watching a
+    /// quiet upstream from costing anything at all.
+    pub fn marks(&self, graph: &Graph) -> BTreeMap<String, Option<(u64, SystemTime)>> {
+        edges(graph)
+            .into_keys()
+            .filter_map(|dependency| parse(&dependency))
+            .map(|reference| {
+                let journal = RunPaths::under(&self.root, &reference.run).journal();
+                let mark = std::fs::metadata(&journal).ok().map(|metadata| {
+                    (
+                        metadata.len(),
+                        metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    )
+                });
+                (reference.run, mark)
+            })
+            .collect()
     }
 
     /// Resolve every edge the graph names, recording what it learns.

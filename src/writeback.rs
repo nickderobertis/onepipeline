@@ -229,7 +229,19 @@ impl Writeback {
     }
 
     /// Replace any queued projection with the newest journal fold.
-    pub fn publish(&self, paths: &RunPaths, launch: &LaunchRecord, state: &RunState) {
+    ///
+    /// Called once per change to what the snapshot is made of rather than once
+    /// per reconcile pass: building one folds the run's whole journal twice, and
+    /// the loop used to hand over two identical snapshots forty times a second on
+    /// a run where nothing was happening. The statuses are handed in for the same
+    /// reason — the caller has already derived them.
+    pub fn publish(
+        &self,
+        paths: &RunPaths,
+        launch: &LaunchRecord,
+        state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) {
         let Ok(project) = launch.project.parse() else {
             return;
         };
@@ -237,7 +249,7 @@ impl Writeback {
             project,
             dir: paths.dir.join("writeback"),
             nodes: all_nodes(paths, state),
-            statuses: state.statuses(),
+            statuses: statuses.clone(),
             outcomes: state.outcomes.clone(),
             landings: state.landings.clone(),
             landing_commits: state.landing_commits.clone(),
@@ -264,6 +276,7 @@ impl Writeback {
                 })
                 .unwrap_or_default(),
         };
+        crate::loopstats::published();
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             if pending.queue(snapshot) {
@@ -1146,7 +1159,7 @@ mod tests {
         let writeback =
             Writeback::start(dir.join("onetaskgraph-nobody-installed"), &paths, &launch)
                 .expect("a write-back worker");
-        writeback.publish(&paths, &launch, &RunState::default());
+        writeback.publish(&paths, &launch, &RunState::default(), &BTreeMap::new());
 
         // Four attempts in, the interval the worker is now waiting out is longer than every
         // one before it — so the last one this test actually watched is a lower bound on

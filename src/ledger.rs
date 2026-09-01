@@ -673,6 +673,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         path: path.to_path_buf(),
         source: e,
     })?;
+    crate::loopstats::store_read(text.len() as u64);
     serde_json::from_str(&text).map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))
 }
 
@@ -683,6 +684,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     fs::read_to_string(path)
         .ok()
+        .inspect(|text| crate::loopstats::store_read(text.len() as u64))
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
@@ -990,6 +992,7 @@ pub fn read_records(path: &Path) -> Vec<Record> {
         return Vec::new();
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
+    crate::loopstats::store_read(bytes.len() as u64);
     let mut records = Vec::new();
     let mut offset = 0u64;
     for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
