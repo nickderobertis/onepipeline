@@ -17,9 +17,9 @@
 // measure IS the whole crate's reconcile loop, so a project whose edges reached less than
 // the crate would be one that could not run them: any change under `src/` can put the sink
 // back, which is why the edge is honest rather than broad. The cost is bounded and paid
-// once — the two minute-long windows run beside each other under nextest and the rest of
-// the file is seconds — and the minute is not a knob: it is the interval the bound is
-// stated over.
+// once — the minute-long windows run beside each other under nextest and the rest of
+// the file is seconds — and the minute is not a knob: it is the interval every bound here
+// is stated over.
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is the compiled binary,
 // driven as a subprocess over real run stores, and the counts are the real loop's own.
 // Only `oneagentgraph` is substituted, at its own subprocess boundary, so a journey can
@@ -28,77 +28,21 @@
 
 use std::time::{Duration, Instant};
 
-use crate::harness::{agent, human, plan_of, renamed, World};
+use crate::harness::{
+    agent, counts, human, plan_of, renamed, reporting, Counts, World, LOOP_STATS_ENV,
+};
 use serde_json::{json, Value};
 
-/// The interval every idle claim here is measured over.
+/// The interval every claim here is measured over.
 ///
-/// A minute, because that is what the bound is stated over: sixty seconds in
-/// which the run records nothing. The tree before this change performed about
-/// 2,400 passes in it.
-const IDLE: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Counts {
-    passes: u64,
-    statuses: u64,
-    publications: u64,
-    upstream_reads: u64,
-    release_asks: u64,
-    store_bytes: u64,
-}
-
-impl Counts {
-    fn since(self, before: Self) -> Self {
-        Self {
-            passes: self.passes - before.passes,
-            statuses: self.statuses - before.statuses,
-            publications: self.publications - before.publications,
-            upstream_reads: self.upstream_reads - before.upstream_reads,
-            release_asks: self.release_asks - before.release_asks,
-            store_bytes: self.store_bytes - before.store_bytes,
-        }
-    }
-}
+/// A minute, because that is what the bounds are stated over: sixty seconds in
+/// which an idle run records nothing, and sixty in which a paced read happens on
+/// its own interval rather than on the loop's. The tree before this change
+/// performed about 2,400 passes in it.
+const WINDOW: Duration = Duration::from_secs(60);
 
 fn measured(name: &str) -> World {
-    World::new(name).with_env("ONEPIPELINE_LOOP_STATS", "1")
-}
-
-fn counts(world: &World, run: &str) -> Counts {
-    let path = world.run_file(run, "loop-stats.json");
-    let read =
-        || -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok() };
-    // Written atomically, so a partial read is not a thing that happens — an
-    // absent one is, on the first look before the driver's first wait.
-    let value = read().unwrap_or_else(|| {
-        panic!(
-            "{run} reported no loop counts at {}\n{}",
-            path.display(),
-            world.dump()
-        )
-    });
-    let count = |name: &str| {
-        value[name]
-            .as_u64()
-            .unwrap_or_else(|| panic!("{run}'s counts carry no {name}: {value}"))
-    };
-    Counts {
-        passes: count("passes"),
-        statuses: count("statuses"),
-        publications: count("publications"),
-        upstream_reads: count("upstream_reads"),
-        release_asks: count("release_asks"),
-        store_bytes: count("store_bytes"),
-    }
-}
-
-/// Wait until a driver has reported anything at all, which it does on its first
-/// wait.
-fn reporting(world: &World, run: &str) {
-    world.until("the driver to report its loop counts", |world| {
-        world.run_file(run, "loop-stats.json").is_file()
-    });
+    World::new(name).with_env(LOOP_STATS_ENV, "1")
 }
 
 /// The records a run wrote that change what the graph is: what "one per recorded
@@ -189,7 +133,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 
     let wrote = world.journal("idle").len();
     let before = counts(&world, "idle");
-    std::thread::sleep(IDLE);
+    std::thread::sleep(WINDOW);
     let did = counts(&world, "idle").since(before);
 
     assert_eq!(
@@ -213,7 +157,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
     );
     // And the ceiling on how often a pass can happen at all, whatever it costs.
     assert!(
-        did.passes <= IDLE.as_secs(),
+        did.passes <= WINDOW.as_secs(),
         "a converged driver ran more than one scheduling pass a second: {did:?}"
     );
 
@@ -271,7 +215,7 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         .iter()
         .map(|run| counts(&world, run))
         .collect();
-    std::thread::sleep(IDLE);
+    std::thread::sleep(WINDOW);
     let did: Vec<Counts> = ["small", "large"]
         .iter()
         .enumerate()
@@ -367,6 +311,11 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// Two consumers of the same upstream, one woken twenty times a second by a
 /// narrating dispatch and one twice a second. Their pass counts are an order of
 /// magnitude apart and what they read out of the upstream is not.
+///
+/// Measured over [`WINDOW`], the same minute every other bound here is stated
+/// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
+/// number a burst either side of the interval can reach without the rate having
+/// moved at all.
 #[test]
 fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     let world = measured("loopcost-paced");
@@ -391,12 +340,11 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     }
     std::thread::sleep(Duration::from_secs(1));
 
-    let window = Duration::from_secs(10);
     let before: Vec<Counts> = ["chatty", "quiet"]
         .iter()
         .map(|run| counts(&world, run))
         .collect();
-    std::thread::sleep(window);
+    std::thread::sleep(WINDOW);
     let did: Vec<Counts> = ["chatty", "quiet"]
         .iter()
         .enumerate()
@@ -411,7 +359,7 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     );
     // Two reads answer one edge — has the node settled, and how far has that run
     // got — so twice a second is four reads a second and no more.
-    let ceiling = 4 * window.as_secs() + 4;
+    let ceiling = 4 * WINDOW.as_secs() + 4;
     for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
         assert!(
             did[nth].upstream_reads <= ceiling,

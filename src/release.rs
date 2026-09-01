@@ -59,7 +59,14 @@ pub const POLL_ENV: &str = "ONEPIPELINE_RELEASE_POLL_SECONDS";
 /// A probe is a subprocess, so this is a bound on how much a held run costs the
 /// host rather than a promise about latency: a release that arrives between two
 /// asks is noticed at the second one.
-pub const DEFAULT_POLL_SECONDS: u64 = 120;
+///
+/// **A minute, and never longer.** That is the bound this loop already promises
+/// for every other answer it owes on a clock — [`Watch::take_up_every`] holds the
+/// take-up to it whatever a host configures — so a shipped default above it would
+/// be the one answer a held run waits longer than a minute for, and nothing about
+/// a run says which. A host that wants to spend less on probes lengthens
+/// [`POLL_ENV`]; the *shipped* value stays inside the promise.
+pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
 /// The environment variable bounding how often a held node's wait is surfaced.
 pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
@@ -2223,5 +2230,25 @@ mod tests {
         }
         assert_eq!(poll_seconds(), DEFAULT_POLL_SECONDS);
         assert_eq!(surface_every_seconds(), DEFAULT_SURFACE_SECONDS);
+    }
+
+    /// The shipped probe interval is inside the bound this loop promises for
+    /// every other answer it owes on a clock.
+    ///
+    /// Read through the same function a driver reads it through rather than off
+    /// the constant, so a build that shipped a longer default fails here whether
+    /// it moved the constant or the fallback around it. What holds the *rate* end
+    /// to end — that a held run really is asked about no oftener than this,
+    /// however fast its loop runs — is
+    /// `adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`.
+    #[test]
+    fn the_shipped_probe_interval_is_no_longer_than_the_loop_promises() {
+        std::env::remove_var(POLL_ENV);
+        let shipped = Duration::from_secs(poll_seconds());
+        assert!(
+            shipped <= Duration::from_secs(60),
+            "the shipped probe interval is {shipped:?}, which is longer than the minute a held \
+             node is promised for every other answer this loop owes on a clock"
+        );
     }
 }

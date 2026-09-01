@@ -29,7 +29,10 @@
 
 use std::path::Path;
 
-use crate::harness::{lifecycle, plan_of, project_id, Repository, World, REFUSED};
+use crate::harness::{
+    agent, counts, lifecycle, plan_of, project_id, reporting, Counts, Repository, World,
+    LOOP_STATS_ENV, REFUSED,
+};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
 
@@ -1372,7 +1375,7 @@ const ASKS: usize = 5;
 /// A world whose release watch answers on this journey's timescale rather than on
 /// an operator's.
 ///
-/// The two bounds are the shipped ones — 120 seconds between probes and 900
+/// The two bounds are the shipped ones — 60 seconds between probes and 900
 /// between surfaces — which are right for a run that waits days for a release and
 /// wrong for a test that has to see both happen. Nothing else about the watch
 /// changes: one hold, indefinite, released only by an answer of released.
@@ -2498,6 +2501,144 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
         );
     }
 }
+
+/// The window one release's asks are counted over.
+///
+/// A minute, because the shipped interval is a minute, and a rate is held over
+/// the interval it is a rate on: a shorter window counts one ask or none whatever
+/// the run is doing, which is the same count a watch that had stopped asking
+/// would leave.
+const PACING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The shipped bound on how often one automated target's probe is run, in
+/// seconds.
+///
+/// The suite's own copy of a constant the crate declares privately — this crate
+/// publishes the contract's surface and nothing else — and it is read here as a
+/// **ceiling**: the journey below holds a real build to asking no oftener than
+/// this, so a build that shortened the interval fails it. That the shipped
+/// default is no *longer* than this is held at the declaration, by
+/// `release::tests::the_shipped_probe_interval_is_no_longer_than_the_loop_promises`,
+/// which is the direction a rate ceiling cannot see.
+const SHIPPED_POLL_SECONDS: u64 = 60;
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
+// waits on is the shipped interval itself, and an interval of a minute cannot be observed
+// in less than a minute. The edge it needs is the crate under test — the compiled binary,
+// its own release watch, a real probe subprocess, and a real repository — so a project of
+// its own would declare the same dependency and skip nothing; every e2e journey here lives
+// in one binary for that reason. It is one window, run beside the other minute-long
+// windows under nextest.
+
+/// One held release is asked about on the **release watch's own interval**,
+/// however fast the run's reconcile loop is running.
+///
+/// A probe is a subprocess, so what a held run costs its host is the number of
+/// them — and a run held for days is held while its loop is woken by everything
+/// else it is doing. Two runs held on the same real release, one woken twenty
+/// times a second by a narrating dispatch and one twice a second: their pass
+/// counts are an order of magnitude apart, and what they spend on the release is
+/// the same one ask a minute the shipped interval allows.
+///
+/// The shipped bounds throughout — nothing here shortens the poll interval — so
+/// what is measured is what an operator's run does.
+#[test]
+fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs() {
+    let world = World::new("adoption-pacing").with_env(LOOP_STATS_ENV, "1");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A release that has happened and does not carry this run's work: the probe
+    // answers, every ask costs a subprocess, and no answer ever releases the hold.
+    releases_at(&answer, "0.1.0");
+
+    let runs = ["pacing-chatty", "pacing-quiet"];
+    for (run, every) in runs.iter().zip(["50", "500"]) {
+        // The dispatch that wakes the loop: held open throughout, beating on the
+        // clock this run's rate is set by.
+        let hold = format!("{run}-hold");
+        world.script(&format!("{hold}.wait"), "hold");
+        world.script(&format!("{hold}.heartbeat"), every);
+        // Started one after another rather than together: both runs' engine nodes
+        // publish into the one engine repository, and two publications racing for
+        // its main branch is this fixture failing rather than the crate under test.
+        start(
+            &world,
+            run,
+            vec![agent(&hold, &[]), engine(), consumer(Some("published"))],
+        );
+        world.until("the engine to settle", |world| {
+            world
+                .events_of(run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == ENGINE)
+        });
+        world.until("the consumer to be held on the release", |world| {
+            !awaiting(world, run, "consumer").is_empty()
+        });
+        reporting(&world, run);
+        // And the watch really is asking: the first ask goes out as soon as the
+        // wait begins, so a window that counts none afterwards is a paced host
+        // rather than a dead one.
+        world.until("the release to be asked about at all", |world| {
+            counts(world, run).release_asks >= 1
+        });
+    }
+
+    let before: Vec<Counts> = runs.iter().map(|run| counts(&world, run)).collect();
+    std::thread::sleep(PACING_WINDOW);
+    let did: Vec<Counts> = runs
+        .iter()
+        .enumerate()
+        .map(|(nth, run)| counts(&world, run).since(before[nth]))
+        .collect();
+
+    // The pass rates really are far apart, which is what makes the claim under
+    // them mean anything.
+    assert!(
+        did[0].passes > did[1].passes * 4,
+        "the two loops did not run at different rates: {did:?}"
+    );
+    // One question for one release, once per interval — plus the one an interval
+    // boundary inside the window can add.
+    let ceiling = PACING_WINDOW.as_secs() / SHIPPED_POLL_SECONDS + 1;
+    for (nth, run) in runs.iter().enumerate() {
+        assert!(
+            did[nth].release_asks <= ceiling,
+            "{run} asked about one release {} times in {PACING_WINDOW:?}, which is oftener than \
+             the {SHIPPED_POLL_SECONDS}s interval allows: {did:?}",
+            did[nth].release_asks
+        );
+    }
+    // Stated against the loop it is *not* paced by: the faster run woke hundreds
+    // of times for every ask it made, so an ask taken on the pass would have
+    // blown the ceiling by two orders of magnitude.
+    assert!(
+        did[0].passes > 100 * ceiling,
+        "the faster loop did not run enough passes for this to prove anything: {did:?}"
+    );
+    assert!(
+        did[0].release_asks <= did[1].release_asks + 1,
+        "asking about the release tracked the loop's pass rate: {did:?}"
+    );
+    // Nothing about the minute started the held nodes, and nothing failed them.
+    for run in runs {
+        assert!(
+            !dispatched(&world, run, "consumer"),
+            "waiting longer is what started a held node in {run}"
+        );
+        assert!(
+            world.events_of(run, "release-arrived").is_empty(),
+            "a release nothing published arrived in {run}"
+        );
+    }
+
+    for run in runs {
+        world.release(&format!("{run}-hold.go"));
+    }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The adoption mode resolves through **exactly four rungs**, and each of them
 /// decides a node the rung beneath it would have decided differently.

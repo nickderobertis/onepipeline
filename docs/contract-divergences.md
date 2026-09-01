@@ -1394,7 +1394,8 @@ The scheduler is **identical for both release styles** — one hold, indefinite,
 never failing — and what differs is only where the readiness answer comes from
 and what is reported. An automated target's answer is its probe, which is a
 subprocess: it is asked off the reconcile loop's own thread and paced on its own
-interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 120 seconds by default. A
+interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 60 seconds by default — the
+minute this loop promises for every answer it owes on a clock. A
 human-step target's answer is the acknowledgement record, for which this crate
 runs no probe because there is none to run. `awaiting-human-step` is carried as
 its own answer through the scheduler, the surface, and the payload and is never
@@ -1535,7 +1536,7 @@ stays private, which is the outcome it was asking for.
 
 What this crate does with it is one paced read and no new vocabulary. On the
 reconcile loop's own passes, on the release watch's interval — `ONEPIPELINE_RELEASE_POLL_SECONDS`,
-120 seconds by default, the same bound the probe is asked under and not a second
+60 seconds by default, the same bound the probe is asked under and not a second
 one — every node that has **settled** and whose repository declares release
 targets has its session read through that reader, under the launch's own
 `filters.vcs`: the same value the follow was opened with, crossing the same seam.

@@ -4442,6 +4442,82 @@ fn yaml_scalar(text: &str) -> String {
     serde_json::to_string(text).expect("a string serializes")
 }
 
+/// The variable that asks a driver to report what its reconcile loop did.
+///
+/// The suite's own copy of a name the crate declares privately, for the reason
+/// [`STARTUP_TIMEOUT_ENV`] is one. What proves the copy is still the name the
+/// binary reads is every journey that calls [`counts`]: a driver launched under
+/// a name it does not read writes no counts file at all, and [`counts`] fails
+/// naming the file it never found rather than passing a little emptier.
+pub const LOOP_STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
+
+/// What one driver's reconcile loop did, as it reports it.
+///
+/// Read as a delta across an interval rather than as an absolute — the counts
+/// are per process and a driver has been running since before any window opened
+/// — so every claim over them is stated as work done inside a window rather than
+/// as time taken, and a loaded host cannot fail correct work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub passes: u64,
+    pub statuses: u64,
+    pub publications: u64,
+    pub upstream_reads: u64,
+    pub release_asks: u64,
+    pub store_bytes: u64,
+}
+
+impl Counts {
+    /// What was done between an earlier reading and this one.
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            passes: self.passes - before.passes,
+            statuses: self.statuses - before.statuses,
+            publications: self.publications - before.publications,
+            upstream_reads: self.upstream_reads - before.upstream_reads,
+            release_asks: self.release_asks - before.release_asks,
+            store_bytes: self.store_bytes - before.store_bytes,
+        }
+    }
+}
+
+/// The counts a run's driver has reported so far.
+pub fn counts(world: &World, run: &str) -> Counts {
+    let path = world.run_file(run, "loop-stats.json");
+    let read =
+        || -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok() };
+    // Written atomically, so a partial read is not a thing that happens — an
+    // absent one is, on the first look before the driver's first wait.
+    let value = read().unwrap_or_else(|| {
+        panic!(
+            "{run} reported no loop counts at {}\n{}",
+            path.display(),
+            world.dump()
+        )
+    });
+    let count = |name: &str| {
+        value[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{run}'s counts carry no {name}: {value}"))
+    };
+    Counts {
+        passes: count("passes"),
+        statuses: count("statuses"),
+        publications: count("publications"),
+        upstream_reads: count("upstream_reads"),
+        release_asks: count("release_asks"),
+        store_bytes: count("store_bytes"),
+    }
+}
+
+/// Wait until a driver has reported anything at all, which it does on its first
+/// wait.
+pub fn reporting(world: &World, run: &str) {
+    world.until("the driver to report its loop counts", |world| {
+        world.run_file(run, "loop-stats.json").is_file()
+    });
+}
+
 /// A direct agent node.
 pub fn agent(id: &str, deps: &[&str]) -> Value {
     serde_json::json!({
