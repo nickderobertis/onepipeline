@@ -1168,7 +1168,6 @@ mod tests {
             "the streak is not deep enough for a stop to have anything to wait out: {waited:?}"
         );
 
-        // The stop itself: what a run's end sends the worker, and nothing else.
         let shared = Arc::clone(&writeback.pending);
         let asked = Instant::now();
         drop(writeback);
