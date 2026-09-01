@@ -81,7 +81,28 @@ const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs.
 const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+// A failing projection is retried on a *growing* interval, and these three numbers are
+// chosen from what refuses one in practice: a hosted destination's rate limiter. That is
+// the one refusal every further attempt makes worse, so a fixed short interval answers it
+// by retrying harder at the thing that is already saying no.
+//
+// Where a streak starts, unchanged from when this was the whole schedule: a projection
+// that fails once and succeeds next time still lands within a quarter-second, which is not
+// a delay an operator watching the board notices.
 const RETRY_AFTER: Duration = Duration::from_millis(250);
+// Each consecutive failure is asked four times further apart than the last, so five
+// attempts carry the interval from milliseconds to the ceiling in about twenty seconds. A
+// limiter's window is minutes, and a schedule that crept there by doubling would spend most
+// of that window still asking several times a minute.
+const RETRY_GROWTH: u32 = 4;
+// A minute, because that is what the destination itself asks for: GitHub's secondary rate
+// limit is documented as "wait at least one minute before retrying", and unlike the primary
+// one it is reported by no endpoint a caller can poll, so a schedule is all there is to go
+// on. Once a minute is a question a refusing destination is asked; four times a second is
+// one it is hammered with. It is a ceiling and not a give-up, because the projection is the
+// record an operator reads to see what became of their plan — a worker that stopped
+// retrying would leave the board wrong for the rest of the run.
+const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
@@ -153,6 +174,16 @@ struct Pending {
     /// One entry per outage rather than one per retry: the worker retries until
     /// the store returns, and a surface for every attempt would bury the first.
     unprojected: Vec<Unprojected>,
+    /// Set once by the closeout window, and taken by a worker waiting out a retry
+    /// interval as leave to make **one** immediate attempt.
+    ///
+    /// The growing interval is there to stop a refused destination being asked again and
+    /// again while the run lasts; the closeout is the opposite situation — the run is
+    /// ending and there is exactly one attempt left in it, inside a window that is
+    /// bounded whatever the store does. A terminal snapshot that sat out a minute's
+    /// interval inside a two-second window would leave the board wrong for good, which is
+    /// the record an operator reads to see what became of their plan.
+    closeout: bool,
 }
 
 impl Pending {
@@ -266,6 +297,10 @@ impl Writeback {
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
+        // A worker waiting out a retry interval is given its one closeout attempt here,
+        // rather than being left to a schedule written for a run that is still going.
+        pending.closeout = true;
+        ready.notify_all();
         while (pending.latest.is_some() || pending.worker == WorkerState::Working)
             && Instant::now() < deadline
         {
@@ -283,7 +318,11 @@ impl Drop for Writeback {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             pending.worker = WorkerState::StopRequested;
-            ready.notify_one();
+            // Every waiter, because two of them wait on this one condition: the worker
+            // idle between snapshots, and the worker waiting out a retry interval that
+            // grows into the tens of seconds. Waking one of the two would leave whichever
+            // it was not sitting on a stop it has already been told about.
+            ready.notify_all();
         }
         // Deliberately no join: a store process is outside the run's failure and latency
         // boundary, and waiting for it here would turn write-back into run settlement.
@@ -297,6 +336,10 @@ fn worker(
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     let mut failing = false;
+    // The consecutive failures of the current streak, which is what the retry interval
+    // grows with. A success ends the streak and resets it, so an isolated failure long
+    // after an outage is retried as promptly as the first one was.
+    let mut failures: u32 = 0;
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -330,6 +373,7 @@ fn worker(
                     );
                 }
                 failing = false;
+                failures = 0;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
@@ -340,23 +384,39 @@ fn worker(
             }
             Err(error) => {
                 let first = !failing;
+                failures = failures.saturating_add(1);
                 if first {
+                    // The one line on the driver's stderr that ever says a projection is in
+                    // trouble, so it says what an operator's next question is: whether to
+                    // expect another attempt in a moment or in a minute.
                     eprintln!(
-                        "onetaskgraph write-back failed for '{}': {error}; retrying",
-                        snapshot.project
+                        "onetaskgraph write-back failed for '{}': {error}; retrying, spacing \
+                         further attempts out to {} seconds apart while it keeps failing",
+                        snapshot.project,
+                        RETRY_CEILING.as_secs()
                     );
                 }
                 failing = true;
-                std::thread::sleep(RETRY_AFTER);
+                // The planner hears about the outage *before* the wait rather than after
+                // it: the interval grows into the tens of seconds, and a surface that
+                // waited for it would reach the reconcile loop long after the board it
+                // reports on went stale.
+                {
+                    let (lock, _) = &*pending;
+                    let Ok(mut state) = lock.lock() else { return };
+                    if first {
+                        state.unprojected.push(Unprojected {
+                            project: snapshot.project.clone(),
+                            items: snapshot.nodes.keys().cloned().collect(),
+                            reason: error,
+                        });
+                    }
+                }
+                if !waited_before_retrying(&pending, retry_after(failures)) {
+                    return;
+                }
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
-                if first {
-                    state.unprojected.push(Unprojected {
-                        project: snapshot.project.clone(),
-                        items: snapshot.nodes.keys().cloned().collect(),
-                        reason: error,
-                    });
-                }
                 if state.worker == WorkerState::StopRequested {
                     return;
                 }
@@ -373,6 +433,53 @@ fn worker(
             }
             ready.notify_all();
         }
+    }
+}
+
+/// How long to wait before retrying the `failures`-th consecutive failure of a streak.
+///
+/// `failures` counts the failures of the streak in progress, the first being 1, so the
+/// interval is [`RETRY_AFTER`] after an isolated failure however long an earlier outage
+/// lasted, and never longer than [`RETRY_CEILING`] however long this one does.
+fn retry_after(failures: u32) -> Duration {
+    RETRY_AFTER
+        .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
+        .min(RETRY_CEILING)
+}
+
+/// Wait out one retry interval, answering whether the worker should retry at all.
+///
+/// A condition wait rather than a sleep, because the interval grows into the tens of
+/// seconds and a run that is stopping must not be made to wait out a schedule that exists
+/// only to be gentle with the destination: `false` is the stop, and the worker returns on
+/// it rather than asking the store again. A snapshot published meanwhile deliberately does
+/// *not* shorten the wait — what the interval is spacing is the destination's refusal, and
+/// a run that keeps folding new graph state would otherwise retry as fast as it publishes.
+fn waited_before_retrying(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
+    let (lock, ready) = pending;
+    let Ok(mut state) = lock.lock() else {
+        return false;
+    };
+    let deadline = Instant::now() + interval;
+    loop {
+        if state.worker == WorkerState::StopRequested {
+            return false;
+        }
+        if state.closeout {
+            // Taken rather than read: the leave is for one attempt, so a closeout window
+            // that outlives a failing attempt does not turn into a tight retry loop
+            // against a destination that is already refusing.
+            state.closeout = false;
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        let Ok((next, _)) = ready.wait_timeout(state, left) else {
+            return false;
+        };
+        state = next;
     }
 }
 
@@ -1030,6 +1137,7 @@ mod tests {
             last_success: Some(first.clone()),
             worker: WorkerState::Working,
             unprojected: Vec::new(),
+            closeout: false,
         };
 
         assert!(pending.queue(first.clone()));
