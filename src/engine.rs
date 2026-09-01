@@ -5122,14 +5122,14 @@ mod tests {
             })
             .collect();
         let named: Vec<String> = serde_json::from_value(block["reason_kinds"].clone())
-            .expect("entry 54 names its kinds");
+            .expect("entry 55 names its kinds");
         assert_eq!(mine, named);
 
         for reason in &reasons {
             let payload = reason.payload();
             let kind = payload["kind"].as_str().expect("a kind");
             let fields: Vec<String> = serde_json::from_value(block["fields"][kind].clone())
-                .unwrap_or_else(|e| panic!("entry 54 names {kind}'s fields: {e}"));
+                .unwrap_or_else(|e| panic!("entry 55 names {kind}'s fields: {e}"));
             let carried: Vec<String> = payload
                 .as_object()
                 .expect("an object")
@@ -5144,7 +5144,7 @@ mod tests {
         assert_eq!(block["unheld_payload"], json!("released"));
         assert_eq!(
             serde_json::from_value::<Vec<String>>(block["event_kinds"].clone())
-                .expect("entry 54 names its kinds"),
+                .expect("entry 55 names its kinds"),
             vec![
                 journal::PipelineKind::NodeHeld.as_str(),
                 journal::PipelineKind::NodeUnheld.as_str()
