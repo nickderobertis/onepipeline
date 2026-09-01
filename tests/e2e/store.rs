@@ -890,6 +890,15 @@ fn retry_intervals(
     at.windows(2).map(|pair| pair[1] - pair[0]).collect()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these six wait on
+// is the schedule itself — a minute-long interval cannot be observed in less than a minute
+// — and the edge they need is the crate under test: they drive the compiled `onepipeline`
+// binary against its own write-back worker, so a project of their own would declare the
+// same dependency and skip nothing. Every e2e journey in this repository lives in this one
+// binary for that reason; the single project that was split out,
+// `onepipeline-note-journeys`, was split for a test binary it needs rather than a narrower
+// edge. Splitting these six would invent a per-topic test project, which is a change to how
+// this repository's graph and gate are shaped rather than to what this change does.
 /// A destination that keeps refusing is asked further and further apart, rather than four
 /// times a second for as long as the run lasts.
 ///
@@ -1156,7 +1165,8 @@ fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_int
 }
 
 /// A stop arriving while the worker is waiting out an interval is honoured on the
-/// operator's own timescale, not the schedule's.
+/// operator's own timescale, not the schedule's — and the worker it woke asks the
+/// destination nothing more.
 #[test]
 fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
     let run = "writeback-backoff-stop";
@@ -1177,8 +1187,23 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
         waited[3]
     );
     assert_eq!(world.events_of(run, "run-stopped").len(), 1);
+
+    // A worker woken out of a wait by the stop leaves rather than taking its turn at the
+    // destination: the run that was asking is over, so nothing more is asked for it.
+    let asked_by_the_stopped_run = projections_asked_for(&world);
+    let watched = Instant::now();
+    while watched.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            projections_asked_for(&world),
+            asked_by_the_stopped_run,
+            "the destination was asked again {:?} after the run was stopped",
+            watched.elapsed()
+        );
+    }
     world.release("work.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Losing the worker's own command-capture path is handled by the same best-effort
 /// boundary as losing the destination: the committed graph keeps running, and the

@@ -81,27 +81,16 @@ const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs.
 const COMMAND_LIMIT: Duration = Duration::from_secs(60);
-// A failing projection is retried on a *growing* interval, and these three numbers are
-// chosen from what refuses one in practice: a hosted destination's rate limiter. That is
-// the one refusal every further attempt makes worse, so a fixed short interval answers it
-// by retrying harder at the thing that is already saying no.
-//
-// Where a streak starts, unchanged from when this was the whole schedule: a projection
-// that fails once and succeeds next time still lands within a quarter-second, which is not
-// a delay an operator watching the board notices.
+// The retry schedule, chosen from the refusal that produces it in practice: a hosted
+// destination's rate limiter, which every further attempt extends. It starts where a fixed
+// quarter-second schedule did, so a projection that fails once still lands unnoticeably
+// fast, and quadruples so that five attempts reach the ceiling inside twenty seconds rather
+// than spending a limiter's whole minutes-long window asking several times a minute. The
+// ceiling is what GitHub's secondary limit — reported by no endpoint a caller can poll —
+// documents as the wait to take: at least one minute. It is a ceiling and not a give-up,
+// because a board nobody projects to stays wrong for the rest of the run.
 const RETRY_AFTER: Duration = Duration::from_millis(250);
-// Each consecutive failure is asked four times further apart than the last, so five
-// attempts carry the interval from milliseconds to the ceiling in about twenty seconds. A
-// limiter's window is minutes, and a schedule that crept there by doubling would spend most
-// of that window still asking several times a minute.
 const RETRY_GROWTH: u32 = 4;
-// A minute, because that is what the destination itself asks for: GitHub's secondary rate
-// limit is documented as "wait at least one minute before retrying", and unlike the primary
-// one it is reported by no endpoint a caller can poll, so a schedule is all there is to go
-// on. Once a minute is a question a refusing destination is asked; four times a second is
-// one it is hammered with. It is a ceiling and not a give-up, because the projection is the
-// record an operator reads to see what became of their plan — a worker that stopped
-// retrying would leave the board wrong for the rest of the run.
 const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
@@ -173,15 +162,9 @@ enum WorkerState {
 enum RunPhase {
     #[default]
     Running,
-    /// The graph has converged and the run is inside its bounded closeout window.
-    ///
-    /// The growing interval is there to stop a refused destination being asked again and
-    /// again while a run lasts; a run that is ending is the opposite situation — it has one
-    /// last snapshot to project, and the window it has to do that in is bounded whatever
-    /// the store does. So the schedule is suspended here rather than obeyed: a terminal
-    /// snapshot left sitting out a minute's interval inside a two-second window leaves the
-    /// board wrong for good, and the board is the record an operator reads to see what
-    /// became of their plan.
+    /// The graph has converged and the run is inside its bounded closeout window, which
+    /// suspends the retry schedule: a terminal snapshot left sitting out a minute's
+    /// interval inside a two-second window would never be projected at all.
     ClosingOut,
     /// The run is over and the worker is to stop, whatever it was waiting for.
     Stopping,
@@ -454,15 +437,12 @@ fn retry_after(failures: u32) -> Duration {
 
 /// Wait out one retry interval, answering whether the worker should retry at all.
 ///
-/// A condition wait rather than a sleep, because the interval grows into the tens of
-/// seconds and neither phase the run can move into may be made to wait one out: `false` is
-/// [`RunPhase::Stopping`], on which the worker returns rather than asking the store again,
-/// and [`RunPhase::ClosingOut`] is the run's last attempt, made now for the reason recorded
-/// there. Both are read on entry as well as on every wake, so a phase the run reached while
-/// this worker was busy projecting is honoured rather than missed. A snapshot published
-/// meanwhile deliberately does *not* shorten the wait — what the interval is spacing is the
-/// destination's refusal, and a run that keeps folding new graph state would otherwise
-/// retry as fast as it publishes.
+/// `false` is [`RunPhase::Stopping`] and the caller returns on it; `true` is the wait
+/// having been served, or [`RunPhase::ClosingOut`]. Both phases are read on entry as well
+/// as on every wake, so one the run reached while this worker was projecting is honoured
+/// rather than missed. A snapshot published meanwhile deliberately does *not* shorten the
+/// wait: what the interval spaces is the destination's refusal, and a run that keeps
+/// folding new graph state would otherwise retry as fast as it publishes.
 fn waited_before_retrying(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
     let (lock, ready) = pending;
     let Ok(mut state) = lock.lock() else {
