@@ -175,13 +175,22 @@ pub const CANCEL_INPUT: &str = "Stop this task now. Do not start any new work, a
      another file, command, or tool call. Commit anything you have not \
      committed yet, then end your turn.";
 
-/// How long a dispatch thread's message is waited for before its batch is closed.
+/// How long the loop keeps taking messages that are already queued, once
+/// something has woken it.
 ///
-/// Two uses, and both are windows rather than rates: the loop drains everything
-/// already queued for this long once it has been woken, and
-/// [`attempt`] waits this long for a dispatch it asked to stop. Neither
-/// decides how often the loop runs — see [`CHANNEL_POLL`] for that.
-const POLL: Duration = Duration::from_millis(25);
+/// A window, not a rate. Narration and settlement share one channel, so taking a
+/// single message per pass made a settlement wait a whole pass for every envelope
+/// queued ahead of it; this is how long the loop spends emptying the queue before
+/// it decides what the batch means. Nothing about it says how often a pass
+/// happens — [`CHANNEL_POLL`] and the paced intervals below say that.
+const DRAIN_WINDOW: Duration = Duration::from_millis(25);
+
+/// How long a teardown waits for the next envelope before looking at its
+/// deadline again.
+///
+/// A dispatch that was asked to stop is read until it stops or its grace runs
+/// out, and this is the granularity that grace is measured at.
+const TEARDOWN_TICK: Duration = Duration::from_millis(25);
 
 /// How long the loop waits before looking at the planner's channel again.
 ///
@@ -1160,7 +1169,7 @@ fn wait_for_work(
                 // whole pass for every envelope queued ahead of it.
                 let mut batch = vec![message];
                 let drain_started = Instant::now();
-                while drain_started.elapsed() < POLL {
+                while drain_started.elapsed() < DRAIN_WINDOW {
                     // One arm for both refusals: nothing is queued, or nothing
                     // ever will be again. The second is answered one pass later,
                     // which is where it has always been answered.
@@ -1226,8 +1235,11 @@ enum HoldReason {
     },
     /// A decision point is holding the subtree it is in.
     ///
-    /// The reference alone. What that decision is stays on `decision-pending`.
-    Decision { reference: String },
+    /// The reference alone, and the type that already models one: a decision is
+    /// cleared by an `attest` or by a reply, and which of the two it is has to be
+    /// readable off the reference rather than guessed from a string. What that
+    /// decision *is* stays on `decision-pending`.
+    Decision { reference: DecisionRef },
     /// It adopts published releases, and not all of them have happened.
     ///
     /// The dependencies awaited, by id. What each wait is stays on `release-wait`.
@@ -1244,7 +1256,9 @@ impl HoldReason {
             Self::Concurrency { ahead, limit } => {
                 json!({ "kind": "concurrency", "ahead": ahead, "limit": limit })
             }
-            Self::Decision { reference } => json!({ "kind": "decision", "reference": reference }),
+            Self::Decision { reference } => {
+                json!({ "kind": "decision", "reference": reference.as_wire() })
+            }
             Self::Release { awaiting } => json!({ "kind": "release", "awaiting": awaiting }),
         }
     }
@@ -1316,7 +1330,7 @@ fn holds_now(
         for decision in decisions.values() {
             if decision.unblocks.contains(&node.id) {
                 reasons.push(HoldReason::Decision {
-                    reference: decision.reference.as_wire(),
+                    reference: decision.reference.clone(),
                 });
             }
         }
@@ -2502,7 +2516,7 @@ pub(crate) fn drain(
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
     loop {
-        match arriving.recv_timeout(POLL) {
+        match arriving.recv_timeout(TEARDOWN_TICK) {
             Ok(Ok(envelope)) => {
                 spoke = true;
                 if let Some(address) = addressed_by(&envelope) {
@@ -5049,7 +5063,7 @@ mod tests {
                 limit: 1,
             },
             HoldReason::Decision {
-                reference: "surface:7".into(),
+                reference: DecisionRef::Surface(7),
             },
             HoldReason::Release {
                 awaiting: vec!["build".into()],
@@ -5239,7 +5253,7 @@ mod tests {
                     blocking: vec!["approve".into()]
                 },
                 HoldReason::Decision {
-                    reference: "approve".into()
+                    reference: DecisionRef::Attestation("approve".into())
                 },
             ])
         );

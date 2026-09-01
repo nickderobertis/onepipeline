@@ -58,24 +58,16 @@ Rules:
   retained report is a rendering rather than a promise, and the segment
   sanitiser behind `report_for` stays private so nobody restates it.
 
-The loop **waits**; it does not poll. A pass runs when a dispatch thread says
+The loop **waits**; it does not poll. A pass runs when a dispatch says
 something, when the planner's channel moves, when something outside this run
 moves — an upstream ledger, an answered release probe, a failed projection — or
-when the longest interval it may go without a pass comes due, and on nothing
-else. A wake that finds none of those goes straight back to waiting, so a
-converged run runs no passes at all. Restoring a per-pass read of whole state —
-`state.statuses()`, `writeback.publish`, `upstreams.resolve`,
-`projection::fold` — puts back the sink this replaced: a driver was measured at
-01:39:24 of CPU over 9,007 seconds on a run with one node in flight.
-
-`ONEPIPELINE_LOOP_STATS` is how that is *checked* rather than claimed. Set to
-anything non-empty, a driver writes `loop-stats.json` into the run's own
-directory: passes, statuses derived, boards published, upstream ledgers read,
-releases asked about, and bytes read out of a run store. `src/loopstats.rs` owns
-it and `tests/e2e/loopcost.rs` is what reads it. The counters are always
-incremented — a relaxed atomic beside a subprocess spawn costs nothing, and one
-that only existed under a flag would be one nothing had proven counts the real
-path.
+when the longest interval it may go without one comes due, and on nothing else.
+So **whole-state work belongs on a change, never on a pass**: a per-pass
+`state.statuses()`, `writeback.publish`, `upstreams.resolve` or
+`projection::fold` is the CPU sink this shape exists to keep out, and one driver
+in that shape spent an hour and a half of CPU on a run with a single node in
+flight. `ONEPIPELINE_LOOP_STATS` is how that is checked rather than claimed —
+`src/loopstats.rs` says what it counts and where.
 
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 

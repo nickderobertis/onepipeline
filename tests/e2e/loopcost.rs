@@ -13,6 +13,13 @@
 //! loaded host cannot fail correct work — and every one of them is a bound the
 //! tree before this change would not have met.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] what these journeys
+// measure IS the whole crate's reconcile loop, so a project whose edges reached less than
+// the crate would be one that could not run them: any change under `src/` can put the sink
+// back, which is why the edge is honest rather than broad. The cost is bounded and paid
+// once — the two minute-long windows run beside each other under nextest and the rest of
+// the file is seconds — and the minute is not a knob: it is the interval the bound is
+// stated over.
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is the compiled binary,
 // driven as a subprocess over real run stores, and the counts are the real loop's own.
 // Only `oneagentgraph` is substituted, at its own subprocess boundary, so a journey can
@@ -21,7 +28,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::harness::{agent, human, plan_of, World};
+use crate::harness::{agent, human, plan_of, renamed, World};
 use serde_json::{json, Value};
 
 /// The interval every idle claim here is measured over.
@@ -551,5 +558,61 @@ fn a_consumer_proceeds_within_a_second_of_its_upstream_settling() {
     world.release("late.go");
     world.until("the run to settle", |world| {
         world.run_file("watcher", "result.json").is_file()
+    });
+}
+
+/// A projection that fails while the run is recording nothing reaches the
+/// planner all the same.
+///
+/// The write-back worker runs on a thread of its own, so it fails without
+/// anything about the run changing — and a loop that only woke for its own state
+/// would leave the board reported behind until something else happened to the
+/// run. Here nothing else does: one node is held open, nobody edits anything, and
+/// the surface has to arrive on a wake the worker caused.
+#[test]
+fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_planner() {
+    let world = World::new("loopcost-unprojected");
+    world.script("hold.wait", "hold");
+    world.script("first.wait", "hold");
+    let project = world.plan(
+        "unprojected",
+        &plan_of("unprojected", vec![agent("hold", &[]), agent("first", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "first"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    // The store goes away, one node settles, and then the run records nothing
+    // at all: the settlement's own pass publishes the snapshot, and the worker
+    // meets the outage well after that pass has finished asking.
+    let unavailable = world.root.join("plan-store-unavailable");
+    renamed(
+        &world.store(),
+        &unavailable,
+        "the store becomes unreachable",
+    );
+    world.release("first.go");
+    world.until("the node to settle", |world| {
+        recorded(world, "unprojected", "node-settled", "first")
+    });
+    world.until("the failed projection to reach the planner", |world| {
+        world
+            .events_of("unprojected", "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["message"]
+                    .as_str()
+                    .is_some_and(|said| said.contains("did not take this run's projection"))
+            })
+    });
+
+    renamed(&unavailable, &world.store(), "the store returns");
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("unprojected", "result.json").is_file()
     });
 }

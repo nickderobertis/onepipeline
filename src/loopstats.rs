@@ -51,32 +51,26 @@ static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's it was.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// One reconcile pass began.
 pub(crate) fn pass() {
     PASSES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The graph's statuses were derived.
 pub(crate) fn statuses_derived() {
     STATUSES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A snapshot was handed to the write-back publisher.
 pub(crate) fn published() {
     PUBLICATIONS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Another run's ledger was read.
 pub(crate) fn upstream_read() {
     UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The sibling was asked whether one release has arrived.
 pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bytes came out of a run store.
 pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
 }
