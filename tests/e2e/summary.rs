@@ -16,6 +16,13 @@ use crate::harness::{agent, plan_of, World};
 
 use onepipeline::views::{Listing, RunPaths, RunSummary, SUMMARY_SCHEMA_VERSION};
 
+/// How many nodes the live-writer journey drives.
+///
+/// The reader has to run against the writer for long enough to be a race rather
+/// than a coincidence, and every node past that is wall time the journey does
+/// not need.
+const NODES: u64 = 6;
+
 /// Launch a run and wait for it to settle, as every journey in `views.rs` does.
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
@@ -26,9 +33,20 @@ fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     name.to_string()
 }
 
-/// Where the binary left one run's state.
 fn paths_of(world: &World, run: &str) -> RunPaths {
     RunPaths::under(&world.runs, run)
+}
+
+/// Take a run's summary document away, leaving the run recorded by a build that
+/// never wrote one.
+///
+/// llmlint: ignore[tests_mirror_real_usage] no verb of this build removes the document its
+/// journal writer maintains, and there is no interface that would: the run recorded by a
+/// build predating it is the state under test, and taking the document off a run this
+/// build's own CLI recorded is the only way to hold one. Every claim either side of this
+/// is read through the public reader over the store the real binary wrote.
+fn recorded_before_the_document(paths: &RunPaths) {
+    std::fs::remove_file(paths.summary()).expect("the document");
 }
 
 /// A run driven through the CLI keeps a summary beside its result, and the row
@@ -80,7 +98,7 @@ fn a_run_driven_through_the_cli_serves_the_row_its_own_fold_produces() {
 
     // The same row, folded from nothing: the document is taken away, so the
     // reader has no choice but the reading every listing did before it existed.
-    std::fs::remove_file(paths.summary()).expect("the document");
+    recorded_before_the_document(&paths);
     let folded = RunSummary::of(&paths).expect("the run folds");
     assert_eq!(
         served, folded,
@@ -100,12 +118,7 @@ fn a_run_recorded_without_a_summary_lists_identically() {
     let paths = paths_of(&world, &run);
     let maintained = RunSummary::of(&paths).expect("the run reads");
 
-    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build leaves a run
-    // root without the document its journal writer maintains — that is what makes it an
-    // older build's run — so the only way to hold one is to take the document off the run
-    // this build's own CLI recorded.
-    std::fs::remove_file(paths.summary()).expect("the document");
-    // llmlint: ignore-end[tests_mirror_real_usage]
+    recorded_before_the_document(&paths);
 
     let listing = Listing::of(&world.runs);
     assert_eq!(listing.root, world.runs);
@@ -162,6 +175,91 @@ fn the_bounded_listing_reports_the_roots_it_could_not_read() {
     );
 }
 
+/// A summary this build cannot read is a run that **folds**, not a run that
+/// vanishes.
+///
+/// Two shapes of the same answer: a document at a schema version this build does
+/// not write, and one a writer left half-finished. Neither is an error to a
+/// reader — the store beside it is intact, and the reading every listing did
+/// before this document existed is still there — so the run lists, and the row
+/// it lists with is the row its own journal produces.
+#[test]
+fn a_summary_this_build_cannot_read_folds_rather_than_taking_the_run_away() {
+    let world = World::new("summary-unreadable");
+    let run = settled(&world, "readable", vec![agent("build", &[])]);
+    let paths = paths_of(&world, &run);
+    let whole = RunSummary::of(&paths).expect("the run reads");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] neither state has a verb: this build
+    // writes exactly the version it reads — that is what makes the first one a *newer*
+    // build's document — and the second is the file a process killed mid-write leaves, not
+    // an output any interface produces. The run beside them is launched and settled through
+    // the CLI, and every claim is read through the public reader over the store it wrote.
+    let document = std::fs::read_to_string(paths.summary()).expect("the document");
+    let mut later: serde_json::Value = serde_json::from_str(&document).expect("a summary");
+    later["schema_version"] = serde_json::json!(SUMMARY_SCHEMA_VERSION + 1);
+    std::fs::write(paths.summary(), later.to_string()).expect("a later build's document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let listing = Listing::of(&world.runs);
+    assert!(
+        listing.skipped.is_empty(),
+        "a document this build cannot read took the run away: {:?}",
+        listing.skipped
+    );
+    assert_eq!(
+        listing.summaries.iter().find(|row| row.run_id == run),
+        Some(&whole),
+        "a run whose document a newer build wrote did not fold to the row its journal says"
+    );
+
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: the half-written file a
+    // killed process leaves is not a state any verb of this build produces.
+    std::fs::write(paths.summary(), &document[..document.len() / 2])
+        .expect("a document a writer left half-finished");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(RunSummary::of(&paths).expect("the run folds"), whole);
+}
+
+/// A summary the store has since moved past is **refolded**, not served.
+///
+/// Staged the way it happens: a writer appends a record and does not get as far
+/// as writing the document beside it — a driver killed between the two — so the
+/// document on disk describes a store shorter than the one there now. The
+/// journal's own recorded length is what says so.
+#[test]
+fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
+    let world = World::new("summary-stale");
+    let run = settled(&world, "moved-on", vec![agent("build", &[])]);
+    let paths = paths_of(&world, &run);
+    let before = std::fs::read_to_string(paths.summary()).expect("the document");
+    let served = RunSummary::of(&paths).expect("the run reads");
+    assert!(!served.stop_recorded);
+
+    // A record the CLI really appends, so the store genuinely moves on.
+    world
+        .run(&["stop", &run, "--force"])
+        .exited(0)
+        .out_has(r#""stopped":true"#);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] what this stages is a writer that
+    // appended and died before writing the document beside it, which is a killed process
+    // rather than an interface — and the document put back is the one this build's own
+    // writer wrote a moment earlier, not one invented here.
+    std::fs::write(paths.summary(), &before).expect("the document that writer left");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let refolded = RunSummary::of(&paths).expect("the run reads");
+    assert!(
+        refolded.stop_recorded,
+        "a document the store had moved past was served: {refolded:?}"
+    );
+    assert_eq!(refolded.event_count, served.event_count + 1);
+    // And what was served is what a fold says, so the refold is the whole answer
+    // rather than a patch on a stale one.
+    recorded_before_the_document(&paths);
+    assert_eq!(refolded, RunSummary::of(&paths).expect("the run folds"));
+}
+
 /// A reader never sees a half-written summary.
 ///
 /// One process lists the root continuously while **another** — the detached
@@ -174,8 +272,10 @@ fn the_bounded_listing_reports_the_roots_it_could_not_read() {
 fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
     let world = World::new("summary-concurrent");
     // Enough nodes that the driver is writing the document continuously for as
-    // long as this reader runs against it.
-    let nodes: Vec<serde_json::Value> = (0..12)
+    // long as this reader runs against it, and no more: what the journey needs
+    // is the two processes overlapping, which a handful of dispatches already
+    // gives it.
+    let nodes: Vec<serde_json::Value> = (0..NODES)
         .map(|nth| agent(&format!("step{nth:02}"), &[]))
         .collect();
     let path = world.plan("live", &plan_of("live", nodes));
@@ -221,7 +321,7 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
     );
     // And the run that was being written all along ends where its own fold says.
     let served = RunSummary::of(&paths).expect("the run reads");
-    std::fs::remove_file(paths.summary()).expect("the document");
+    recorded_before_the_document(&paths);
     assert_eq!(served, RunSummary::of(&paths).expect("the run folds"));
-    assert_eq!(served.node_counts.get("done"), Some(&12));
+    assert_eq!(served.node_counts.get("done"), Some(&NODES));
 }

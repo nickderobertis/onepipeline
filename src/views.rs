@@ -259,7 +259,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
     if ours
         && launch
             .driver_pid()
-            .is_some_and(|pid| !sys::process_may_be_live(pid))
+            .is_some_and(|pid| !sys::process_may_be_live(pid.get()))
     {
         return DriverLiveness::DriverDead;
     }

@@ -38,7 +38,17 @@
 //!
 //! [`views::RunView::open`]: crate::views::RunView::open
 
+// llmlint: ignore-file[invalid_states_unrepresentable] every identifier and timestamp on
+// `RunSummary` is a `String` for the reason `src/ledger.rs`'s own file-level suppression
+// states, and this document is that file's records read back: a run id, a project id, a
+// launching session and an instant are *serialized* fields a consumer parses and an older
+// build wrote, so every reader has to accept what is there rather than what this build
+// would mint. `docs/contract.md` names no `RunId` and no timestamp type, so a newtype here
+// would be a public vocabulary the contract did not ask for — and the contract that does
+// exist is enforced where it can be: `schema_version` is refused by the deserializer, and
+// the one value that could be a nonsense pid is `NonZeroU32` rather than a checked `u32`.
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +67,15 @@ use crate::telemetry::{self, RunTelemetry};
 /// mean something else. A version this build does not write is **refused**, and
 /// a refused document is not an error — it is a run that folds, which is the
 /// answer every run had before this document existed.
+///
+/// The version is why this document is read **closed** —
+/// `deny_unknown_fields` — while the launch record beside it is read
+/// permissively. That record has no version and no fallback: refusing it takes
+/// the whole run away from every view, which is the incident the ledger's own
+/// module documentation records. This one has both, so a key this build does not
+/// know costs a fold and nothing else, and the alternative — reading a document
+/// half of whose meaning is a build's this one is not — is exactly what the
+/// version exists to refuse.
 pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
 
 /// Read the version, refusing a document this build cannot honestly read.
@@ -80,6 +99,7 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 /// fabricated a launch instant, a host, or a pid would be the more expensive
 /// mistake by far.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunSummary {
     /// The document's own version, so a reader can refuse one it does not
     /// understand. See [`SUMMARY_SCHEMA_VERSION`].
@@ -166,7 +186,7 @@ pub struct RunSummary {
     /// pid nobody wrote has no stamp beside it by construction, so nothing that
     /// acts on a pid may act on this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
+    pub pid: Option<NonZeroU32>,
     /// The host that pid is meaningful on, when the record names one.
     ///
     /// Absent rather than claimed: a pid means nothing across machines, so a
@@ -398,23 +418,6 @@ impl Listing {
     }
 }
 
-/// One run's summary, kept current a record at a time by the process appending
-/// to its journal.
-///
-/// Held by [`journal::Journal`], which is the only writer of a run's merged
-/// store, so the document is written by whatever wrote the record it describes
-/// and is current for a live run rather than as of some later pass.
-///
-/// # Why an appended record can be folded at all
-///
-/// Because the derivations below are over the store in **merge order**, and a
-/// record whose `(ts, stream)` is at or past everything already in the store
-/// sorts last in that order — so folding it onto the state is exactly refolding
-/// the whole store. A record that arrives *behind* the newest instant does not,
-/// and the answer there is to rebuild from the file rather than to fold
-/// something into the wrong place. Two producers relay their own timestamps into
-/// this store, so that is a case rather than a hypothetical; it is also a rare
-/// one, which is what makes rebuilding on it affordable.
 /// A run's store folded: everything the summary is derived from except the
 /// launch record.
 ///
@@ -514,14 +517,21 @@ impl Maintainer {
         // The last instant's records are held open rather than folded, because
         // the next record to arrive may be stamped at that same instant and
         // belong in front of one of them.
+        //
+        // The **trailing run** of them, counted from the end, and not every
+        // record that happens to carry that stamp: the merge orders by each
+        // stream's own `seq` first, so a store some producer stamped out of
+        // order can carry that instant earlier as well — and taking those with
+        // it would re-sort records the merge had already placed, which is a
+        // different store from the one on disk.
         let open_ts = events
             .last()
             .map(|event| event.ts.clone())
             .unwrap_or_default();
         let opened = events
             .iter()
-            .position(|event| event.ts == open_ts)
-            .unwrap_or(events.len());
+            .rposition(|event| event.ts != open_ts)
+            .map_or(0, |before| before + 1);
         let mut settled = Folded::new();
         for event in &events[..opened] {
             settled.take(paths, event);

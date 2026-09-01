@@ -61,6 +61,7 @@
 
 use std::fs;
 use std::io;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -763,8 +764,11 @@ impl LaunchRecord {
 
     /// The driver pid this record names, when it names one a reader may act on.
     ///
-    /// `None` for the `0` a record carrying no pid defaults to. A pid is one
-    /// third of a claim — which process, on which host, and the stamp saying it
+    /// `None` for the `0` a record carrying no pid defaults to, and a
+    /// [`NonZeroU32`] so that no later reader can put it back: `0` is never a
+    /// driver on any platform this builds for, so the one value that would be a
+    /// nonsense pid is not a value this answer has. A pid is one third of a
+    /// claim — which process, on which host, and the stamp saying it
     /// is still that process, all written together by
     /// [`driven_by_this_process`](Self::driven_by_this_process) — so a defaulted
     /// pid has no stamp beside it by construction and no reader may act on it:
@@ -772,8 +776,8 @@ impl LaunchRecord {
     /// the strength of a pid nobody wrote, and not the stop path, which refuses
     /// an unstamped claim outright and would otherwise be aiming a teardown at
     /// whatever this host has given pid `0` a meaning of.
-    pub fn driver_pid(&self) -> Option<u32> {
-        (self.pid != 0).then_some(self.pid)
+    pub fn driver_pid(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.pid)
     }
 
     /// The host this record names, when it names one.
@@ -1854,7 +1858,7 @@ mod tests {
         // above is standing in front of a value somebody wrote.
         let whole = read_one("whole", &[]);
         assert_eq!(whole.session, "a-session");
-        assert_eq!(whole.driver_pid(), Some(1));
+        assert_eq!(whole.driver_pid(), NonZeroU32::new(1));
         assert_eq!(whole.recorded_host(), Some("h"));
         assert!(whole.launched_at().is_some());
         assert_eq!(whole.pacemaker_interval(), Some(1_800));
