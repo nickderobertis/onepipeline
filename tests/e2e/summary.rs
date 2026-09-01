@@ -387,13 +387,28 @@ fn a_listing_answers_most_recently_written_first() {
     }
 }
 
-/// The bounded read, at the surface a consumer reads it through.
+/// The bounded read, at the surface a consumer reads it through, **measured**
+/// rather than timed.
 ///
-/// The claim is that serving a run's row does not grow with that run's journal,
-/// and the control is the reading it replaces: the **same** store, folded, right
-/// beside it. Machine speed cancels between the two, so what is left is the
-/// ratio — and twenty bounded reads costing less than one fold is not a margin a
-/// loaded host closes.
+/// The claim is that serving a run's row does not open that run's journal at
+/// all, and a clock cannot say that: it reports that a read was fast without
+/// ever saying what the read opened, and on a loaded host it does not report
+/// even that. Nor can a store whose *contents* were substituted — a reader that
+/// read every byte and threw them away answers identically, which is the reading
+/// this exists to rule out.
+///
+/// So the store is made **unopenable** instead, with its length and modification
+/// time untouched: the reader's staleness rule has nothing to object to, and the
+/// only way past the document is a read that cannot succeed. A row served over a
+/// store no byte of which can be read is a row that cost no byte of it, however
+/// long the store is — and what the read *did* consume, the document, is a file
+/// the two runs carry at the same size while their journals stay three orders of
+/// magnitude apart.
+///
+/// `#[cfg(unix)]` on the measurement, and on it alone: taking read permission
+/// away is how a file is made unopenable here, and Windows takes it away through
+/// an ACL this suite has no equivalent for. The journey either side of it —
+/// the two stores, the document's own size, and the fold — runs everywhere.
 #[test]
 fn a_summary_read_stays_bounded_as_a_run_journal_grows() {
     let world = World::new("summary-bounded");
@@ -430,32 +445,141 @@ fn a_summary_read_stays_bounded_as_a_run_journal_grows() {
     // The first read of the grown run folds — its document no longer describes
     // the store — and caches. Everything measured below is the read a consumer
     // makes afterwards.
-    RunSummary::of(&large).expect("the run reads");
+    let served = RunSummary::of(&large).expect("the run reads");
+    assert_eq!(
+        served.journal_len, large_len,
+        "the fold stamped a store this is not"
+    );
 
-    let timed = |paths: &RunPaths, reads: u32| {
-        let began = std::time::Instant::now();
-        for _ in 0..reads {
-            RunSummary::of(paths).expect("the run reads");
-        }
-        began.elapsed()
+    #[cfg(unix)]
+    {
+        // The instrument, and the guard that takes it off again: a store no
+        // process may open, held for exactly the read below and restored when
+        // this scope ends — including through the panic a failing assertion
+        // raises, so the fold control still has a store to fold.
+        let instrument = Unopenable::over(&large);
+        // It has to have taken. A process that can open the store anyway — root,
+        // which is how a container runs as often as not — measures nothing at
+        // all, and would report that as a pass.
+        let opened = std::fs::File::open(large.journal());
+        assert!(
+            matches!(&opened, Err(refusal) if refusal.kind() == std::io::ErrorKind::PermissionDenied),
+            "this process opened a store carrying no read permission, so nothing below is \
+             measured: {opened:?}"
+        );
+        // And the reader has no staleness reason of its own to fold: what the
+        // document was stamped against is what the store still stands at.
+        assert_eq!(
+            std::fs::metadata(large.journal()).expect("a store").len(),
+            served.journal_len,
+            "the instrument moved the length the document was stamped against"
+        );
+        assert_eq!(
+            journal_mtime_ms(&large),
+            served.journal_mtime_ms,
+            "the instrument moved the modification time the document was stamped against"
+        );
+
+        let bounded = RunSummary::of(&large)
+            .expect("the run reads: serving a row opened a store no byte of which can be read");
+        assert_eq!(
+            bounded, served,
+            "the row served over an unopenable {large_len}-byte store is not the row that \
+             was served over the readable one"
+        );
+        drop(instrument);
+    }
+
+    // And what the read *did* consume: the document beside the store, which does
+    // not grow with the journal either. The two runs' rows describe stores three
+    // orders of magnitude apart and are the same handful of fields, so the
+    // larger one's cost is within a factor of the smaller's rather than within a
+    // factor of its journal's.
+    let document_of = |paths: &RunPaths| {
+        std::fs::metadata(paths.summary())
+            .expect("a document")
+            .len()
     };
-    const READS: u32 = 20;
-    let bounded_large = timed(&large, READS);
-    let bounded_small = timed(&small, READS);
+    let (small_document, large_document) = (document_of(&small), document_of(&large));
+    assert!(
+        large_document < 2 * small_document,
+        "the document a {large_len}-byte store is served from is {large_document} bytes, \
+         against {small_document} for one a thousandth the size: the bounded read's own \
+         cost grows with the journal"
+    );
 
-    // The control: the same store, folded, which is what every listing did
-    // before this document existed.
+    // The control: the same store, readable again and folded, which is the
+    // reading every listing did before this document existed — and the read that
+    // does open all of it. It answers the same row, so the bounded read is not a
+    // cheaper different answer.
     recorded_before_the_document(&large);
-    let folded_once = timed(&large, 1);
+    let folded = RunSummary::of(&large).expect("the run folds");
+    assert_eq!(
+        folded, served,
+        "the row a fold of the store produces is not the row that was served"
+    );
+}
 
-    assert!(
-        bounded_large < folded_once,
-        "{READS} bounded reads of a {large_len}-byte store took {bounded_large:?},          against {folded_once:?} for one fold of it"
-    );
-    assert!(
-        bounded_large < 10 * bounded_small,
-        "reading the summary of a {large_len}-byte store took {bounded_large:?}          against {bounded_small:?} for one a thousandth the size, so the read grows          with the journal"
-    );
+/// A run's store with every read permission taken off it, put back when this is
+/// dropped.
+///
+/// The bounded read's whole measurement. A summary served from its document
+/// stats the store and never opens it, so taking the store's readability away
+/// leaves that read untouched and leaves a read that folds the store with
+/// nothing it can do — which is the difference a substituted *content* cannot
+/// show, since reading every byte and discarding it answers the same as never
+/// reading one. The bytes and the stamp are not touched at all, so the reader
+/// meets the same store it was served from a line earlier.
+#[cfg(unix)]
+struct Unopenable {
+    path: std::path::PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Unopenable {
+    fn over(paths: &RunPaths) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = paths.journal();
+        let mode = std::fs::metadata(&path)
+            .expect("the store")
+            .permissions()
+            .mode();
+        // llmlint: ignore-block[tests_mirror_real_usage] an instrument is not a state
+        // under test, and no verb sets a mode on a store.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o444))
+            .expect("a store nothing may open");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        Self { path, mode }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unopenable {
+    /// Runs on the panic a failed assertion raises as well as on the way out, so the
+    /// fold control below always has a store it can open.
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // llmlint: ignore-block[tests_mirror_real_usage] the instrument coming off, as
+        // above.
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+            .expect("the store readable again");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+    }
+}
+
+/// A run's store's modification time as a summary stamps it: milliseconds since
+/// the epoch.
+#[cfg(unix)]
+fn journal_mtime_ms(paths: &RunPaths) -> u64 {
+    std::fs::metadata(paths.journal())
+        .and_then(|about| about.modified())
+        .expect("the store's modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a time after the epoch")
+        .as_millis() as u64
 }
 
 /// A reader never sees a half-written summary.
