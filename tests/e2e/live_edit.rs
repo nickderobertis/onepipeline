@@ -64,8 +64,8 @@ fn added_edges(world: &World, run: &str) -> Vec<(String, String, Option<String>)
         .filter(|operation| operation["kind"] == "edge-added")
         .map(|operation| {
             (
-                operation["from"].as_str().unwrap_or_default().to_string(),
-                operation["to"].as_str().unwrap_or_default().to_string(),
+                end(&operation, "from"),
+                end(&operation, "to"),
                 operation["target"].as_str().map(str::to_string),
             )
         })
@@ -76,21 +76,34 @@ fn removed_edges(world: &World, run: &str) -> Vec<(String, String)> {
     operations(world, run)
         .into_iter()
         .filter(|operation| operation["kind"] == "edge-removed")
-        .map(|operation| {
-            (
-                operation["from"].as_str().unwrap_or_default().to_string(),
-                operation["to"].as_str().unwrap_or_default().to_string(),
-            )
-        })
+        .map(|operation| (end(&operation, "from"), end(&operation, "to")))
         .collect()
+}
+
+/// One end of a recorded edge, which the record must name.
+///
+/// Read rather than defaulted: an edge operation missing an end is a record this
+/// build could not have written, and a journey that turned it into an empty id
+/// would compare two things neither of which happened.
+fn end(operation: &Value, which: &str) -> String {
+    operation[which]
+        .as_str()
+        .unwrap_or_else(|| panic!("a recorded edge names its `{which}`: {operation}"))
+        .to_string()
 }
 
 fn operations(world: &World, run: &str) -> Vec<Value> {
     world
         .events_of(run, "edit-committed")
         .into_iter()
-        .filter_map(|event| event["payload"]["operations"].as_array().cloned())
-        .flatten()
+        .flat_map(|event| {
+            event["payload"]["operations"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("an `edit-committed` carries the operations it compiled: {event}")
+                })
+                .clone()
+        })
         .collect()
 }
 

@@ -53,10 +53,6 @@ pub enum Operation {
         target: Option<TargetName>,
     },
     /// A dependency edge was removed.
-    ///
-    /// Takes the dependent's `consumes` entry keyed on that dependency with it:
-    /// there is no dependency left for a target to name, and `validate_node`
-    /// refuses a key that is not a dep.
     EdgeRemoved {
         /// The dependency.
         from: String,
@@ -1439,6 +1435,17 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::NodeAdded { node, .. } => graph.insert((**node).clone()),
         Operation::NodeDropped { node, .. } => {
             graph.remove(node);
+            // No node can consume one that has left the graph, and
+            // `validate_node` refuses a `consumes` key that is not a dep. This
+            // is where the removal belongs rather than on `edge-removed`: a
+            // `reparent` records an edge it keeps as removed and then re-added,
+            // and a record written before an edge carried a target cannot
+            // restore what an unconditional removal there would have dropped.
+            for id in graph.ids().cloned().collect::<Vec<_>>() {
+                if let Some(other) = graph.get_mut(&id) {
+                    other.consumes.remove(node);
+                }
+            }
         }
         Operation::Reparent { node, to, .. } => {
             if let Some(node) = graph.get_mut(node) {
@@ -1449,7 +1456,6 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::EdgeRemoved { from, to } => {
             if let Some(node) = graph.get_mut(to) {
                 node.deps.retain(|dep| dep != from);
-                node.consumes.remove(from);
             }
         }
         Operation::EdgeAdded { from, to, target } => {
@@ -3263,6 +3269,67 @@ mod tests {
             .to_string();
             assert!(message.contains("cannot amend"), "{message}");
         }
+    }
+
+    /// A record written before `edge-added` carried a target replays exactly as
+    /// the build that wrote it executed.
+    ///
+    /// A `reparent` records an `edge-removed` for **every** dep it had and an
+    /// `edge-added` for every dep it now has, so a dep that survives is recorded
+    /// as removed and re-added. An older build accepted such a reparent whenever
+    /// the target it consumed a *surviving* dep at kept naming a dep — and wrote
+    /// no target on the edge that brought it back. So the removal a replay
+    /// performs cannot hang off `edge-removed`: it would drop a target that
+    /// record has no way to restore.
+    #[test]
+    fn a_record_written_before_an_edge_carried_a_target_replays_unchanged() {
+        let mut ship = agent("ship", &["engine", "packager"]);
+        ship.consumes.insert("engine".into(), target("crate"));
+        ship.consumes.insert("packager".into(), target("wheel"));
+        let mut graph = graph_of(vec![
+            agent("engine", &[]),
+            agent("packager", &[]),
+            agent("docs", &[]),
+            ship,
+        ]);
+
+        // The operations an older build wrote for `reparent ship [packager,
+        // docs]`: no `target` anywhere, because the field did not exist.
+        for operation in [
+            Operation::EdgeRemoved {
+                from: "engine".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeRemoved {
+                from: "packager".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeAdded {
+                from: "packager".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::EdgeAdded {
+                from: "docs".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::Reparent {
+                node: "ship".into(),
+                from: vec!["engine".into(), "packager".into()],
+                to: vec!["packager".into(), "docs".into()],
+            },
+        ] {
+            apply(&mut graph, &operation);
+        }
+
+        let ship = graph.get("ship").expect("the reparented node");
+        assert_eq!(ship.deps, vec!["packager".to_string(), "docs".to_string()]);
+        assert_eq!(
+            ship.consumes,
+            BTreeMap::from([("packager".to_string(), target("wheel"))]),
+            "replaying an older record lost a target it has no way to restore"
+        );
     }
 
     #[test]

@@ -2847,13 +2847,21 @@ target its author wrote.
 **The operation stream carries what replay needs, because it is what replay
 rebuilds `deps` from.** `edge-added` gains one optional field, `target`, omitted
 where the edge has none — which is every edge in every record written before it
-existed, so a build that predates it reads those records exactly as it did. Its
-partner needs no field: `edge-removed` takes the dependent's entry keyed on that
-dependency with it, and a `reparent` keeps only the entries whose dep the new list
-carries, both of which are removals a record already says enough to reconstruct.
-Replaying a run's own journal from empty therefore lands on the same `consumes`
-the reconciler compiled, which is the property, and no checked-in record changes
-shape.
+existed, so a build that predates it reads those records exactly as it did. No
+other operation gains a field: the removals are ones a record already says enough
+to reconstruct. `node-dropped` takes every entry keyed on the node that left, and
+`reparent` keeps only the entries whose dep the new list carries.
+
+**Neither removal hangs off `edge-removed`, and that is the load-bearing part.** A
+`reparent` records an `edge-removed` for every dep the node had and an
+`edge-added` for every dep it now has, so a dep that survives is recorded as
+removed and immediately re-added. An older build accepted such a reparent whenever
+the target it consumed a surviving dep at kept naming a dep, and wrote no target
+on the edge that brought it back — so a removal on `edge-removed` would drop a
+target that record has no way to restore. Attached instead to the operations that
+actually take a dependency away, replaying a run's own journal from empty lands on
+the same `consumes` the reconciler compiled whether the record predates this work
+or not, and no checked-in record changes shape.
 
 This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
 could work around, and the only interface it adds is an optional field on a record
