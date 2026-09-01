@@ -571,7 +571,7 @@ impl Watch {
     /// How long the loop may go without taking this watch up.
     ///
     /// An arriving *answer* does not wait for it —
-    /// [`answers_arrived`](Self::answers_arrived) is what the loop waits on, and
+    /// [`take_up_answers`](Self::take_up_answers) is what the loop waits on, and
     /// it wakes within a fifth of a second of the asker answering. What this
     /// paces is the work that is due on a clock rather than on an answer:
     /// re-surfacing a wait that has not ended, and re-reading what the sibling
@@ -588,11 +588,16 @@ impl Watch {
     /// Take up whatever the asker has answered, and say whether it answered
     /// anything.
     ///
+    /// Named for the taking up rather than for the question it answers: the
+    /// asker's queue is drained here and the answers are stored, so a caller
+    /// reading this as a look at the run's state would be the caller that lost
+    /// them.
+    ///
     /// What the reconcile loop waits on. The asker runs on its own thread at its
     /// own pace, so an answer arrives without anything about this run changing —
     /// and this is how it wakes the loop, rather than the loop going back and
     /// asking on a timer of its own.
-    pub(crate) fn answers_arrived(&mut self) -> bool {
+    pub(crate) fn take_up_answers(&mut self) -> bool {
         let mut arrived = false;
         for (keys, answer) in self.asker.answered() {
             arrived = true;
@@ -660,7 +665,7 @@ impl Watch {
     /// is ready to start, and every fast-adoption node still running. Neither
     /// blocks on anything.
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
-        self.answers_arrived();
+        self.take_up_answers();
         let now = crate::sys::now_millis();
         let mut waits: Vec<(Key, Dependency)> = Vec::new();
         for node in watching {

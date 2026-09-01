@@ -216,8 +216,10 @@ const CHANNEL_POLL: Duration = Duration::from_millis(200);
 /// be and not about how often to go and get it. A second is the freshness a
 /// consumer whose upstream settles in another run is promised, comfortably inside
 /// the second the contract states for it. A graph naming no cross-DAG edge never
-/// reads one at all — and one whose upstreams have not moved does not either,
-/// because the wait looks at their length before it wakes anything.
+/// reads one at all, and one whose upstreams have not moved does not *wake* the
+/// loop either, because the wait looks at their length before it wakes anything —
+/// it is re-read when this interval comes due and not before, which is the whole
+/// of what the interval buys.
 const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 
 /// The schema version a run result is written as.
@@ -952,7 +954,7 @@ fn converge(
             // thread already owns the other end of, and a `stat` — so a wake that
             // finds none of them goes straight back to waiting.
             let mut outside = || {
-                if releases.answers_arrived() {
+                if releases.take_up_answers() {
                     return true;
                 }
                 if writeback

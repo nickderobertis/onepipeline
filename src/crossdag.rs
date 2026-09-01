@@ -195,9 +195,12 @@ impl Observer {
     /// Length and modification time, and no read at all. A run's ledger is
     /// append-only and its length *is* the extent this observer measures against,
     /// so a `stat` answers the only question a re-read could: has that run done
-    /// anything since we last looked? The reconcile loop waits on this and reads
-    /// the ledger only when it moved, which is what keeps a consumer watching a
-    /// quiet upstream from costing anything at all.
+    /// anything since we last looked? The reconcile loop waits on this, so an
+    /// upstream that has not moved never *wakes* it — which is what keeps a
+    /// consumer watching a quiet upstream from paying a pass for it. What still
+    /// re-reads that ledger is the loop's own paced deadline, `UPSTREAM_EVERY`,
+    /// because the freshness the edge is promised is a bound on how stale the
+    /// answer may be rather than on how quiet the upstream is.
     pub fn marks(&self, graph: &Graph) -> BTreeMap<String, Option<(u64, SystemTime)>> {
         edges(graph)
             .into_keys()
