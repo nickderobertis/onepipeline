@@ -330,7 +330,8 @@ fn worker(
     run_dir: PathBuf,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    let mut failing = false;
+    // The consecutive failures of the streak in progress, and the whole of what this worker
+    // remembers about one: zero is a projection that is landing.
     let mut failures: u32 = 0;
     loop {
         let snapshot = {
@@ -356,13 +357,12 @@ fn worker(
         };
         match project(&binary, &launch_dir, &run_dir, &snapshot) {
             Ok(()) => {
-                if failing {
+                if failures > 0 {
                     eprintln!(
                         "onetaskgraph write-back recovered for '{}'",
                         snapshot.project
                     );
                 }
-                failing = false;
                 failures = 0;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
@@ -373,7 +373,7 @@ fn worker(
                 }
             }
             Err(error) => {
-                let first = !failing;
+                let first = failures == 0;
                 failures = failures.saturating_add(1);
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
@@ -386,7 +386,6 @@ fn worker(
                         RETRY_CEILING.as_secs()
                     );
                 }
-                failing = true;
                 // The planner hears about the outage *before* the wait rather than after
                 // it: the interval grows into the tens of seconds, and a surface that
                 // waited for it would reach the reconcile loop long after the board it
@@ -402,7 +401,7 @@ fn worker(
                         });
                     }
                 }
-                if !waited_before_retrying(&pending, retry_after(failures)) {
+                if !should_retry_after(&pending, retry_after(failures)) {
                     return;
                 }
                 let (lock, ready) = &*pending;
@@ -435,7 +434,7 @@ fn retry_after(failures: u32) -> Duration {
         .min(RETRY_CEILING)
 }
 
-/// Wait out one retry interval, answering whether the worker should retry at all.
+/// Wait out at most one retry interval, answering whether to attempt again at all.
 ///
 /// `false` is [`RunPhase::Stopping`] and the caller returns on it; `true` is the wait
 /// having been served, or [`RunPhase::ClosingOut`]. Both phases are read on entry as well
@@ -443,7 +442,7 @@ fn retry_after(failures: u32) -> Duration {
 /// rather than missed. A snapshot published meanwhile deliberately does *not* shorten the
 /// wait: what the interval spaces is the destination's refusal, and a run that keeps
 /// folding new graph state would otherwise retry as fast as it publishes.
-fn waited_before_retrying(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
+fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
     let (lock, ready) = pending;
     let Ok(mut state) = lock.lock() else {
         return false;
