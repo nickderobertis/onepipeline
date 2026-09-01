@@ -156,12 +156,35 @@ pub(crate) struct Unprojected {
     pub reason: String,
 }
 
+/// What the worker is doing, which is what the closeout window waits on.
 #[derive(Default, PartialEq, Eq)]
 enum WorkerState {
     #[default]
     Idle,
     Working,
-    StopRequested,
+}
+
+/// Where the run holding this worker has got to.
+///
+/// One value rather than a flag beside the worker's own, because these are phases of one
+/// run and it only ever moves forward through them: what a worker between snapshots and a
+/// worker waiting out a retry interval each do next is decided by the same value.
+#[derive(Default, PartialEq, Eq)]
+enum RunPhase {
+    #[default]
+    Running,
+    /// The graph has converged and the run is inside its bounded closeout window.
+    ///
+    /// The growing interval is there to stop a refused destination being asked again and
+    /// again while a run lasts; a run that is ending is the opposite situation — it has one
+    /// last snapshot to project, and the window it has to do that in is bounded whatever
+    /// the store does. So the schedule is suspended here rather than obeyed: a terminal
+    /// snapshot left sitting out a minute's interval inside a two-second window leaves the
+    /// board wrong for good, and the board is the record an operator reads to see what
+    /// became of their plan.
+    ClosingOut,
+    /// The run is over and the worker is to stop, whatever it was waiting for.
+    Stopping,
 }
 
 #[derive(Default)]
@@ -169,21 +192,12 @@ struct Pending {
     latest: Option<Snapshot>,
     last_success: Option<Snapshot>,
     worker: WorkerState,
+    phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
     ///
     /// One entry per outage rather than one per retry: the worker retries until
     /// the store returns, and a surface for every attempt would bury the first.
     unprojected: Vec<Unprojected>,
-    /// Set once by the closeout window, and taken by a worker waiting out a retry
-    /// interval as leave to make **one** immediate attempt.
-    ///
-    /// The growing interval is there to stop a refused destination being asked again and
-    /// again while the run lasts; the closeout is the opposite situation — the run is
-    /// ending and there is exactly one attempt left in it, inside a window that is
-    /// bounded whatever the store does. A terminal snapshot that sat out a minute's
-    /// interval inside a two-second window would leave the board wrong for good, which is
-    /// the record an operator reads to see what became of their plan.
-    closeout: bool,
 }
 
 impl Pending {
@@ -297,9 +311,7 @@ impl Writeback {
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
-        // A worker waiting out a retry interval is given its one closeout attempt here,
-        // rather than being left to a schedule written for a run that is still going.
-        pending.closeout = true;
+        pending.phase = RunPhase::ClosingOut;
         ready.notify_all();
         while (pending.latest.is_some() || pending.worker == WorkerState::Working)
             && Instant::now() < deadline
@@ -317,7 +329,7 @@ impl Drop for Writeback {
     fn drop(&mut self) {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
-            pending.worker = WorkerState::StopRequested;
+            pending.phase = RunPhase::Stopping;
             // Every waiter, because two of them wait on this one condition: the worker
             // idle between snapshots, and the worker waiting out a retry interval that
             // grows into the tens of seconds. Waking one of the two would leave whichever
@@ -336,9 +348,6 @@ fn worker(
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     let mut failing = false;
-    // The consecutive failures of the current streak, which is what the retry interval
-    // grows with. A success ends the streak and resets it, so an isolated failure long
-    // after an outage is retried as promptly as the first one was.
     let mut failures: u32 = 0;
     loop {
         let snapshot = {
@@ -347,18 +356,16 @@ fn worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
-            while state.latest.is_none() && state.worker != WorkerState::StopRequested {
+            while state.latest.is_none() && state.phase != RunPhase::Stopping {
                 state = match ready.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
                 };
             }
-            if state.worker == WorkerState::StopRequested && state.latest.is_none() {
+            if state.phase == RunPhase::Stopping && state.latest.is_none() {
                 return;
             }
-            if state.worker == WorkerState::Idle {
-                state.worker = WorkerState::Working;
-            }
+            state.worker = WorkerState::Working;
             state
                 .latest
                 .take()
@@ -377,7 +384,7 @@ fn worker(
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
-                    if state.worker == WorkerState::StopRequested && state.latest.is_none() {
+                    if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
                     }
                 }
@@ -417,7 +424,7 @@ fn worker(
                 }
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
-                if state.worker == WorkerState::StopRequested {
+                if state.phase == RunPhase::Stopping {
                     return;
                 }
                 if state.latest.is_none() {
@@ -428,9 +435,7 @@ fn worker(
         }
         let (lock, ready) = &*pending;
         if let Ok(mut state) = lock.lock() {
-            if state.worker == WorkerState::Working {
-                state.worker = WorkerState::Idle;
-            }
+            state.worker = WorkerState::Idle;
             ready.notify_all();
         }
     }
@@ -450,29 +455,27 @@ fn retry_after(failures: u32) -> Duration {
 /// Wait out one retry interval, answering whether the worker should retry at all.
 ///
 /// A condition wait rather than a sleep, because the interval grows into the tens of
-/// seconds and a run that is stopping must not be made to wait out a schedule that exists
-/// only to be gentle with the destination: `false` is the stop, and the worker returns on
-/// it rather than asking the store again. A snapshot published meanwhile deliberately does
-/// *not* shorten the wait — what the interval is spacing is the destination's refusal, and
-/// a run that keeps folding new graph state would otherwise retry as fast as it publishes.
+/// seconds and neither phase the run can move into may be made to wait one out: `false` is
+/// [`RunPhase::Stopping`], on which the worker returns rather than asking the store again,
+/// and [`RunPhase::ClosingOut`] is the run's last attempt, made now for the reason recorded
+/// there. Both are read on entry as well as on every wake, so a phase the run reached while
+/// this worker was busy projecting is honoured rather than missed. A snapshot published
+/// meanwhile deliberately does *not* shorten the wait — what the interval is spacing is the
+/// destination's refusal, and a run that keeps folding new graph state would otherwise
+/// retry as fast as it publishes.
 fn waited_before_retrying(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
     let (lock, ready) = pending;
     let Ok(mut state) = lock.lock() else {
         return false;
     };
-    let deadline = Instant::now() + interval;
+    let due = Instant::now() + interval;
     loop {
-        if state.worker == WorkerState::StopRequested {
-            return false;
+        match state.phase {
+            RunPhase::Stopping => return false,
+            RunPhase::ClosingOut => return true,
+            RunPhase::Running => {}
         }
-        if state.closeout {
-            // Taken rather than read: the leave is for one attempt, so a closeout window
-            // that outlives a failing attempt does not turn into a tight retry loop
-            // against a destination that is already refusing.
-            state.closeout = false;
-            return true;
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = due.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return true;
         }
@@ -1136,8 +1139,8 @@ mod tests {
             latest: Some(superseded),
             last_success: Some(first.clone()),
             worker: WorkerState::Working,
+            phase: super::RunPhase::Running,
             unprojected: Vec::new(),
-            closeout: false,
         };
 
         assert!(pending.queue(first.clone()));

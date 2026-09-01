@@ -741,8 +741,6 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
     (world, project)
 }
 
-/// How many projections the destination has been asked for, counted at the one command
-/// every attempt starts with.
 fn projections_asked_for(world: &World) -> usize {
     world
         .invocations()
@@ -829,13 +827,11 @@ fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
     }
 }
 
-/// The destination answers again.
 fn stops_refusing(world: &World) {
     std::fs::remove_file(world.fakes.join("onetaskgraph.refuse-reads"))
         .expect("the destination stops refusing");
 }
 
-/// How many failing streaks the driver has reported, which is one line per streak.
 fn streaks_reported(world: &World, run: &str) -> usize {
     std::fs::read_to_string(world.run_file(run, "driver.log"))
         .map(|log| log.matches("onetaskgraph write-back failed").count())
@@ -932,10 +928,6 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
         waited[3]
     );
 
-    // What an operator reads while all of that is happening: one line for the streak,
-    // naming the project and the destination's own reason, and saying that the attempts
-    // are being spaced — which is the difference between expecting another one in a moment
-    // and expecting one in a minute.
     let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
         .expect("the driver log is readable");
     let said: Vec<&str> = log
@@ -958,7 +950,6 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
         "the line an operator reads does not say the attempts are being spaced: {said}"
     );
 
-    // And none of it reached execution: the held node is still the only one that has run.
     assert_eq!(
         dispatched(&world, run),
         ["work"],
@@ -1052,8 +1043,6 @@ fn a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned
         );
     }
 
-    // Still one streak, one line, and one node: a destination nobody can reach changes
-    // nothing about the run it is refusing.
     let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
         .expect("the driver log is readable");
     assert_eq!(
@@ -1103,7 +1092,6 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
         waited[3]
     );
 
-    // And what it settled as is what a run whose projection landed settles as.
     let result = world.run_json(run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert!(
@@ -1118,6 +1106,52 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
         dispatched(&world, run),
         ["work", "later"],
         "the refusing destination changed what executed"
+    );
+}
+
+/// The one attempt a closing run has left is made at its closeout, rather than on a
+/// schedule written for a run that is still going.
+///
+/// The spacing exists to stop a refusing destination being asked again and again while a
+/// run lasts. A run that is ending asks once more, inside a window bounded whatever the
+/// store does — and a terminal snapshot left to sit out a minute-long interval inside a
+/// two-second window is a board that stays wrong for good, which is the record an operator
+/// reads to see what became of their plan.
+#[test]
+fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_interval() {
+    let run = "writeback-backoff-closeout";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-closeout", run);
+
+    let outage = starts_refusing(&world, run, "come back for the last one");
+    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    outage.replied();
+
+    // The destination returns while the worker is part-way through an interval at least as
+    // long as the last one it waited out, so nothing it has already scheduled can reach the
+    // store before this run ends.
+    stops_refusing(&world);
+    world.release("work.go");
+    world.until("the graph to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
+    });
+    let settled = Instant::now();
+    world.until_store("the terminal settlement to reach the board", |world| {
+        world.store_tasks(&project).iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
+    assert!(
+        settled.elapsed() < waited[3],
+        "the terminal projection took {:?} to reach the board, which is the interval the \
+         worker was part-way through rather than the closeout window",
+        settled.elapsed()
+    );
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the projection that landed was not a settled run's"
     );
 }
 
