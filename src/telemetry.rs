@@ -390,43 +390,70 @@ fn side_of(event: &Envelope) -> Option<Role> {
     serde_json::from_value(event.payload.get(ROLE)?.clone()).ok()
 }
 
-/// Aggregate one run's telemetry from its merged event store.
+/// One run's timing and usage, aggregated a record at a time.
 ///
-/// The per-party split is read from the onejudge reports the run's
-/// `member-settled` events named — which is where a two-party member records
-/// what each side spent — through **this run's own copies** of them, so a
-/// document a journal line points at is never opened. A report the run did not
-/// keep contributes nothing rather than a zero.
-pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
-    let state = projection::fold(events);
-    let stamps: Vec<(u64, &Envelope)> = events
-        .iter()
-        .filter_map(|event| projection::millis_of(&event.ts).map(|ms| (ms, event)))
-        .collect();
+/// The timeline walk lives here rather than inside [`of_run`] because it has two
+/// readers now: the whole-store read below, and the per-append maintenance that
+/// keeps a run's summary document current as its journal grows. One
+/// implementation, so the two accounts of a run's clock cannot drift apart.
+///
+/// **Fed in merge order.** Every millisecond of the wall clock is attributed to
+/// whatever was open across it, so the order records arrive in is the order the
+/// spans are measured in; a caller that appends out of order rebuilds rather
+/// than folding — see [`summary::Maintainer`](crate::summary::Maintainer).
+///
+/// [`of_run`]: crate::telemetry::of_run
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Aggregate {
+    /// The first stamped record, which the wall clock is measured from. `None`
+    /// until one arrives: a store with nothing stamped in it has no clock, which
+    /// is not the same fact as a clock that measured zero.
+    first: Option<u64>,
+    /// The last stamped record, which it is measured to.
+    last: u64,
+    /// Where the span being measured began.
+    previous: u64,
+    /// What each bucket has been credited so far.
+    totals: BTreeMap<BucketName, u64>,
+    /// The nodes with a dispatch in flight.
+    dispatched: BTreeSet<String>,
+    /// What each open repository session is doing.
+    phases: BTreeMap<String, Phase>,
+    /// The members whose judge side is running.
+    judging: BTreeSet<String>,
+    /// Whether anything in this store ever distinguished a judge-side turn.
+    judge_measured: bool,
+    /// Whether anything in it ever ran a repository gate.
+    gate_measured: bool,
+    /// What each party has been reported to have spent.
+    usage: BTreeMap<Party, Usage>,
+}
 
-    let first = stamps.first().map_or(0, |(ms, _)| *ms);
-    let last = stamps.last().map_or(first, |(ms, _)| *ms);
-    let wall_ms = last.saturating_sub(first);
+impl Aggregate {
+    /// Take one record of the merged store into the aggregate.
+    pub(crate) fn fold(&mut self, paths: &RunPaths, event: &Envelope) {
+        self.fold_usage(paths, event);
+        // A record this build cannot date measures no span: the wall clock is
+        // read off the stamps, and a record carrying none says nothing about
+        // when anything happened. It still counts toward what was spent above,
+        // which is a sum rather than a timeline.
+        let Some(ms) = projection::millis_of(&event.ts) else {
+            return;
+        };
+        if self.first.is_none() {
+            self.first = Some(ms);
+            self.previous = ms;
+        }
+        self.last = ms;
 
-    // Walk the timeline once, attributing each span between consecutive events
-    // to whatever the run was doing across it. Every millisecond of the wall
-    // clock lands in exactly one bucket, which is what makes the sum exact.
-    let mut totals: BTreeMap<BucketName, u64> = BTreeMap::new();
-    let mut dispatched: BTreeSet<String> = BTreeSet::new();
-    let mut phases: BTreeMap<String, Phase> = BTreeMap::new();
-    let mut judging: BTreeSet<String> = BTreeSet::new();
-    let mut judge_measured = false;
-    let mut gate_measured = false;
-    let mut previous = first;
-
-    for (ms, event) in &stamps {
-        let span = ms.saturating_sub(previous);
+        let span = ms.saturating_sub(self.previous);
         if span > 0 {
-            *totals
-                .entry(now(&phases, &judging, &dispatched))
+            *self
+                .totals
+                .entry(now(&self.phases, &self.judging, &self.dispatched))
                 .or_insert(0) += span;
         }
-        previous = *ms;
+        self.previous = ms;
 
         // A session is keyed by the node it belongs to where one is known, and
         // by its own stream where it is not: both are stable for the session's
@@ -439,7 +466,7 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
         match event.source {
             Source::Vcs => match event.kind.0.as_str() {
                 SESSION_CLOSED => {
-                    phases.remove(&whose);
+                    self.phases.remove(&whose);
                 }
                 // A session opening is the *start* of a session's life, so it
                 // never moves one already under way backwards. A node holds more
@@ -449,43 +476,43 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
                 // landing after a `lock-wait` is a tie the merge broke, not a
                 // publication that went back to preparing its workspace.
                 SESSION_OPENED => {
-                    phases.entry(whose).or_insert(Phase::Setup);
+                    self.phases.entry(whose).or_insert(Phase::Setup);
                 }
                 kind => {
                     if let Some(phase) = Phase::of(kind) {
-                        gate_measured |= phase == Phase::Gate;
-                        phases.insert(whose, phase);
+                        self.gate_measured |= phase == Phase::Gate;
+                        self.phases.insert(whose, phase);
                     }
                 }
             },
             Source::Agentgraph if WORKING.contains(&event.kind.0.as_str()) => {
                 // The workspace is ready and a turn is running in it.
-                phases.remove(&whose);
+                self.phases.remove(&whose);
                 match side_of(event) {
                     Some(Role::Judge) => {
-                        judge_measured = true;
-                        judging.insert(whose);
+                        self.judge_measured = true;
+                        self.judging.insert(whose);
                     }
                     // A turn the producer attributed to the agent side ends the
                     // judge's, as does the member settling.
                     Some(Role::Agent) => {
-                        judge_measured = true;
-                        judging.remove(&whose);
+                        self.judge_measured = true;
+                        self.judging.remove(&whose);
                     }
                     None if event.kind.0 == crate::report::MEMBER_SETTLED => {
-                        judging.remove(&whose);
+                        self.judging.remove(&whose);
                     }
                     None => {}
                 }
             }
             Source::Pipeline => match journal::PipelineKind::from_wire(&event.kind) {
                 Some(journal::PipelineKind::NodeDispatched) => {
-                    dispatched.insert(whose);
+                    self.dispatched.insert(whose);
                 }
                 Some(journal::PipelineKind::NodeSettled) => {
-                    dispatched.remove(&whose);
-                    judging.remove(&whose);
-                    phases.remove(&whose);
+                    self.dispatched.remove(&whose);
+                    self.judging.remove(&whose);
+                    self.phases.remove(&whose);
                 }
                 _ => {}
             },
@@ -493,52 +520,121 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
         }
     }
 
-    let measured = |name: BucketName| match name {
-        // Nothing in this stack runs an LLM-lint pass, so its bucket is
-        // unmeasured rather than zero.
-        BucketName::Llmlint => None,
-        // The merged stream distinguishes a judge-side turn only where the
-        // producer stamped one. Absent, the judge's time is inside `agent` and
-        // saying `0` here would claim it was not spent.
-        BucketName::Judge if !judge_measured => None,
-        // Nothing in this stack runs a gate: what verifies a change is the
-        // repository's own merge path, whose wall time is the publication's. So
-        // a run this build produces measures no gate at all, and a `0` would
-        // claim a tier ran and cost nothing rather than that none ran. A store
-        // an older `onevcs` wrote still carries the records, and there the
-        // bucket is a measurement again.
-        BucketName::Gate if !gate_measured => None,
-        _ => Some(totals.get(&name).copied().unwrap_or(0)),
-    };
-    let mut buckets: Vec<Bucket> = BucketName::ALL
-        .into_iter()
-        .map(|name| Bucket {
-            name,
-            ms: measured(name),
-        })
-        .collect();
-    balance(&mut buckets, wall_ms);
-
-    RunTelemetry {
-        schema_version: TELEMETRY_SCHEMA_VERSION,
-        run_id: paths.run.clone(),
-        wall_ms,
-        buckets,
-        usage: usage_of(paths, events),
-        dispatches: state.dispatched_at.len() as u64,
-        settled_done: state
-            .recorded
-            .values()
-            .filter(|recorded| recorded.status() == NodeStatus::Done)
-            .count() as u64,
-        no_diff: state
-            .outcomes
-            .values()
-            .filter(|outcome| *outcome == "no-changes")
-            .count() as u64,
-        surfaces_queued: state.surfaces_queued,
-        surfaces_read: state.surfaces_read,
+    /// What one record says was spent.
+    ///
+    /// `total` is what a member reports for the whole of its conversation; the
+    /// split between the two sides is only in the report that member settled
+    /// with, and that is read through **this run's own copy** of it, so a
+    /// document a journal line points at is never opened. A report the run did
+    /// not keep contributes nothing rather than a zero.
+    fn fold_usage(&mut self, paths: &RunPaths, event: &Envelope) {
+        if event.source != Source::Agentgraph {
+            return;
+        }
+        let mut fold = |party: Party, usage: &Usage| {
+            if !usage.is_empty() {
+                self.usage.entry(party).or_default().add(usage);
+            }
+        };
+        if event.kind.0 == "turn-completed" {
+            if let Some(usage) = event.payload.get("usage").filter(|value| value.is_object()) {
+                fold(Party::Total, &Usage::of(usage));
+            }
+            return;
+        }
+        if event.kind.0 != crate::report::MEMBER_SETTLED {
+            return;
+        }
+        for retained in crate::report::evidence(paths, std::slice::from_ref(event)) {
+            let Some(document) = crate::report::read(&retained.kept) else {
+                continue;
+            };
+            let Some(telemetry) = document.get("telemetry") else {
+                continue;
+            };
+            for (party, side) in [(Party::Agent, "agent"), (Party::Judge, "judge")] {
+                if let Some(usage) = telemetry
+                    .get(side)
+                    .and_then(|side| side.get("usage"))
+                    .filter(|value| value.is_object())
+                {
+                    fold(party, &Usage::of(usage));
+                }
+            }
+        }
     }
+
+    /// The document, as everything folded so far measures it.
+    ///
+    /// `state` is the same store's projection, which the caller already holds:
+    /// the counts below are the graph's rather than the clock's, and folding a
+    /// second copy of the journal to reach them is the cost this whole seam
+    /// exists to remove.
+    pub(crate) fn finish(&self, run: &str, state: &projection::RunState) -> RunTelemetry {
+        let first = self.first.unwrap_or(0);
+        let wall_ms = self.last.saturating_sub(first);
+        let measured = |name: BucketName| match name {
+            // Nothing in this stack runs an LLM-lint pass, so its bucket is
+            // unmeasured rather than zero.
+            BucketName::Llmlint => None,
+            // The merged stream distinguishes a judge-side turn only where the
+            // producer stamped one. Absent, the judge's time is inside `agent`
+            // and saying `0` here would claim it was not spent.
+            BucketName::Judge if !self.judge_measured => None,
+            // Nothing in this stack runs a gate: what verifies a change is the
+            // repository's own merge path, whose wall time is the publication's.
+            // So a run this build produces measures no gate at all, and a `0`
+            // would claim a tier ran and cost nothing rather than that none ran.
+            // A store an older `onevcs` wrote still carries the records, and
+            // there the bucket is a measurement again.
+            BucketName::Gate if !self.gate_measured => None,
+            _ => Some(self.totals.get(&name).copied().unwrap_or(0)),
+        };
+        let mut buckets: Vec<Bucket> = BucketName::ALL
+            .into_iter()
+            .map(|name| Bucket {
+                name,
+                ms: measured(name),
+            })
+            .collect();
+        balance(&mut buckets, wall_ms);
+
+        RunTelemetry {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            run_id: run.to_string(),
+            wall_ms,
+            buckets,
+            usage: self.usage.clone(),
+            dispatches: state.dispatched_at.len() as u64,
+            settled_done: state
+                .recorded
+                .values()
+                .filter(|recorded| recorded.status() == NodeStatus::Done)
+                .count() as u64,
+            no_diff: state
+                .outcomes
+                .values()
+                .filter(|outcome| *outcome == "no-changes")
+                .count() as u64,
+            surfaces_queued: state.surfaces_queued,
+            surfaces_read: state.surfaces_read,
+        }
+    }
+}
+
+/// Aggregate one run's telemetry from its merged event store.
+///
+/// The per-party split is read from the onejudge reports the run's
+/// `member-settled` events named — which is where a two-party member records
+/// what each side spent — through **this run's own copies** of them, so a
+/// document a journal line points at is never opened. A report the run did not
+/// keep contributes nothing rather than a zero.
+pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
+    let mut aggregate = Aggregate::default();
+    for event in events {
+        aggregate.fold(paths, event);
+    }
+    aggregate.finish(&paths.run, &projection::fold(events))
 }
 
 /// What the run is doing across one span, given everything open across it.
@@ -624,49 +720,6 @@ fn drain(buckets: &mut [Bucket], mut excess: u64) {
         buckets[index].ms = Some(ms - taken);
         excess -= taken;
     }
-}
-
-/// What each party spent, from the evidence the run's own store carries.
-///
-/// `total` is the sum of every `turn-completed`, which is what a member reports
-/// for the whole of its conversation. The split between the two sides is only in
-/// the report that member settled with, so `agent` and `judge` come from there —
-/// and a run whose members were single-sided, or whose reports this host cannot
-/// read, has no split to report and says so by absence.
-fn usage_of(paths: &RunPaths, events: &[Envelope]) -> BTreeMap<Party, Usage> {
-    let mut totals: BTreeMap<Party, Usage> = BTreeMap::new();
-    let mut fold = |party: Party, usage: &Usage| {
-        if !usage.is_empty() {
-            totals.entry(party).or_default().add(usage);
-        }
-    };
-
-    for event in events
-        .iter()
-        .filter(|event| event.source == Source::Agentgraph && event.kind.0 == "turn-completed")
-    {
-        if let Some(usage) = event.payload.get("usage").filter(|value| value.is_object()) {
-            fold(Party::Total, &Usage::of(usage));
-        }
-    }
-    for retained in crate::report::evidence(paths, events) {
-        let Some(document) = crate::report::read(&retained.kept) else {
-            continue;
-        };
-        let Some(telemetry) = document.get("telemetry") else {
-            continue;
-        };
-        for (party, side) in [(Party::Agent, "agent"), (Party::Judge, "judge")] {
-            if let Some(usage) = telemetry
-                .get(side)
-                .and_then(|side| side.get("usage"))
-                .filter(|value| value.is_object())
-            {
-                fold(party, &Usage::of(usage));
-            }
-        }
-    }
-    totals
 }
 
 /// What an unmeasured number reads as, everywhere it is rendered.

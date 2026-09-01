@@ -77,6 +77,7 @@ mod plancheck;
 mod projection;
 mod refusal;
 mod release;
+mod summary;
 mod sys;
 mod taskgraph;
 mod telemetry;

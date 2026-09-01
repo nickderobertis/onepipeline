@@ -78,6 +78,26 @@ pub use crate::ledger::Skipped;
 // llmlint: ignore[invalid_states_unrepresentable] naming the type changes nothing about a run id: `run` is a `String` for the reason `src/ledger.rs`'s file-level suppression states, and `ledger::is_valid_run_id` remains the boundary every externally-supplied id crosses.
 pub use crate::ledger::RunPaths;
 
+/// One run, as a bounded listing reads it.
+///
+/// Re-exported where the views are, because it is a **view**: it answers the
+/// questions `runs` and `status` answer, in the structure a consumer building
+/// its own listing needs, and at a cost that does not grow with the run's
+/// journal. Every entry point beside it renders a `String` shaped for a terminal
+/// and reaches it by folding the whole store; this is the same account, read.
+pub use crate::summary::{Listing, RunSummary, SUMMARY_SCHEMA_VERSION};
+
+/// One run's timing and usage, with a breakdown that sums exactly to its wall
+/// clock.
+///
+/// Re-exported here because [`RunSummary::timing`] carries one: the summary
+/// **references** this type rather than restating its fields, so there is one
+/// declaration of what a run's clock is rather than two to drift apart — and a
+/// field a consumer cannot name is a field it cannot read. The five types are
+/// what one document is made of, and `telemetry [--breakdown]` renders exactly
+/// this.
+pub use crate::telemetry::{Bucket, BucketName, Party, RunTelemetry, Usage};
+
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).
 ///
@@ -225,11 +245,12 @@ fn blocking_surface(paths: &RunPaths) -> bool {
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
 ///
-/// **A record that names no driver at all is that same unknown**, and it is read
-/// through [`LaunchRecord::driver_pid`] and [`LaunchRecord::recorded_host`] so
-/// that it stays one: a record written before those keys existed defaults to pid
-/// `0` on a nameless host, and a reader that probed `0` would prove the absence
-/// it was handed and report `DRIVER DEAD` over a run it knows nothing about.
+/// **A record that names no driver at all is that same unknown.** A record
+/// written before those keys existed defaults to pid `0` on a nameless host, and
+/// a reader that probed `0` would prove the absence it was handed and report
+/// `DRIVER DEAD` over a run it knows nothing about — so the pid and the host are
+/// each read through the accessor that turns the record's silence back into
+/// silence rather than into an answer.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     if state.stop_recorded() {
         return DriverLiveness::DriverDead;

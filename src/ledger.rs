@@ -62,12 +62,40 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::filter::Filters;
 use crate::sys;
+
+/// Every byte of a run's ledger this process has read since it started.
+///
+/// Accounting rather than a promise, which is why it is crate-visible and why
+/// it lives beside the two readers that slurp a whole file. What it is *for* is
+/// holding a bounded read bounded: a run's summary served from its own document
+/// reads that document and stats the journal, while one that has to be folded
+/// reads the entire store — and the difference between those two is the whole
+/// reason the document exists. That is a property to be **measured** rather than
+/// inferred from a clock, and this is what measures it.
+static BYTES_READ: AtomicU64 = AtomicU64::new(0);
+
+/// What that counter stands at.
+///
+/// Read by the tests that hold the bounded read bounded, and by nothing else —
+/// a number this crate acted on would be a second account of a run's cost, and
+/// there is no second account here to keep true.
+#[cfg(test)]
+pub(crate) fn bytes_read() -> u64 {
+    BYTES_READ.load(Ordering::Relaxed)
+}
+
+/// Count what a read just cost.
+fn counted<T>(bytes: usize, read: T) -> T {
+    BYTES_READ.fetch_add(bytes as u64, Ordering::Relaxed);
+    read
+}
 
 /// The environment variable that moves the runs root.
 pub const RUNS_DIR_ENV: &str = "ONEPIPELINE_RUNS_DIR";
@@ -184,6 +212,17 @@ impl RunPaths {
     /// The plan the run was launched with.
     pub fn plan(&self) -> PathBuf {
         self.dir.join("plan.json")
+    }
+
+    /// The run's summary document: the row a bounded listing reads instead of
+    /// this run's whole journal.
+    ///
+    /// Beside [`plan`](Self::plan) and the run's result, and for the same
+    /// reason: it is a derived record of the run, kept where the run's own state
+    /// is kept, so a run thrown away takes it with it. See
+    /// [`summary::RunSummary`](crate::summary::RunSummary).
+    pub fn summary(&self) -> PathBuf {
+        self.dir.join("summary.json")
     }
 
     /// The single-writer ownership lock the engine verbs hold.
@@ -778,6 +817,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         path: path.to_path_buf(),
         source: e,
     })?;
+    counted(text.len(), ());
     serde_json::from_str(&text).map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))
 }
 
@@ -788,6 +828,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     fs::read_to_string(path)
         .ok()
+        .map(|text| counted(text.len(), text))
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
@@ -1095,8 +1136,18 @@ pub fn read_records(path: &Path) -> Vec<Record> {
         return Vec::new();
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
+    counted(bytes.len(), ());
+    records_of(&bytes, 0)
+}
+
+/// Split read bytes into records, numbering and placing them from `base`.
+///
+/// One splitter for the whole file and for a tail of it, so a record read either
+/// way is the same record: the decoding, the terminator, and the byte count are
+/// decided here and in no second place.
+fn records_of(bytes: &[u8], base: u64) -> Vec<Record> {
     let mut records = Vec::new();
-    let mut offset = 0u64;
+    let mut offset = base;
     for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
         let terminated = line.ends_with(b"\n");
         let text = String::from_utf8_lossy(line)
@@ -1114,6 +1165,42 @@ pub fn read_records(path: &Path) -> Vec<Record> {
         offset += line.len() as u64;
     }
     records
+}
+
+/// Every line an append-only file has grown by since its first `from` bytes.
+///
+/// The bounded counterpart of [`read_records`], for the one reader that already
+/// knows how much of the file it has accounted for: a run's summary is kept
+/// current by folding what the store has grown by, and a reader that had to
+/// re-read the whole store to find that out would be paying exactly the cost the
+/// summary exists to remove.
+///
+/// `from` **must** be a record boundary, which is what its only caller counts:
+/// whole records, added up. A file shorter than `from` — healed of a torn tail,
+/// or replaced — hands back nothing, and the caller reads the whole store again
+/// rather than folding a tail it cannot place. Offsets stay the file's own;
+/// [`Record::line`] is the tail's own count and **not** the file's, because
+/// nothing before `from` was read to number against. The one reader here folds
+/// records and reports no line, and any reader that reports one takes the whole
+/// file.
+pub fn read_records_from(path: &Path, from: u64) -> Vec<Record> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
+    // ledger reader here follows, stated on `read_records` above: a file this process
+    // cannot open reads as one that is not there.
+    let Ok(mut file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
+    counted(bytes.len(), ());
+    records_of(&bytes, from)
 }
 
 /// Every line of an append-only file, or nothing when it does not exist yet.
@@ -1669,13 +1756,8 @@ mod tests {
     fn a_launch_record_written_before_any_of_these_five_keys_still_reads() {
         /// Every key added to this record after it shipped whose absence this
         /// reader has to answer for.
-        const HISTORICAL: [&str; 5] = [
-            "session",
-            "pid",
-            "host",
-            "started_at",
-            "heartbeat_interval",
-        ];
+        const HISTORICAL: [&str; 5] =
+            ["session", "pid", "host", "started_at", "heartbeat_interval"];
         let root = scratch("historical-launch");
         let whole = serde_json::to_value(a_record()).expect("a record this build writes");
 
