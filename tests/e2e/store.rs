@@ -1057,14 +1057,6 @@ fn a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned
         ceiling[0],
         ceiling[1]
     );
-    for waited_at_the_ceiling in ceiling {
-        assert!(
-            *waited_at_the_ceiling >= Duration::from_secs(30),
-            "the ceiling is {waited_at_the_ceiling:?}, which is not the minutes-scale window \
-             a hosted rate limiter refuses over"
-        );
-    }
-
     let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
         .expect("the driver log is readable");
     assert_eq!(
@@ -1072,6 +1064,36 @@ fn a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned
         1,
         "the streak was reported more than once: {log}"
     );
+
+    // The one line an operator ever gets names how far apart to expect the attempts, and
+    // that number is only worth reading if it is the interval actually waited: a line
+    // promising a minute over a worker asking every twenty seconds sends an operator away
+    // from a destination that is still being hammered. So the ceiling this journey measured
+    // is held to what the line said, rather than to a constant copied out of the source.
+    let said = log
+        .lines()
+        .find(|line| line.contains("onetaskgraph write-back failed"))
+        .expect("the failing streak was reported");
+    let promised = said
+        .split_once("out to ")
+        .and_then(|(_, rest)| rest.split_once(" seconds apart"))
+        .and_then(|(seconds, _)| seconds.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            panic!("the line does not say how far apart to expect further attempts: {said}")
+        });
+    assert!(
+        promised >= Duration::from_secs(30),
+        "the operator is told to expect another attempt every {promised:?}, which is not the \
+         minutes-scale window a hosted rate limiter refuses over"
+    );
+    for waited_at_the_ceiling in ceiling {
+        assert!(
+            *waited_at_the_ceiling >= promised && *waited_at_the_ceiling <= promised.mul_f64(1.5),
+            "the operator was told to expect another attempt {promised:?} apart, and the \
+             destination was actually asked again after {waited_at_the_ceiling:?}: {waited:?}"
+        );
+    }
     assert_eq!(
         dispatched(&world, run),
         ["work"],
