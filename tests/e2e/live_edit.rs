@@ -52,6 +52,82 @@ fn committed(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
+/// The `edge-added` operations a run recorded, as `(from, to, target)`.
+///
+/// Read out of the journal rather than off the graph because this record is what
+/// a replay of the run rebuilds `deps` from: a target the reconciler moved and
+/// the record did not carry would leave a projected run consuming a dependency at
+/// a different artifact than the executing one.
+fn added_edges(world: &World, run: &str) -> Vec<(String, String, Option<String>)> {
+    operations(world, run)
+        .into_iter()
+        .filter(|operation| operation["kind"] == "edge-added")
+        .map(|operation| {
+            (
+                end(&operation, "from"),
+                end(&operation, "to"),
+                operation["target"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+fn removed_edges(world: &World, run: &str) -> Vec<(String, String)> {
+    operations(world, run)
+        .into_iter()
+        .filter(|operation| operation["kind"] == "edge-removed")
+        .map(|operation| (end(&operation, "from"), end(&operation, "to")))
+        .collect()
+}
+
+/// One end of a recorded edge, which the record must name.
+///
+/// Read rather than defaulted: an edge operation missing an end is a record this
+/// build could not have written, and a journey that turned it into an empty id
+/// would compare two things neither of which happened.
+fn end(operation: &Value, which: &str) -> String {
+    operation[which]
+        .as_str()
+        .unwrap_or_else(|| panic!("a recorded edge names its `{which}`: {operation}"))
+        .to_string()
+}
+
+fn operations(world: &World, run: &str) -> Vec<Value> {
+    world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .flat_map(|event| {
+            event["payload"]["operations"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("an `edit-committed` carries the operations it compiled: {event}")
+                })
+                .clone()
+        })
+        .collect()
+}
+
+/// One node's reserved metadata, as the plan store holds it after the run has
+/// projected its graph.
+///
+/// The one place the *replayed* graph reaches a reader: the writeback publishes
+/// from the state this crate folds out of the journal, so a target a live edit
+/// moved and replay did not is a target the board disagrees with the run about.
+/// `None` is a node the board does not hold at all, which is never the same
+/// answer as one it holds with no targets.
+fn board_metadata(world: &World, run: &str, node: &str) -> Option<Value> {
+    world
+        .store_tasks(&format!("plans:{}", crate::harness::project_id(run)))
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .map(|task| task["item"]["metadata"].clone())
+}
+
+/// The targets one node consumes its deps at, as the board holds them.
+fn consumes_on_the_board(world: &World, run: &str, node: &str) -> Option<Value> {
+    board_metadata(world, run, node).map(|metadata| metadata["onepipeline.consumes"].clone())
+}
+
 #[test]
 fn add_reparent_and_context_are_applied_and_reported_applied() {
     let world = World::new("edit-apply");
@@ -631,6 +707,358 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
         1,
         "the superseded node was dispatched again: {dispatched:?}"
     );
+}
+
+/// A node another node `consumes` can be retried, and the release target the
+/// dependent stated follows the edge onto the replacement.
+///
+/// The deadlock this journey exists for: `consumes` is keyed by **dependency node
+/// id**, a retry necessarily gives the replacement a new id, and the dependent's
+/// key was left naming the superseded one — so the candidate graph failed
+/// validation and the whole edit was refused. There was no order an operator
+/// could get out of it in, because correcting the key first is refused for naming
+/// something that is not yet a dep, and `requeue` refuses `deps` by name. A run
+/// that lost a consumed node to a provider failure had to be relaunched whole.
+///
+/// The target is read back out of the `edit-committed` record rather than off the
+/// live graph, because that record is what a replay of this run reconstructs the
+/// graph from: a rekey the reconciler made and the record did not carry would
+/// leave a projected run building against a different artifact than the executing
+/// one.
+#[test]
+fn a_node_another_node_consumes_is_retried_and_its_target_follows_the_edge() {
+    let world = World::new("edit-consumes");
+    let mut adopt = agent("adopt", &["engine"]);
+    adopt["consumes"] = json!({"engine": "crate"});
+    let run = live(
+        &world,
+        "consumed",
+        vec![agent("engine", &[]), adopt],
+        &["engine"],
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry",
+                "id": "engine",
+                "node": {"id": "engine-2", "persona": "engineer", "task": "## What\nagain"},
+            }])),
+        )
+        .exited(0);
+    world.until("the retry to commit", |world| {
+        committed(world, &run).contains(&"retry".to_string())
+    });
+
+    let rewired: Vec<_> = added_edges(&world, &run)
+        .into_iter()
+        .filter(|(_, to, _)| to == "adopt")
+        .collect();
+    assert_eq!(
+        rewired,
+        vec![(
+            "engine-2".to_string(),
+            "adopt".to_string(),
+            Some("crate".to_string())
+        )],
+        "the target the dependent stated did not follow the edge onto the replacement"
+    );
+    assert!(
+        removed_edges(&world, &run).contains(&("engine".to_string(), "adopt".to_string())),
+        "the superseded node's edge was not recorded as removed"
+    );
+
+    // And the graph the run projects out of that record says the same, which is
+    // where a reader meets it: the rekey survived the round trip through the
+    // journal rather than living only in the reconciler's own copy.
+    world.until_store("the rekeyed target to reach the project", |world| {
+        consumes_on_the_board(world, &run, "adopt") == Some(json!({"engine-2": "crate"}))
+    });
+
+    world.release("engine.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    let ids: Vec<&str> = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"engine-2") && ids.contains(&"adopt"),
+        "the replacement and its dependent did not both settle: {ids:?}"
+    );
+}
+
+/// A replacement that states no dependencies of its own inherits the superseded
+/// node's — and inherits the targets it consumes them at on the same condition —
+/// while one that states its own is answered with what it stated.
+///
+/// The half the rewiring journey above cannot show: there the superseded node had
+/// no dependencies of its own, so nothing was inherited. Here the node being
+/// retried is the *consumer*, and what has to survive the supersession is the
+/// pair of targets its plan stated. Both halves in one run, because the
+/// distinction between them is that the inheritance is a default rather than an
+/// override, and one retry alone cannot show a default being overridden.
+#[test]
+fn a_replacement_inherits_the_targets_it_inherits_deps_with_or_states_its_own() {
+    let world = World::new("edit-consumes-inherit");
+    let mut build = agent("build", &["engine", "packager"]);
+    build["consumes"] = json!({"engine": "crate", "packager": "wheel"});
+    let run = live(
+        &world,
+        "inherited",
+        vec![agent("engine", &[]), agent("packager", &[]), build],
+        &["build"],
+    );
+    world.until("the consuming node to be in flight", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+    // The replacement is held too, so the second retry below has a live node to
+    // supersede rather than one that has already settled.
+    world.script("build-2.wait", "hold");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry",
+                "id": "build",
+                "node": {"id": "build-2", "persona": "engineer", "task": "## What\nagain"},
+            }])),
+        )
+        .exited(0);
+    world.until("the retry to commit", |world| {
+        committed(world, &run).contains(&"retry".to_string())
+    });
+
+    let inherited: Vec<_> = added_edges(&world, &run)
+        .into_iter()
+        .filter(|(_, to, _)| to == "build-2")
+        .collect();
+    assert_eq!(
+        inherited,
+        vec![
+            (
+                "engine".to_string(),
+                "build-2".to_string(),
+                Some("crate".to_string())
+            ),
+            (
+                "packager".to_string(),
+                "build-2".to_string(),
+                Some("wheel".to_string())
+            ),
+        ],
+        "the replacement did not inherit the targets it inherited its deps with"
+    );
+
+    // And a replacement that states its own deps and targets is answered with
+    // what it stated: `packager` at a different target than the plan named, and
+    // `engine` not consumed at all.
+    world.until("the replacement to be in flight", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build-2")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry",
+                "id": "build-2",
+                "node": {
+                    "id": "build-3",
+                    "persona": "engineer",
+                    "task": "## What\nonce more",
+                    "deps": ["packager"],
+                    "consumes": {"packager": "crate"},
+                },
+            }])),
+        )
+        .exited(0);
+    world.until("the second retry to commit", |world| {
+        committed(world, &run).len() == 2
+    });
+
+    let stated: Vec<_> = added_edges(&world, &run)
+        .into_iter()
+        .filter(|(_, to, _)| to == "build-3")
+        .collect();
+    assert_eq!(
+        stated,
+        vec![(
+            "packager".to_string(),
+            "build-3".to_string(),
+            Some("crate".to_string())
+        )],
+        "the replacement was answered with the superseded node's targets over its own"
+    );
+
+    world.release("build.go");
+    world.release("build-2.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
+/// An `add` states its own targets, and a `reparent` keeps the ones whose dep
+/// survives and drops the one whose dep it discarded.
+///
+/// The reparent is the assertion that carries: `validate_node` refuses a
+/// `consumes` key that is not a dep, so an edit that discarded the dep and kept
+/// the key would be refused outright — and the run would still be waiting on the
+/// node it was reparented away from.
+#[test]
+fn an_add_and_a_reparent_carry_the_targets_of_the_edges_they_move() {
+    let world = World::new("edit-consumes-edges");
+    let mut ship = agent("ship", &["slow", "packager"]);
+    ship["consumes"] = json!({"slow": "crate", "packager": "wheel"});
+    let run = live(
+        &world,
+        "moved",
+        vec![
+            agent("slow", &[]),
+            agent("packager", &[]),
+            agent("docs", &[]),
+            ship,
+        ],
+        &["slow"],
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "deps": ["packager"], "consumes": {"packager": "crate"}}},
+                {"op": "reparent", "id": "ship", "deps": ["packager", "docs"]},
+            ])),
+        )
+        .exited(0);
+    world.until("both edits to commit", |world| {
+        committed(world, &run) == vec!["add".to_string(), "reparent".to_string()]
+    });
+
+    let added = added_edges(&world, &run);
+    assert!(
+        added.contains(&(
+            "packager".to_string(),
+            "extra".to_string(),
+            Some("crate".to_string())
+        )),
+        "the added node's own target is not on the edge it added: {added:?}"
+    );
+    assert!(
+        added.contains(&(
+            "packager".to_string(),
+            "ship".to_string(),
+            Some("wheel".to_string())
+        )),
+        "the surviving dep's target did not survive the reparent: {added:?}"
+    );
+    assert!(
+        added.contains(&("docs".to_string(), "ship".to_string(), None)),
+        "a dep the plan states no target for was given one: {added:?}"
+    );
+    assert!(
+        !added
+            .iter()
+            .any(|(from, to, _)| from == "slow" && to == "ship"),
+        "the discarded dep's edge was re-added: {added:?}"
+    );
+    assert!(
+        removed_edges(&world, &run).contains(&("slow".to_string(), "ship".to_string())),
+        "the discarded dep's edge was not recorded as removed"
+    );
+
+    // The graph the run projects out of those records agrees: the discarded
+    // dep's target is gone and the survivor's is untouched, and the added node
+    // carries what it stated.
+    world.until_store("both edits to reach the project", |world| {
+        consumes_on_the_board(world, &run, "ship") == Some(json!({"packager": "wheel"}))
+            && consumes_on_the_board(world, &run, "extra") == Some(json!({"packager": "crate"}))
+    });
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
+/// Detaching takes the dependency away, so the dependent's target for it goes
+/// with the edge — there is nothing left for one to name.
+#[test]
+fn a_detaching_drop_takes_its_dependents_target_with_the_edge() {
+    let world = World::new("edit-consumes-drop");
+    let mut dependent = agent("dependent", &["victim"]);
+    dependent["consumes"] = json!({"victim": "crate"});
+    let run = live(
+        &world,
+        "detached",
+        vec![agent("slow", &[]), agent("victim", &[]), dependent],
+        &["slow", "victim"],
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "drop", "id": "victim", "dependents": "detach"}])),
+        )
+        .exited(0);
+    world.until("the drop to commit", |world| {
+        committed(world, &run).contains(&"drop".to_string())
+    });
+
+    assert!(
+        removed_edges(&world, &run).contains(&("victim".to_string(), "dependent".to_string())),
+        "the dropped dependency's edge was not recorded as removed"
+    );
+    assert!(
+        added_edges(&world, &run).is_empty(),
+        "a detaching drop re-added an edge, and with it a target"
+    );
+
+    // And the projected graph holds the dependent with no target at all — which
+    // is a different answer from not holding it, so the board is asked for the
+    // node first and for its targets second.
+    world.until_store("the detach to reach the project", |world| {
+        board_metadata(world, &run, "dependent")
+            .is_some_and(|metadata| metadata["onepipeline.consumes"].is_null())
+    });
+
+    world.release("slow.go");
+    world.release("victim.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    let ids: Vec<&str> = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"victim"),
+        "the dropped node survived: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"dependent"),
+        "the node that consumed it was dropped too: {ids:?}"
+    );
+    assert_eq!(result["state"], "complete", "{result}");
 }
 
 #[test]
