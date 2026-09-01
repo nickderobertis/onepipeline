@@ -2827,19 +2827,17 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   that is still recording rather than as of some later pass. `RunPaths::summary()`
   is where it is, which is a **seventh** method on a type the contract says
   promises six.
-- **`views::RunSummary`**, at `SUMMARY_SCHEMA_VERSION` 1, carrying: the run id;
-  the last recorded write (the ordering key) and the last recorded kind; the
-  record count; each node's status word to the number of nodes carrying it; the
-  two settled-run facts, `stop_recorded` and `graph_complete`; the four a run's
-  phase is derived from, `decisions_pending`, `surfaces_queued`, `surfaces_read`
-  and `awaiting_human_action`; the launch record's own account of the run —
-  `project`, `launcher`, `session`, `started_at`, `pid`, `host`, `started` — so a
-  row's attribution needs no second read; the run's aggregate `timing`; and the
-  journal length and modification time a stale document is detected by.
-  **Liveness is deliberately not on it**: how a run is being driven is read from
-  the host at the moment of the question, and a stored answer is stale the
-  instant it is written. What the document carries is what `views::liveness`
-  takes as *input*.
+- **`views::RunSummary`**, at the schema version and with the fields the block
+  below states — which is where they are written down, once, rather than in prose
+  here as well: the run's own record of itself (the ordering key a listing sorts
+  by, the last recorded kind, the record count, each node's status word to the
+  number of nodes carrying it, the two settled-run facts and the four a run's
+  phase is derived from), the launch record's own account of the run so a row's
+  attribution needs no second read, the run's aggregate clock, and the stamp a
+  stale document is detected by. **Liveness is deliberately not on it**: how a run
+  is being driven is read from the host at the moment of the question, and a
+  stored answer is stale the instant it is written. What the document carries is
+  what `views::liveness` takes as *input*.
 - **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
   run roots it could not read with each root's own reason — on the same terms
   `Survey::skipped` already states, because a cheap listing that reported only
@@ -2852,6 +2850,42 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   rather than restating its fields, so there is one declaration of what a run's
   clock is; a field a consumer cannot name is a field it cannot read, which is
   why the type is exported rather than merely reached through.
+
+The document's version and its whole inventory, which
+`the_summary_document_is_what_the_divergence_record_names` in `tests/contract.rs`
+holds to `views::RunSummary` itself — a field added to the type and not named
+here fails, and a name here the type does not carry fails too, so this proposal
+cannot go on describing a document the build stopped writing:
+
+```json
+{
+  "schema_version": 1,
+  "fields": [
+    "schema_version",
+    "run_id",
+    "last_write_at",
+    "last_event_kind",
+    "event_count",
+    "node_counts",
+    "stop_recorded",
+    "graph_complete",
+    "decisions_pending",
+    "surfaces_queued",
+    "surfaces_read",
+    "awaiting_human_action",
+    "project",
+    "launcher",
+    "session",
+    "started_at",
+    "pid",
+    "host",
+    "started",
+    "timing",
+    "journal_len",
+    "journal_mtime_ms"
+  ]
+}
+```
 
 **Nothing existing changed.** `RunView`, `Survey`, and every `views` entry point
 behave exactly as before; a run with no summary document, or one stale against
