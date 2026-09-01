@@ -333,6 +333,119 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
     );
 }
 
+/// A run the root does not hold is **refused by name**, not answered as an empty
+/// row.
+///
+/// The one refusal on this reader's public surface, and what a consumer builds
+/// its own error on: a row full of defaults for a run nobody launched would read
+/// as a run that has recorded nothing, which is a state that really exists.
+#[test]
+fn a_run_the_root_does_not_hold_is_refused_by_name() {
+    let world = World::new("summary-missing");
+    let run = settled(&world, "launched", vec![agent("build", &[])]);
+
+    let refusal = RunSummary::of(&RunPaths::under(&world.runs, "never-launched"))
+        .expect_err("a run nobody launched read as a row");
+    let said = refusal.to_string();
+    assert!(
+        said.contains("never-launched") && said.contains(&world.runs.display().to_string()),
+        "the refusal names neither the run asked for nor the root it was looked for \
+         under: {said}"
+    );
+
+    // And the root itself is unharmed: a name nobody launched is not a run root,
+    // so it is not a refused one either.
+    let listing = Listing::of(&world.runs);
+    assert_eq!(
+        listing
+            .summaries
+            .iter()
+            .map(|row| row.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![run.as_str()]
+    );
+    assert!(listing.skipped.is_empty(), "{:?}", listing.skipped);
+}
+
+/// A producer that publishes **out of its own order** leaves the row its fold
+/// produces.
+///
+/// The writer keeps the document by folding one arriving record at a time, which
+/// it can only do while each arrival belongs at or past the newest instant it
+/// holds. Three arrivals do not, and each is something a real producer does —
+/// `oneagentgraph` publishes an `oneharness-session` record out of band, stamped
+/// when its session opened, and a clock correction under a running process moves
+/// a stamp backwards under a `seq` that keeps counting:
+///
+/// - one stamped **behind** the newest instant;
+/// - one that closes that instant **over** a record of its own stream still open
+///   at it, with a higher `seq` than the arrival;
+/// - one whose stream has already **settled** a higher `seq`.
+///
+/// The writer reads the store again for each, and the whole claim is that the
+/// row it then keeps is the row the store folds to. Three real runs, one per
+/// arrival, each driven through the compiled binary with the double publishing
+/// what the scenario names.
+#[test]
+fn a_producer_that_publishes_out_of_its_own_order_leaves_the_row_its_fold_produces() {
+    let world = World::new("summary-out-of-order");
+    // A clock that stepped back under the turn, which the double stamps its
+    // third record with; the other two runs name the stamp and the sequence of
+    // every record they add.
+    world.script("stepped.clock-stepped", "the turn's clock steps back");
+    // Closing an instant over an open record of the same stream: `seq` 50 opens
+    // the instant a second past the turn, and `seq` 49 arrives at a later one.
+    world.script(
+        "closing.out-of-order",
+        r#"[{"ms": 1000, "seq": 50}, {"ms": 2000, "seq": 49}]"#,
+    );
+    // Arriving behind a `seq` already settled: 50 is settled by 60 opening the
+    // instant past it, and 45 arrives after both.
+    world.script(
+        "behind.out-of-order",
+        r#"[{"ms": 1000, "seq": 50}, {"ms": 2000, "seq": 60}, {"ms": 3000, "seq": 45}]"#,
+    );
+
+    for (node, unplaceable) in [
+        ("stepped", "2001-01-01T00:00:00.000Z"),
+        ("closing", "49"),
+        ("behind", "45"),
+    ] {
+        let run = settled(&world, node, vec![agent(node, &[])]);
+        let paths = paths_of(&world, &run);
+        // The arrival the scenario is about really reached the store, so the run
+        // below is the run this claims to be about.
+        assert!(
+            world.journal(&run).iter().any(|event| {
+                event["ts"] == unplaceable || event["seq"].as_u64() == unplaceable.parse().ok()
+            }),
+            "'{node}' recorded no arrival its writer could not place: {:?}",
+            world.kinds(&run)
+        );
+
+        // The document as the writer left it — read as the file it is, because a
+        // reader that folded would answer correctly whatever the writer counted.
+        let document: RunSummary = serde_json::from_str(
+            &std::fs::read_to_string(paths.summary()).expect("the document reads"),
+        )
+        .expect("the document the writer maintained");
+        assert_eq!(
+            document.journal_len,
+            std::fs::metadata(paths.journal()).expect("a store").len(),
+            "'{node}' left a document stamped at a length its store does not have, so \
+             every reader of it folds"
+        );
+
+        recorded_before_the_document(&paths);
+        assert_eq!(
+            RunSummary::of(&paths).expect("the run folds"),
+            document,
+            "on '{node}' the row the writer kept across an arrival it could not place is \
+             not the row the store folds to"
+        );
+    }
+}
+
 /// A record appended over a **torn tail** leaves the summary current, not stale.
 ///
 /// The one append that does two things: healing the fragment a dead writer left

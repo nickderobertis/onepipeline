@@ -479,7 +479,10 @@ impl Folded {
 ///
 /// Two arrivals do not belong anywhere this can place them, and the answer to
 /// both is to read the store again. One is a record stamped *behind* the newest
-/// instant — a producer's clock is not this one's. The other is a record whose
+/// instant **any** stream has reached — a producer's clock is not this one's, and
+/// the merge holds a stream stamped ahead of the others back until they drain, so
+/// the order can end behind an instant the store already carries. The other is a
+/// record whose
 /// stream has already had a **higher** `seq` folded and settled: a stream is
 /// merged in its own `seq` order whatever its stamps say, so a producer that
 /// publishes `seq` 10 stamped before its `seq` 5 puts the later record first in
@@ -495,9 +498,21 @@ pub(crate) struct Maintainer {
     /// The records stamped **at** it, unfolded, so one arriving beside them can
     /// still sort in front of them.
     open: Vec<Envelope>,
-    /// The newest instant this store has recorded. Empty for a store with
-    /// nothing in it, which every stamp is past.
+    /// The instant the **merge order ends at**. Empty for a store with nothing in
+    /// it, which every stamp is past.
     open_ts: String,
+    /// The newest instant **any** record in this store carries, which is not
+    /// always the one above.
+    ///
+    /// The merge is a k-way one — each stream in its own `seq`, streams
+    /// interleaved by `ts` — so a stream whose head is stamped ahead of every
+    /// other stream's remaining records is held back until those are drained, and
+    /// the order then ends on a record stamped *behind* one already placed. A
+    /// producer whose clock runs ahead of this one's is ordinary between hosts, so
+    /// this is not a rare shape. An arrival behind this instant has records to
+    /// sort in front of wherever the order happens to end, and is not one this
+    /// state can place.
+    newest_ts: String,
     /// How many bytes of the journal this state has accounted for. See
     /// [`Stamp`].
     accounted: u64,
@@ -551,6 +566,12 @@ impl Maintainer {
             paths: paths.clone(),
             settled,
             open: events[opened..].to_vec(),
+            newest_ts: events
+                .iter()
+                .map(|event| &event.ts)
+                .max()
+                .cloned()
+                .unwrap_or_default(),
             open_ts,
             accounted: before.min(after),
             settled_seq,
@@ -638,7 +659,7 @@ impl Maintainer {
                 .open
                 .iter()
                 .any(|held| held.stream == event.stream && held.seq > event.seq);
-        if settled_past_it || closing_over_it || event.ts < self.open_ts {
+        if settled_past_it || closing_over_it || event.ts < self.newest_ts {
             *self = Self::of(&self.paths);
             return Rebuilt::Yes;
         }
@@ -651,6 +672,9 @@ impl Maintainer {
             self.open.clear();
         }
         self.open.push(event.clone());
+        if event.ts > self.newest_ts {
+            self.newest_ts = event.ts.clone();
+        }
         self.accounted += bytes;
         Rebuilt::No
     }
