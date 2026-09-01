@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5](https://github.com/nickderobertis/onepipeline/compare/v0.18.4...v0.18.5) - 2026-09-01
+
+### Fixed
+
+- *(edits)* carry a node's release targets across every live edit that moves its deps ([#182](https://github.com/nickderobertis/onepipeline/pull/182))
+
 ## [0.18.4](https://github.com/nickderobertis/onepipeline/compare/v0.18.3...v0.18.4) - 2026-09-01
 
 ### Fixed
