@@ -20,10 +20,11 @@
 
 use crate::harness::{
     agent, double, lifecycle, onetaskgraph_binary, plan_of, renamed, World, REFUSED,
-    STORE_BINARY_ENV,
+    RENDEZVOUS_SECONDS_ENV, STORE_BINARY_ENV,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// A run launches from a local Markdown project, with no remote system in it at
 /// all, and executes the graph that project holds.
@@ -693,6 +694,570 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
             .is_file()
     });
 }
+
+/// What a hosted destination says when it is refusing for a rate limit, and what this
+/// suite's store double is made to say. The words are GitHub's own: that limiter is the
+/// one the retry schedule below exists for, and the driver's line has to carry the
+/// destination's reason through unchanged for an operator to know which refusal it is.
+const RATE_LIMITED: &str = "You have exceeded a secondary rate limit";
+
+/// A detached run whose projections go through the store double, in front of the real
+/// store.
+///
+/// The double delegates every call to the real `onetaskgraph` until [`starts_refusing`]
+/// makes it refuse, which is how a destination that begins rate-limiting part-way through
+/// a run is arranged — and, because every attempt is a real process this double records,
+/// how the intervals the worker actually waits become observable at the destination rather
+/// than in the shape of the code.
+fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World, String) {
+    let world = World::new(world);
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
+    );
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    let world = world
+        .with_env(
+            STORE_BINARY_ENV,
+            &double("fake-onetaskgraph").to_string_lossy(),
+        )
+        // A hold has to outlast the thing the journey is measuring, and what these measure
+        // is a schedule in minutes: the default is written to outlast `World::until`'s
+        // two-minute deadline, which is shorter than the interval a refusing destination is
+        // eventually asked at. Nextest's own `terminate-after` is still the backstop, so a
+        // rendezvous nobody releases is ended rather than waited out for ten minutes.
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the running state to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+    (world, project)
+}
+
+fn projections_asked_for(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "onetaskgraph"
+                && call["args"][0] == "project"
+                && call["args"][1] == "show"
+        })
+        .count()
+}
+
+/// Which of the plan's nodes have run, in the order they first were dispatched.
+///
+/// The dispatches counted would say the same thing, until a held node outlives its
+/// rendezvous and is re-asked — which is the double's business rather than the
+/// projection's. What these journeys claim is that a refusing destination changed neither
+/// which work ran nor what it waited for.
+fn dispatched(world: &World, run: &str) -> Vec<String> {
+    let mut ran: Vec<String> = Vec::new();
+    for event in world.events_of(run, "node-dispatched") {
+        if let Some(node) = event["labels"]["node"].as_str() {
+            if !ran.iter().any(|already| already == node) {
+                ran.push(node.to_owned());
+            }
+        }
+    }
+    ran
+}
+
+/// An outage this journey arranged: what the driver had already reported before it began,
+/// and the reply that gives the worker a snapshot to fail on.
+struct Outage {
+    /// Read before the destination started refusing, because the streak can begin — and
+    /// the line an operator reads can be printed — before the reply that publishes for it
+    /// has even exited. A count taken afterwards would be waiting for a second streak that
+    /// this outage is never going to produce.
+    streaks_before: usize,
+    reply: std::process::Child,
+}
+
+impl Outage {
+    /// The reply that gave the worker something to project, ended.
+    ///
+    /// Checked rather than dropped: a journey whose reply was refused would be timing a
+    /// schedule nothing had been queued for.
+    fn replied(mut self) {
+        let status = self.reply.wait().expect("the reply ends");
+        assert!(
+            status.success(),
+            "the reply that gave the worker something to project exited {status}"
+        );
+    }
+}
+
+/// The destination starts refusing every read for a rate limit, the way a hosted store does
+/// when a limiter takes against it, and the run is given something to project.
+///
+/// The reply is launched rather than waited for. It is what publishes the snapshot the
+/// streak fails on, and the failure it leads to is the moment every interval below is
+/// measured from — so a caller that waited here would start observing somewhere after the
+/// thing it means to time.
+fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
+    let streaks_before = streaks_reported(world, run);
+    world.script("onetaskgraph.refuse-reads", RATE_LIMITED);
+    let mut reply = world
+        .cmd(&["reply", run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the reply starts");
+    let envelope = json!({
+        "version": 1,
+        "commands": [{"op": "context", "id": "later", "note": note}]
+    })
+    .to_string();
+    let mut stdin = reply.stdin.take().expect("the reply's stdin is piped");
+    std::io::Write::write_all(&mut stdin, envelope.as_bytes()).expect("the envelope is written");
+    drop(stdin);
+    Outage {
+        streaks_before,
+        reply,
+    }
+}
+
+fn stops_refusing(world: &World) {
+    std::fs::remove_file(world.fakes.join("onetaskgraph.refuse-reads"))
+        .expect("the destination stops refusing");
+}
+
+/// How many outages reached the planner, in the words the driver raises them in.
+fn outages_raised(world: &World, run: &str) -> usize {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("did not take this run's projection"))
+        })
+        .count()
+}
+
+fn streaks_reported(world: &World, run: &str) -> usize {
+    std::fs::read_to_string(world.run_file(run, "driver.log"))
+        .map(|log| log.matches("onetaskgraph write-back failed").count())
+        .unwrap_or_default()
+}
+
+/// The intervals the worker waited before each of the next `count` retries of a projection
+/// that has started failing.
+///
+/// Both ends of every interval are read off something the destination or its operator can
+/// see, rather than off the shape of the code: the streak's start is the moment the driver
+/// printed the line an operator reads, and each retry is the destination's own record of
+/// being asked again — the `project show` every attempt opens with, and the only call a
+/// refusing destination ever gets that far.
+fn retry_intervals(
+    world: &World,
+    run: &str,
+    outage: &Outage,
+    count: usize,
+    budget: Duration,
+) -> Vec<Duration> {
+    let deadline = Instant::now() + budget;
+    let mut at: Vec<Instant> = Vec::new();
+    while streaks_reported(world, run) == outage.streaks_before {
+        assert!(
+            Instant::now() < deadline,
+            "no failing projection was reported within {budget:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    at.push(Instant::now());
+    // Seeded at the failure rather than before it, so whatever the attempt that failed had
+    // already asked for is behind us and the next thing counted is the retry.
+    let mut asked = projections_asked_for(world);
+    while at.len() <= count {
+        assert!(
+            Instant::now() < deadline,
+            "the destination was asked {} more times in {budget:?}, not the {count} retries \
+             this journey reads its intervals off",
+            at.len() - 1
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        let now = projections_asked_for(world);
+        if now > asked {
+            assert_eq!(
+                now,
+                asked + 1,
+                "{} retries landed inside one observation, so the intervals read off them \
+                 are not the ones that were waited",
+                now - asked
+            );
+            asked = now;
+            at.push(Instant::now());
+        }
+    }
+    at.windows(2).map(|pair| pair[1] - pair[0]).collect()
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these six wait on
+// is the schedule itself — a minute-long interval cannot be observed in less than a minute
+// — and the edge they need is the crate under test: they drive the compiled `onepipeline`
+// binary against its own write-back worker, so a project of their own would declare the
+// same dependency and skip nothing. Every e2e journey in this repository lives in this one
+// binary for that reason; the single project that was split out,
+// `onepipeline-note-journeys`, was split for a test binary it needs rather than a narrower
+// edge. Splitting these six would invent a per-topic test project, which is a change to how
+// this repository's graph and gate are shaped rather than to what this change does.
+/// A destination that keeps refusing is asked further and further apart, rather than four
+/// times a second for as long as the run lasts.
+///
+/// The refusal this schedule exists for is a rate limiter, which every further attempt
+/// extends — so retrying at one fixed short interval answers a destination that is already
+/// saying no by asking it harder. The first retry stays where it was, though: a projection
+/// that fails once and then succeeds still lands without a delay an operator notices.
+#[test]
+fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
+    let run = "writeback-backoff";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff", run);
+
+    let outage = starts_refusing(&world, run, "project this through a rate limit");
+    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    outage.replied();
+
+    assert!(
+        waited[0] < Duration::from_secs(1),
+        "the first retry of a streak came {:?} after the failure, which is a delay an \
+         operator watching the board would notice",
+        waited[0]
+    );
+    for pair in waited.windows(2) {
+        assert!(
+            pair[1] >= pair[0] * 2,
+            "the destination was asked again after {:?} and then after {:?}, which is not a \
+             schedule that grows: {waited:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+    assert!(
+        waited[3] >= Duration::from_secs(8),
+        "four failures in, the destination is still being asked every {:?}: {waited:?}",
+        waited[3]
+    );
+
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
+        .expect("the driver log is readable");
+    let said: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("onetaskgraph write-back failed"))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "a streak of failures was reported {} times: {log}",
+        said.len()
+    );
+    let said = said[0];
+    assert!(
+        said.contains(&project) && said.contains(RATE_LIMITED),
+        "the line an operator reads names neither the project nor the reason: {said}"
+    );
+    assert!(
+        said.contains("spacing"),
+        "the line an operator reads does not say the attempts are being spaced: {said}"
+    );
+
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the outage changed what executed"
+    );
+}
+
+/// A streak that ends resets the schedule: the projection after a recovery is retried as
+/// promptly as the very first one was.
+///
+/// Without this a run that met one outage would carry a minute-long interval for the rest
+/// of its life, so a later isolated failure — the case the quarter-second start is for —
+/// would leave the board stale for a minute over a failure that lasted a moment.
+#[test]
+fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails() {
+    let run = "writeback-backoff-reset";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-reset", run);
+
+    let outage = starts_refusing(&world, run, "the first outage");
+    let waited = retry_intervals(&world, run, &outage, 2, Duration::from_secs(60));
+    outage.replied();
+    assert!(
+        waited[1] > waited[0],
+        "the first streak did not grow: {waited:?}"
+    );
+
+    stops_refusing(&world);
+    world.until("write-back recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the projection to catch the board up", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "the first outage"
+        })
+    });
+
+    let outage = starts_refusing(&world, run, "the second outage");
+    let again = retry_intervals(&world, run, &outage, 1, Duration::from_secs(60));
+    outage.replied();
+    assert!(
+        again[0] < Duration::from_secs(1),
+        "the streak that ended left the next one starting {:?} apart, where the first \
+         started {:?} apart",
+        again[0],
+        waited[0]
+    );
+}
+
+/// A destination that never returns keeps being asked at the ceiling, rather than being
+/// asked at ever-growing intervals until nobody is watching or being abandoned altogether.
+///
+/// This journey is the suite's slowest on purpose: what it asserts is a schedule measured
+/// in minutes, and the only honest evidence for "it stopped growing here, and it kept
+/// asking at that" is two consecutive waits of that length actually waited.
+#[test]
+fn a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned() {
+    let run = "writeback-backoff-ceiling";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-ceiling", run);
+
+    let outage = starts_refusing(&world, run, "this destination is not coming back");
+    let waited = retry_intervals(&world, run, &outage, 6, Duration::from_secs(300));
+    outage.replied();
+    let (climbing, ceiling) = waited.split_at(waited.len() - 2);
+
+    for pair in waited[..waited.len() - 1].windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "an interval shrank while the destination was still refusing: {waited:?}"
+        );
+    }
+    assert!(
+        climbing.windows(2).all(|pair| pair[1] >= pair[0] * 2),
+        "the schedule did not climb to its ceiling: {waited:?}"
+    );
+    assert!(
+        ceiling[1] <= ceiling[0].mul_f64(1.5),
+        "the interval was still growing after six retries — {:?} then {:?} — so there is no \
+         ceiling here, only a slower runaway: {waited:?}",
+        ceiling[0],
+        ceiling[1]
+    );
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
+        .expect("the driver log is readable");
+    assert_eq!(
+        log.matches("onetaskgraph write-back failed").count(),
+        1,
+        "the streak was reported more than once: {log}"
+    );
+
+    // The one line an operator ever gets names how far apart to expect the attempts, and
+    // that number is only worth reading if it is the interval actually waited: a line
+    // promising a minute over a worker asking every twenty seconds sends an operator away
+    // from a destination that is still being hammered. So the ceiling this journey measured
+    // is held to what the line said, rather than to a constant copied out of the source.
+    let said = log
+        .lines()
+        .find(|line| line.contains("onetaskgraph write-back failed"))
+        .expect("the failing streak was reported");
+    let promised = said
+        .split_once("out to ")
+        .and_then(|(_, rest)| rest.split_once(" seconds apart"))
+        .and_then(|(seconds, _)| seconds.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            panic!("the line does not say how far apart to expect further attempts: {said}")
+        });
+    assert!(
+        promised >= Duration::from_secs(30),
+        "the operator is told to expect another attempt every {promised:?}, which is not the \
+         minutes-scale window a hosted rate limiter refuses over"
+    );
+    for waited_at_the_ceiling in ceiling {
+        assert!(
+            *waited_at_the_ceiling >= promised && *waited_at_the_ceiling <= promised.mul_f64(1.5),
+            "the operator was told to expect another attempt {promised:?} apart, and the \
+             destination was actually asked again after {waited_at_the_ceiling:?}: {waited:?}"
+        );
+    }
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the outage changed what executed"
+    );
+}
+
+/// Settlement never waits on the store, whatever the schedule is doing: a run whose
+/// projection is part-way through a long interval settles exactly like one whose
+/// projection lands, and the stop that ends the run is honoured rather than waited out.
+#[test]
+fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
+    let run = "writeback-backoff-settles";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-settles", run);
+
+    let outage = starts_refusing(&world, run, "settle without me");
+    // Four retries in, the next attempt is a long way off — which is the state this journey
+    // needs the graph to complete in.
+    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    outage.replied();
+    assert!(
+        waited[3] >= Duration::from_secs(8),
+        "the outstanding interval is only {:?}, so a run settling inside it proves nothing",
+        waited[3]
+    );
+
+    world.release("work.go");
+    world.until("the graph to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
+    });
+    let settled = Instant::now();
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert!(
+        settled.elapsed() < waited[3],
+        "settlement waited {:?} on a projection whose next attempt was {:?} away",
+        settled.elapsed(),
+        waited[3]
+    );
+
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .all(|node| node["status"] == "done"),
+        "the refusing destination changed a node's settlement: {result}"
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the refusing destination changed what executed"
+    );
+
+    // And the planner was told, which is what makes a projection nobody took something
+    // anyone can fix. A run that settles under an outage is exactly the run whose record a
+    // reader trusts, so the outage reaches the planner from inside the schedule rather than
+    // being dropped when the run ends part-way through an interval.
+    assert_eq!(
+        outages_raised(&world, run),
+        1,
+        "the planner was told {} times about the outage this run settled under",
+        outages_raised(&world, run)
+    );
+}
+
+/// A closing run's terminal snapshot is projected inside its closeout window, rather than
+/// on a schedule written for a run that is still going.
+///
+/// The spacing exists to stop a refusing destination being asked again and again while a
+/// run lasts, and a run that is ending is the opposite case: the window it has left is
+/// bounded whatever the store does, so the schedule is suspended inside it. A terminal
+/// snapshot left to sit out a minute-long interval inside a two-second window is a board
+/// that stays wrong for good, which is the record an operator reads to see what became of
+/// their plan.
+#[test]
+fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_interval() {
+    let run = "writeback-backoff-closeout";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-closeout", run);
+
+    let outage = starts_refusing(&world, run, "come back for the last one");
+    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    outage.replied();
+
+    // The destination returns while the worker is part-way through an interval at least as
+    // long as the last one it waited out, so nothing it has already scheduled can reach the
+    // store before this run ends.
+    stops_refusing(&world);
+    world.release("work.go");
+    world.until("the graph to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
+    });
+    let settled = Instant::now();
+    world.until_store("the terminal settlement to reach the board", |world| {
+        world.store_tasks(&project).iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
+    assert!(
+        settled.elapsed() < waited[3],
+        "the terminal projection took {:?} to reach the board, which is the interval the \
+         worker was part-way through rather than the closeout window",
+        settled.elapsed()
+    );
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the projection that landed was not a settled run's"
+    );
+}
+
+/// A stop asked for while a projection is waiting out a long interval answers on the
+/// operator's own timescale, not the schedule's, and the destination is asked nothing more
+/// for the run that was stopped.
+///
+/// What this cannot see is the worker's own half of it: `stop` signals the whole process
+/// tree, so the driver holding that worker is gone whatever the worker would have done
+/// with the request. That half — a worker leaving a wait it was part-way through, watched
+/// after its stop was asked for — is
+/// `writeback::tests::a_stop_reaches_a_worker_that_is_waiting_out_a_retry_interval`, which
+/// holds its process open across the stop precisely because a journey cannot.
+#[test]
+fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
+    let run = "writeback-backoff-stop";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-backoff-stop", run);
+
+    let outage = starts_refusing(&world, run, "stop me instead");
+    let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
+    outage.replied();
+
+    let stop_requested_at = Instant::now();
+    world.run(&["stop", run]).exited(0);
+    assert!(
+        stop_requested_at.elapsed() < waited[3],
+        "the stop took {:?}, which is the schedule's timescale rather than the operator's: \
+         the outstanding interval was longer than {:?}",
+        stop_requested_at.elapsed(),
+        waited[3]
+    );
+    assert_eq!(world.events_of(run, "run-stopped").len(), 1);
+
+    // A worker woken out of a wait by the stop leaves rather than taking its turn at the
+    // destination: the run that was asking is over, so nothing more is asked for it.
+    let asked_by_the_stopped_run = projections_asked_for(&world);
+    let watched = Instant::now();
+    while watched.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            projections_asked_for(&world),
+            asked_by_the_stopped_run,
+            "the destination was asked again {:?} after the run was stopped",
+            watched.elapsed()
+        );
+    }
+    world.release("work.go");
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Losing the worker's own command-capture path is handled by the same best-effort
 /// boundary as losing the destination: the committed graph keeps running, and the

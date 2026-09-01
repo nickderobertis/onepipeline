@@ -81,7 +81,17 @@ const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs.
 const COMMAND_LIMIT: Duration = Duration::from_secs(60);
-const RETRY_AFTER: Duration = Duration::from_millis(250);
+// The retry schedule, chosen from the refusal that produces it in practice: a hosted
+// destination's rate limiter, which every further attempt extends. It starts where a fixed
+// quarter-second schedule did, so a projection that fails once still lands unnoticeably
+// fast, and quadruples so that five attempts reach the ceiling inside twenty seconds rather
+// than spending a limiter's whole minutes-long window asking several times a minute. The
+// ceiling is what GitHub's secondary limit — reported by no endpoint a caller can poll —
+// documents as the wait to take: at least one minute. It is a ceiling and not a give-up,
+// because a board nobody projects to stays wrong for the rest of the run.
+const FIRST_RETRY_AFTER: Duration = Duration::from_millis(250);
+const RETRY_GROWTH: u32 = 4;
+const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
@@ -140,7 +150,22 @@ enum WorkerState {
     #[default]
     Idle,
     Working,
-    StopRequested,
+}
+
+/// Where the run holding this worker has got to.
+///
+/// One value rather than a flag beside the worker's own, because these are phases of one
+/// run and it only ever moves forward through them: what a worker between snapshots and a
+/// worker waiting out a retry interval each do next is decided by the same value.
+#[derive(Default, PartialEq, Eq)]
+enum RunPhase {
+    #[default]
+    Running,
+    /// The graph has converged and the run is inside its bounded closeout window, which
+    /// suspends the retry schedule: a terminal snapshot left sitting out a minute's
+    /// interval inside a two-second window would never be projected at all.
+    ClosingOut,
+    Stopping,
 }
 
 #[derive(Default)]
@@ -148,6 +173,7 @@ struct Pending {
     latest: Option<Snapshot>,
     last_success: Option<Snapshot>,
     worker: WorkerState,
+    phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
     ///
     /// One entry per outage rather than one per retry: the worker retries until
@@ -266,6 +292,8 @@ impl Writeback {
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
+        pending.phase = RunPhase::ClosingOut;
+        ready.notify_all();
         while (pending.latest.is_some() || pending.worker == WorkerState::Working)
             && Instant::now() < deadline
         {
@@ -282,8 +310,12 @@ impl Drop for Writeback {
     fn drop(&mut self) {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
-            pending.worker = WorkerState::StopRequested;
-            ready.notify_one();
+            pending.phase = RunPhase::Stopping;
+            // Every waiter, because two of them wait on this one condition: the worker
+            // idle between snapshots, and the worker waiting out a retry interval that
+            // grows into the tens of seconds. Waking one of the two would leave whichever
+            // it was not sitting on a stop it has already been told about.
+            ready.notify_all();
         }
         // Deliberately no join: a store process is outside the run's failure and latency
         // boundary, and waiting for it here would turn write-back into run settlement.
@@ -296,7 +328,9 @@ fn worker(
     run_dir: PathBuf,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    let mut failing = false;
+    // The consecutive failures of the streak in progress, and the whole of what this worker
+    // remembers about one: zero is a projection that is landing.
+    let mut failures: u32 = 0;
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -304,18 +338,16 @@ fn worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
-            while state.latest.is_none() && state.worker != WorkerState::StopRequested {
+            while state.latest.is_none() && state.phase != RunPhase::Stopping {
                 state = match ready.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
                 };
             }
-            if state.worker == WorkerState::StopRequested && state.latest.is_none() {
+            if state.phase == RunPhase::Stopping && state.latest.is_none() {
                 return;
             }
-            if state.worker == WorkerState::Idle {
-                state.worker = WorkerState::Working;
-            }
+            state.worker = WorkerState::Working;
             state
                 .latest
                 .take()
@@ -323,31 +355,38 @@ fn worker(
         };
         match project(&binary, &launch_dir, &run_dir, &snapshot) {
             Ok(()) => {
-                if failing {
+                if failures > 0 {
                     eprintln!(
                         "onetaskgraph write-back recovered for '{}'",
                         snapshot.project
                     );
                 }
-                failing = false;
+                failures = 0;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
-                    if state.worker == WorkerState::StopRequested && state.latest.is_none() {
+                    if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
                     }
                 }
             }
             Err(error) => {
-                let first = !failing;
+                let first = failures == 0;
+                failures = failures.saturating_add(1);
                 if first {
+                    // The one line on the driver's stderr that ever says a projection is in
+                    // trouble, so it says what an operator's next question is: whether to
+                    // expect another attempt in a moment or in a minute.
                     eprintln!(
-                        "onetaskgraph write-back failed for '{}': {error}; retrying",
-                        snapshot.project
+                        "onetaskgraph write-back failed for '{}': {error}; retrying, spacing \
+                         further attempts out to {} seconds apart while it keeps failing",
+                        snapshot.project,
+                        RETRY_CEILING.as_secs()
                     );
                 }
-                failing = true;
-                std::thread::sleep(RETRY_AFTER);
+                if !should_retry_after(&pending, retry_after(failures)) {
+                    return;
+                }
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
                 if first {
@@ -357,7 +396,7 @@ fn worker(
                         reason: error,
                     });
                 }
-                if state.worker == WorkerState::StopRequested {
+                if state.phase == RunPhase::Stopping {
                     return;
                 }
                 if state.latest.is_none() {
@@ -368,11 +407,51 @@ fn worker(
         }
         let (lock, ready) = &*pending;
         if let Ok(mut state) = lock.lock() {
-            if state.worker == WorkerState::Working {
-                state.worker = WorkerState::Idle;
-            }
+            state.worker = WorkerState::Idle;
             ready.notify_all();
         }
+    }
+}
+
+/// How long to wait before retrying the `failures`-th consecutive failure of a streak.
+///
+/// `failures` counts the failures of the streak in progress, the first being 1, so the
+/// interval is [`FIRST_RETRY_AFTER`] after an isolated failure however long an earlier outage
+/// lasted, and never longer than [`RETRY_CEILING`] however long this one does.
+fn retry_after(failures: u32) -> Duration {
+    FIRST_RETRY_AFTER
+        .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
+        .min(RETRY_CEILING)
+}
+
+/// Wait out at most one retry interval, answering whether to attempt again at all.
+///
+/// `false` is [`RunPhase::Stopping`] and the caller returns on it; `true` is the wait
+/// having been served, or [`RunPhase::ClosingOut`]. Both phases are read on entry as well
+/// as on every wake, so one the run reached while this worker was projecting is honoured
+/// rather than missed. A snapshot published meanwhile deliberately does *not* shorten the
+/// wait: what the interval spaces is the destination's refusal, and a run that keeps
+/// folding new graph state would otherwise retry as fast as it publishes.
+fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Duration) -> bool {
+    let (lock, ready) = pending;
+    let Ok(mut state) = lock.lock() else {
+        return false;
+    };
+    let due = Instant::now() + interval;
+    loop {
+        match state.phase {
+            RunPhase::Stopping => return false,
+            RunPhase::ClosingOut => return true,
+            RunPhase::Running => {}
+        }
+        let left = due.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        let Ok((next, _)) = ready.wait_timeout(state, left) else {
+            return false;
+        };
+        state = next;
     }
 }
 
@@ -1004,14 +1083,18 @@ fn encoded(value: &str) -> String {
 mod tests {
     use super::{
         projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
-        Pending, ProjectedStatus, Snapshot, WorkerState, CHANGE_URL_KEY, LANDING_COMMIT_KEY,
-        LANDING_KEY,
+        Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
+        LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::graph::NodeStatus;
+    use crate::ledger::{LaunchRecord, RunPaths};
     use crate::plan::Node;
+    use crate::projection::RunState;
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn snapshot(status: NodeStatus) -> Snapshot {
         Fixture::new("queue").snapshot_with(|snapshot| {
@@ -1029,11 +1112,117 @@ mod tests {
             latest: Some(superseded),
             last_success: Some(first.clone()),
             worker: WorkerState::Working,
+            phase: super::RunPhase::Running,
             unprojected: Vec::new(),
         };
 
         assert!(pending.queue(first.clone()));
         assert!(pending.latest.as_ref() == Some(&first));
+    }
+
+    /// A run's own end, arriving while the worker is waiting out a retry interval, is
+    /// honoured then rather than once the interval nobody is waiting for has run out.
+    ///
+    /// In this process on purpose. The stop an operator types signals the whole process
+    /// tree, so the journey beside this one — `a_stop_during_a_long_retry_interval_is_...`
+    /// in `tests/e2e/store.rs` — cannot tell a worker that left because it was told from
+    /// one the kill took with it whatever it was doing. Proving the worker's own half means
+    /// watching it *after* its stop is requested, and only something holding this process
+    /// open across that request can.
+    ///
+    /// What it watches is real: the thread [`Writeback::start`] spawns, the schedule that
+    /// thread keeps, and its own reference to the state it shares — which it lets go of
+    /// when, and only when, `worker` returns. The destination refuses at the same
+    /// subprocess boundary a rate-limited one does, because the binary the run names is not
+    /// installed, which is a refusal this test can arrange without a store at all.
+    #[test]
+    fn a_stop_reaches_a_worker_that_is_waiting_out_a_retry_interval() {
+        let dir = scratch("stop-mid-wait");
+        let paths = RunPaths {
+            run: "stopmidwait".to_owned(),
+            dir: dir.clone(),
+        };
+        let launch = a_launch(&paths);
+        let writeback =
+            Writeback::start(dir.join("onetaskgraph-nobody-installed"), &paths, &launch)
+                .expect("a write-back worker");
+        writeback.publish(&paths, &launch, &RunState::default());
+
+        // Four attempts in, the interval the worker is now waiting out is longer than every
+        // one before it — so the last one this test actually watched is a lower bound on
+        // what a stop would have to sit through if it were not honoured.
+        let waited = intervals_between_attempts(&paths, 4);
+        let outstanding = *waited.last().expect("an interval between attempts");
+        assert!(
+            outstanding >= Duration::from_secs(2),
+            "the streak is not deep enough for a stop to have anything to wait out: {waited:?}"
+        );
+
+        let shared = Arc::clone(&writeback.pending);
+        let asked = Instant::now();
+        drop(writeback);
+        while Arc::strong_count(&shared) > 1 {
+            assert!(
+                asked.elapsed() < outstanding,
+                "the worker was still running {:?} after its stop was requested, with an \
+                 interval of at least {outstanding:?} outstanding",
+                asked.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !attempt_capture(&paths).exists(),
+            "the worker asked the destination again on its way out"
+        );
+    }
+
+    /// The wall-clock intervals between the worker's next `count` attempts.
+    ///
+    /// An attempt is counted where the destination's side of the boundary is: the capture
+    /// file the worker creates for the store command it is about to run. This takes each
+    /// one away again, so the next one appearing is the next attempt rather than the same
+    /// file read twice — which a modification time this filesystem may round would not tell
+    /// apart.
+    fn intervals_between_attempts(paths: &RunPaths, count: usize) -> Vec<Duration> {
+        let capture = attempt_capture(paths);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut at: Vec<Instant> = Vec::new();
+        while at.len() < count {
+            assert!(
+                Instant::now() < deadline,
+                "the worker made {} attempts, not the {count} this test reads its intervals \
+                 off",
+                at.len()
+            );
+            if capture.exists() {
+                at.push(Instant::now());
+                std::fs::remove_file(&capture).expect("the capture file is taken away");
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        at.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    fn attempt_capture(paths: &RunPaths) -> PathBuf {
+        paths.dir.join("writeback-project-show.stderr")
+    }
+
+    /// A launch record naming a project to project into, and nothing else this worker reads.
+    fn a_launch(paths: &RunPaths) -> LaunchRecord {
+        serde_json::from_value(json!({
+            "run_id": paths.run,
+            "project": "plans:stop-mid-wait",
+            "dir": paths.dir,
+            "launcher": "test",
+            "session": "test",
+            "pid": crate::sys::pid(),
+            "host": "test",
+            "started": "linux-proc-stat:1",
+            "started_at": "2026-09-01T00:00:00Z",
+            "heartbeat_interval": 1_800,
+        }))
+        .expect("a launch record")
     }
 
     /// Every word this projection writes, in the one arrangement that states them:
