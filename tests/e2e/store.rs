@@ -666,11 +666,20 @@ fn a_store_answer_carrying_a_field_at_the_wrong_type_is_still_refused_by_name() 
 
     // The fixture can fail: the bytes the projection actually parsed are the ones the
     // worker kept, and they carry a list answered as a string.
-    let answered = world.run_json(name, "writeback-project-show.stdout");
-    assert!(
-        answered["items"][0]["item"]["labels"].is_string(),
-        "the answer this projection read carried `labels` as the list it is, so nothing \
-         here is about a field at the wrong type: {answered}"
+    //
+    // Waited for rather than read once, because this projection never succeeds and so is
+    // retried: every attempt truncates that capture before the store it starts writes into
+    // it, and a single read landing inside that window sees an empty file rather than the
+    // answer — which is what the `cross (windows-latest)` leg saw and neither developed-on
+    // platform did.
+    world.until(
+        "the answer this projection read to carry `labels` as the string it was retyped to",
+        |world| {
+            std::fs::read_to_string(world.run_file(name, "writeback-project-show.stdout"))
+                .ok()
+                .and_then(|kept| serde_json::from_str::<Value>(&kept).ok())
+                .is_some_and(|answered| answered["items"][0]["item"]["labels"].is_string())
+        },
     );
 
     let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
