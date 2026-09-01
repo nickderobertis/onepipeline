@@ -1177,13 +1177,13 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
     let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
     outage.replied();
 
-    let asked = Instant::now();
+    let stop_requested_at = Instant::now();
     world.run(&["stop", run]).exited(0);
     assert!(
-        asked.elapsed() < waited[3],
+        stop_requested_at.elapsed() < waited[3],
         "the stop took {:?}, which is the schedule's timescale rather than the operator's: \
          the outstanding interval was longer than {:?}",
-        asked.elapsed(),
+        stop_requested_at.elapsed(),
         waited[3]
     );
     assert_eq!(world.events_of(run, "run-stopped").len(), 1);

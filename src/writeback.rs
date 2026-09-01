@@ -89,7 +89,7 @@ const COMMAND_LIMIT: Duration = Duration::from_secs(60);
 // ceiling is what GitHub's secondary limit — reported by no endpoint a caller can poll —
 // documents as the wait to take: at least one minute. It is a ceiling and not a give-up,
 // because a board nobody projects to stays wrong for the rest of the run.
-const RETRY_AFTER: Duration = Duration::from_millis(250);
+const FIRST_RETRY_AFTER: Duration = Duration::from_millis(250);
 const RETRY_GROWTH: u32 = 4;
 const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
@@ -426,10 +426,10 @@ fn worker(
 /// How long to wait before retrying the `failures`-th consecutive failure of a streak.
 ///
 /// `failures` counts the failures of the streak in progress, the first being 1, so the
-/// interval is [`RETRY_AFTER`] after an isolated failure however long an earlier outage
+/// interval is [`FIRST_RETRY_AFTER`] after an isolated failure however long an earlier outage
 /// lasted, and never longer than [`RETRY_CEILING`] however long this one does.
 fn retry_after(failures: u32) -> Duration {
-    RETRY_AFTER
+    FIRST_RETRY_AFTER
         .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
         .min(RETRY_CEILING)
 }
