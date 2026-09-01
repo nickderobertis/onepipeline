@@ -11,11 +11,11 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–52 are open**. Each states what the code does
+Entries **10–22, 33, 35–40 and 46–54 are open**. Each states what the code does
 today and the proposal it is waiting on. Most are questions for a *producer*
 rather than for this crate, because `oneagentgraph` and `onevcs` are independent
 tools that expose general integration hooks only and nothing in them may know
-about this one; the rest — 36 to 40, and 46 to 52 — are for the planner who owns
+about this one; the rest — 36 to 40, and 46 to 54 — are for the planner who owns
 the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -2798,3 +2798,63 @@ publishes.
   }
 }
 ```
+
+## 54. A live edit moves a node's `deps` and leaves its `consumes` behind, which is a deadlock rather than a missing feature — OPEN
+
+**Proposal (for the planner who owns the contract): every live edit that changes a
+node's `deps` carries that node's `consumes` with it — `retry` **rekeys** a
+dependent's entry from the superseded id onto the replacement's, `drop` with
+`dependents: detach` **removes** the entry keyed on the dropped dependency, and
+`reparent` **removes** every entry whose dep the new list no longer carries — so
+the edit leaves a graph that is valid for the same reason it was valid before.**
+
+The sentence it would amend is in the channel contract's `retry` paragraph:
+
+> The superseded node leaves the graph in the **same edit**, which emits
+> `node-dropped` — a cancelled node left in a continuous graph holds the run in
+> `waiting` for ever — and what became of it stays in the run's record as its own
+> `node-settled` and the `edit-committed` that replaced it.
+
+It states the rewiring without saying what becomes of a target keyed on the id
+being rewired away from. `consumes` is keyed by **dependency node id** — a plan
+node's field, and the only key a dependency can be named by, since two nodes in
+one repository can want different targets — and `validate_node` refuses a node
+whose `consumes` names anything that is not one of its own `deps`.
+
+**Nothing was reachable through this, in either direction.** A `retry` refuses a
+replacement carrying the superseded node's own id, so the id necessarily changes
+and the dependent's key necessarily goes stale; the candidate graph then fails
+validation and the whole edit is refused. Correcting the dependent first does not
+work either — at that moment its `deps` still names the old id, so the corrected
+`consumes` is refused for naming something that is not a dep, and `requeue`
+refuses amending `deps` by name and directs the caller to `reparent`, which moves
+`deps` without moving `consumes`. Replacing the dependent instead meets `drop`'s
+publication-anchor guard. Measured: this host's first plan to use
+`adoption`/`consumes` lost a node to a provider `spawn-error` and could not be
+retried past it, so a run was one provider hiccup away from a full relaunch.
+
+**No target is invented, defaulted, or altered.** The only values in a graph after
+an edit are ones a plan or an accepted edit stated: a rekey carries the value
+across unchanged, and the other two cases only remove. A replacement that states
+no `deps` of its own already inherits the superseded node's `deps`, and it
+inherits that node's `consumes` on the same condition and in the same way; one
+that states its own is answered with what it stated. `requeue` still refuses to
+amend `id` and `deps`, and `validate_node` still refuses a `consumes` key that is
+not a dep — this removes the *cause* of that refusal on three paths rather than
+relaxing the rule, because the rule is what stops a plan silently not applying a
+target its author wrote.
+
+**The operation stream carries what replay needs, because it is what replay
+rebuilds `deps` from.** `edge-added` gains one optional field, `target`, omitted
+where the edge has none — which is every edge in every record written before it
+existed, so a build that predates it reads those records exactly as it did. Its
+partner needs no field: `edge-removed` takes the dependent's entry keyed on that
+dependency with it, and a `reparent` keeps only the entries whose dep the new list
+carries, both of which are removals a record already says enough to reconstruct.
+Replaying a run's own journal from empty therefore lands on the same `consumes`
+the reconciler compiled, which is the property, and no checked-in record changes
+shape.
+
+This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
+could work around, and the only interface it adds is an optional field on a record
+this crate both writes and reads.

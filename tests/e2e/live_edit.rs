@@ -633,6 +633,88 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     );
 }
 
+/// A node another node `consumes` can be retried, and the release target the
+/// dependent stated follows the edge onto the replacement.
+///
+/// The deadlock this journey exists for: `consumes` is keyed by **dependency node
+/// id**, a retry necessarily gives the replacement a new id, and the dependent's
+/// key was left naming the superseded one — so the candidate graph failed
+/// validation and the whole edit was refused. There was no order an operator
+/// could get out of it in, because correcting the key first is refused for naming
+/// something that is not yet a dep, and `requeue` refuses `deps` by name. A run
+/// that lost a consumed node to a provider failure had to be relaunched whole.
+///
+/// The target is read back out of the `edit-committed` record rather than off the
+/// live graph, because that record is what a replay of this run reconstructs the
+/// graph from: a rekey the reconciler made and the record did not carry would
+/// leave a projected run building against a different artifact than the executing
+/// one.
+#[test]
+fn a_node_another_node_consumes_is_retried_and_its_target_follows_the_edge() {
+    let world = World::new("edit-consumes");
+    let mut adopt = agent("adopt", &["engine"]);
+    adopt["consumes"] = json!({"engine": "crate"});
+    let run = live(
+        &world,
+        "consumed",
+        vec![agent("engine", &[]), adopt],
+        &["engine"],
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "retry",
+                "id": "engine",
+                "node": {"id": "engine-2", "persona": "engineer", "task": "## What\nagain"},
+            }])),
+        )
+        .exited(0);
+    world.until("the retry to commit", |world| {
+        committed(world, &run).contains(&"retry".to_string())
+    });
+
+    let rewired: Vec<Value> = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .filter_map(|event| event["payload"]["operations"].as_array().cloned())
+        .flatten()
+        .filter(|operation| {
+            operation["kind"] == "edge-added"
+                && operation["from"] == "engine-2"
+                && operation["to"] == "adopt"
+        })
+        .collect();
+    assert_eq!(
+        rewired.len(),
+        1,
+        "the dependent was not rewired onto the replacement: {rewired:?}"
+    );
+    assert_eq!(
+        rewired[0]["target"], "crate",
+        "the record does not carry the target the dependent consumes the replacement at: {}",
+        rewired[0]
+    );
+
+    world.release("engine.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    let ids: Vec<&str> = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"engine-2") && ids.contains(&"adopt"),
+        "the replacement and its dependent did not both settle: {ids:?}"
+    );
+}
+
 #[test]
 fn a_retry_may_name_only_one_branch() {
     let world = World::new("edit-branch");
