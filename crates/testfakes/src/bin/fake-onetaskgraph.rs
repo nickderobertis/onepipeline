@@ -61,30 +61,20 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-/// The release a delegated answer is served at: the real store's own answer, plus or
-/// minus what another release of it carries.
-///
-/// Nothing here invents a store. Both halves are applied to bytes the **real** binary
-/// produced against a real folder of Markdown, so what a journey drives is that store's
-/// own answer at a shape this build was not written against — which is the one thing an
-/// install on this host cannot be asked to be.
+/// The three halves of `.grow`, `.shrink` and `.retype`, as scripted for one verb.
 #[derive(Default)]
 struct Release {
-    /// Members a later release added to every item of this answer.
     grown: Map<String, Value>,
-    /// Fields an item of this answer no longer carries.
     shrunk: Vec<String>,
-    /// Fields an item of this answer carries at another JSON type.
     retyped: Map<String, Value>,
 }
 
 impl Release {
-    /// What a journey scripted for one verb, `None` where it scripted none of the three,
-    /// and a refusal to say where it scripted one this program cannot read.
+    /// What a journey scripted, `None` where it scripted none of the three, and a refusal
+    /// where it scripted one this program cannot read.
     ///
-    /// A scenario file is external input like any other, so a `.grow` or `.retype` that is
-    /// not a JSON object is reported as the scripting mistake it is rather than crashed on:
-    /// a panic here would reach the journey as a store that died, which is a different
+    /// A scenario file is external input, and a refusal here reaches the journey as this
+    /// program's own — a panic would reach it as a store that died, which is a different
     /// fixture from the one it asked for.
     fn scripted(dir: &Path, name: &str) -> Result<Option<Self>, String> {
         let grown = Self::members(dir, name, "grow", "the members a later release added")?;
@@ -95,8 +85,7 @@ impl Release {
             "the fields this answer carries at another JSON type, each named against the \
              value it is answered as",
         )?;
-        let shrunk = std::fs::read_to_string(dir.join(format!("{name}.shrink")))
-            .ok()
+        let shrunk = Self::scenario(dir, name, "shrink")?
             .map(|scripted| scripted.split_whitespace().map(ToOwned::to_owned).collect());
         Ok(
             (grown.is_some() || shrunk.is_some() || retyped.is_some()).then(|| Self {
@@ -107,6 +96,20 @@ impl Release {
         )
     }
 
+    /// One scenario file, or `None` where the journey wrote none.
+    ///
+    /// Only "there is no such file" is absence: a scenario a journey did write and this
+    /// program cannot read — a permission, an I/O failure, bytes that are not UTF-8 — is a
+    /// fixture nobody applied, and reading it as unscripted would hand that journey a
+    /// plain delegated answer while it asserted against a moved one.
+    fn scenario(dir: &Path, name: &str, half: &str) -> Result<Option<String>, String> {
+        match std::fs::read_to_string(dir.join(format!("{name}.{half}"))) {
+            Ok(scripted) => Ok(Some(scripted)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("`{name}.{half}` could not be read: {error}")),
+        }
+    }
+
     /// One scenario file that states a JSON object, or a refusal saying what it states.
     fn members(
         dir: &Path,
@@ -114,12 +117,12 @@ impl Release {
         half: &str,
         states: &str,
     ) -> Result<Option<Map<String, Value>>, String> {
-        match std::fs::read_to_string(dir.join(format!("{name}.{half}"))) {
-            Err(_) => Ok(None),
-            Ok(scripted) => match serde_json::from_str(&scripted) {
-                Ok(Value::Object(members)) => Ok(Some(members)),
-                _ => Err(format!("`{name}.{half}` states {states}, as a JSON object")),
-            },
+        let Some(scripted) = Self::scenario(dir, name, half)? else {
+            return Ok(None);
+        };
+        match serde_json::from_str(&scripted) {
+            Ok(Value::Object(members)) => Ok(Some(members)),
+            _ => Err(format!("`{name}.{half}` states {states}, as a JSON object")),
         }
     }
 

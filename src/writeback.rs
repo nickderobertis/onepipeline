@@ -710,26 +710,13 @@ fn exit(status: &ExitStatus) -> String {
         .map_or_else(|| "on a signal".into(), |code| code.to_string())
 }
 
-// The plan store's own `--json` answers, as far as this projection reads them.
-//
-// **None of the types below deny unknown fields, deliberately.** Each one describes a
-// response `onetaskgraph` composes, and that program adds fields to its own answers in
-// patch releases — `location` on a project item arrived in 0.2.14. A consumer that mirrors
-// a producer's shape under `deny_unknown_fields` turns every additive change upstream into
-// a breaking change downstream, and this projection is best-effort: the break surfaces as
-// one line on the driver's own log while the board silently stops being written, which is
-// the worst shape the failure could take. The opposite rule still holds for a document
-// this crate *authors* and reads back — a plan file, an executor-rules file, a reply
-// envelope — and those keep `deny_unknown_fields`. The only document this module authors
-// is the shadow project `write_shadow` builds, and nothing reads that back through a type.
-//
-// Tolerating growth is not tolerating anything. Every field kept below is one the
-// projection consumes, and each is still required and still typed, so a response that
-// stops carrying one — or carries it as something else — is refused by name. What is no
-// longer enumerated is what the projection never read: the store's native ids, URLs,
-// timestamps, repositories and normalised status were listed only because
-// `deny_unknown_fields` demanded a complete mirror of a shape this crate does not own, and
-// the mirror is the defect rather than the check.
+// Every type below describes a response `onetaskgraph` composes, so none of them denies
+// unknown fields: that program adds one to its own answer in a patch release — `location`
+// on a project item, at 0.2.14 — and a consumer mirroring a producer's shape under
+// `deny_unknown_fields` makes each of those a hard read failure. A document this crate
+// authors and reads back is the opposite case and keeps the deny; this module authors only
+// the shadow project, which nothing reads back through a type. What the projection
+// consumes stays required and typed, and what it never read is no longer enumerated.
 
 /// One page of the store's answer to `task list`.
 #[derive(Deserialize)]
