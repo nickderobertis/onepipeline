@@ -537,10 +537,37 @@ pub struct LaunchRecord {
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
     /// [`sys::session_digest`], never by this value.
+    ///
+    /// Defaulted to **empty** on a record that carries no such key, and empty is
+    /// already the unattributed launch every view renders `[unknown]` — see
+    /// [`owner_label`](Self::owner_label). So a record written before this key
+    /// existed and one written where nothing could attribute the launch read
+    /// alike, which is what they are: neither says who owns the run, and an
+    /// unattributed run is nobody's. The default states nothing rather than
+    /// naming a session, because a reader that took the *reading* process's
+    /// session for the record's would hand a stranger's run every command
+    /// ownership guards.
+    #[serde(default)]
     pub session: String,
-    /// The driver process.
+    /// The driver process, or `0` on a record that names none.
+    ///
+    /// Read through [`driver_pid`](Self::driver_pid) rather than tested here.
+    /// A pid is one third of a claim — see [`started`](Self::started) — and a
+    /// defaulted one has no stamp beside it by construction, so nothing that
+    /// acts on a pid may act on this one. `0` is never a driver on any platform
+    /// this builds for, which is what makes it the honest default: it is the
+    /// value `start` itself writes in the moment before
+    /// [`driven_by_this_process`](Self::driven_by_this_process) claims the run.
+    #[serde(default)]
     pub pid: u32,
-    /// The host that pid is meaningful on.
+    /// The host that pid is meaningful on, or empty on a record that names none.
+    ///
+    /// Read through [`recorded_host`](Self::recorded_host), which is where empty
+    /// becomes "this record does not say" again. A reader must not claim a host
+    /// the record does not name: a pid means nothing across machines, so a
+    /// nameless host resolves toward *not this one* and the pid beside it is
+    /// left alone.
+    #[serde(default)]
     pub host: String,
     /// That driver's own process start token, as [`sys::process_start_token`]
     /// read it when it claimed the run.
@@ -562,9 +589,26 @@ pub struct LaunchRecord {
     /// wrote. Empty is **not** a match — see [`sys::StartToken::matches`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub started: String,
-    /// When the run was launched.
+    /// When the run was launched, or empty on a record that does not say.
+    ///
+    /// Read through [`launched_at`](Self::launched_at), which serves the absence
+    /// **absent**. Never an instant standing in for one: a launch nobody
+    /// recorded is a different fact from a launch recorded at the epoch, and
+    /// only the second is a measurement. A reader handed epoch zero here would
+    /// report every record that predates this key as a run launched in 1970 and
+    /// age it accordingly.
+    #[serde(default)]
     pub started_at: String,
-    /// The pacemaker interval, in seconds.
+    /// The pacemaker interval, in seconds, or `0` on a record that names none.
+    ///
+    /// Read through [`pacemaker_interval`](Self::pacemaker_interval), which is
+    /// where `0` becomes "the record does not say" again: the shipped default,
+    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`], or no pacemaker at all —
+    /// and never a zero-second one. A pacemaker that fires continuously is worse
+    /// than a run with none: it buries every real surface under its own.
+    ///
+    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    #[serde(default)]
     pub heartbeat_interval: u64,
     /// Opaque overrides replayed on the dag-scope graph launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -646,24 +690,85 @@ impl LaunchRecord {
         (!self.envelope_reviewer.is_empty()).then_some(self.envelope_reviewer.as_str())
     }
 
+    /// Whether this record attributes the launch to a session at all.
+    ///
+    /// Two spellings of the same nothing: `unknown`, which is what
+    /// [`sys::launching_session`] answers where the environment identifies
+    /// nobody, and **empty**, which is what a record carrying no `session` key
+    /// defaults to and what a launcher that wrote a blank one recorded. Reading
+    /// them apart would make a run written before the key existed *ownable* by
+    /// whichever reader also had no session.
+    fn attributed(&self) -> bool {
+        !self.session.is_empty() && self.session != sys::UNKNOWN_LAUNCHER
+    }
+
     /// Whether `session` is the session that launched this run.
     ///
-    /// An `unknown` launch is nobody's, including the reader's — a
+    /// An unattributed launch is nobody's, including the reader's — a
     /// provenance-less run never displays as the caller's, and never accepts a
     /// command that ownership guards.
     pub fn owned_by(&self, session: &str) -> bool {
-        self.session != sys::UNKNOWN_LAUNCHER && self.session == session
+        self.attributed() && self.session == session
     }
 
     /// How a view names this run's owner.
     pub fn owner_label(&self, session: &str) -> String {
-        if self.session == sys::UNKNOWN_LAUNCHER {
+        if !self.attributed() {
             "[unknown]".to_string()
         } else if self.session == session {
             "[mine]".to_string()
         } else {
             format!("[{}:{}]", self.launcher, sys::session_digest(&self.session))
         }
+    }
+
+    /// The driver pid this record names, when it names one a reader may act on.
+    ///
+    /// `None` for the `0` a record carrying no pid defaults to. A pid is one
+    /// third of a claim — which process, on which host, and the stamp saying it
+    /// is still that process, all written together by
+    /// [`driven_by_this_process`](Self::driven_by_this_process) — so a defaulted
+    /// pid has no stamp beside it by construction and no reader may act on it:
+    /// not the liveness readings, which would report a live run's driver dead on
+    /// the strength of a pid nobody wrote, and not the stop path, which refuses
+    /// an unstamped claim outright and would otherwise be aiming a teardown at
+    /// whatever this host has given pid `0` a meaning of.
+    pub fn driver_pid(&self) -> Option<u32> {
+        (self.pid != 0).then_some(self.pid)
+    }
+
+    /// The host this record names, when it names one.
+    ///
+    /// The same reading [`observer_graph`](Self::observer_graph) has: an absent
+    /// string field arrives back as an empty one, and this is the one place that
+    /// becomes "there is none" again. A reader must not claim a host the record
+    /// does not name — the pid beside it would then be read as this machine's.
+    pub fn recorded_host(&self) -> Option<&str> {
+        (!self.host.is_empty()).then_some(self.host.as_str())
+    }
+
+    /// When the run was launched, when the record says.
+    ///
+    /// Served **absent** rather than as an instant: a launch instant nobody
+    /// recorded is a different fact from one recorded at the epoch, and only the
+    /// second is a measurement. This is the one place that decision is made, so
+    /// no caller invents a date for a record that carries none.
+    pub fn launched_at(&self) -> Option<&str> {
+        (!self.started_at.is_empty()).then_some(self.started_at.as_str())
+    }
+
+    /// The pacemaker interval this launch recorded, when it recorded one.
+    ///
+    /// `None` for the `0` a record carrying no interval defaults to, and a
+    /// caller that must pace something takes the shipped default —
+    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`] — or paces nothing. **Never
+    /// `Some(0)`**: a zero-second pacemaker fires continuously, and a run whose
+    /// every surface is its own pacemaker's is worse off than a run with no
+    /// pacemaker at all.
+    ///
+    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    pub fn pacemaker_interval(&self) -> Option<u64> {
+        (self.heartbeat_interval > 0).then_some(self.heartbeat_interval)
     }
 }
 
@@ -1542,6 +1647,135 @@ mod tests {
             !text.contains("started\""),
             "an empty stamp reached the record: {text}"
         );
+    }
+
+    /// The five keys a record on this host was written before, each absent on its
+    /// own and then all five at once — read off disk, as the reader meets them.
+    ///
+    /// The same incident [`launcher`](LaunchRecord::launcher) records, and the
+    /// rest of it: 141 of 443 run roots on one host hold a record written before
+    /// one or more of these keys existed, and every one of them was refused by
+    /// name — so a third of that host's history was invisible to the view an
+    /// operator opens to see what is running. One field of six was repaired
+    /// then; these are the other five.
+    ///
+    /// What each absence **means** is asserted beside the read, because a lenient
+    /// reader that fabricates a value is the failure this must not become: the
+    /// default stands for *the record does not say*, and every reading of it says
+    /// so. Each assertion here fails if the value were invented — a session that
+    /// named somebody, a pid a reader would probe, a host a reader would claim,
+    /// an instant nobody measured, or a pacemaker that fires every zero seconds.
+    #[test]
+    fn a_launch_record_written_before_any_of_these_five_keys_still_reads() {
+        /// Every key added to this record after it shipped whose absence this
+        /// reader has to answer for.
+        const HISTORICAL: [&str; 5] = [
+            "session",
+            "pid",
+            "host",
+            "started_at",
+            "heartbeat_interval",
+        ];
+        let root = scratch("historical-launch");
+        let whole = serde_json::to_value(a_record()).expect("a record this build writes");
+
+        // Each shape written where a run root keeps one, and read back the way
+        // every view reads it: off the file, through the ledger's own reader.
+        let read_one = |name: &str, without: &[&str]| -> LaunchRecord {
+            let mut document = whole.clone();
+            let fields = document.as_object_mut().expect("a launch record");
+            for key in without {
+                assert!(
+                    fields.remove(*key).is_some(),
+                    "the record this build writes carries no `{key}` to take away"
+                );
+            }
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).expect("a run root");
+            let launch = dir.join("launch.json");
+            fs::write(&launch, document.to_string()).expect("a record an older build wrote");
+            read_json::<LaunchRecord>(&launch).unwrap_or_else(|error| {
+                panic!("a record written before `{without:?}` existed was refused: {error}")
+            })
+        };
+
+        for key in HISTORICAL {
+            let read = read_one(key, &[key]);
+            // Everything the record still says, it still says: the default
+            // answers for the missing key and for nothing beside it.
+            assert_eq!(read.run_id, "demo");
+            match key {
+                "session" => {
+                    assert!(read.session.is_empty(), "a session was invented: {read:?}");
+                    assert!(
+                        !read.owned_by(""),
+                        "a record naming no session was owned by a reader that names none either"
+                    );
+                    assert_eq!(read.owner_label("a-session"), "[unknown]");
+                }
+                "pid" => {
+                    assert_eq!(read.pid, 0);
+                    assert_eq!(
+                        read.driver_pid(),
+                        None,
+                        "a pid nobody wrote was served as one a reader may act on"
+                    );
+                }
+                "host" => {
+                    assert!(read.host.is_empty());
+                    assert_eq!(
+                        read.recorded_host(),
+                        None,
+                        "a host nobody named was served as one"
+                    );
+                }
+                "started_at" => {
+                    assert_eq!(
+                        read.launched_at(),
+                        None,
+                        "a launch instant nobody recorded was served as an instant"
+                    );
+                }
+                "heartbeat_interval" => {
+                    assert_eq!(read.heartbeat_interval, 0);
+                    assert_eq!(
+                        read.pacemaker_interval(),
+                        None,
+                        "a record naming no interval produced a pacemaker interval"
+                    );
+                    assert_ne!(
+                        read.pacemaker_interval(),
+                        Some(0),
+                        "a zero-second pacemaker was served as an interval"
+                    );
+                }
+                other => unreachable!("{other} is not one of the five"),
+            }
+        }
+
+        // And the record 141 roots on that host actually hold: none of the five.
+        let oldest = read_one("all-five", &HISTORICAL);
+        assert!(oldest.session.is_empty());
+        assert_eq!(oldest.owner_label("a-session"), "[unknown]");
+        assert!(!oldest.owned_by(sys::UNKNOWN_LAUNCHER));
+        assert_eq!(oldest.driver_pid(), None);
+        assert_eq!(oldest.recorded_host(), None);
+        assert_eq!(oldest.launched_at(), None);
+        assert_eq!(oldest.pacemaker_interval(), None);
+        // What it does say, it still says — the run it names most of all, since
+        // a row a reader cannot key is a row that reaches nobody.
+        assert_eq!(oldest.run_id, "demo");
+        assert_eq!(oldest.launcher, "claude-code");
+        assert_eq!(oldest.node_graph, "graphs/node-scope.yaml");
+
+        // A record that carries the five reads them, so none of the defaults
+        // above is standing in front of a value somebody wrote.
+        let whole = read_one("whole", &[]);
+        assert_eq!(whole.session, "a-session");
+        assert_eq!(whole.driver_pid(), Some(1));
+        assert_eq!(whole.recorded_host(), Some("h"));
+        assert!(whole.launched_at().is_some());
+        assert_eq!(whole.pacemaker_interval(), Some(1_800));
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its

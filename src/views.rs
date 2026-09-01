@@ -224,12 +224,22 @@ fn blocking_surface(paths: &RunPaths) -> bool {
 /// write is enough to keep it reported as running. A pid recorded on another
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
+///
+/// **A record that names no driver at all is that same unknown**, and it is read
+/// through [`LaunchRecord::driver_pid`] and [`LaunchRecord::recorded_host`] so
+/// that it stays one: a record written before those keys existed defaults to pid
+/// `0` on a nameless host, and a reader that probed `0` would prove the absence
+/// it was handed and report `DRIVER DEAD` over a run it knows nothing about.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     if state.stop_recorded() {
         return DriverLiveness::DriverDead;
     }
-    let ours = launch.host == sys::hostname();
-    if ours && !sys::process_may_be_live(launch.pid) {
+    let ours = launch.recorded_host() == Some(sys::hostname().as_str());
+    if ours
+        && launch
+            .driver_pid()
+            .is_some_and(|pid| !sys::process_may_be_live(pid))
+    {
         return DriverLiveness::DriverDead;
     }
     // A live pid is ownership, not progress.
@@ -2793,6 +2803,88 @@ mod tests {
         assert_eq!(view.liveness(), DriverLiveness::Driving);
         assert!(!view.liveness().is_undriven());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A record that names **no driver** is not a driver this host can prove is
+    /// gone.
+    ///
+    /// Two shapes, and the first is the one a guard on the host name alone would
+    /// miss: a record carrying this host and no pid at all. `0` is not a process
+    /// here, so a reader that probed it would prove the absence it was handed and
+    /// report `DRIVER DEAD` over a run it knows nothing about — and `DRIVER DEAD`
+    /// is what invites the `adopt` that displaces a driver. The second is the
+    /// record 141 roots on one host actually hold: none of the five keys, read
+    /// off disk exactly as a view meets it.
+    #[test]
+    fn a_launch_record_naming_no_driver_is_never_read_as_a_dead_one() {
+        let root = scratch("no-driver");
+        let live = event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        );
+
+        // The record as an older build left it: this host, and nothing that says
+        // which process on it.
+        let paths = write_run(&root, "unclaimed", dead_pid(), std::slice::from_ref(&live));
+        without(&paths, &["pid", "started"]);
+        let view = RunView::open(&paths).expect("a record naming no pid still reads");
+        assert_eq!(view.launch.driver_pid(), None);
+        assert_eq!(view.launch.recorded_host(), Some(sys::hostname().as_str()));
+        assert_eq!(
+            view.liveness(),
+            DriverLiveness::Driving,
+            "a pid nobody recorded was probed, and its absence read as a dead driver"
+        );
+
+        // And the whole historical shape: none of the five.
+        let older = write_run(&root, "oldest", dead_pid(), std::slice::from_ref(&live));
+        without(
+            &older,
+            &[
+                "session",
+                "pid",
+                "host",
+                "started",
+                "started_at",
+                "heartbeat_interval",
+            ],
+        );
+        let view = RunView::open(&older).expect("a record predating all five still reads");
+        assert_eq!(view.launch.driver_pid(), None);
+        assert_eq!(view.launch.recorded_host(), None);
+        assert_eq!(view.launch.launched_at(), None);
+        assert_eq!(view.launch.pacemaker_interval(), None);
+        assert_ne!(view.liveness(), DriverLiveness::DriverDead);
+
+        // And both are on the view an operator opens, under the label an
+        // unattributed launch has always had.
+        let rendered = runs(&root, false, "session-a");
+        assert!(rendered.contains("unclaimed"), "{rendered}");
+        assert!(rendered.contains("oldest"), "{rendered}");
+        assert!(rendered.contains("[unknown]"), "{rendered}");
+        assert!(
+            !rendered.contains("run root(s) skipped"),
+            "a record an older build wrote was refused:\n{rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Take keys off a run's launch record, leaving the record an older build of
+    /// this crate wrote.
+    ///
+    /// Edited on the file rather than built from the struct: what these read is a
+    /// *document* that never carried the key, and a record this build serialises
+    /// carries every one of them.
+    fn without(paths: &RunPaths, keys: &[&str]) {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(paths.launch()).expect("the record"))
+                .expect("a launch record");
+        let fields = document.as_object_mut().expect("a launch record");
+        for key in keys {
+            fields.remove(*key);
+        }
+        std::fs::write(paths.launch(), document.to_string()).expect("an older build's record");
     }
 
     #[test]
