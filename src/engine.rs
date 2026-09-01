@@ -934,6 +934,12 @@ fn converge(
                 if releases.answers_arrived() {
                     return true;
                 }
+                if writeback
+                    .as_ref()
+                    .is_some_and(crate::writeback::Writeback::has_unprojected)
+                {
+                    return true;
+                }
                 if !has_upstreams || upstream_looked.elapsed() < UPSTREAM_EVERY {
                     return false;
                 }

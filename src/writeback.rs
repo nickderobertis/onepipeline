@@ -285,6 +285,19 @@ impl Writeback {
         }
     }
 
+    /// Whether the worker has a failed projection the planner has not been told
+    /// about.
+    ///
+    /// What the reconcile loop waits on. The worker runs on a thread of its own,
+    /// so a projection fails without anything about this run changing — and a
+    /// loop that only woke for its own state would leave a board reported behind
+    /// until something else happened to it.
+    pub fn has_unprojected(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .is_ok_and(|pending| !pending.unprojected.is_empty())
+    }
+
     /// Take the projections that failed since this was last asked, clearing them.
     ///
     /// Draining rather than reading: each failure is the planner's to hear once,
