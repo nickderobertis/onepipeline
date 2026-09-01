@@ -5086,14 +5086,14 @@ mod tests {
         .expect("the divergence record ships");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("54."))
-            .expect("the record still carries entry 54");
+            .find(|entry| entry.starts_with("55."))
+            .expect("the record still carries entry 55");
         let block: Value = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .and_then(|block| serde_json::from_str(block).ok())
-            .expect("entry 54 carries the json block this test drives");
+            .expect("entry 55 carries the json block this test drives");
 
         // One of each, so every variant's own payload is read rather than a list
         // of names kept beside them.

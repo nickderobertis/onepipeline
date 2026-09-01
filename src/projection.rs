@@ -1678,6 +1678,124 @@ mod tests {
         assert!(state.settled_at.contains_key("build"));
     }
 
+    /// The graph a run's journal replays is the graph the reconciler compiled —
+    /// release targets included.
+    ///
+    /// `deps` is reconstructed here from `reparent`, `edge-added` and
+    /// `edge-removed` rather than copied, so a `consumes` change the reconciler
+    /// made and the operation stream did not carry would leave the projected
+    /// graph disagreeing with the executing one about which artifact a node
+    /// builds against. Each of the three ops that moves a node's `deps` is driven
+    /// through the reconciler and then through this module's own fold, and the
+    /// two maps are compared.
+    #[test]
+    fn a_replayed_journal_reconstructs_the_consumes_the_reconciler_compiled() {
+        let target = |name: &str| {
+            name.parse::<onevcs::releases::TargetName>()
+                .expect("a release target name")
+        };
+        let consuming_plan = || {
+            let mut ship = agent("ship", &["engine", "packager"]);
+            ship.consumes.insert("engine".into(), target("crate"));
+            ship.consumes.insert("packager".into(), target("wheel"));
+            plan_of_nodes(vec![
+                agent("engine", &[]),
+                agent("packager", &[]),
+                agent("docs", &[]),
+                ship,
+            ])
+        };
+
+        for (what, command, recorded) in [
+            (
+                "retry",
+                crate::channel::Command::Retry {
+                    id: "engine".into(),
+                    node: agent("engine-2", &[]),
+                },
+                vec![("engine", NodeStatus::Failed)],
+            ),
+            (
+                "drop",
+                crate::channel::Command::Drop {
+                    id: "engine".into(),
+                    dependents: crate::channel::Dependents::Detach,
+                },
+                Vec::new(),
+            ),
+            (
+                "reparent",
+                crate::channel::Command::Reparent {
+                    id: "ship".into(),
+                    deps: vec!["packager".into(), "docs".into()],
+                },
+                Vec::new(),
+            ),
+        ] {
+            let plan = consuming_plan();
+            let mut live = Graph::from_plan(&plan);
+            let frontier = Frontier {
+                recorded: recorded
+                    .iter()
+                    .map(|(id, status)| ((*id).to_string(), *status))
+                    .collect(),
+                ..Frontier::default()
+            };
+            let operations = edits::compile(&mut live, &frontier, &command)
+                .unwrap_or_else(|e| panic!("the {what} is accepted: {e}"));
+
+            let mut events = vec![pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            )];
+            for (seq, (id, _)) in recorded.iter().enumerate() {
+                let seq = seq as u64 + 1;
+                events.push(pipeline(
+                    journal::PipelineKind::NodeDispatched,
+                    seq,
+                    Some(id),
+                    &[],
+                ));
+                events.push(pipeline(
+                    journal::PipelineKind::NodeSettled,
+                    seq + 1,
+                    Some(id),
+                    &[
+                        ("status", json!("failed")),
+                        ("outcome", json!(crate::engine::DISPATCH_DIED)),
+                    ],
+                ));
+            }
+            events.push(pipeline(
+                journal::PipelineKind::EditCommitted,
+                9,
+                None,
+                &[("operations", json!(operations))],
+            ));
+
+            let replayed = fold(&events).graph;
+            assert_eq!(
+                replayed
+                    .iter()
+                    .map(|node| (node.id.clone(), node.consumes.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                live.iter()
+                    .map(|node| (node.id.clone(), node.consumes.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                "the {what} the journal replays consumes different targets than the one \
+                 the reconciler compiled"
+            );
+            // And the maps compared are not two empty ones: the edit moved a
+            // target rather than leaving the graph without any.
+            assert!(
+                replayed.iter().any(|node| !node.consumes.is_empty()),
+                "the {what} left no target for this comparison to be about"
+            );
+        }
+    }
+
     #[test]
     fn an_edit_whose_operations_cannot_be_folded_ends_strict_replay() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);

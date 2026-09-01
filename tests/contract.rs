@@ -2368,7 +2368,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "54."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -3320,6 +3320,43 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
         );
     }
     assert!(CONTRACT.contains("executor_has_capacity"));
+}
+
+/// The sentence entry 54 proposes to amend is one the contract still carries.
+///
+/// The entry is open, so the contract says nothing about what a live edit does to
+/// a node's `consumes` and there is no fenced block to drive. What can drift is
+/// the entry's *citation*: an amendment that reworded the `retry` paragraph would
+/// leave the register naming a sentence nobody can find, and an open proposal
+/// nothing gates quietly stops being true.
+#[test]
+fn the_consumes_divergence_quotes_a_sentence_the_contract_still_carries() {
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("54."))
+        .expect("the divergence record carries entry 54");
+    let quoted = entry
+        .lines()
+        .skip_while(|line| !line.starts_with("> "))
+        .take_while(|line| line.starts_with("> "))
+        .map(|line| line.trim_start_matches("> "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !quoted.is_empty(),
+        "entry 54 quotes no sentence of the contract"
+    );
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        contract.contains(&quoted),
+        "entry 54 names a sentence the contract no longer carries: {quoted}"
+    );
+    assert!(
+        !contract.contains("consumes` with it"),
+        "the contract now states what an edit does to `consumes`; entry 54 has been ruled on"
+    );
 }
 
 /// The templated adoption instruction this build renders is exactly what the
