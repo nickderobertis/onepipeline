@@ -252,7 +252,7 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these two
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these three
 // need is the crate under test: each drives the compiled `onepipeline` binary against its
 // own write-back worker, reading a real store through the real installed `onetaskgraph`,
 // so a project of their own would declare the same dependency and skip nothing. Every e2e
@@ -260,7 +260,7 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
 // `a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned` records
 // the same finding on the same grounds — and the single project that was split out,
 // `onepipeline-note-journeys`, was split for a test binary it needs rather than a narrower
-// edge. Splitting these two would invent a per-topic test project, which is a change to
+// edge. Splitting these three would invent a per-topic test project, which is a change to
 // how this repository's graph and gate are shaped rather than to what this change does.
 /// A settlement reaches a store at a release this build was **not** written against.
 ///
@@ -485,6 +485,122 @@ fn a_store_answer_missing_a_field_the_projection_reads_is_still_refused_by_name(
             .iter()
             .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_null()),
         "a settlement was projected out of an answer the projection had refused"
+    );
+
+    // The run itself is untouched, because write-back is best-effort and settles nothing.
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
+/// The same again, for a field the answer carries at the **wrong JSON type**.
+///
+/// Growth is tolerated because the store owns its own shape; a field this projection reads
+/// is not tolerated at whatever type happens to arrive. `labels` is where that matters
+/// most: the projection reads the destination's labels and writes them back whole, so a
+/// read that took a string for a list would write a project carrying none — and the
+/// destination that refuses a label-dropping write is the one this run's every later
+/// settlement then stops reaching.
+#[test]
+fn a_store_answer_carrying_a_field_at_the_wrong_type_is_still_refused_by_name() {
+    let world = World::new("store-writeback-retyped");
+    let name = "writeback-retyped";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    label(
+        &world
+            .store()
+            .join("projects")
+            .join(format!("{}.md", crate::harness::project_id(name))),
+        &["planning", "q3"],
+    );
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    // The same field the journey above takes away, at a type it is not: read by the
+    // projection, never looked at by the plan reader, so what this moves is the
+    // write-back's own read and the launch still reaches a running graph.
+    world.script(
+        "onetaskgraph.project-show.retype",
+        &json!({"labels": "planning, q3"}).to_string(),
+    );
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until("the projection failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
+    });
+
+    // The fixture can fail: the bytes the projection actually parsed are the ones the
+    // worker kept, and they carry a list answered as a string.
+    let answered = world.run_json(name, "writeback-project-show.stdout");
+    assert!(
+        answered["items"][0]["item"]["labels"].is_string(),
+        "the answer this projection read carried `labels` as the list it is, so nothing \
+         here is about a field at the wrong type: {answered}"
+    );
+
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+        .expect("the driver log is readable");
+    // Both halves: which field, and what was wrong with it. `serde_json` on its own says
+    // the type it wanted and not where it wanted it, which is one sentence for every field
+    // of the answer and tells an operator nothing about which to look at.
+    for said in [
+        "items[0].item.labels",
+        "invalid type: string",
+        "expected a sequence",
+    ] {
+        assert!(
+            log.contains(said),
+            "the refusal does not say {said:?}: {log}"
+        );
+    }
+
+    // And the planner heard the same two halves, rather than only the log a detached run
+    // writes where nobody opens it.
+    let raised: Vec<Value> = world
+        .events_of(name, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("did not take this run's projection"))
+        })
+        .collect();
+    assert!(
+        raised.iter().any(|event| {
+            event["payload"]["message"].as_str().is_some_and(|said| {
+                said.contains("items[0].item.labels")
+                    && said.contains("invalid type: string")
+                    && said.contains("expected a sequence")
+            })
+        }),
+        "the planner was told a projection failed without being told which field was \
+         answered as what: {raised:?}"
+    );
+
+    // Nothing was projected out of what could still be read: a field at a type this build
+    // does not read it as is a refusal, not a projection that dropped it.
+    assert!(
+        world
+            .store_tasks(&project)
+            .iter()
+            .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_null()),
+        "a settlement was projected out of an answer the projection had refused"
+    );
+    assert_eq!(
+        world.store_project(&project)["items"][0]["item"]["labels"],
+        json!([
+            {"id": "planning", "name": "planning", "color": null},
+            {"id": "q3", "name": "q3", "color": null},
+        ]),
+        "the refused projection reached the destination and dropped its labels"
     );
 
     // The run itself is untouched, because write-back is best-effort and settles nothing.

@@ -49,6 +49,11 @@
 //!   item of that verb's answer **stopped** carrying. A field the projection reads
 //!   going missing is still a refusal, and this is what makes a journey able to
 //!   tell the two apart.
+//! * `onetaskgraph.<verb>.retype` — the third shape, and the other half of that
+//!   same point: a JSON object naming fields an item of that verb's answer carries
+//!   at **another JSON type** — `{"labels": "planning, q3"}` for a list answered as
+//!   a string. Only a field the item already holds is moved, because a retype is
+//!   not an addition; `.grow` is where an addition goes.
 
 use onepipeline_testfakes as fake;
 use serde_json::{Map, Value};
@@ -69,36 +74,53 @@ struct Release {
     grown: Map<String, Value>,
     /// Fields an item of this answer no longer carries.
     shrunk: Vec<String>,
+    /// Fields an item of this answer carries at another JSON type.
+    retyped: Map<String, Value>,
 }
 
 impl Release {
-    /// What a journey scripted for one verb, `None` where it scripted neither half, and a
-    /// refusal to say where it scripted one this program cannot read.
+    /// What a journey scripted for one verb, `None` where it scripted none of the three,
+    /// and a refusal to say where it scripted one this program cannot read.
     ///
-    /// A scenario file is external input like any other, so a `.grow` that is not a JSON
-    /// object is reported as the scripting mistake it is rather than crashed on: a panic
-    /// here would reach the journey as a store that died, which is a different fixture
-    /// from the one it asked for.
+    /// A scenario file is external input like any other, so a `.grow` or `.retype` that is
+    /// not a JSON object is reported as the scripting mistake it is rather than crashed on:
+    /// a panic here would reach the journey as a store that died, which is a different
+    /// fixture from the one it asked for.
     fn scripted(dir: &Path, name: &str) -> Result<Option<Self>, String> {
-        let grown = match std::fs::read_to_string(dir.join(format!("{name}.grow"))) {
-            Err(_) => None,
-            Ok(scripted) => match serde_json::from_str(&scripted) {
-                Ok(Value::Object(members)) => Some(members),
-                _ => {
-                    return Err(format!(
-                        "`{name}.grow` states the members a later release added to this \
-                         answer, as a JSON object"
-                    ))
-                }
-            },
-        };
+        let grown = Self::members(dir, name, "grow", "the members a later release added")?;
+        let retyped = Self::members(
+            dir,
+            name,
+            "retype",
+            "the fields this answer carries at another JSON type, each named against the \
+             value it is answered as",
+        )?;
         let shrunk = std::fs::read_to_string(dir.join(format!("{name}.shrink")))
             .ok()
             .map(|scripted| scripted.split_whitespace().map(ToOwned::to_owned).collect());
-        Ok((grown.is_some() || shrunk.is_some()).then(|| Self {
-            grown: grown.unwrap_or_default(),
-            shrunk: shrunk.unwrap_or_default(),
-        }))
+        Ok(
+            (grown.is_some() || shrunk.is_some() || retyped.is_some()).then(|| Self {
+                grown: grown.unwrap_or_default(),
+                shrunk: shrunk.unwrap_or_default(),
+                retyped: retyped.unwrap_or_default(),
+            }),
+        )
+    }
+
+    /// One scenario file that states a JSON object, or a refusal saying what it states.
+    fn members(
+        dir: &Path,
+        name: &str,
+        half: &str,
+        states: &str,
+    ) -> Result<Option<Map<String, Value>>, String> {
+        match std::fs::read_to_string(dir.join(format!("{name}.{half}"))) {
+            Err(_) => Ok(None),
+            Ok(scripted) => match serde_json::from_str(&scripted) {
+                Ok(Value::Object(members)) => Ok(Some(members)),
+                _ => Err(format!("`{name}.{half}` states {states}, as a JSON object")),
+            },
+        }
     }
 
     fn apply(&self, object: &mut Value) {
@@ -110,6 +132,22 @@ impl Release {
         }
         for (key, value) in &self.grown {
             object.insert(key.clone(), value.clone());
+        }
+    }
+
+    /// The same, for the fields this release answers at another type.
+    ///
+    /// Only a field already held is moved: a retype says what an answer's own field is
+    /// answered as, and one that added a field nothing carries would be `.grow` wearing
+    /// another name.
+    fn retype(&self, object: &mut Value) {
+        let Some(object) = object.as_object_mut() else {
+            return;
+        };
+        for (key, value) in &self.retyped {
+            if let Some(held) = object.get_mut(key) {
+                *held = value.clone();
+            }
         }
     }
 
@@ -127,6 +165,7 @@ impl Release {
                 self.apply(entry);
                 if let Some(item) = entry.get_mut("item") {
                     self.apply(item);
+                    self.retype(item);
                     if let Some(labels) = item.get_mut("labels").and_then(Value::as_array_mut) {
                         for label in labels {
                             self.apply(label);

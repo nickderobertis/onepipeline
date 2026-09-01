@@ -515,8 +515,7 @@ fn destination_project(
     // or a different/duplicate project here requires replacing the real onetaskgraph
     // executable with a scripted mock; the real-store journey drives the successful read,
     // total-replacement copy, and preservation of present and absent content end to end.
-    let response: ProjectPage =
-        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    let response: ProjectPage = answered(&output.stdout)?;
     if !response.errors.is_empty() {
         return Err("project show returned partial results".to_owned());
     }
@@ -586,8 +585,7 @@ fn destination_origins(
         // invalid qualified ids, missing node ids, or duplicate node ids here requires
         // replacing the real onetaskgraph executable with a scripted mock; real-store
         // success and outage/recovery are driven end to end instead.
-        let response: TaskPage =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let response: TaskPage = answered(&output.stdout)?;
         if !response.errors.is_empty() {
             return Err("task list returned partial results".to_owned());
         }
@@ -680,6 +678,30 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
         stdout: std::fs::read(stdout).map_err(|error| error.to_string())?,
         stderr: std::fs::read(stderr).map_err(|error| error.to_string())?,
     })
+}
+
+/// Read one of the store's answers, naming the field that refused it.
+///
+/// `serde_json`'s own error says the type it wanted and not where it wanted it, and this
+/// projection reads several fields of several shapes out of one paged response — so a
+/// `labels` answered as a string and a `metadata` answered as one are otherwise the same
+/// sentence. The path is the whole of what makes the refusal actionable, because of where
+/// it lands: write-back is best-effort, so this one line on the driver's own standard
+/// error and the planner surface built from it are all anybody gets. Read the same way
+/// `taskgraph::read` reads a project, for the same reason.
+fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> {
+    let mut reading = serde_json::Deserializer::from_slice(stdout);
+    let response: T =
+        serde_path_to_error::deserialize(&mut reading).map_err(|error| {
+            match error.path().to_string() {
+                path if path == "." => error.into_inner().to_string(),
+                path => format!("{path}: {}", error.into_inner()),
+            }
+        })?;
+    // Trailing bytes are still a refusal, exactly as `serde_json::from_slice` made them:
+    // a second document after the answer is not an answer this build can act on.
+    reading.end().map_err(|error| error.to_string())?;
+    Ok(response)
 }
 
 fn exit(status: &ExitStatus) -> String {
