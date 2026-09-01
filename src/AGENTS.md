@@ -64,10 +64,7 @@ moves — an upstream ledger, an answered release probe, a failed projection —
 when the longest interval it may go without one comes due, and on nothing else.
 So **whole-state work belongs on a change, never on a pass**: a per-pass
 `state.statuses()`, `writeback.publish`, `upstreams.resolve` or
-`projection::fold` is the CPU sink this shape exists to keep out, and one driver
-in that shape spent an hour and a half of CPU on a run with a single node in
-flight. `ONEPIPELINE_LOOP_STATS` is how that is checked rather than claimed —
-`src/loopstats.rs` says what it counts and where.
+`projection::fold` puts back a CPU sink big enough to make this host unusable.
 
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 

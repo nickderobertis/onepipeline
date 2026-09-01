@@ -15,7 +15,6 @@
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::{json, Value};
 
-/// Every hold reported for one node, in the order the run recorded them.
 fn held(world: &World, run: &str, node: &str) -> Vec<Value> {
     world
         .events_of(run, "node-held")
@@ -24,7 +23,6 @@ fn held(world: &World, run: &str, node: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The reasons one `node-held` carries.
 fn reasons(event: &Value) -> Vec<Value> {
     event["payload"]["reasons"]
         .as_array()
@@ -32,7 +30,6 @@ fn reasons(event: &Value) -> Vec<Value> {
         .unwrap_or_else(|| panic!("a hold carries no reasons: {event}"))
 }
 
-/// The `blocking` set of the one dependency reason a hold carries.
 fn blocking(event: &Value) -> Vec<String> {
     reasons(event)
         .into_iter()
@@ -43,7 +40,6 @@ fn blocking(event: &Value) -> Vec<String> {
         .unwrap_or_else(|| panic!("no dependency reason on: {event}"))
 }
 
-/// A plan of this shape, running at most `concurrency` dispatches at once.
 fn plan_running(name: &str, concurrency: u64, nodes: Vec<Value>) -> Value {
     let mut plan = plan_of(name, nodes);
     plan["concurrency"] = json!(concurrency);
@@ -310,5 +306,65 @@ fn a_dispatchable_node_and_a_waiting_human_action_are_held_by_nothing() {
         world.events_of("free", "node-unheld"),
         Vec::<Value>::new(),
         "a hold that never began was reported cleared"
+    );
+}
+
+/// A hold outlives the driver that reported it.
+///
+/// A fresh driver folds the journal, so it knows what its predecessor was
+/// holding: it does not restate a span already open, and it closes one that
+/// cleared while nothing was driving — carrying the reasons the record it is
+/// answering was written with, rather than reasons of its own.
+#[test]
+fn a_hold_survives_the_driver_that_reported_it() {
+    let world = World::new("held-adopted");
+    let plan = world.plan(
+        "adopted",
+        &plan_of(
+            "adopted",
+            vec![human("approve", &[]), agent("ship", &["approve"])],
+        ),
+    );
+    // Settles waiting on the person, with `ship` held behind them.
+    world.run(&["start", &plan, "--attach"]).settled();
+    let opened = held(&world, "adopted", "ship");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let reported = opened[0]["payload"]["reasons"].clone();
+
+    // A fresh driver over the same ledger, holding the same node for the same
+    // reasons. It says nothing, because nothing changed.
+    world.run(&["adopt", "adopted"]).settled();
+    assert_eq!(
+        held(&world, "adopted", "ship").len(),
+        1,
+        "an adopted driver restated a hold its predecessor had already reported"
+    );
+    assert_eq!(
+        world.events_of("adopted", "node-unheld"),
+        Vec::<Value>::new(),
+        "an adopted driver released a hold that was still on"
+    );
+
+    // The person takes the action while nothing is driving, and the next driver
+    // is the one that reports the release.
+    world.run(&["attest", "adopted", "approve"]).exited(0);
+    world.run(&["adopt", "adopted"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_json("adopted", "result.json")["state"] == json!("complete")
+    });
+    let unheld = world
+        .events_of("adopted", "node-unheld")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "ship")
+        .collect::<Vec<Value>>();
+    assert_eq!(unheld.len(), 1, "{unheld:?}");
+    assert_eq!(
+        unheld[0]["payload"]["released"], reported,
+        "the release names something other than what the record it answers said"
+    );
+    assert_eq!(
+        held(&world, "adopted", "ship").len(),
+        1,
+        "the hold was restated on its way out"
     );
 }

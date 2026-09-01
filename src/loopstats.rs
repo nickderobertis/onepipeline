@@ -40,15 +40,12 @@ pub(crate) const STATS_FILE: &str = "loop-stats.json";
 /// which is exactly the distinction the bound is stated in: what costs the host
 /// is the body, and the wait around it is two `stat` calls.
 static PASSES: AtomicU64 = AtomicU64::new(0);
-/// Times the graph's statuses were derived from the folded state.
 static STATUSES: AtomicU64 = AtomicU64::new(0);
-/// Snapshots handed to the write-back publisher.
 static PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
-/// Times another run's ledger was read to answer a cross-DAG edge.
 static UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
-/// Times the sibling was asked whether a release has arrived.
 static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
-/// Bytes read out of a run store by this process, whichever run's it was.
+/// Bytes read out of a run store by this process, whichever run's they came from
+/// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn pass() {

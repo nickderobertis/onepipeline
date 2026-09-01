@@ -744,8 +744,19 @@ fn converge(
 
     // What the loop is holding back, and why. Diffed pass to pass exactly as the
     // decisions above are, so a hold is written when it begins, again when what
-    // it is held by changes, and once when it clears.
-    let mut holding: BTreeMap<String, Vec<HoldReason>> = BTreeMap::new();
+    // it is held by changes, and once when it clears — and seeded from the
+    // journal for the same reason they are: a hold outlives the driver that
+    // reported it, so a fresh one that started empty would restate every span
+    // already open and never close one that cleared while nothing was driving.
+    let mut holding: BTreeMap<String, Vec<HoldReason>> = state
+        .holds
+        .iter()
+        .filter_map(|(node, reasons)| {
+            let read: Option<Vec<HoldReason>> =
+                reasons.iter().map(HoldReason::of_payload).collect();
+            read.map(|reasons| (node.clone(), reasons))
+        })
+        .collect();
     // The graph's derived statuses, computed at most once per change to the
     // folded state rather than once per place that wants them. Deriving is a
     // fixpoint over every node and every edge, and the loop asked for it four
@@ -1096,14 +1107,11 @@ fn converge(
     Ok(graph::state_of(&settled))
 }
 
-/// Whether paced work last done at `last` is due again.
-///
 /// `None` is due now, which is what makes the first pass do everything once.
 fn due(last: Option<Instant>, every: Duration) -> bool {
     last.is_none_or(|last| last.elapsed() >= every)
 }
 
-/// How long until that work comes due, or zero when it already has.
 fn until_due(last: Option<Instant>, every: Duration) -> Duration {
     last.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()))
 }
@@ -1247,7 +1255,6 @@ enum HoldReason {
 }
 
 impl HoldReason {
-    /// The reason as one entry of the `reasons` array.
     fn payload(&self) -> Value {
         match self {
             Self::Dependencies { blocking } => {
@@ -1260,6 +1267,40 @@ impl HoldReason {
                 json!({ "kind": "decision", "reference": reference.as_wire() })
             }
             Self::Release { awaiting } => json!({ "kind": "release", "awaiting": awaiting }),
+        }
+    }
+
+    /// One entry a `node-held` record carried, read back.
+    ///
+    /// `None` for an entry this build cannot read whole, which is what a reason a
+    /// later build added looks like from here. The caller then treats the whole
+    /// hold as one it does not know about and states its own, which is the safe
+    /// direction: a hold restated is a duplicate span, and a hold silently taken
+    /// as understood is one whose release is never reported.
+    fn of_payload(entry: &Value) -> Option<Self> {
+        let ids = |key: &str| -> Option<Vec<String>> {
+            entry
+                .get(key)?
+                .as_array()?
+                .iter()
+                .map(|id| id.as_str().map(str::to_string))
+                .collect()
+        };
+        match entry.get("kind")?.as_str()? {
+            "dependencies" => Some(Self::Dependencies {
+                blocking: ids("blocking")?,
+            }),
+            "concurrency" => Some(Self::Concurrency {
+                ahead: ids("ahead")?,
+                limit: usize::try_from(entry.get("limit")?.as_u64()?).ok()?,
+            }),
+            "decision" => Some(Self::Decision {
+                reference: DecisionRef::of_wire(entry.get("reference")?.as_str()?),
+            }),
+            "release" => Some(Self::Release {
+                awaiting: ids("awaiting")?,
+            }),
+            _ => None,
         }
     }
 }

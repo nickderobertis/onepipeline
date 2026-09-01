@@ -150,6 +150,16 @@ pub struct RunState {
     /// The decision points reported as holding dependents back and not yet
     /// reported as released, by the reference that clears each.
     pub decisions_pending: BTreeMap<String, PendingDecision>,
+    /// The nodes reported as held and not yet reported as released, carrying the
+    /// `reasons` array the record was written with.
+    ///
+    /// Held as the payload rather than as a parsed reason, for the same reason
+    /// every other fold here keeps the producer's own words: a driver reading a
+    /// record a later build wrote must not normalise a reason it has no variant
+    /// for into one it has. What a fresh driver does with it is seed what it
+    /// believes it is already holding, so it neither restates a hold its
+    /// predecessor opened nor loses the release of one.
+    pub holds: BTreeMap<String, Vec<Value>>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -891,6 +901,19 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 if matches!(recorded, Recorded::Cancelling { .. }) {
                     *recorded = Recorded::At(NodeStatus::Parked);
                 }
+            }
+        }
+        Some(journal::PipelineKind::NodeHeld) => {
+            if let (Some(node), Some(reasons)) = (
+                event.labels.node.clone(),
+                payload.get("reasons").and_then(Value::as_array),
+            ) {
+                state.holds.insert(node, reasons.clone());
+            }
+        }
+        Some(journal::PipelineKind::NodeUnheld) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.holds.remove(node);
             }
         }
         Some(journal::PipelineKind::DecisionPending) => {

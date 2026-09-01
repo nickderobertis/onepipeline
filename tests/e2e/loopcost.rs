@@ -38,7 +38,6 @@ use serde_json::{json, Value};
 /// 2,400 passes in it.
 const IDLE: Duration = Duration::from_secs(60);
 
-/// What one driver's reconcile loop did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Counts {
     passes: u64,
@@ -50,7 +49,6 @@ struct Counts {
 }
 
 impl Counts {
-    /// What it did between two readings.
     fn since(self, before: Self) -> Self {
         Self {
             passes: self.passes - before.passes,
@@ -63,12 +61,10 @@ impl Counts {
     }
 }
 
-/// A world whose drivers report what their loops did.
 fn measured(name: &str) -> World {
     World::new(name).with_env("ONEPIPELINE_LOOP_STATS", "1")
 }
 
-/// One driver's counts, read out of its own run directory.
 fn counts(world: &World, run: &str) -> Counts {
     let path = world.run_file(run, "loop-stats.json");
     let read =
@@ -121,7 +117,6 @@ fn state_changes(world: &World, run: &str) -> usize {
         .count()
 }
 
-/// Whether a run has dispatched, or settled, one node.
 fn recorded(world: &World, run: &str, kind: &str, node: &str) -> bool {
     world
         .events_of(run, kind)
