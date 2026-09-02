@@ -822,7 +822,7 @@ struct DestinationTaskItem {
 /// so a field it reports has to be nameable here even though this projection has nothing
 /// to do with it. Absent means the source did not say where the item is, which is not the
 /// same as saying it is nowhere.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DestinationLocation {
     Url(String),
@@ -1127,9 +1127,9 @@ fn encoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
-        Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
-        LANDING_COMMIT_KEY, LANDING_KEY,
+        projected, write_shadow, DestinationLabel, DestinationLocation, DestinationProjectItem,
+        Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState, Writeback,
+        CHANGE_URL_KEY, LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::graph::NodeStatus;
     use crate::ledger::{LaunchRecord, RunPaths};
@@ -1988,5 +1988,47 @@ mod tests {
             "https://example.invalid/pull/9"
         );
         assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
+    }
+
+    /// The suite's copy of the `location` enum is this one.
+    ///
+    /// Two hand-written copies of `onetaskgraph`'s two-variant schema stand at the two
+    /// boundaries that read an item back — this one, and the e2e suite's `StoreLocation`.
+    /// The suite's is reconciled against the *real* sibling's printed schema by
+    /// `harness::the_locations_this_boundary_accepts_are_the_ones_onetaskgraph_declares`;
+    /// this closes the triangle, so neither copy can move without the other. A copy of an
+    /// external schema is exactly what rots unnoticed: this field arrived by turning a
+    /// whole suite red.
+    #[test]
+    fn the_suites_copy_of_a_location_is_this_one() {
+        let suite = include_str!("../tests/e2e/harness.rs");
+        let declaration = suite
+            .split_once("enum StoreLocation {")
+            .expect("tests/e2e/harness.rs declares StoreLocation")
+            .1
+            .split_once('}')
+            .expect("the declaration is closed")
+            .0;
+        let mut copied: Vec<String> = declaration
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with("(String),"))
+            .map(|line| line.trim_end_matches("(String),").to_ascii_lowercase())
+            .collect();
+        copied.sort();
+        assert_eq!(
+            copied,
+            ["path", "url"],
+            "the e2e suite reads a different set of locations than this boundary does"
+        );
+        // And this boundary really accepts those two and refuses anything else, so the
+        // agreement above is about behaviour rather than about two spellings matching.
+        for spelling in &copied {
+            serde_json::from_value::<DestinationLocation>(json!({ spelling.as_str(): "x" }))
+                .unwrap_or_else(|e| panic!("this boundary refuses a `{spelling}` location: {e}"));
+        }
+        serde_json::from_value::<DestinationLocation>(json!({ "shelf": "x" }))
+            .err()
+            .expect("a location onetaskgraph does not declare is refused");
     }
 }

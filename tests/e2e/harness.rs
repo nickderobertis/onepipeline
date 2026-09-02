@@ -230,6 +230,64 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The two spellings of `location` this suite accepts are the two `onetaskgraph`
+/// documents, asked of the real `onetaskgraph`.
+///
+/// Both this suite and `src/writeback.rs` carry a hand-written copy of that enum, and a
+/// copy of an external schema is exactly the thing that rots silently — the `location`
+/// field arrived here as a whole suite going red. So the authoritative source is asked
+/// rather than assumed: `onetaskgraph schema` prints the variants, and the copy is
+/// reconciled against them. `writeback::tests::the_suites_copy_of_a_location_is_this_one`
+/// holds the other copy against this one.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
+// against the real sibling's declared schema, which is not a journey: it asks the same
+// compiled `onetaskgraph` every journey reads its store through, and no journey can assert
+// about the validation standing between it and that store.
+#[test]
+fn the_locations_this_boundary_accepts_are_the_ones_onetaskgraph_declares() {
+    let world = World::new("harness-location-schema");
+    let output = world
+        .store_cmd(&["schema"])
+        .output()
+        .expect("the real onetaskgraph prints its schema");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let schema: Value =
+        serde_json::from_slice(&output.stdout).expect("the schema is machine-readable");
+    let variants = schema["roots"]["Task"]["$defs"]["Location"]["oneOf"]
+        .as_array()
+        .expect("onetaskgraph declares Location as a tagged union");
+    let mut declared: Vec<String> = variants
+        .iter()
+        .flat_map(|variant| {
+            variant["properties"]
+                .as_object()
+                .expect("each variant is an object with one key")
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>()
+        })
+        .collect();
+    declared.sort();
+    assert_eq!(
+        declared,
+        ["path", "url"],
+        "onetaskgraph now declares a location this suite does not read"
+    );
+    for spelling in &declared {
+        let read: Result<StoreLocation, _> =
+            serde_json::from_value(serde_json::json!({ spelling.as_str(): "somewhere" }));
+        assert!(
+            read.is_ok(),
+            "onetaskgraph declares a `{spelling}` location this boundary refuses"
+        );
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Widening the boundary by one documented field did not stop it refusing the rest.
 ///
 /// The reason this boundary denies unknown fields is that a store page carrying

@@ -2542,7 +2542,7 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 ///
 /// The shipped bounds throughout — nothing here shortens the poll interval — so
 /// what is measured is what an operator's run does.
-// llmlint: ignore[tests_mirror_real_usage] what a held run costs its host is the number of
+// llmlint: ignore-block[tests_mirror_real_usage] what a held run costs its host is the number of
 // probe subprocesses it starts, and a probe that answered "not released" leaves nothing behind
 // for a CLI to report — the hold reads identically at one ask a minute and at forty a second.
 // The journey is otherwise entirely real: the shipped binary, two real runs, a real release
@@ -2644,6 +2644,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
         world.release(&format!("{run}-hold.go"));
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The adoption mode resolves through **exactly four rungs**, and each of them

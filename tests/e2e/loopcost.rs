@@ -13,14 +13,6 @@
 //! loaded host cannot fail correct work — and every one of them is a bound the
 //! tree before this change would not have met.
 
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] what these journeys
-// measure IS the whole crate's reconcile loop, so a project whose edges reached less than
-// the crate would be one that could not run them: any change under `src/` can put the sink
-// back, which is why the edge is honest rather than broad. The cost is bounded and paid
-// once — the minute-long windows run beside each other under nextest and the rest of
-// the file is seconds — and the minute is not a knob: it is the interval every bound here
-// is stated over.
-
 use std::time::{Duration, Instant};
 
 use crate::harness::{
@@ -105,6 +97,13 @@ fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
     found.into_iter().next().expect("one record")
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
+// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
+// stated over, so a shorter one would assert a different claim. What it measures is the
+// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
+// so a project edged narrower than the crate could not honestly run it. The three
+// minute-long journeys in this file run beside each other under nextest; every other
+// journey here is seconds.
 /// A converged run with one node in flight does no scheduling work at all while
 /// it records nothing.
 ///
@@ -113,7 +112,7 @@ fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
 /// another run's ledger — over a minute in which the run wrote not one record.
 /// The tree before this change performed roughly 2,400 passes in that minute,
 /// each folding the journal four times over.
-// llmlint: ignore[tests_mirror_real_usage] the claim is that a converged driver does no
+// llmlint: ignore-block[tests_mirror_real_usage] the claim is that a converged driver does no
 // scheduling work, and there is no user-facing representation of work that did not happen: a
 // loop that publishes nothing and folds nothing writes no record, so a journey reading the CLI
 // alone cannot tell it from the 40-passes-a-second loop this replaced. Everything a user does
@@ -172,8 +171,18 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
     world.until("the run to settle", |world| {
         world.run_file("idle", "result.json").is_file()
     });
-} // llmlint: ignore-end[e2e_not_mocked]
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
+// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
+// stated over, so a shorter one would assert a different claim. What it measures is the
+// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
+// so a project edged narrower than the crate could not honestly run it. The three
+// minute-long journeys in this file run beside each other under nextest; every other
+// journey here is seconds.
 /// What a converged idle pass costs does not grow with the run.
 ///
 /// Two converged runs two orders of magnitude apart in nodes, and more than one
@@ -181,7 +190,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 /// interval — because neither reads anything at all. The tree before this change
 /// refolded the whole journal on every pass, so the larger run's driver read
 /// hundreds of times what the smaller one's did.
-// llmlint: ignore[tests_mirror_real_usage] what this compares is how much two real drivers
+// llmlint: ignore-block[tests_mirror_real_usage] what this compares is how much two real drivers
 // read out of two real run stores, which no CLI output reports: the defect it holds off — a
 // pass that refolds the journal — is invisible to every user-facing surface and shows only as
 // a run that costs more the longer it has been running. The runs, the plans, the dispatches
@@ -262,11 +271,14 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
             world.run_file(run, "result.json").is_file()
         });
     }
-} // llmlint: ignore-end[e2e_not_mocked]
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The two things a pass does about whole state are paid once per recorded state
 /// change, not once per pass.
-// llmlint: ignore[tests_mirror_real_usage] "at most one publication and one status
+// llmlint: ignore-block[tests_mirror_real_usage] "at most one publication and one status
 // derivation per recorded state change" is a ratio between what the run journalled, which is
 // read the user's way, and what the loop did to produce it, which nothing outside the process
 // reports. The journey drives the real CLI end to end and reads the real journal for one half
@@ -330,8 +342,17 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
     world.until("the run to settle", |world| {
         world.run_file("changes", "result.json").is_file()
     });
-} // llmlint: ignore-end[e2e_not_mocked]
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey sleeps
+// the whole of WINDOW, and the minute is not a knob: it *is* the interval the bound is
+// stated over, so a shorter one would assert a different claim. What it measures is the
+// whole crate's reconcile loop, which any change under `src/` can put the sink back into,
+// so a project edged narrower than the crate could not honestly run it. The three
+// minute-long journeys in this file run beside each other under nextest; every other
+// journey here is seconds.
 /// Another run's ledger is read on the interval this loop states, whatever rate
 /// its own passes are running at.
 ///
@@ -343,7 +364,7 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
 /// number a burst either side of the interval can reach without the rate having
 /// moved at all.
-// llmlint: ignore[tests_mirror_real_usage] the property is that another run's ledger is read
+// llmlint: ignore-block[tests_mirror_real_usage] the property is that another run's ledger is read
 // on a stated interval rather than on the loop's pass rate — a statement about how often a
 // real driver reads a real upstream store, which produces no record either way. Both runs,
 // both stores and both drivers are real and the shipped intervals are unchanged; the counters
@@ -411,7 +432,10 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     for run in ["chatty", "quiet"] {
         world.release(&format!("{run}-hold.go"));
     }
-} // llmlint: ignore-end[e2e_not_mocked]
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The loop still answers inside the bounds a caller observes it by.
 ///

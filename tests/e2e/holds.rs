@@ -388,3 +388,65 @@ fn a_hold_survives_the_driver_that_reported_it() {
         "the hold was restated on its way out"
     );
 } // llmlint: ignore-end[e2e_not_mocked]
+
+/// A hold reason a later build wrote is restated rather than taken as understood.
+///
+/// The fold keeps the producer's own words, so a driver reading a `node-held` a newer
+/// build wrote meets a reason it has no variant for. Taking that hold as one it
+/// understands would be the expensive mistake: the span would stay open and its release
+/// would never be reported, because this driver could not recognise what cleared. So the
+/// whole hold reads as one it does not know about and the driver states its own — a
+/// duplicate span, which a reader can see, rather than a lost one, which nobody can.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
+#[test]
+fn a_hold_reason_written_by_a_later_build_is_restated_rather_than_assumed() {
+    let world = World::new("held-unreadable");
+    let plan = world.plan(
+        "unreadable",
+        &plan_of(
+            "unreadable",
+            vec![human("approve", &[]), agent("ship", &["approve"])],
+        ),
+    );
+    world.run(&["start", &plan, "--attach"]).settled();
+    let opened = held(&world, "unreadable", "ship");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+
+    // The same record as a later build would have written it: the hold is on, and the
+    // only reason it names is one this build has no variant for. Appended while nothing
+    // is driving, so the next driver folds it as its predecessor's word.
+    let mut future = opened[0].clone();
+    future["seq"] = json!(9_000);
+    future["payload"] = json!({ "reasons": [{ "kind": "lunar-phase", "phase": "waxing" }] });
+    let events = world.run_file("unreadable", "events.jsonl");
+    let mut written = std::fs::read_to_string(&events).expect("the journal is readable");
+    written.push_str(&format!("{future}\n"));
+    std::fs::write(&events, written).expect("a later build's record is appended");
+
+    // A fresh driver over that ledger. It cannot read what is holding `ship`, so it
+    // states the hold itself instead of trusting a span it could never close.
+    world.run(&["adopt", "unreadable"]).settled();
+    let after = held(&world, "unreadable", "ship");
+    assert_eq!(
+        after.len(),
+        3,
+        "a driver that could not read the standing hold neither restated it nor said why"
+    );
+    let restated = reasons(&after[2]);
+    assert!(
+        restated
+            .iter()
+            .all(|reason| reason["kind"] != json!("lunar-phase")),
+        "the driver echoed a reason it cannot read back: {restated:?}"
+    );
+    assert_eq!(
+        blocking(&after[2]),
+        vec!["approve".to_owned()],
+        "the hold it stated is not the one it can actually see"
+    );
+}
+// llmlint: ignore-end[e2e_not_mocked]
