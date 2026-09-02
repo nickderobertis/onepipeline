@@ -2514,21 +2514,24 @@ const PACING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// seconds.
 ///
 /// The suite's own copy of a constant the crate declares privately — this crate
-/// publishes the contract's surface and nothing else — and it is read here as a
-/// **ceiling**: the journey below holds a real build to asking no oftener than
-/// this, so a build that shortened the interval fails it. That the shipped
-/// default is no *longer* than this is held at the declaration, by
-/// `release::tests::the_shipped_probe_interval_is_no_longer_than_the_loop_promises`,
-/// which is the direction a rate ceiling cannot see.
+/// publishes the contract's surface and nothing else — and the journey below
+/// reads it in **both** directions against a real build: a ceiling, so a build
+/// that shortened the interval fails it, and a floor taken as the gap between
+/// two consecutive asks, so a build that lengthened it — or stopped asking
+/// altogether — fails it too. The second is what the minute a held node is
+/// promised rests on, and it is what a rate ceiling alone cannot see;
+/// `release::tests::the_shipped_probe_interval_is_no_longer_than_the_loop_promises`
+/// holds the same direction at the declaration.
 const SHIPPED_POLL_SECONDS: u64 = 60;
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
 // waits on is the shipped interval itself, and an interval of a minute cannot be observed
-// in less than a minute. The edge it needs is the crate under test — the compiled binary,
-// its own release watch, a real probe subprocess, and a real repository — so a project of
-// its own would declare the same dependency and skip nothing; every e2e journey here lives
-// in one binary for that reason. It is one window, run beside the other minute-long
-// windows under nextest.
+// in less than a minute — twice over, because a rate has a ceiling *and* a floor and the
+// floor is the gap between two consecutive asks. The edge it needs is the crate under test
+// — the compiled binary, its own release watch, a real probe subprocess, and a real
+// repository — so a project of its own would declare the same dependency and skip nothing;
+// every e2e journey here lives in one binary for that reason. It runs beside the other
+// minute-long windows under nextest.
 
 /// One held release is asked about on the **release watch's own interval**,
 /// however fast the run's reconcile loop is running.
@@ -2541,7 +2544,9 @@ const SHIPPED_POLL_SECONDS: u64 = 60;
 /// the same one ask a minute the shipped interval allows.
 ///
 /// The shipped bounds throughout — nothing here shortens the poll interval — so
-/// what is measured is what an operator's run does.
+/// what is measured is what an operator's run does, in both directions: no
+/// oftener than the interval, and no longer than it either, which is what the
+/// minute between a release arriving and a held node noticing rests on.
 // llmlint: ignore-block[tests_mirror_real_usage] what a held run costs its host is the number of
 // probe subprocesses it starts, and a probe that answered "not released" leaves nothing behind
 // for a CLI to report — the hold reads identically at one ask a minute and at forty a second.
@@ -2628,7 +2633,32 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
         did[0].release_asks <= did[1].release_asks + 1,
         "asking about the release tracked the loop's pass rate: {did:?}"
     );
-    // Nothing about the minute started the held nodes, and nothing failed them.
+
+    // A rate has two directions and every assertion above is the ceiling. A build
+    // that asked once and then stopped, and one whose interval was two minutes,
+    // pass all of them exactly as the shipped build does — and both would break
+    // the minute a held node is promised between a release arriving and being
+    // noticed. So the floor is taken as the interval itself: an ask is waited for
+    // first, so the gap measured after it is a whole one rather than whatever was
+    // left of the one already running.
+    let quiet = runs[1];
+    let phase = counts(&world, quiet).release_asks;
+    world.until("an ask to land, so the gap after it is a whole interval", {
+        |world| counts(world, quiet).release_asks > phase
+    });
+    let asked = counts(&world, quiet).release_asks;
+    let from = std::time::Instant::now();
+    world.until("the release to be asked about again", |world| {
+        counts(world, quiet).release_asks > asked
+    });
+    let gap = from.elapsed();
+    assert!(
+        gap < std::time::Duration::from_secs(SHIPPED_POLL_SECONDS + 30),
+        "one held release went {gap:?} unasked about, which is longer than the \
+         {SHIPPED_POLL_SECONDS}s interval a held node's promised minute rests on"
+    );
+
+    // Nothing about the minutes started the held nodes, and nothing failed them.
     for run in runs {
         assert!(
             !dispatched(&world, run, "consumer"),
