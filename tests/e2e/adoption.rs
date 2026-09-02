@@ -934,8 +934,14 @@ fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
     let mut node = consumer(Some("published"));
     node["consumes"] = json!({"engine": "wheel"});
     let run = start(&world, "adoption-unanswerable", vec![engine(), node]);
-    world.until("the wait to be surfaced", |world| {
-        !wait_surface(world, &run, "consumer").is_empty()
+    // Waited for on the **record**, which is what this reads, rather than on the
+    // surface beside it. `release::Waits::report` raises the surface first and
+    // emits the record second — deliberately, so a reader holding the record
+    // never reads an older surface — so waiting on the surface and then reading
+    // the record is the one direction of that pair that can be caught in the
+    // middle, and a record implies its surface where the reverse does not hold.
+    world.until("the wait to be recorded", |world| {
+        !awaiting(world, &run, "consumer").is_empty()
     });
 
     assert!(

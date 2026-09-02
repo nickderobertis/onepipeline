@@ -1697,6 +1697,13 @@ fn a_terminal_projection_is_attempted_at_closeout_rather_than_left_to_a_long_int
          worker was part-way through rather than the closeout window",
         settled.elapsed()
     );
+    // The nodes settling is not the run settling: the driver writes its result
+    // after them, so the document this reads is written strictly later than the
+    // wait above returned. Timed before this, so what the interval bound above
+    // measures is unchanged.
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
     assert_eq!(
         world.run_json(run, "result.json")["state"],
         "complete",
