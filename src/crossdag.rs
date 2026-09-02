@@ -106,13 +106,38 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 /// a later one is done, which is the whole point of a planner retrying it.
 /// A record this build cannot read is skipped, the same way every other reader
 /// of a journal skips one.
+/// The loop's own answer: read now, whatever was read before.
+///
+/// Never served from what is remembered below, because the loop is what the
+/// freshness of a cross-DAG edge is promised against. Serving it a remembered
+/// answer would add that answer's age to the interval the loop already waits, so
+/// an upstream settling just after a read would go unseen for up to twice the
+/// interval — and a consumer's own bound is one interval's worth of that. What
+/// this does do is *refresh* what the quiet readers see, which is what makes
+/// theirs free.
 fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
-    if let Some(answered) = answered_recently(root, reference) {
-        return answered;
-    }
     let status = read_settled_status(root, reference);
     remember(root, reference, status);
     status
+}
+
+/// The same answer for a reader that must not write, which may be one the loop
+/// has already paid for.
+///
+/// Accepted up to twice [`UPSTREAM_EVERY`] old, which is deliberately looser than
+/// the loop's own cadence rather than equal to it: the loop refreshes on that
+/// cadence, so a window of exactly it would expire in the moment before each
+/// refresh and buy one of these readers its own read for the gap. What it costs
+/// is that a rendered row, or an edit's submission check, may name a cross-DAG
+/// status a second behind the run's — where before it cost another run's whole
+/// ledger, read again, for every record appended to this one's journal.
+///
+/// [`UPSTREAM_EVERY`]: crate::engine::UPSTREAM_EVERY
+fn settled_status_recently(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    if let Some(answered) = answered_within(root, reference, 2 * crate::engine::UPSTREAM_EVERY) {
+        return answered;
+    }
+    settled_status(root, reference)
 }
 
 /// What this process has already read an upstream's ledger to learn, and when.
@@ -125,12 +150,10 @@ fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
 /// inside one interval is that ledger read twice over for one answer, and the
 /// second read is one nobody chose to spend.
 ///
-/// Held for [`UPSTREAM_EVERY`], which is not a freshness this invents: it is the
-/// interval the loop already re-reads on, and so the bound on how stale a
-/// cross-DAG answer is allowed to be. An answer younger than that is one the loop
-/// would have given from its own state anyway.
-///
-/// [`UPSTREAM_EVERY`]: crate::engine::UPSTREAM_EVERY
+/// Filled by every read, and read back only by
+/// [`settled_status_recently`] — the loop reads through [`settled_status`] and is
+/// never served from here, so nothing this holds can make the answer the loop
+/// acts on any older than its own interval already allows.
 static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
 
 /// One upstream node, under the runs root it was asked beneath.
@@ -153,10 +176,14 @@ fn answers() -> std::sync::MutexGuard<'static, Answers> {
     ANSWERED.lock().unwrap_or_else(|held| held.into_inner())
 }
 
-fn answered_recently(root: &Path, reference: &Reference) -> Option<Option<NodeStatus>> {
+fn answered_within(
+    root: &Path,
+    reference: &Reference,
+    age: std::time::Duration,
+) -> Option<Option<NodeStatus>> {
     answers()
         .get(&key(root, reference))
-        .filter(|(read_at, _)| read_at.elapsed() < crate::engine::UPSTREAM_EVERY)
+        .filter(|(read_at, _)| read_at.elapsed() < age)
         .map(|(_, status)| *status)
 }
 
@@ -164,7 +191,7 @@ fn remember(root: &Path, reference: &Reference, status: Option<NodeStatus>) {
     let mut answers = answers();
     // Dropped as they go stale rather than on a size, so what is held is one
     // entry per upstream a live graph is actually asking about.
-    answers.retain(|_, (read_at, _)| read_at.elapsed() < crate::engine::UPSTREAM_EVERY);
+    answers.retain(|_, (read_at, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
     answers.insert(key(root, reference), (Instant::now(), status));
 }
 
@@ -365,7 +392,7 @@ pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatu
         .into_keys()
         .filter_map(|dependency| {
             let reference = parse(&dependency)?;
-            let status = match settled_status(root, &reference) {
+            let status = match settled_status_recently(root, &reference) {
                 Some(NodeStatus::Done) => NodeStatus::Done,
                 _ => NodeStatus::Blocked,
             };
