@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/nickderobertis/onepipeline/compare/v0.18.5...v0.19.0) - 2026-09-02
+
+### Added
+
+- say why a ready node is not running, and stop the loop spending a core on a converged run ([#185](https://github.com/nickderobertis/onepipeline/pull/185))
+- *(views)* serve a run's row from a summary document instead of folding its journal ([#184](https://github.com/nickderobertis/onepipeline/pull/184))
+
+### Fixed
+
+- *(writeback)* read the plan store's answer without refusing fields this engine does not know ([#181](https://github.com/nickderobertis/onepipeline/pull/181))
+
 ## [0.18.5](https://github.com/nickderobertis/onepipeline/compare/v0.18.4...v0.18.5) - 2026-09-01
 
 ### Fixed
