@@ -12,6 +12,13 @@
 //! Every bound here is stated as work done rather than as time taken, so a
 //! loaded host cannot fail correct work — and every one of them is a bound the
 //! tree before this change would not have met.
+//!
+//! The one thing the harness substitutes throughout is `oneagentgraph`, a sibling
+//! behind its own subprocess boundary: the layer under test is this crate's
+//! reconcile loop, driven as the compiled binary over a real run store, and the
+//! counts asserted on are that real loop's own. A journey has to hold a node in
+//! flight for a whole minute to reach the converged state, and a model turn is
+//! not what any of these are about. Each journey says below what it holds open.
 
 use std::time::{Duration, Instant};
 
@@ -119,11 +126,8 @@ fn one(world: &World, run: &str, kind: &str, node: &str) -> Value {
 // is real here — the shipped binary, a real plan store, a real dispatch, the shipped intervals
 // — and the counters are the driver's own account of the one thing left, which the host
 // otherwise only feels as CPU a loaded machine hands out as it likes.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
     let world = measured("loopcost-idle");
@@ -195,11 +199,8 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
 // pass that refolds the journal — is invisible to every user-facing surface and shows only as
 // a run that costs more the longer it has been running. The runs, the plans, the dispatches
 // and the binary are the real ones; the byte count is the only observation of the property.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
     let world = measured("loopcost-scale");
@@ -283,11 +284,8 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 // read the user's way, and what the loop did to produce it, which nothing outside the process
 // reports. The journey drives the real CLI end to end and reads the real journal for one half
 // of the ratio; the counters are the only account of the other half.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
     let world = measured("loopcost-changes");
@@ -369,11 +367,8 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 // real driver reads a real upstream store, which produces no record either way. Both runs,
 // both stores and both drivers are real and the shipped intervals are unchanged; the counters
 // are what makes "how often" observable at all.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     let world = measured("loopcost-paced");
@@ -444,11 +439,8 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
 /// run does not write, and live beside the fixtures that produce them —
 /// `loopcost::a_consumer_proceeds_within_a_second_of_its_upstream_settling` below,
 /// and `adoption::a_published_node_is_held_until_the_release_answers_and_by_nothing_else`.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn every_answer_the_loop_owes_arrives_inside_a_second() {
     let world = World::new("loopcost-latency");
@@ -530,11 +522,8 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
 ///
 /// The one bound that turns on state this run does not write: nothing tells this
 /// driver the upstream moved, so what it costs is the interval the loop looks on.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn a_consumer_proceeds_within_a_second_of_its_upstream_settling() {
     let world = World::new("loopcost-upstream");
@@ -583,11 +572,8 @@ fn a_consumer_proceeds_within_a_second_of_its_upstream_settling() {
 /// would leave the board reported behind until something else happened to the
 /// run. Here nothing else does: one node is held open, nobody edits anything, and
 /// the surface has to arrive on a wake the worker caused.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_planner() {
     let world = World::new("loopcost-unprojected");
@@ -645,11 +631,8 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
 /// frozen at an earlier pass with nothing anywhere saying why. Driven through the
 /// real CLI over a real run store, and read where a detached driver's failures
 /// are read — the run's own driver log.
-// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
-// loop, driven as the compiled binary over a real run store, and the counts asserted on are
-// that real loop's own. What the harness substitutes is `oneagentgraph`, a sibling behind
-// its own subprocess boundary, so a journey can hold one node in flight for a whole minute
-// without paying for a model turn — which is the converged state every bound here is about.
+// llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
+// one node held in flight for a whole minute — see the module note above.
 #[test]
 fn a_driver_that_cannot_write_the_counts_it_was_asked_for_says_so() {
     let world = measured("loopcost-unwritable");
