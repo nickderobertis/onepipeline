@@ -43,7 +43,7 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
-use onepipeline::views::RunPaths;
+use onepipeline::views::{RunPaths, RunSummary, RunTelemetry, SUMMARY_SCHEMA_VERSION};
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -1584,6 +1584,71 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+}
+
+/// Every field a summary document carries, taken off a value built through the
+/// type with every absence filled in.
+///
+/// Built rather than listed: a field added to `RunSummary` does not compile here
+/// until it is given a value, and an optional one left absent would not reach the
+/// wire — so what this answers is the whole inventory a consumer can read.
+fn summary_fields() -> BTreeSet<String> {
+    let document = RunSummary {
+        schema_version: SUMMARY_SCHEMA_VERSION,
+        run_id: "gated".into(),
+        last_write_at: Some(1_786_000_000_000),
+        last_event_kind: Some("node-settled".into()),
+        event_count: 11,
+        node_counts: [("done".to_string(), 1)].into_iter().collect(),
+        stop_recorded: true,
+        graph_complete: true,
+        decisions_pending: 1,
+        surfaces_queued: 1,
+        surfaces_read: 1,
+        awaiting_human_action: true,
+        project: "plans:gated".into(),
+        launcher: "claude-code".into(),
+        session: "a-session".into(),
+        started_at: Some("2026-01-01T00:00:00.000Z".into()),
+        pid: NonZeroU32::new(4_242),
+        host: Some("a-host".into()),
+        started: Some("linux-proc-stat:1".into()),
+        timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
+            .expect("the telemetry golden reads back into the types"),
+        journal_len: 8_192,
+        journal_mtime_ms: 1_786_000_000_100,
+    };
+    serde_json::to_value(&document)
+        .expect("a summary is an object")
+        .as_object()
+        .expect("a summary is an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// The summary document's schema version and field inventory are the type's own.
+///
+/// The contract names neither, so entry 56 is the only place the document a
+/// consumer parses is written down — and a divergence nothing gates quietly stops
+/// being true. Both directions, as entries 39 to 41 already hold their own: a
+/// field the type grows and the entry does not name fails here, and so does a name
+/// the entry keeps after the type dropped it.
+#[test]
+fn the_summary_document_is_what_the_divergence_record_names() {
+    let block = divergence_block("56.");
+    assert_eq!(
+        block["schema_version"].as_u64(),
+        Some(u64::from(SUMMARY_SCHEMA_VERSION)),
+        "entry 56 states a schema version this build does not write"
+    );
+    let named: BTreeSet<String> = serde_json::from_value(block["fields"].clone())
+        .expect("entry 56 names the document's fields");
+    assert_eq!(
+        named,
+        summary_fields(),
+        "entry 56's inventory is not the document this build writes"
+    );
 }
 
 /// The amendment lever and the node-validator hook this build carries **beyond**

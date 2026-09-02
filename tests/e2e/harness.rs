@@ -236,17 +236,24 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
 /// This boundary reads every `location` the real `onetaskgraph` declares — and the
 /// revision this suite pins declares none, which is why the field is optional here.
 ///
-/// Both this suite and `src/writeback.rs` carry a hand-written copy of a two-variant
-/// enum, and a copy of an external schema is exactly the thing that rots silently. But
-/// the copy is a *forward* tolerance rather than a mirror: `taskgraph::FIRST_REVISION`,
-/// which is the `onetaskgraph` every check here installs and drives, predates the field
-/// entirely, and the field arrived from the newer install a real host shells out to — as
-/// a whole suite going red. So what is asked of the authoritative source is the one
-/// thing that holds either way: whatever `onetaskgraph schema` declares, this boundary
-/// reads. Against the pinned revision that is an empty set beside a `Task` carrying no
-/// `location` at all; against a newer one it is the two spellings, and a third would
-/// fail here. `writeback::tests::the_suites_copy_of_a_location_is_this_one` holds the
-/// other copy against this one.
+/// This suite carries a hand-written copy of a two-variant enum, and a copy of an
+/// external schema is exactly the thing that rots silently. But the copy is a *forward*
+/// tolerance rather than a mirror: `taskgraph::FIRST_REVISION`, which is the
+/// `onetaskgraph` every check here installs and drives, predates the field entirely, and
+/// the field arrived from the newer install a real host shells out to — as a whole suite
+/// going red. So what is asked of the authoritative source is the one thing that holds
+/// either way: whatever `onetaskgraph schema` declares, this boundary reads. Against the
+/// pinned revision that is an empty set beside a `Task` carrying no `location` at all;
+/// against a newer one it is the two spellings, and a third would fail here.
+///
+/// **The copy is this suite's alone.** `src/writeback.rs` carried a second one, for this
+/// same field and this same reason, for as long as it mirrored the store's shape under
+/// `deny_unknown_fields`. It no longer denies unknown fields at all, so it neither
+/// enumerates `location` nor can be refused over how one is spelled, and
+/// `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
+/// drives that against the real binary. So there is one copy left to rot rather than two,
+/// and it is this one because this suite's own reader is still the one that refuses what
+/// it does not recognise — which is what the test below it pins.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
 // against the real sibling's declared schema, which is not a journey: it asks the same
 // compiled `onetaskgraph` every journey reads its store through, and no journey can assert

@@ -618,7 +618,7 @@ pub fn fold(events: &[Envelope]) -> RunState {
     state
 }
 
-fn fold_one(state: &mut RunState, event: &Envelope) {
+pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     state.last_write_at = Some(
         millis_of(&event.ts)
             .unwrap_or(0)

@@ -65,6 +65,17 @@ pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
 }
 
+/// What that counter stands at, for the checks that hold a bounded read bounded.
+///
+/// The loop's own report reads it through [`flush`] instead. This is the same
+/// account under a second name rather than a second account: `ledger::bytes_read`
+/// is what the summary's checks measure with, and the whole point of pointing it
+/// here is that they measure the number the host is actually told.
+#[cfg(test)]
+pub(crate) fn store_bytes() -> u64 {
+    STORE_BYTES.load(Ordering::Relaxed)
+}
+
 /// Whether this process was launched to report what its loop did.
 fn asked() -> bool {
     std::env::var_os(STATS_ENV).is_some_and(|value| !value.is_empty())

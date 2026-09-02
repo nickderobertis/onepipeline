@@ -1438,6 +1438,35 @@ fn unplaceable_now() -> String {
     format!("{}+00:00", fake::now().trim_end_matches('Z'))
 }
 
+/// One record a scenario asks this producer to publish out of its own order.
+///
+/// Both fields are the scenario's to choose because both are what a producer
+/// chooses: the pair is the whole of what a consumer has to place a record by. A
+/// closed shape, like every other scenario this double reads — a misspelled key
+/// is a scenario that would otherwise act out something it did not ask for.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutOfOrder {
+    /// Milliseconds from now to stamp it, behind where it is negative.
+    ms: i64,
+    /// The sequence number it claims on this producer's stream.
+    seq: u64,
+}
+
+/// The records a scenario asks this producer to publish out of its own order.
+///
+/// `<key>.out-of-order` is a JSON array of [`OutOfOrder`], one envelope each.
+fn out_of_order(dir: &std::path::Path, key: &str) -> Vec<OutOfOrder> {
+    let Some(script) = fake::node_script(dir, key, "out-of-order") else {
+        return Vec::new();
+    };
+    serde_json::from_str(&script).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "an out-of-order script holds a JSON array of {{ms, seq}}: {error}"
+        ))
+    })
+}
+
 /// The turn is over, so nothing can be delivered into it any more.
 fn close_turn(dir: &std::path::Path) {
     let _ = std::fs::remove_file(turn_record(dir, &graph_run()));
@@ -1667,6 +1696,36 @@ fn emit(
             Err(error) => fake::fail(&format!("a turn close is not an object: {error}")),
         },
     );
+    // Records this producer publishes **out of its own order**, when a scenario
+    // asks for them. A producer's `seq` is its own statement of the order it
+    // wrote things in and its stamps do not have to agree with it: the real
+    // sibling's `oneharness-session` record is published out of band and stamped
+    // when its session *opened*, so it reaches a consumer behind records already
+    // written. A consumer folding this stream one record at a time has to place
+    // each arrival somewhere or read the stream again, and this is what asks it
+    // to.
+    for record in out_of_order(dir, key) {
+        let (ms, seq) = (record.ms, record.seq);
+        let kind = oneagentgraph::event::EventKind::TurnActivity;
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::moved_by(ms),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": kind.as_str(),
+                "labels": stamp_session(&labels, &stream(), kind),
+                "payload": {
+                    "kind": "tool_call",
+                    "name": "bash",
+                    "detail": "echo out of this producer's own order",
+                    "message": format!("published at {ms}ms under seq {seq}"),
+                },
+            })
+        );
+    }
     // The report is *stored*, and the settlement says where — the sibling's own
     // contract, and the only reason a turn's tools and words survive the
     // process that produced them. Under a directory of this member's own,
