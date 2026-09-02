@@ -918,7 +918,7 @@ fn converge(
             } else {
                 Duration::MAX
             },
-            if releases.awaits_anything() || releases.relays_anything(state) {
+            if releases.names_a_release_dependency() || releases.relays_anything(state) {
                 until_due(took_up_releases, releases.take_up_every())
             } else {
                 Duration::MAX

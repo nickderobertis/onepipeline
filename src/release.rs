@@ -605,13 +605,16 @@ impl Watch {
         arrived
     }
 
-    /// Whether any node in this run is waiting on an out-of-repository release.
+    /// Whether any node in this run names a dependency outside its own
+    /// repository, which is the cheap half of asking whether one is waiting.
     ///
-    /// What it decides is whether the loop wakes for a release at all. A run
-    /// whose nodes name no dependency outside their own repository has nothing to
-    /// ask about and nothing to take up, so it never pays the interval above —
-    /// which is most runs.
-    pub(crate) fn awaits_anything(&self) -> bool {
+    /// What it decides is whether the loop wakes for a release at all, so it is
+    /// deliberately the wider question: a run whose nodes name no such dependency
+    /// has nothing to ask about and nothing to take up, and never pays the
+    /// interval above — which is most runs. A run that names one goes on waking
+    /// for it after the answer has arrived, because the answer this holds is a
+    /// cache of a thing another process writes.
+    pub(crate) fn names_a_release_dependency(&self) -> bool {
         self.unresolved || self.dependencies.values().any(|of| !of.is_empty())
     }
 
