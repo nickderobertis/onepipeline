@@ -1629,25 +1629,25 @@ fn summary_fields() -> BTreeSet<String> {
 
 /// The summary document's schema version and field inventory are the type's own.
 ///
-/// The contract names neither, so entry 54 is the only place the document a
+/// The contract names neither, so entry 56 is the only place the document a
 /// consumer parses is written down — and a divergence nothing gates quietly stops
 /// being true. Both directions, as entries 39 to 41 already hold their own: a
 /// field the type grows and the entry does not name fails here, and so does a name
 /// the entry keeps after the type dropped it.
 #[test]
 fn the_summary_document_is_what_the_divergence_record_names() {
-    let block = divergence_block("54.");
+    let block = divergence_block("56.");
     assert_eq!(
         block["schema_version"].as_u64(),
         Some(u64::from(SUMMARY_SCHEMA_VERSION)),
-        "entry 54 states a schema version this build does not write"
+        "entry 56 states a schema version this build does not write"
     );
     let named: BTreeSet<String> = serde_json::from_value(block["fields"].clone())
-        .expect("entry 54 names the document's fields");
+        .expect("entry 56 names the document's fields");
     assert_eq!(
         named,
         summary_fields(),
-        "entry 54's inventory is not the document this build writes"
+        "entry 56's inventory is not the document this build writes"
     );
 }
 
@@ -3385,6 +3385,43 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
         );
     }
     assert!(CONTRACT.contains("executor_has_capacity"));
+}
+
+/// The sentence entry 54 proposes to amend is one the contract still carries.
+///
+/// The entry is open, so the contract says nothing about what a live edit does to
+/// a node's `consumes` and there is no fenced block to drive. What can drift is
+/// the entry's *citation*: an amendment that reworded the `retry` paragraph would
+/// leave the register naming a sentence nobody can find, and an open proposal
+/// nothing gates quietly stops being true.
+#[test]
+fn the_consumes_divergence_quotes_a_sentence_the_contract_still_carries() {
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("54."))
+        .expect("the divergence record carries entry 54");
+    let quoted = entry
+        .lines()
+        .skip_while(|line| !line.starts_with("> "))
+        .take_while(|line| line.starts_with("> "))
+        .map(|line| line.trim_start_matches("> "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !quoted.is_empty(),
+        "entry 54 quotes no sentence of the contract"
+    );
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        contract.contains(&quoted),
+        "entry 54 names a sentence the contract no longer carries: {quoted}"
+    );
+    assert!(
+        !contract.contains("consumes` with it"),
+        "the contract now states what an edit does to `consumes`; entry 54 has been ruled on"
+    );
 }
 
 /// The templated adoption instruction this build renders is exactly what the

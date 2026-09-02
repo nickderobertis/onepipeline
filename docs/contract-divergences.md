@@ -2799,7 +2799,75 @@ publishes.
 }
 ```
 
-## 54. A listing reads every byte of every run, and there is no cheap read to name — OPEN
+## 54. A live edit moves a node's `deps` and leaves its `consumes` behind, which is a deadlock rather than a missing feature — OPEN
+
+**Proposal (for the planner who owns the contract): every live edit that changes a
+node's `deps` carries that node's `consumes` with it — `retry` **rekeys** a
+dependent's entry from the superseded id onto the replacement's, `drop` with
+`dependents: detach` **removes** the entry keyed on the dropped dependency, and
+`reparent` **removes** every entry whose dep the new list no longer carries — so
+the edit leaves a graph that is valid for the same reason it was valid before.**
+
+The sentence it would amend is in the channel contract's `retry` paragraph:
+
+> The superseded node leaves the graph in the **same edit**, which emits
+> `node-dropped` — a cancelled node left in a continuous graph holds the run in
+> `waiting` for ever — and what became of it stays in the run's record as its own
+> `node-settled` and the `edit-committed` that replaced it.
+
+It states the rewiring without saying what becomes of a target keyed on the id
+being rewired away from. `consumes` is keyed by **dependency node id** — a plan
+node's field, and the only key a dependency can be named by, since two nodes in
+one repository can want different targets — and `validate_node` refuses a node
+whose `consumes` names anything that is not one of its own `deps`.
+
+**Nothing was reachable through this, in either direction.** A `retry` refuses a
+replacement carrying the superseded node's own id, so the id necessarily changes
+and the dependent's key necessarily goes stale; the candidate graph then fails
+validation and the whole edit is refused. Correcting the dependent first does not
+work either — at that moment its `deps` still names the old id, so the corrected
+`consumes` is refused for naming something that is not a dep, and `requeue`
+refuses amending `deps` by name and directs the caller to `reparent`, which moves
+`deps` without moving `consumes`. Replacing the dependent instead meets `drop`'s
+publication-anchor guard. Measured: this host's first plan to use
+`adoption`/`consumes` lost a node to a provider `spawn-error` and could not be
+retried past it, so a run was one provider hiccup away from a full relaunch.
+
+**No target is invented, defaulted, or altered.** The only values in a graph after
+an edit are ones a plan or an accepted edit stated: a rekey carries the value
+across unchanged, and the other two cases only remove. A replacement that states
+no `deps` of its own already inherits the superseded node's `deps`, and it
+inherits that node's `consumes` on the same condition and in the same way; one
+that states its own is answered with what it stated. `requeue` still refuses to
+amend `id` and `deps`, and `validate_node` still refuses a `consumes` key that is
+not a dep — this removes the *cause* of that refusal on three paths rather than
+relaxing the rule, because the rule is what stops a plan silently not applying a
+target its author wrote.
+
+**The operation stream carries what replay needs, because it is what replay
+rebuilds `deps` from.** `edge-added` gains one optional field, `target`, omitted
+where the edge has none — which is every edge in every record written before it
+existed, so a build that predates it reads those records exactly as it did. No
+other operation gains a field: the removals are ones a record already says enough
+to reconstruct. `node-dropped` takes every entry keyed on the node that left, and
+`reparent` keeps only the entries whose dep the new list carries.
+
+**Neither removal hangs off `edge-removed`, and that is the load-bearing part.** A
+`reparent` records an `edge-removed` for every dep the node had and an
+`edge-added` for every dep it now has, so a dep that survives is recorded as
+removed and immediately re-added. An older build accepted such a reparent whenever
+the target it consumed a surviving dep at kept naming a dep, and wrote no target
+on the edge that brought it back — so a removal on `edge-removed` would drop a
+target that record has no way to restore. Attached instead to the operations that
+actually take a dependency away, replaying a run's own journal from empty lands on
+the same `consumes` the reconciler compiled whether the record predates this work
+or not, and no checked-in record changes shape.
+
+This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
+could work around, and the only interface it adds is an optional field on a record
+this crate both writes and reads.
+
+## 56. A listing reads every byte of every run, and there is no cheap read to name — OPEN
 
 **Proposal (for the planner who owns the contract): name the per-run summary
 document and the bounded read over it in the Views paragraph, and add the
@@ -2902,3 +2970,4 @@ what lands here reaches it through a release rather than through a branch.
 sentence this would change is the Views paragraph's first, which today reads
 `Views (CLI): runs, status, host, monitor …`; the proposal is a second sentence
 beside it naming the structured read and the document behind it.
+

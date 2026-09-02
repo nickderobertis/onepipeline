@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -39,6 +40,17 @@ pub enum Operation {
         from: String,
         /// The dependent.
         to: String,
+        /// The release target the dependent consumes this dependency at, where
+        /// it states one.
+        ///
+        /// Carried because `consumes` is keyed by **dependency node id**, so an
+        /// edge that moves moves the target with it — and replay reconstructs
+        /// `deps` from these operations, so a target the reconciler rekeyed and
+        /// this record did not carry would leave the projected graph differing
+        /// from the executing one. Omitted where the edge has no target, which
+        /// is every edge in every record written before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetName>,
     },
     /// A dependency edge was removed.
     EdgeRemoved {
@@ -864,6 +876,7 @@ fn compile_add(graph: &mut Graph, node: &Node) -> Result<Vec<Operation>> {
         operations.push(Operation::EdgeAdded {
             from: dep.clone(),
             to: node.id.clone(),
+            target: node.consumes.get(dep).cloned(),
         });
     }
     graph.insert(node.clone());
@@ -883,6 +896,7 @@ fn compile_reparent(
         return Err(refuse(format!("reparent: node '{id}' has already started")));
     }
     let previous = node.deps.clone();
+    let consumes = node.consumes.clone();
     let mut operations: Vec<Operation> = previous
         .iter()
         .map(|dep| Operation::EdgeRemoved {
@@ -893,6 +907,9 @@ fn compile_reparent(
     operations.extend(deps.iter().map(|dep| Operation::EdgeAdded {
         from: dep.clone(),
         to: id.to_string(),
+        // The dep survived the reparent, so the target this node stated for it
+        // survives too — the edge is the same edge, moved nowhere.
+        target: consumes.get(dep).cloned(),
     }));
     operations.push(Operation::Reparent {
         node: id.to_string(),
@@ -901,6 +918,12 @@ fn compile_reparent(
     });
     if let Some(node) = graph.get_mut(id) {
         node.deps = deps.to_vec();
+        // A target for a dep the new list no longer carries names nothing. It
+        // is dropped rather than kept, because `validate_node` refuses a
+        // `consumes` key that is not a dep — and inventing one for a new dep
+        // would apply a target the plan's author never wrote.
+        node.consumes
+            .retain(|dep, _| node.deps.iter().any(|d| d == dep));
     }
     Ok(operations)
 }
@@ -952,6 +975,11 @@ fn compile_drop(
             for dependent in &direct {
                 if let Some(node) = graph.get_mut(dependent) {
                     node.deps.retain(|dep| dep != id);
+                    // The dependency is gone, so a target naming it names
+                    // nothing — and `validate_node` refuses a `consumes` key
+                    // that is not a dep, which is what left this edit refusable
+                    // in every order an operator could try.
+                    node.consumes.remove(id);
                 }
                 operations.push(Operation::EdgeRemoved {
                     from: id.to_string(),
@@ -1005,6 +1033,12 @@ fn compile_retry(
     let mut replacement = replacement;
     if replacement.deps.is_empty() {
         replacement.deps = target.deps.clone();
+        // On the same condition and in the same way: a replacement that states
+        // no dependencies of its own consumes them at the targets the node it
+        // supersedes stated. `validate_node` above already refused a
+        // replacement that named targets without naming the deps they key on,
+        // so there is nothing of its own here to overwrite.
+        replacement.consumes.clone_from(&target.consumes);
     }
 
     let direct = graph.dependents_of(id);
@@ -1033,15 +1067,25 @@ fn compile_retry(
         operations.push(Operation::EdgeAdded {
             from: dep.clone(),
             to: replacement.id.clone(),
+            target: replacement.consumes.get(dep).cloned(),
         });
     }
     graph.insert(replacement.clone());
     for dependent in &direct {
+        // `consumes` is keyed by dependency node id, so an edge rewired onto
+        // the replacement takes the target keyed on the superseded id with it.
+        // Rekeyed rather than re-derived: the value is the one the plan or an
+        // accepted edit stated, carried across unchanged.
+        let mut carried = None;
         if let Some(node) = graph.get_mut(dependent) {
             for dep in &mut node.deps {
                 if dep == id {
                     dep.clone_from(&replacement.id);
                 }
+            }
+            carried = node.consumes.remove(id);
+            if let Some(carried) = carried.clone() {
+                node.consumes.insert(replacement.id.clone(), carried);
             }
         }
         operations.push(Operation::EdgeRemoved {
@@ -1051,6 +1095,7 @@ fn compile_retry(
         operations.push(Operation::EdgeAdded {
             from: replacement.id.clone(),
             to: dependent.clone(),
+            target: carried,
         });
     }
     // The superseded node leaves the graph, exactly as a `drop` would take it:
@@ -1390,10 +1435,22 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::NodeAdded { node, .. } => graph.insert((**node).clone()),
         Operation::NodeDropped { node, .. } => {
             graph.remove(node);
+            // No node can consume one that has left the graph, and
+            // `validate_node` refuses a `consumes` key that is not a dep. This
+            // is where the removal belongs rather than on `edge-removed`: a
+            // `reparent` records an edge it keeps as removed and then re-added,
+            // and a record written before an edge carried a target cannot
+            // restore what an unconditional removal there would have dropped.
+            for id in graph.ids().cloned().collect::<Vec<_>>() {
+                if let Some(other) = graph.get_mut(&id) {
+                    other.consumes.remove(node);
+                }
+            }
         }
         Operation::Reparent { node, to, .. } => {
             if let Some(node) = graph.get_mut(node) {
                 node.deps.clone_from(to);
+                node.consumes.retain(|dep, _| to.iter().any(|d| d == dep));
             }
         }
         Operation::EdgeRemoved { from, to } => {
@@ -1401,13 +1458,29 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                 node.deps.retain(|dep| dep != from);
             }
         }
-        Operation::EdgeAdded { from, to } => {
+        // llmlint: ignore-block[changed_behavior_has_e2e] the `None` half has no
+        // invocation a user can type behind it, and it changes nothing: a record
+        // stating no target needs a journal an *older build* wrote, and what this
+        // arm does with one is byte-for-byte what that build's own `apply` did —
+        // push the dep, touch no target. The removals were moved off
+        // `edge-removed` so that stays true, which is what
+        // `a_record_written_before_an_edge_carried_a_target_replays_unchanged`
+        // holds over the real `apply`. What a user *can* reach is the `Some` half,
+        // driven end to end through the compiled binary by the four journeys in
+        // `tests/e2e/live_edit.rs` that read a target back out of the record.
+        Operation::EdgeAdded { from, to, target } => {
             if let Some(node) = graph.get_mut(to) {
                 if !node.deps.contains(from) {
                     node.deps.push(from.clone());
                 }
+                // Only where the record states one, so a node's own definition —
+                // which `node-added` carried whole — is left as it stands.
+                if let Some(target) = target {
+                    node.consumes.insert(from.clone(), target.clone());
+                }
             }
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Operation::NodeParked { node } => {
             if let Some(node) = graph.get_mut(node) {
                 node.parked = true;
@@ -1478,6 +1551,27 @@ mod tests {
         }
     }
 
+    /// A release target, spelled the one way a plan spells one.
+    fn target(name: &str) -> TargetName {
+        name.parse().expect("a release target name")
+    }
+
+    /// Every release target the graph holds, as `(node, dep, target)`.
+    ///
+    /// The whole of what an edit is allowed to move: a target that appears here
+    /// afterwards and was not stated by a plan or by the edit itself is one this
+    /// crate invented.
+    fn targets_in(graph: &Graph) -> BTreeSet<(String, String, String)> {
+        graph
+            .iter()
+            .flat_map(|node| {
+                node.consumes
+                    .iter()
+                    .map(|(dep, target)| (node.id.clone(), dep.clone(), target.to_string()))
+            })
+            .collect()
+    }
+
     fn graph_of(nodes: Vec<Node>) -> Graph {
         Graph::from_plan(&Plan {
             schema_version: PLAN_SCHEMA_VERSION,
@@ -1521,7 +1615,7 @@ mod tests {
         assert!(graph.contains("b"));
         assert!(matches!(operations[0], Operation::NodeAdded { .. }));
         assert!(
-            matches!(&operations[1], Operation::EdgeAdded { from, to } if from == "a" && to == "b")
+            matches!(&operations[1], Operation::EdgeAdded { from, to, .. } if from == "a" && to == "b")
         );
     }
 
@@ -2915,6 +3009,7 @@ mod tests {
             Operation::EdgeAdded {
                 from: "a".into(),
                 to: "gone".into(),
+                target: None,
             },
             Operation::EdgeRemoved {
                 from: "a".into(),
@@ -2946,6 +3041,343 @@ mod tests {
         assert_eq!(graph.len(), 1);
     }
 
+    /// `consumes` is keyed by **dependency node id**, so an edge a `retry`
+    /// rewires takes the target keyed on it along.
+    ///
+    /// The shape this defect was found in: a lifecycle node whose `published`
+    /// dependent consumes it at a named target, lost to a provider failure. Left
+    /// behind, the dependent's key names a node its own `deps` no longer carry,
+    /// `graph::validate_node` refuses the candidate graph, and the whole retry is
+    /// rejected — which is a run nothing can move past, because the replacement's
+    /// id necessarily differs from the superseded one.
+    #[test]
+    fn a_retry_rekeys_a_dependents_consumes_onto_the_replacement() {
+        let engine = Node {
+            repo: Some("owner/engine".into()),
+            ..agent("engine-run-reading", &[])
+        };
+        let mut adopt = Node {
+            adoption: Some(onevcs::Adoption::Published),
+            ..agent("ao-adopt", &["engine-run-reading"])
+        };
+        adopt
+            .consumes
+            .insert("engine-run-reading".into(), target("crate"));
+        // A second dependent that consumes nothing, so "nothing was defaulted"
+        // is asserted on the same edit that rekeys.
+        let plain = agent("audit", &["engine-run-reading"]);
+        let mut graph = graph_of(vec![engine, adopt, plain]);
+        let stated = targets_in(&graph);
+
+        compile(
+            &mut graph,
+            &frontier(&[("engine-run-reading", NodeStatus::Failed)]),
+            &Command::Retry {
+                id: "engine-run-reading".into(),
+                node: Node {
+                    repo: Some("owner/engine".into()),
+                    ..agent("engine-run-reading-2", &[])
+                },
+            },
+        )
+        .expect("a node another node consumes retries");
+
+        let adopt = graph.get("ao-adopt").expect("the dependent survived");
+        assert_eq!(adopt.deps, vec!["engine-run-reading-2".to_string()]);
+        assert_eq!(
+            adopt.consumes,
+            BTreeMap::from([("engine-run-reading-2".to_string(), target("crate"))]),
+            "the target did not follow the edge onto the replacement"
+        );
+        assert!(
+            graph
+                .get("audit")
+                .expect("the other dependent")
+                .consumes
+                .is_empty(),
+            "a dependent that stated no target was given one"
+        );
+        assert_eq!(
+            targets_in(&graph)
+                .into_iter()
+                .map(|(_, _, target)| target)
+                .collect::<BTreeSet<_>>(),
+            stated
+                .into_iter()
+                .map(|(_, _, target)| target)
+                .collect::<BTreeSet<_>>(),
+            "the retry altered a release target, or invented one"
+        );
+    }
+
+    /// A replacement that states no dependencies of its own inherits the
+    /// superseded node's — and inherits its targets on the same condition, since
+    /// a target is only meaningful beside the dep it keys on. One that states its
+    /// own dependencies is answered with what it stated, targets included.
+    #[test]
+    fn a_replacement_inherits_the_consumes_it_inherits_deps_with() {
+        let stated = |id: &str| {
+            let mut node = agent(id, &["engine", "packager"]);
+            node.consumes.insert("engine".into(), target("crate"));
+            node.consumes.insert("packager".into(), target("wheel"));
+            node
+        };
+        let base = || {
+            graph_of(vec![
+                agent("engine", &[]),
+                agent("packager", &[]),
+                stated("build"),
+            ])
+        };
+        let failed = frontier(&[("build", NodeStatus::Failed)]);
+
+        let mut graph = base();
+        compile(
+            &mut graph,
+            &failed,
+            &Command::Retry {
+                id: "build".into(),
+                node: agent("build-2", &[]),
+            },
+        )
+        .expect("a replacement stating no deps inherits them");
+        let inherited = graph.get("build-2").expect("the replacement");
+        assert_eq!(
+            inherited.deps,
+            vec!["engine".to_string(), "packager".to_string()]
+        );
+        assert_eq!(inherited.consumes, stated("build").consumes);
+
+        // And one that states its own is answered with what it stated: the
+        // inheritance is a default, never an override.
+        let mut graph = base();
+        let mut own = agent("build-2", &["packager"]);
+        own.consumes.insert("packager".into(), target("crate"));
+        compile(
+            &mut graph,
+            &failed,
+            &Command::Retry {
+                id: "build".into(),
+                node: own,
+            },
+        )
+        .expect("a replacement stating its own deps keeps them");
+        let stated_its_own = graph.get("build-2").expect("the replacement");
+        assert_eq!(stated_its_own.deps, vec!["packager".to_string()]);
+        assert_eq!(
+            stated_its_own.consumes,
+            BTreeMap::from([("packager".to_string(), target("crate"))]),
+            "the replacement was given the superseded node's targets over its own"
+        );
+    }
+
+    /// Detaching takes the dependency away, so the target keyed on it names
+    /// nothing and goes with it.
+    #[test]
+    fn dropping_a_consumed_node_takes_its_dependents_target_with_the_edge() {
+        let mut consumer = agent("ship", &["engine", "packager"]);
+        consumer.consumes.insert("engine".into(), target("crate"));
+        consumer.consumes.insert("packager".into(), target("wheel"));
+        let mut graph = graph_of(vec![agent("engine", &[]), agent("packager", &[]), consumer]);
+        let stated = targets_in(&graph);
+
+        compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Drop {
+                id: "engine".into(),
+                dependents: Dependents::Detach,
+            },
+        )
+        .expect("a node another node consumes detaches");
+
+        let ship = graph.get("ship").expect("the dependent survived");
+        assert_eq!(ship.deps, vec!["packager".to_string()]);
+        assert_eq!(
+            ship.consumes,
+            BTreeMap::from([("packager".to_string(), target("wheel"))]),
+            "the dropped dependency's target outlived the dependency"
+        );
+        assert!(
+            targets_in(&graph).is_subset(&stated),
+            "the drop invented or altered a release target"
+        );
+    }
+
+    /// A reparent replaces `deps` wholesale, so it drops exactly the targets
+    /// whose dep the new list no longer carries and leaves every other alone.
+    #[test]
+    fn reparenting_away_from_a_consumed_dep_drops_only_that_target() {
+        let mut consumer = agent("ship", &["engine", "packager"]);
+        consumer.consumes.insert("engine".into(), target("crate"));
+        consumer.consumes.insert("packager".into(), target("wheel"));
+        let mut graph = graph_of(vec![
+            agent("engine", &[]),
+            agent("packager", &[]),
+            agent("docs", &[]),
+            consumer,
+        ]);
+        let stated = targets_in(&graph);
+
+        compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Reparent {
+                id: "ship".into(),
+                deps: vec!["packager".into(), "docs".into()],
+            },
+        )
+        .expect("a node reparents away from a dep it consumes");
+
+        let ship = graph.get("ship").expect("the reparented node");
+        assert_eq!(ship.deps, vec!["packager".to_string(), "docs".to_string()]);
+        assert_eq!(
+            ship.consumes,
+            BTreeMap::from([("packager".to_string(), target("wheel"))]),
+            "the surviving dep's target moved, or the removed dep's target stayed"
+        );
+        assert!(
+            targets_in(&graph).is_subset(&stated),
+            "the reparent invented or altered a release target"
+        );
+    }
+
+    /// This change removes the *cause* of `validate_node`'s refusal on three
+    /// paths; it does not relax the rule, and it does not widen `requeue`.
+    ///
+    /// Both refusals are what stops a plan silently not applying a target its
+    /// author wrote, and what keeps a rewiring recorded as the op that did it.
+    #[test]
+    fn neither_refusal_this_change_works_around_is_relaxed() {
+        let mut orphaned = agent("ship", &["engine"]);
+        orphaned.consumes.insert("packager".into(), target("crate"));
+        let refusal = graph::validate_node(&orphaned)
+            .expect_err("a target keyed on something that is not a dep is refused")
+            .to_string();
+        assert!(
+            refusal.contains("`consumes` names 'packager'")
+                && refusal.contains("not one of this node's deps"),
+            "{refusal}"
+        );
+
+        let mut parked = agent("ship", &["engine"]);
+        parked.parked = true;
+        let mut graph = graph_of(vec![agent("engine", &[]), parked]);
+        for key in ["id", "deps"] {
+            let mut amend = Map::new();
+            amend.insert(key.to_string(), Value::String("other".into()));
+            let message = compile(
+                &mut graph,
+                &Frontier::default(),
+                &Command::Requeue {
+                    id: "ship".into(),
+                    amend: Some(amend),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains("cannot amend"), "{message}");
+        }
+    }
+
+    /// A record written before `edge-added` carried a target replays exactly as
+    /// the build that wrote it executed.
+    ///
+    /// A `reparent` records an `edge-removed` for **every** dep it had and an
+    /// `edge-added` for every dep it now has, so a dep that survives is recorded
+    /// as removed and re-added. An older build accepted such a reparent whenever
+    /// the target it consumed a *surviving* dep at kept naming a dep — and wrote
+    /// no target on the edge that brought it back. So the removal a replay
+    /// performs cannot hang off `edge-removed`: it would drop a target that
+    /// record has no way to restore.
+    #[test]
+    fn a_record_written_before_an_edge_carried_a_target_replays_unchanged() {
+        let mut ship = agent("ship", &["engine", "packager"]);
+        ship.consumes.insert("engine".into(), target("crate"));
+        ship.consumes.insert("packager".into(), target("wheel"));
+        let mut graph = graph_of(vec![
+            agent("engine", &[]),
+            agent("packager", &[]),
+            agent("docs", &[]),
+            ship,
+        ]);
+
+        // The operations an older build wrote for `reparent ship [packager,
+        // docs]`: no `target` anywhere, because the field did not exist.
+        for operation in [
+            Operation::EdgeRemoved {
+                from: "engine".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeRemoved {
+                from: "packager".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeAdded {
+                from: "packager".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::EdgeAdded {
+                from: "docs".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::Reparent {
+                node: "ship".into(),
+                from: vec!["engine".into(), "packager".into()],
+                to: vec!["packager".into(), "docs".into()],
+            },
+        ] {
+            apply(&mut graph, &operation);
+        }
+
+        let ship = graph.get("ship").expect("the reparented node");
+        assert_eq!(ship.deps, vec!["packager".to_string(), "docs".to_string()]);
+        assert_eq!(
+            ship.consumes,
+            BTreeMap::from([("packager".to_string(), target("wheel"))]),
+            "replaying an older record lost a target it has no way to restore"
+        );
+
+        // The same for the other two ops that move `deps`. An older build
+        // accepted these only where no surviving node consumed what left, so a
+        // target it did carry is one keyed on a dependency neither edit touched —
+        // and it survives both, exactly as it did before this field existed.
+        for operation in [
+            Operation::EdgeRemoved {
+                from: "docs".into(),
+                to: "ship".into(),
+            },
+            Operation::NodeDropped {
+                node: "docs".into(),
+                dependents: Dependents::Detach,
+            },
+            Operation::EdgeRemoved {
+                from: "packager".into(),
+                to: "ship".into(),
+            },
+            Operation::EdgeAdded {
+                from: "packager-2".into(),
+                to: "ship".into(),
+                target: None,
+            },
+            Operation::NodeDropped {
+                node: "packager".into(),
+                dependents: Dependents::Detach,
+            },
+        ] {
+            apply(&mut graph, &operation);
+        }
+        let ship = graph.get("ship").expect("the node both edits moved");
+        assert_eq!(ship.deps, vec!["packager-2".to_string()]);
+        assert!(
+            ship.consumes.is_empty(),
+            "replaying older records left a target keyed on a node that has gone: {:?}",
+            ship.consumes
+        );
+    }
+
     #[test]
     fn an_added_edge_is_not_duplicated_on_replay() {
         let mut graph = graph_of(vec![agent("a", &[]), agent("b", &["a"])]);
@@ -2954,6 +3386,7 @@ mod tests {
             &Operation::EdgeAdded {
                 from: "a".into(),
                 to: "b".into(),
+                target: None,
             },
         );
         assert_eq!(graph.get("b").expect("b").deps, vec!["a".to_string()]);
