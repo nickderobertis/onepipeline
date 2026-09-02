@@ -543,6 +543,23 @@ fn a_consumer_proceeds_within_a_second_of_its_upstream_settling() {
             .count()
             .eq(&0)
     });
+    // The hold names the reference whole. A cross-run dependency is the one id a
+    // reader cannot shorten and still act on — half of it names no node of any
+    // graph — so what the record carries is what the plan wrote.
+    let holds = world.events_of("watcher", "node-held");
+    let ship = holds
+        .iter()
+        .find(|event| event["labels"]["node"] == "ship")
+        .expect("the consumer is held");
+    assert!(
+        ship["payload"]["reasons"]
+            .as_array()
+            .expect("a hold carries reasons")
+            .iter()
+            .any(|reason| reason["kind"] == "dependencies"
+                && reason["blocking"] == json!(["run:moving#build"])),
+        "the hold on a cross-run dependency does not name the run it waits on: {ship}"
+    );
 
     // Only now does the upstream exist at all.
     let upstream = world.plan("moving", &plan_of("moving", vec![agent("build", &[])]));

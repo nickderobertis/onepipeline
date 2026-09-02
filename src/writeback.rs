@@ -768,17 +768,18 @@ struct DestinationProjectItem {
     _updated_at: Option<String>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
-    // llmlint: ignore[changed_behavior_has_e2e] this field cannot be driven end to end
-    // here: the `onetaskgraph` every check installs is `taskgraph::FIRST_REVISION`, which
-    // predates the field and can neither emit nor accept one, so a journey proving this
-    // read would have to be run against a stand-in for the very sibling under test. What
-    // it tolerates is the newer install a real host shells out to, whose whole page this
-    // boundary refused; the two hand-written copies of the shape are held against each
-    // other and against whatever the installed sibling declares by
+    // llmlint: ignore-block[changed_behavior_has_e2e] this field cannot be driven end to
+    // end here: the `onetaskgraph` every check installs is `taskgraph::FIRST_REVISION`,
+    // which predates the field and can neither emit nor accept one, so a journey proving
+    // this read would have to be run against a stand-in for the very sibling under test.
+    // What it tolerates is the newer install a real host shells out to, whose whole page
+    // this boundary refused; the two hand-written copies of the shape are held against
+    // each other and against whatever the installed sibling declares by
     // `the_suites_copy_of_a_location_is_this_one` and
     // `harness::this_boundary_reads_every_location_onetaskgraph_declares`.
     #[serde(rename = "location", default)]
     _location: Option<DestinationLocation>,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -818,17 +819,18 @@ struct DestinationTaskItem {
     _updated_at: Option<String>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
-    // llmlint: ignore[changed_behavior_has_e2e] this field cannot be driven end to end
-    // here: the `onetaskgraph` every check installs is `taskgraph::FIRST_REVISION`, which
-    // predates the field and can neither emit nor accept one, so a journey proving this
-    // read would have to be run against a stand-in for the very sibling under test. What
-    // it tolerates is the newer install a real host shells out to, whose whole page this
-    // boundary refused; the two hand-written copies of the shape are held against each
-    // other and against whatever the installed sibling declares by
+    // llmlint: ignore-block[changed_behavior_has_e2e] this field cannot be driven end to
+    // end here: the `onetaskgraph` every check installs is `taskgraph::FIRST_REVISION`,
+    // which predates the field and can neither emit nor accept one, so a journey proving
+    // this read would have to be run against a stand-in for the very sibling under test.
+    // What it tolerates is the newer install a real host shells out to, whose whole page
+    // this boundary refused; the two hand-written copies of the shape are held against
+    // each other and against whatever the installed sibling declares by
     // `the_suites_copy_of_a_location_is_this_one` and
     // `harness::this_boundary_reads_every_location_onetaskgraph_declares`.
     #[serde(rename = "location", default)]
     _location: Option<DestinationLocation>,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 

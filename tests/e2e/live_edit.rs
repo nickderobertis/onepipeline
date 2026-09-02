@@ -1324,6 +1324,44 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
         committed(world, &run).contains(&"drop".to_string())
     });
 
+    // A detached dependent still names the node the drop removed, and a
+    // dependency that is no longer in the graph holds nothing: the hold that had
+    // named `victim` clears while `victim` is still being held open, so what
+    // released the dependent was the edit rather than the run moving on.
+    world.until(
+        "the dependent's hold on the dropped node to clear",
+        |world| {
+            world
+                .events_of(&run, "node-unheld")
+                .iter()
+                .filter(|event| event["labels"]["node"] == "dependent")
+                .any(|event| {
+                    event["payload"]["released"]
+                        .as_array()
+                        .is_some_and(|released| {
+                            released
+                                .iter()
+                                .any(|reason| reason["blocking"] == json!(["victim"]))
+                        })
+                })
+        },
+    );
+    let restated: Vec<Value> = world
+        .events_of(&run, "node-held")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "dependent")
+        .filter(|event| {
+            event["payload"]["reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason["blocking"] != json!([])))
+        })
+        .collect();
+    assert_eq!(
+        restated.len(),
+        1,
+        "the dependent was held again for a node the drop had removed: {restated:?}"
+    );
+
     world.release("slow.go");
     world.release("victim.go");
     world.until("the run to settle", |world| {
