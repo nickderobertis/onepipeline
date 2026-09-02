@@ -23,6 +23,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Instant, SystemTime};
 
 use serde_json::{json, Value};
 
@@ -94,6 +96,7 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
     if !paths.exists() {
         return None;
     }
+    crate::loopstats::upstream_read();
     Some(ledger::read_lines(&paths.journal()).len() as u64)
 }
 
@@ -103,11 +106,101 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 /// a later one is done, which is the whole point of a planner retrying it.
 /// A record this build cannot read is skipped, the same way every other reader
 /// of a journal skips one.
+/// The loop's own answer: read now, whatever was read before.
+///
+/// Never served from what is remembered below, because the loop is what the
+/// freshness of a cross-DAG edge is promised against. Serving it a remembered
+/// answer would add that answer's age to the interval the loop already waits, so
+/// an upstream settling just after a read would go unseen for up to twice the
+/// interval — and a consumer's own bound is one interval's worth of that. What
+/// this does do is *refresh* what the quiet readers see, which is what makes
+/// theirs free.
 fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    let status = read_settled_status(root, reference);
+    remember(root, reference, status);
+    status
+}
+
+/// The same answer for a reader that must not write, which may be one the loop
+/// has already paid for.
+///
+/// Accepted up to twice [`UPSTREAM_EVERY`] old, which is deliberately looser than
+/// the loop's own cadence rather than equal to it: the loop refreshes on that
+/// cadence, so a window of exactly it would expire in the moment before each
+/// refresh and buy one of these readers its own read for the gap. What it costs
+/// is that a rendered row, or an edit's submission check, may name a cross-DAG
+/// status a second behind the run's — where before it cost another run's whole
+/// ledger, read again, for every record appended to this one's journal.
+///
+/// [`UPSTREAM_EVERY`]: crate::engine::UPSTREAM_EVERY
+fn settled_status_recently(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    if let Some(answered) = answered_within(root, reference, 2 * crate::engine::UPSTREAM_EVERY) {
+        return answered;
+    }
+    settled_status(root, reference)
+}
+
+/// What this process has already read an upstream's ledger to learn, and when.
+///
+/// More than one part of a driver asks this same question. The reconcile loop
+/// asks it on its own paced deadline, and every reader that resolves a graph's
+/// edges quietly asks it beside them — a view rendering a row, and the summary
+/// document's writer, which is asked once per record appended to a journal. Each
+/// answer costs a read of **another run's whole ledger**, so two consumers asking
+/// inside one interval is that ledger read twice over for one answer, and the
+/// second read is one nobody chose to spend.
+///
+/// Filled by every read, and read back only by
+/// [`settled_status_recently`] — the loop reads through [`settled_status`] and is
+/// never served from here, so nothing this holds can make the answer the loop
+/// acts on any older than its own interval already allows.
+static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
+
+/// One upstream node, under the runs root it was asked beneath.
+type Asked = (PathBuf, String, String);
+
+/// What that question answered, and when it was paid for.
+type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>)>;
+
+fn key(root: &Path, reference: &Reference) -> Asked {
+    (
+        root.to_path_buf(),
+        reference.run.clone(),
+        reference.node.clone(),
+    )
+}
+
+/// A lock another thread poisoned still holds a sound answer: every writer here
+/// replaces one whole entry, so nothing can be observed half-written.
+fn answers() -> std::sync::MutexGuard<'static, Answers> {
+    ANSWERED.lock().unwrap_or_else(|held| held.into_inner())
+}
+
+fn answered_within(
+    root: &Path,
+    reference: &Reference,
+    age: std::time::Duration,
+) -> Option<Option<NodeStatus>> {
+    answers()
+        .get(&key(root, reference))
+        .filter(|(read_at, _)| read_at.elapsed() < age)
+        .map(|(_, status)| *status)
+}
+
+fn remember(root: &Path, reference: &Reference, status: Option<NodeStatus>) {
+    let mut answers = answers();
+    // Dropped as they go stale rather than on a size, so what is held is one
+    // entry per upstream a live graph is actually asking about.
+    answers.retain(|_, (read_at, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
+    answers.insert(key(root, reference), (Instant::now(), status));
+}
+
+fn read_settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
     let paths = RunPaths::under(root, &reference.run);
     if !paths.exists() {
         return None;
     }
+    crate::loopstats::upstream_read();
     ledger::read_lines(&paths.journal())
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -185,6 +278,34 @@ impl Observer {
             state.cross_dag_baselines.clone(),
             state.cross_dag_reported.clone(),
         )
+    }
+
+    /// A cheap look at every upstream ledger this graph's edges are answered by.
+    ///
+    /// Length and modification time, and no read at all. A run's ledger is
+    /// append-only and its length *is* the extent this observer measures against,
+    /// so a `stat` answers the only question a re-read could: has that run done
+    /// anything since we last looked? The reconcile loop waits on this, so an
+    /// upstream that has not moved never *wakes* it — which is what keeps a
+    /// consumer watching a quiet upstream from paying a pass for it. What still
+    /// re-reads that ledger is the loop's own paced deadline, `UPSTREAM_EVERY`,
+    /// because the freshness the edge is promised is a bound on how stale the
+    /// answer may be rather than on how quiet the upstream is.
+    pub fn marks(&self, graph: &Graph) -> BTreeMap<String, Option<(u64, SystemTime)>> {
+        edges(graph)
+            .into_keys()
+            .filter_map(|dependency| parse(&dependency))
+            .map(|reference| {
+                let journal = RunPaths::under(&self.root, &reference.run).journal();
+                let mark = std::fs::metadata(&journal).ok().map(|metadata| {
+                    (
+                        metadata.len(),
+                        metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    )
+                });
+                (reference.run, mark)
+            })
+            .collect()
     }
 
     /// Resolve every edge the graph names, recording what it learns.
@@ -271,7 +392,7 @@ pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatu
         .into_keys()
         .filter_map(|dependency| {
             let reference = parse(&dependency)?;
-            let status = match settled_status(root, &reference) {
+            let status = match settled_status_recently(root, &reference) {
                 Some(NodeStatus::Done) => NodeStatus::Done,
                 _ => NodeStatus::Blocked,
             };

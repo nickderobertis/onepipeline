@@ -74,6 +74,25 @@ struct StoreQualified<T> {
     item: T,
 }
 
+/// Where the store says an entity is, on the two terms a reader can act on.
+///
+/// Externally tagged with exactly two variants, so the JSON is `{"url": "https://…"}`
+/// or `{"path": "/home/…"}` and which key is present is what tells them apart. An
+/// unknown key is an unknown *variant*, which is refused here exactly as an unknown
+/// field is refused on the structs around it — so this widens what the boundary accepts
+/// by the one shape `onetaskgraph` documents and by nothing else. It is read *forward*:
+/// the revision the checks pin predates the field, and this is what lets the suite read
+/// a store served by the newer install a real host has.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoreLocation {
+    /// The entity lives at an external website, and this is a link a reader can open.
+    Url(String),
+    /// The entity is a file on the machine the source runs on, and this is its absolute
+    /// path.
+    Path(String),
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoreTask {
@@ -84,6 +103,11 @@ struct StoreTask {
     labels: Vec<StoreLabel>,
     project: Option<String>,
     url: Option<String>,
+    /// Absent where the source does not say, which means *it did not say* rather than
+    /// *this is nowhere*. Skipped on the way out so a task the source placed nowhere
+    /// renders exactly as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<StoreLocation>,
     created_at: Option<String>,
     updated_at: Option<String>,
     #[serde(default)]
@@ -101,6 +125,9 @@ struct StoreProject {
     status: StoreStatus,
     labels: Vec<StoreLabel>,
     url: Option<String>,
+    /// On exactly the terms of [`StoreTask::location`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<StoreLocation>,
     created_at: Option<String>,
     updated_at: Option<String>,
     #[serde(default)]
@@ -156,6 +183,169 @@ enum StoreItemKind {
     Task,
     Project,
 }
+
+/// A task page is read whether the source said where the task is or not, and both
+/// forms of saying are understood.
+///
+/// The **absent** form is what every journey in `store.rs` drives end to end: the
+/// `onetaskgraph` revision the checks pin predates the field, so a task read back
+/// through it never says where it is. What no source here produces is either form of
+/// *saying* — a newer install on a real host reports one on every task its `local-md`
+/// plugin serves, and that is what turned this suite red — so the two spellings are
+/// pinned here, beside the silence, against the boundary that actually validates them.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
+// validated boundary rather than a journey: what is asserted is which store pages this
+// harness will accept, which is the thing every journey built on it takes for granted
+// and none of them can assert about itself.
+#[test]
+fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
+    let page = |task: &str| {
+        format!(
+            r#"{{"items":[{{"id":"local:t","item":{task}}}],"next":null,
+               "plan":{{}},"errors":[]}}"#
+        )
+    };
+    let task = |extra: &str| {
+        format!(
+            r#"{{"id":"t","title":"probe","content":null,
+               "status":{{"category":"todo","name":"todo"}},"labels":[],
+               "project":null,"url":null{extra},"created_at":null,
+               "updated_at":null,"metadata":{{}},"repositories":[]}}"#
+        )
+    };
+    for (form, extra) in [
+        ("said nothing", String::new()),
+        (
+            "a path on this machine",
+            r#","location":{"path":"/home/who/tasks/t.md"}"#.to_owned(),
+        ),
+        (
+            "a link to open",
+            r#","location":{"url":"https://example.invalid/t"}"#.to_owned(),
+        ),
+    ] {
+        let read: Result<StoreResponse<StoreQualified<StoreTask>>, _> =
+            serde_json::from_str(&page(&task(&extra)));
+        let read = read.unwrap_or_else(|error| {
+            panic!("a store page whose source {form} is not read by this harness: {error}")
+        });
+        assert_eq!(read.items.len(), 1, "the page held one task where {form}");
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// This boundary reads every `location` the real `onetaskgraph` declares — and the
+/// revision this suite pins declares none, which is why the field is optional here.
+///
+/// This suite carries a hand-written copy of a two-variant enum, and a copy of an
+/// external schema is exactly the thing that rots silently. But the copy is a *forward*
+/// tolerance rather than a mirror: `taskgraph::FIRST_REVISION`, which is the
+/// `onetaskgraph` every check here installs and drives, predates the field entirely, and
+/// the field arrived from the newer install a real host shells out to — as a whole suite
+/// going red. So what is asked of the authoritative source is the one thing that holds
+/// either way: whatever `onetaskgraph schema` declares, this boundary reads. Against the
+/// pinned revision that is an empty set beside a `Task` carrying no `location` at all;
+/// against a newer one it is the two spellings, and a third would fail here.
+///
+/// **The copy is this suite's alone.** `src/writeback.rs` names `location` too, but no
+/// longer as a second copy of this shape: those types stopped denying unknown fields, and
+/// the field is held there as the raw document, so no spelling of one can be refused and
+/// there is nothing there for this enum to agree with. That is what
+/// `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
+/// drives, at a `{"kind": …, "url": …}` neither spelling below would have accepted. So one
+/// copy is left to rot rather than two, and it is this one, because this suite's own reader
+/// is still the one that refuses what it does not recognise — which is what the test below
+/// it pins.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
+// against the real sibling's declared schema, which is not a journey: it asks the same
+// compiled `onetaskgraph` every journey reads its store through, and no journey can assert
+// about the validation standing between it and that store.
+#[test]
+fn this_boundary_reads_every_location_onetaskgraph_declares() {
+    let world = World::new("harness-location-schema");
+    let output = world
+        .store_cmd(&["schema"])
+        .output()
+        .expect("the real onetaskgraph prints its schema");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let schema: Value =
+        serde_json::from_slice(&output.stdout).expect("the schema is machine-readable");
+    let task = &schema["roots"]["Task"];
+    let mut declared: Vec<String> = match task["$defs"]["Location"]["oneOf"].as_array() {
+        Some(variants) => variants
+            .iter()
+            .flat_map(|variant| {
+                variant["properties"]
+                    .as_object()
+                    .expect("each variant is an object with one key")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+            })
+            .collect(),
+        // The pinned revision predates the field, which leaves nothing to reconcile
+        // against but is not nothing to assert: a task it declares carries no `location`
+        // either, so the two halves of its schema agree and the absent form this
+        // boundary reads is the only form this `onetaskgraph` can produce.
+        None => {
+            assert!(
+                task["properties"].get("location").is_none(),
+                "onetaskgraph reports a location it declares no shape for: {}",
+                task["properties"]
+            );
+            Vec::new()
+        }
+    };
+    declared.sort();
+    for spelling in &declared {
+        let read: Result<StoreLocation, _> =
+            serde_json::from_value(serde_json::json!({ spelling.as_str(): "somewhere" }));
+        assert!(
+            read.is_ok(),
+            "onetaskgraph declares a `{spelling}` location this boundary refuses"
+        );
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Widening the boundary by one documented field did not stop it refusing the rest.
+///
+/// The reason this boundary denies unknown fields is that a store page carrying
+/// something the suite has never heard of is the suite reading a `onetaskgraph` it was
+/// not written against — which is exactly how the `location` field announced itself. So
+/// accepting that one field must not become accepting anything, and the refusal is
+/// pinned rather than assumed.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: the subject is what the
+// harness refuses, and a journey cannot assert about the validation standing between it
+// and the store it reads.
+#[test]
+fn a_field_this_boundary_has_never_heard_of_is_still_refused() {
+    let task = r#"{"id":"t","title":"probe","content":null,
+        "status":{"category":"todo","name":"todo"},"labels":[],"project":null,
+        "url":null,"whereabouts":{"path":"/tmp/t.md"},"created_at":null,
+        "updated_at":null,"metadata":{},"repositories":[]}"#;
+    let read: Result<StoreTask, _> = serde_json::from_str(task);
+    let error = read
+        .err()
+        .expect("a task carrying a field this suite has never heard of is refused")
+        .to_string();
+    assert!(
+        error.contains("whereabouts"),
+        "the refusal does not name the field that caused it: {error}"
+    );
+
+    // And an unknown *variant* of the field that was widened, for the same reason.
+    let placed_oddly = task.replace(
+        r#""whereabouts":{"path":"/tmp/t.md"}"#,
+        r#""location":{"shelf":"third from the left"}"#,
+    );
+    serde_json::from_str::<StoreTask>(&placed_oddly)
+        .err()
+        .expect("a location spelled a way onetaskgraph does not document is refused");
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -749,7 +939,18 @@ impl World {
             .env_remove("ONEHARNESS_HARNESSES")
             .env_remove("ONEHARNESS_MODEL")
             .env_remove("ONEHARNESS_MODELS")
-            .env_remove("ONEHARNESS_MODE");
+            .env_remove("ONEHARNESS_MODE")
+            // And the scratch directory *this* suite's own dispatch was given,
+            // for the same reason one step further in: a turn with no scratch of
+            // its own reads this variable as the one it was handed. Every turn a
+            // journey launches is then holding a directory, and the outer
+            // dispatch's at that — so a supervisory member arrives at
+            // `concurrent_dispatches_each_hold_their_own_scratch_directory_throughout`'s
+            // barrier as a third party, and the set of directories live at one
+            // instant holds one belonging to no dispatch under test. What a
+            // dispatch is given is composed per dispatch by `executor`, so
+            // removing it here leaves every genuine one untouched.
+            .env_remove("ONEPIPELINE_NODE_SCRATCH_DIR");
         command
     }
 
@@ -4440,6 +4641,82 @@ fn read_jsonl(path: &Path) -> Vec<Value> {
 /// already knows every escape does the quoting.
 fn yaml_scalar(text: &str) -> String {
     serde_json::to_string(text).expect("a string serializes")
+}
+
+/// The variable that asks a driver to report what its reconcile loop did.
+///
+/// The suite's own copy of a name the crate declares privately, for the reason
+/// [`STARTUP_TIMEOUT_ENV`] is one. What proves the copy is still the name the
+/// binary reads is every journey that calls [`counts`]: a driver launched under
+/// a name it does not read writes no counts file at all, and [`counts`] fails
+/// naming the file it never found rather than passing a little emptier.
+pub const LOOP_STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
+
+/// What one driver's reconcile loop did, as it reports it.
+///
+/// Read as a delta across an interval rather than as an absolute — the counts
+/// are per process and a driver has been running since before any window opened
+/// — so every claim over them is stated as work done inside a window rather than
+/// as time taken, and a loaded host cannot fail correct work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub passes: u64,
+    pub statuses: u64,
+    pub publications: u64,
+    pub upstream_reads: u64,
+    pub release_asks: u64,
+    pub store_bytes: u64,
+}
+
+impl Counts {
+    /// What was done between an earlier reading and this one.
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            passes: self.passes - before.passes,
+            statuses: self.statuses - before.statuses,
+            publications: self.publications - before.publications,
+            upstream_reads: self.upstream_reads - before.upstream_reads,
+            release_asks: self.release_asks - before.release_asks,
+            store_bytes: self.store_bytes - before.store_bytes,
+        }
+    }
+}
+
+/// The counts a run's driver has reported so far.
+pub fn counts(world: &World, run: &str) -> Counts {
+    let path = world.run_file(run, "loop-stats.json");
+    let read =
+        || -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok() };
+    // Written atomically, so a partial read is not a thing that happens — an
+    // absent one is, on the first look before the driver's first wait.
+    let value = read().unwrap_or_else(|| {
+        panic!(
+            "{run} reported no loop counts at {}\n{}",
+            path.display(),
+            world.dump()
+        )
+    });
+    let count = |name: &str| {
+        value[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{run}'s counts carry no {name}: {value}"))
+    };
+    Counts {
+        passes: count("passes"),
+        statuses: count("statuses"),
+        publications: count("publications"),
+        upstream_reads: count("upstream_reads"),
+        release_asks: count("release_asks"),
+        store_bytes: count("store_bytes"),
+    }
+}
+
+/// Wait until a driver has reported anything at all, which it does on its first
+/// wait.
+pub fn reporting(world: &World, run: &str) {
+    world.until("the driver to report its loop counts", |world| {
+        world.run_file(run, "loop-stats.json").is_file()
+    });
 }
 
 /// A direct agent node.

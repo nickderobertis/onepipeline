@@ -59,28 +59,32 @@
 // enforced instead is the thing that matters: `owned_by` is the one place ownership is
 // decided, and `unknown` is never anybody's.
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::filter::Filters;
 use crate::sys;
 
-/// Every byte of a run's ledger this process has read since it started.
-///
-/// Accounting rather than a promise, which is why it is crate-visible and why
-/// it lives beside the two readers that slurp a whole file. What it is *for* is
-/// holding a bounded read bounded: a run's summary served from its own document
-/// reads that document and stats the journal, while one that has to be folded
-/// reads the entire store — and the difference between those two is the whole
-/// reason the document exists. That is a property to be **measured** rather than
-/// inferred from a clock, and this is what measures it.
-static BYTES_READ: AtomicU64 = AtomicU64::new(0);
+// Every byte of a run's ledger this process reads is counted through the two
+// functions below, and the counter they reach is `crate::loopstats`'s rather than
+// a second one kept here.
+//
+// Accounting rather than a promise. What it is *for* is holding a bounded read
+// bounded: a run's summary served from its own document reads that document and
+// stats the journal, while one that has to be folded reads the entire store — and
+// the difference between those two is the whole reason the document exists. That
+// is a property to be **measured** rather than inferred from a clock, and this is
+// what measures it.
+//
+// One account rather than two, because a driver launched to report what its loop
+// cost writes that same number out as `store_bytes`. Two counters here would not
+// fail by disagreeing — nobody compares them — but by a reader being added to one
+// and not the other, leaving the number the checks hold and the number the host is
+// told describing different sets of reads.
 
 /// What that counter stands at.
 ///
@@ -89,12 +93,12 @@ static BYTES_READ: AtomicU64 = AtomicU64::new(0);
 /// there is no second account here to keep true.
 #[cfg(test)]
 pub(crate) fn bytes_read() -> u64 {
-    BYTES_READ.load(Ordering::Relaxed)
+    crate::loopstats::store_bytes()
 }
 
 /// Count what a read just cost.
 fn counted<T>(bytes: usize, read: T) -> T {
-    BYTES_READ.fetch_add(bytes as u64, Ordering::Relaxed);
+    crate::loopstats::store_read(bytes as u64);
     read
 }
 

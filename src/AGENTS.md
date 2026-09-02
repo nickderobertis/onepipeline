@@ -58,6 +58,14 @@ Rules:
   retained report is a rendering rather than a promise, and the segment
   sanitiser behind `report_for` stays private so nobody restates it.
 
+The loop **waits**; it does not poll. A pass runs when a dispatch says
+something, when the planner's channel moves, when something outside this run
+moves — an upstream ledger, an answered release probe, a failed projection — or
+when the longest interval it may go without one comes due, and on nothing else.
+So **whole-state work belongs on a change, never on a pass**: a per-pass
+`state.statuses()`, `writeback.publish`, `upstreams.resolve` or
+`projection::fold` puts back a CPU sink big enough to make this host unusable.
+
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 
 - `start_ready` runs **before** the terminal check. A ready human action derives
@@ -68,6 +76,9 @@ Two ordering rules in `engine.rs` are load-bearing and easy to undo:
   record. A driver that wrote its pid there and then lost the race for the lock
   would leave the record naming a process that is gone, and every reader would
   call the run undriven while the driver that won was still working.
+- `holds_now` runs **after** `start_ready`, so what a concurrency hold names as
+  ahead of it is what is really in flight and a node the pass just dispatched is
+  not reported as held by the run it just joined.
 
 ## The siblings
 

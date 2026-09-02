@@ -229,7 +229,19 @@ impl Writeback {
     }
 
     /// Replace any queued projection with the newest journal fold.
-    pub fn publish(&self, paths: &RunPaths, launch: &LaunchRecord, state: &RunState) {
+    ///
+    /// Called once per change to what the snapshot is made of rather than once
+    /// per reconcile pass: building one folds the run's whole journal twice, and
+    /// the loop used to hand over two identical snapshots forty times a second on
+    /// a run where nothing was happening. The statuses are handed in for the same
+    /// reason — the caller has already derived them.
+    pub fn publish(
+        &self,
+        paths: &RunPaths,
+        launch: &LaunchRecord,
+        state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) {
         let Ok(project) = launch.project.parse() else {
             return;
         };
@@ -237,7 +249,7 @@ impl Writeback {
             project,
             dir: paths.dir.join("writeback"),
             nodes: all_nodes(paths, state),
-            statuses: state.statuses(),
+            statuses: statuses.clone(),
             outcomes: state.outcomes.clone(),
             landings: state.landings.clone(),
             landing_commits: state.landing_commits.clone(),
@@ -264,12 +276,26 @@ impl Writeback {
                 })
                 .unwrap_or_default(),
         };
+        crate::loopstats::published();
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             if pending.queue(snapshot) {
                 ready.notify_one();
             }
         }
+    }
+
+    /// Whether the worker has a failed projection the planner has not been told
+    /// about.
+    ///
+    /// What the reconcile loop waits on. The worker runs on a thread of its own,
+    /// so a projection fails without anything about this run changing — and a
+    /// loop that only woke for its own state would leave a board reported behind
+    /// until something else happened to it.
+    pub fn has_unprojected(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .is_ok_and(|pending| !pending.unprojected.is_empty())
     }
 
     /// Take the projections that failed since this was last asked, clearing them.
@@ -749,6 +775,26 @@ struct DestinationProjectItem {
     labels: Vec<DestinationLabel>,
     /// Only the reserved keys this worker owns are rewritten; the rest are preserved.
     metadata: BTreeMap<String, Value>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] `location` is onetaskgraph's
+    // own answer about where it keeps an item, and this projection neither mints one nor
+    // reads one. It is named anyway so this boundary *states* the newest field the store
+    // reports rather than leaving it to be inferred from an absence, and it is typed as
+    // the raw document precisely so that it cannot narrow: the shapes are the producer's
+    // to change, and it has already shipped `{"path": …}`, `{"url": …}` and
+    // `{"kind": …, "url": …}` across patch releases. Giving it a type of its own is what
+    // would make a fourth shape a projection failure, which is the defect this field was
+    // added under rather than a stricter form of the fix.
+    // llmlint: ignore-block[changed_behavior_has_e2e] naming it changes no behaviour that
+    // could be driven on its own: the types here no longer deny unknown fields, so a page
+    // carrying `location` was already accepted and naming it accepts exactly the same
+    // pages. What there is to drive is that acceptance, and
+    // `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
+    // drives it against the real binary at a release this build was not written against —
+    // on the response, on each item, on that item's body and on every label it holds.
+    #[serde(rename = "location", default)]
+    _location: Option<Value>,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 #[derive(Deserialize)]
@@ -763,6 +809,26 @@ struct DestinationTaskItem {
     labels: Vec<DestinationLabel>,
     /// Read for `onepipeline.id`, which is how a destination task names its plan node.
     metadata: BTreeMap<String, Value>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] `location` is onetaskgraph's
+    // own answer about where it keeps an item, and this projection neither mints one nor
+    // reads one. It is named anyway so this boundary *states* the newest field the store
+    // reports rather than leaving it to be inferred from an absence, and it is typed as
+    // the raw document precisely so that it cannot narrow: the shapes are the producer's
+    // to change, and it has already shipped `{"path": …}`, `{"url": …}` and
+    // `{"kind": …, "url": …}` across patch releases. Giving it a type of its own is what
+    // would make a fourth shape a projection failure, which is the defect this field was
+    // added under rather than a stricter form of the fix.
+    // llmlint: ignore-block[changed_behavior_has_e2e] naming it changes no behaviour that
+    // could be driven on its own: the types here no longer deny unknown fields, so a page
+    // carrying `location` was already accepted and naming it accepts exactly the same
+    // pages. What there is to drive is that acceptance, and
+    // `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
+    // drives it against the real binary at a release this build was not written against —
+    // on the response, on each item, on that item's body and on every label it holds.
+    #[serde(rename = "location", default)]
+    _location: Option<Value>,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One label a destination item carries, read back and written unchanged.
@@ -1106,7 +1172,7 @@ mod tests {
         let writeback =
             Writeback::start(dir.join("onetaskgraph-nobody-installed"), &paths, &launch)
                 .expect("a write-back worker");
-        writeback.publish(&paths, &launch, &RunState::default());
+        writeback.publish(&paths, &launch, &RunState::default(), &BTreeMap::new());
 
         // Four attempts in, the interval the worker is now waiting out is longer than every
         // one before it — so the last one this test actually watched is a lower bound on

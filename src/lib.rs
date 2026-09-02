@@ -73,6 +73,7 @@ mod graph;
 mod journal;
 mod ledger;
 mod lifecycle;
+mod loopstats;
 mod plancheck;
 mod projection;
 mod refusal;

@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -150,6 +151,28 @@ pub struct RunState {
     /// The decision points reported as holding dependents back and not yet
     /// reported as released, by the reference that clears each.
     pub decisions_pending: BTreeMap<String, PendingDecision>,
+    /// The nodes reported as held and not yet reported as released, carrying the
+    /// `reasons` array the record was written with.
+    ///
+    /// Held as the payload rather than as a parsed reason, for the same reason
+    /// every other fold here keeps the producer's own words: a driver reading a
+    /// record a later build wrote must not normalise a reason it has no variant
+    /// for into one it has. What a fresh driver does with it is seed what it
+    /// believes it is already holding, so it neither restates a hold its
+    /// predecessor opened nor loses the release of one.
+    ///
+    /// The typed reading happens where the reasons are *used*, not here:
+    /// `engine`'s `HoldReason::of_payload` refuses a payload it cannot read, and
+    /// a node whose reasons do not all parse is dropped from what the driver
+    /// believes it holds rather than folded in malformed.
+    // llmlint: ignore[invalid_states_unrepresentable] a typed enum here cannot
+    // reject anything this one accepts: the array is a persisted record a *later*
+    // build may have written, so any enum able to round-trip it needs an
+    // `Unknown(Value)` variant, which is this type again behind one more parse.
+    // The rejecting boundary is `HoldReason::of_payload` at the point of use,
+    // named above; making it the fold's boundary instead would silently discard a
+    // reason a newer driver wrote, which is the bug this field exists to avoid.
+    pub holds: BTreeMap<String, Vec<Value>>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -570,8 +593,19 @@ impl RunState {
 
     /// Every node's status, with the derived gates recomputed against the graph
     /// as it stands now.
+    ///
+    /// Answered from what this process last derived where nothing the answer is
+    /// a function of has moved — see [`DERIVED`]. The uncached derivation is
+    /// [`statuses_with`](Self::statuses_with), which is what a caller resolving
+    /// its references some other way asks.
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
-        self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied())
+        let recorded = self.statuses_recorded();
+        if let Some(derived) = derived_already(&self.graph, &recorded, &self.cross_dag) {
+            return derived;
+        }
+        let derived = self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied());
+        remember_derived(&self.graph, &recorded, &self.cross_dag, &derived);
+        derived
     }
 
     /// Every node's status, resolving cross-DAG references through `upstream`.
@@ -579,8 +613,70 @@ impl RunState {
         &self,
         upstream: &dyn Fn(&str) -> Option<NodeStatus>,
     ) -> BTreeMap<String, NodeStatus> {
+        crate::loopstats::statuses_derived();
         crate::graph::derive(&self.graph, &self.statuses_recorded(), upstream)
     }
+}
+
+/// What this process has already derived the graph's statuses from, and to.
+///
+/// Deriving is a fixpoint over every node and every edge, and a driver asks for
+/// it from two places that do not know about each other: the reconcile loop,
+/// once per fold, and the summary document's writer, once per record appended to
+/// the journal. Both derive from the same journal, so at the ordinary moment they
+/// are asking the identical question — and answering it twice is the whole of the
+/// cost, since the answer is a pure function of the three things keyed here.
+///
+/// Keyed on the whole of that input rather than on a digest of it, because a
+/// digest that collided would hand back another graph's statuses, and the
+/// comparison is a walk where the derivation it saves is a fixpoint.
+///
+/// A few entries rather than one: the two askers are not in lockstep, and a
+/// single slot would be evicted by whichever asked from the older state and then
+/// miss for both.
+static DERIVED: Mutex<Vec<Derivation>> = Mutex::new(Vec::new());
+
+/// How many states are remembered at once. Small: the askers are at most a
+/// record or two apart, and anything older is a state nothing will ask about
+/// again.
+const DERIVATIONS_HELD: usize = 4;
+
+type Statuses = BTreeMap<String, NodeStatus>;
+
+/// One remembered derivation: the three inputs, and what they derived to.
+struct Derivation {
+    graph: Graph,
+    recorded: Statuses,
+    cross_dag: Statuses,
+    derived: Statuses,
+}
+
+/// A lock another thread poisoned still holds sound answers: every writer pushes
+/// one whole entry, so nothing can be observed half-written.
+fn derivations() -> std::sync::MutexGuard<'static, Vec<Derivation>> {
+    DERIVED.lock().unwrap_or_else(|held| held.into_inner())
+}
+
+fn derived_already(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses) -> Option<Statuses> {
+    derivations()
+        .iter()
+        .find(|held| {
+            held.graph == *graph && held.recorded == *recorded && held.cross_dag == *cross_dag
+        })
+        .map(|held| held.derived.clone())
+}
+
+fn remember_derived(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses, derived: &Statuses) {
+    let mut held = derivations();
+    if held.len() >= DERIVATIONS_HELD {
+        held.remove(0);
+    }
+    held.push(Derivation {
+        graph: graph.clone(),
+        recorded: recorded.clone(),
+        cross_dag: cross_dag.clone(),
+        derived: derived.clone(),
+    });
 }
 
 /// Fold a run's whole journal.
@@ -890,6 +986,26 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 if matches!(recorded, Recorded::Cancelling { .. }) {
                     *recorded = Recorded::At(NodeStatus::Parked);
                 }
+            }
+        }
+        // llmlint: ignore-block[boundary_inputs_validated] the journal is this crate's own
+        // record rather than external input, on the ruling `journal.rs` already carries for
+        // the same reader: a record written by a build this one does not know is *skipped and
+        // reported*, never refused. Validating a reason's shape here would refuse the whole
+        // fold over a reason a newer driver wrote, which is the case this field exists to
+        // survive; the rejecting boundary is `engine`'s `HoldReason::of_payload`, which drops
+        // a node whose reasons it cannot read rather than admitting a malformed one.
+        Some(journal::PipelineKind::NodeHeld) => {
+            if let (Some(node), Some(reasons)) = (
+                event.labels.node.clone(),
+                payload.get("reasons").and_then(Value::as_array),
+            ) {
+                state.holds.insert(node, reasons.clone());
+            }
+        } // llmlint: ignore-end[boundary_inputs_validated]
+        Some(journal::PipelineKind::NodeUnheld) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.holds.remove(node);
             }
         }
         Some(journal::PipelineKind::DecisionPending) => {

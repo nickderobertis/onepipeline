@@ -175,8 +175,41 @@ pub const CANCEL_INPUT: &str = "Stop this task now. Do not start any new work, a
      another file, command, or tool call. Commit anything you have not \
      committed yet, then end your turn.";
 
-/// How often the reconcile loop wakes to drain edits and re-derive the frontier.
-const POLL: Duration = Duration::from_millis(25);
+/// How long the loop keeps taking messages that are already queued, once
+/// something has woken it.
+///
+/// A window, not a rate. Narration and settlement share one channel, so taking a
+/// single message per pass made a settlement wait a whole pass for every envelope
+/// queued ahead of it; this is how long the loop spends emptying the queue before
+/// it decides what the batch means. Nothing about it says how often a pass
+/// happens — [`CHANNEL_POLL`] and the paced intervals below say that.
+const DRAIN_WINDOW: Duration = Duration::from_millis(25);
+
+/// How long a teardown waits for the next envelope before looking at its
+/// deadline again.
+///
+/// A dispatch that was asked to stop is read until it stops or its grace runs
+/// out, and this is the granularity that grace is measured at.
+const TEARDOWN_TICK: Duration = Duration::from_millis(25);
+
+/// How long the loop waits before looking at the planner's channel again.
+///
+/// **Not a pass rate.** A look is two `stat` calls, and a pass runs only when one
+/// of them moved, so a converged run costs the host two syscalls a fifth of a
+/// second rather than a whole-state reconciliation.
+///
+/// What the interval bounds is how long an edit another process wrote waits to
+/// be read. The contract states that as a second, and a fifth of it leaves the
+/// pass it triggers the rest of the budget.
+const CHANNEL_POLL: Duration = Duration::from_millis(200);
+
+/// How often another run's ledger is re-read to answer a cross-DAG edge.
+///
+/// That ledger is written by a process this one does not control, which fixes how
+/// **fresh** the answer must be rather than how often to fetch it. Half a second
+/// sits inside the second the contract promises a consumer whose upstream settles
+/// elsewhere. A graph naming no cross-DAG edge reads nothing at all.
+pub(crate) const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 
 /// The schema version a run result is written as.
 ///
@@ -700,21 +733,69 @@ fn converge(
         })
         .collect();
 
+    // What the loop is holding back, and why. Diffed pass to pass exactly as the
+    // decisions above are, so a hold is written when it begins, again when what
+    // it is held by changes, and once when it clears — and seeded from the
+    // journal for the same reason they are: a hold outlives the driver that
+    // reported it, so a fresh one that started empty would restate every span
+    // already open and never close one that cleared while nothing was driving.
+    let mut holding: BTreeMap<String, Vec<HoldReason>> = state
+        .holds
+        .iter()
+        .filter_map(|(node, reasons)| {
+            let read: Option<Vec<HoldReason>> =
+                reasons.iter().map(HoldReason::of_payload).collect();
+            read.map(|reasons| (node.clone(), reasons))
+        })
+        .collect();
+    // The graph's derived statuses, cached so the fixpoint over every node and
+    // edge is paid at most once per change to the folded state rather than once
+    // per caller that wants it.
+    let mut derived: Option<BTreeMap<String, NodeStatus>> = None;
+    // When each piece of paced work was last done. `None` is due now, which is
+    // what makes the first pass do all of it.
+    let mut read_upstreams: Option<Instant> = None;
+    // Assigned by every pass before the wait reads it: taking the release watch
+    // up is part of what a pass *is*, so there is no "not yet" for it to be in.
+    let mut took_up_releases;
+    // Whether the board has been told what the run looks like now. Publishing
+    // folds the run's whole journal, so it is paid once per change to what the
+    // snapshot is made of — the number of times the board can actually be
+    // behind — rather than once per pass.
+    let mut unpublished = true;
+    // What the channel looked like when this loop last read it.
+    let mut channel_seen = channel.fingerprint();
+    // And what every upstream ledger this graph's edges are answered by looked
+    // like. Compared rather than re-read: see [`crossdag::Observer::marks`].
+    let mut upstream_seen = upstreams.marks(&state.graph);
+    let mut upstream_looked = Instant::now();
+
     loop {
-        reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)?;
-        if let Some(writeback) = &writeback {
-            writeback.publish(paths, launch, state);
-            report_unprojected(paths, journal, writeback)?;
+        crate::loopstats::pass();
+        if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
+            derived = None;
+            unpublished = true;
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
-        // edge, and it is written by a process this one does not control — so
-        // the answer is re-read on every reconcile pass rather than taken once.
-        // This is also where an upstream that moved past what a consumer
-        // recorded is noticed.
-        state.cross_dag = upstreams.resolve(&state.graph, paths, journal)?;
+        // edge, and it is written by a process this one does not control — which
+        // is a statement about how **fresh** the answer has to be and not about
+        // how often to go and get it. So it is re-read on [`UPSTREAM_EVERY`]
+        // rather than on every pass, and a graph naming no cross-DAG edge never
+        // reads it at all. This is also where an upstream that moved past what a
+        // consumer recorded is noticed.
+        let has_upstreams = !crate::crossdag::edges(&state.graph).is_empty();
+        if has_upstreams && due(read_upstreams, UPSTREAM_EVERY) {
+            read_upstreams = Some(Instant::now());
+            let resolved = upstreams.resolve(&state.graph, paths, journal)?;
+            if resolved != state.cross_dag {
+                state.cross_dag = resolved;
+                derived = None;
+                unpublished = true;
+            }
+        }
 
-        let statuses = state.statuses();
+        let statuses = statuses_of(&mut derived, state);
         announce_ready(paths, journal, &statuses, &mut announced_ready)?;
         // The decision points holding subtrees back, and the nodes they hold.
         // Diffed against the last pass, so each one is reported when it begins
@@ -727,6 +808,12 @@ fn converge(
         // `published` hold applies and where a `fast` node's reference block is
         // composed, and every node still running, where an arrival note is
         // delivered.
+        //
+        // Taken up on this pass either because something about the run changed —
+        // a node became ready, a dispatch settled — or because the interval an
+        // answer may sit unread for came due. A run with no out-of-repository
+        // dependency and nothing landed in a repository that releases pays
+        // neither: it asks nothing and takes nothing up, ever.
         let watching = crate::release::watching(
             state,
             &statuses,
@@ -739,37 +826,75 @@ fn converge(
         // landed work. Not part of the wait: a release is reported whether or
         // not anything is waiting on it, because the node whose work it carries
         // has settled and its own follow ended with the session it watched.
-        releases.relay_releases(paths, journal, state, launch.filters.vcs.as_ref())?;
+        releases.relay_releases(
+            paths,
+            journal,
+            state,
+            &statuses,
+            launch.filters.vcs.as_ref(),
+        )?;
+        took_up_releases = Some(Instant::now());
         // One hold, beside the decision points rather than in place of them: a
         // node a person is holding and a node a release is holding are both nodes
-        // this pass does not start, and neither shortens the other's wait.
+        // this pass does not start, and neither shortens the other's wait. Read
+        // twice: as what the pass may not start, and — with the dependency ids
+        // each is waiting on — as what to say about why.
+        let awaiting_release: BTreeMap<String, Vec<String>> = held_for_release
+            .iter()
+            .map(|node| (node.clone(), releases.awaited_deps(node)))
+            .collect();
         paused.extend(held_for_release);
-        adopt_releases(paths, journal, state, &mut releases, &in_flight)?;
+        if adopt_releases(paths, journal, state, &statuses, &mut releases, &in_flight)? {
+            derived = None;
+            unpublished = true;
+        }
 
         // Start what became actionable *before* asking whether the run is over.
         // A ready human action derives as `waiting`, which is a settled status —
         // so a check that ran first would call the graph terminal and leave that
         // settlement unrecorded, with nothing for a later `attest` to validate
         // against.
-        start_ready(
+        let statuses = statuses_of(&mut derived, state);
+        if start_ready(
             paths,
             journal,
             state,
+            &statuses,
             &rules,
             launch,
             &tx,
             &mut in_flight,
             &paused,
             &releases,
+        )? {
+            derived = None;
+            unpublished = true;
+        }
+
+        // Why every node the loop is not running and has not settled is not
+        // running, after the dispatches this pass started: a node the frontier
+        // moved past is not held by what held it a moment ago.
+        let statuses = statuses_of(&mut derived, state);
+        if unpublished {
+            if let Some(writeback) = &writeback {
+                writeback.publish(paths, launch, state, &statuses);
+            }
+            unpublished = false;
+        }
+        report_holds(
+            paths,
+            journal,
+            &holds_now(state, &statuses, &in_flight, &decisions, &awaiting_release),
+            &mut holding,
         )?;
+
         if let Some(writeback) = &writeback {
-            writeback.publish(paths, launch, state);
+            report_unprojected(paths, journal, writeback)?;
         }
 
         if in_flight.is_empty() {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
-            let statuses = state.statuses();
             if graph::is_terminal(&statuses) {
                 break;
             }
@@ -781,39 +906,80 @@ fn converge(
             }
         }
 
-        // Everything that has **already arrived**, applied in this one pass.
-        //
-        // Narration and settlement share this channel, so taking one message a pass
-        // made a settlement wait a whole pass — a frontier re-derived, `onevcs` asked
-        // what each repository releases, whatever is due written — for every envelope
-        // queued ahead of it. Deciding what to do about a batch is that same one pass.
-        //
-        // Bounded by the `POLL` this pass would otherwise have spent waiting for one
-        // message, so a dispatch narrating without pause cannot hold a pass open.
+        // Nothing more to do until something happens. The longest this loop may go
+        // without a pass is stated here rather than inside the wait: the two paced
+        // reads, and the earliest stall threshold. Each is `Duration::MAX` where
+        // this run can never need it — a graph naming no cross-DAG edge, a run
+        // with no release business, nothing in flight — so a converged driver
+        // waits on the channel alone.
+        let next = [
+            if has_upstreams {
+                until_due(read_upstreams, UPSTREAM_EVERY)
+            } else {
+                Duration::MAX
+            },
+            if releases.names_a_release_dependency() || releases.relays_anything(state) {
+                until_due(took_up_releases, releases.take_up_every())
+            } else {
+                Duration::MAX
+            },
+            next_quiet(&in_flight, stall_after),
+        ];
+        let deadline = next.into_iter().min().unwrap_or(Duration::MAX);
+        // Scoped, because the two things it reads are things the pass writes:
+        // the closure's borrows end with the wait, before the messages it hands
+        // back are applied.
+        let arrived = {
+            // What the loop can be woken by that nothing here writes: a release
+            // probe that answered, a projection that failed, and an upstream
+            // ledger that grew. Each is read the cheap way — two queues this
+            // thread already owns the other end of, and a `stat` — so a wake that
+            // finds none of them goes straight back to waiting.
+            let mut outside = || {
+                if releases.take_up_answers() {
+                    return true;
+                }
+                if writeback
+                    .as_ref()
+                    .is_some_and(crate::writeback::Writeback::has_unprojected)
+                {
+                    return true;
+                }
+                if !has_upstreams || upstream_looked.elapsed() < UPSTREAM_EVERY {
+                    return false;
+                }
+                upstream_looked = Instant::now();
+                let now = upstreams.marks(&state.graph);
+                if now == upstream_seen {
+                    return false;
+                }
+                upstream_seen = now;
+                true
+            };
+            wait_for_work(
+                paths,
+                &rx,
+                &channel,
+                &mut channel_seen,
+                deadline,
+                &mut outside,
+            )?
+        };
+        let Some(arrived) = arrived else {
+            break;
+        };
+
+        // Everything that had **already arrived**, applied in this one pass:
+        // narration and settlement share the channel, so taking one message a
+        // pass would make a settlement wait a whole pass for every envelope
+        // queued ahead of it.
         //
         // llmlint: ignore-block[changed_behavior_has_e2e] the batch is applied in arrival
         // order, so no journal a journey can read differs by a record; what differs is how
         // long a settlement waits, which is proportional to what a pass costs on the host.
         // Every journey drives this code — it is the only path a message reaches the
         // journal by — and one written to prove the wait passed against both builds.
-        let mut batch: Vec<Message> = Vec::new();
-        match rx.recv_timeout(POLL) {
-            Ok(message) => batch.push(message),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        let drain_started = Instant::now();
-        while drain_started.elapsed() < POLL {
-            // One arm for both refusals: nothing is queued, or nothing ever will
-            // be again. The second is the loop's own `Disconnected` one pass later,
-            // which is where it has always been answered.
-            let Ok(message) = rx.try_recv() else {
-                break;
-            };
-            batch.push(message);
-        }
-
-        for message in batch {
+        for message in arrived {
             // llmlint: ignore-end[changed_behavior_has_e2e]
             match message {
                 Message::Event(envelope) => {
@@ -887,13 +1053,19 @@ fn converge(
                     *state = projection::fold(&journal::read(&paths.journal()));
                     // A node that settled may have readied its dependents, and a
                     // node that is ready again — a requeue, a retry — is announced
-                    // again.
-                    announced_ready
-                        .retain(|id| state.statuses().get(id).copied() == Some(NodeStatus::Ready));
+                    // again. `announce_ready` retains against the frontier at the
+                    // top of the next pass, which is that same fact asked once
+                    // rather than once per settlement in a batch.
+                    derived = None;
+                    unpublished = true;
                 }
             }
         }
 
+        // A dispatch that has recorded nothing for long enough is reported, and
+        // the wait above ends when the earliest of those thresholds comes due —
+        // so this is asked when it can have an answer rather than forty times a
+        // second when it cannot.
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
@@ -904,8 +1076,13 @@ fn converge(
     // host-level process control rather than an input either CLI exposes, and the window
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
+    // Every node's status as the teardown leaves it, which is not the same as
+    // every node being settled: this also runs when the channel disconnected
+    // under a run that still has pending and blocked nodes.
+    let final_statuses = statuses_of(&mut derived, state);
+    crate::loopstats::flush(paths)?;
     if let Some(writeback) = &writeback {
-        writeback.publish(paths, launch, state);
+        writeback.publish(paths, launch, state, &final_statuses);
         writeback.wait_briefly();
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
@@ -914,7 +1091,356 @@ fn converge(
         report_unprojected(paths, journal, writeback)?;
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(graph::state_of(&state.statuses()))
+    Ok(graph::state_of(&final_statuses))
+}
+
+/// `None` is due now, which is what makes the first pass do everything once.
+pub(crate) fn due(last: Option<Instant>, every: Duration) -> bool {
+    last.is_none_or(|last| last.elapsed() >= every)
+}
+
+fn until_due(last: Option<Instant>, every: Duration) -> Duration {
+    last.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()))
+}
+
+/// How long until the earliest in-flight dispatch could be reported quiet.
+///
+/// [`Duration::MAX`] where nothing is in flight or every dispatch has already
+/// been reported: there is then no deadline of the loop's own, so it waits on
+/// the channel alone.
+fn next_quiet(in_flight: &BTreeMap<String, Dispatch>, stall_after: Duration) -> Duration {
+    in_flight
+        .values()
+        .filter(|dispatch| !dispatch.reported_quiet)
+        .map(|dispatch| stall_after.saturating_sub(dispatch.last_progress.elapsed()))
+        .min()
+        .unwrap_or(Duration::MAX)
+}
+
+/// The graph's derived statuses, computed once per change to the folded state.
+///
+/// Deriving is a fixpoint over every node and every edge of the graph, and the
+/// loop wanted the answer in four places a pass. Cached behind the one thing
+/// that can change it — a fold — so what the run pays for is what it recorded
+/// rather than how often the loop looked.
+fn statuses_of(
+    cache: &mut Option<BTreeMap<String, NodeStatus>>,
+    state: &RunState,
+) -> BTreeMap<String, NodeStatus> {
+    cache.get_or_insert_with(|| state.statuses()).clone()
+}
+
+/// Wait until there is a reason to reconcile, and hand back what arrived.
+///
+/// The four things that can be one: a dispatch thread said something, the
+/// planner's channel moved, `outside` says state this run does not write has
+/// moved — an upstream ledger, an answered release probe — or `deadline`, the
+/// longest this loop may go without a pass, came due. A wake that finds none of
+/// them **goes back to waiting**, which is what makes a converged run run no
+/// passes at all rather than one per look.
+///
+/// `Ok(None)` when every dispatch thread has gone and no message can ever arrive
+/// again, which is the loop's own `Disconnected`. `Err` when a driver that was
+/// asked to report what its loop did could not write the report.
+fn wait_for_work(
+    paths: &RunPaths,
+    rx: &Receiver<Message>,
+    channel: &ChannelState,
+    seen: &mut crate::channel::Fingerprint,
+    deadline: Duration,
+    outside: &mut dyn FnMut() -> bool,
+) -> Result<Option<Vec<Message>>> {
+    let waiting_since = Instant::now();
+    loop {
+        // The one place a measured driver reports what its loop has done: every
+        // wait rather than every pass, because the counts a wait is long enough
+        // to change are the ones another thread keeps — a release probe answers
+        // while this loop sits here. A write that fails is handed back: the only
+        // way to reach it is a host that asked for the counts, and it is owed an
+        // answer rather than a file that never appears.
+        crate::loopstats::flush(paths)?;
+        let left = deadline.saturating_sub(waiting_since.elapsed());
+        match rx.recv_timeout(CHANNEL_POLL.min(left)) {
+            Ok(message) => {
+                // Everything else already queued, applied in the one pass this
+                // message is about to cause. Narration and settlement share this
+                // channel, so taking one message a pass made a settlement wait a
+                // whole pass for every envelope queued ahead of it.
+                let mut batch = vec![message];
+                let drain_started = Instant::now();
+                while drain_started.elapsed() < DRAIN_WINDOW {
+                    // One arm for both refusals: nothing is queued, or nothing
+                    // ever will be again. The second is answered one pass later,
+                    // which is where it has always been answered.
+                    let Ok(message) = rx.try_recv() else {
+                        break;
+                    };
+                    batch.push(message);
+                }
+                return Ok(Some(batch));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+        }
+        let now = channel.fingerprint();
+        if now != *seen {
+            *seen = now;
+            return Ok(Some(Vec::new()));
+        }
+        if outside() {
+            return Ok(Some(Vec::new()));
+        }
+        if waiting_since.elapsed() >= deadline {
+            return Ok(Some(Vec::new()));
+        }
+    }
+}
+
+/// One reason the loop is not running a node it has not settled.
+///
+/// **They compose.** A node can be held by more than one at once, so a hold
+/// carries one entry per reason in one record rather than one record per reason:
+/// "behind three running nodes", "a dependency has not settled", and both at
+/// once are three different answers, told apart from the `reasons` array alone.
+///
+/// **Two of the four are reported elsewhere, and this does not restate them.**
+/// [`DecisionPending`](journal::PipelineKind::DecisionPending) and
+/// [`ReleaseWait`](journal::PipelineKind::ReleaseWait) stay authoritative for
+/// what that decision and that wait *are*; the entries here name only which one
+/// holds the node. This record is authoritative for the hold itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HoldReason {
+    /// Its dependencies have not all settled `done`.
+    ///
+    /// `blocking` is what it is waiting for, as the graph names it — a node id,
+    /// or a whole `run:<run>#<node>` reference for a dependency in another run.
+    /// This is the shrinking set a reader watches: a node behind three running
+    /// dependencies is held first by all three, then by the two that are left,
+    /// then by the last, and then it dispatches.
+    Dependencies { blocking: Vec<String> },
+    /// It could dispatch, and the run has reached its concurrency.
+    Concurrency {
+        /// The dispatches in flight ahead of it.
+        ahead: Vec<String>,
+        /// The run's concurrency.
+        limit: usize,
+    },
+    /// A decision point is holding the subtree it is in.
+    ///
+    /// The reference alone, and the type that already models one: a decision is
+    /// cleared by an `attest` or by a reply, and which of the two it is has to be
+    /// readable off the reference rather than guessed from a string. What that
+    /// decision *is* stays on `decision-pending`.
+    Decision { reference: DecisionRef },
+    /// It adopts published releases, and not all of them have happened.
+    ///
+    /// The dependencies awaited, by id. What each wait is stays on `release-wait`.
+    Release { awaiting: Vec<String> },
+}
+
+impl HoldReason {
+    fn payload(&self) -> Value {
+        match self {
+            Self::Dependencies { blocking } => {
+                json!({ "kind": "dependencies", "blocking": blocking })
+            }
+            Self::Concurrency { ahead, limit } => {
+                json!({ "kind": "concurrency", "ahead": ahead, "limit": limit })
+            }
+            Self::Decision { reference } => {
+                json!({ "kind": "decision", "reference": reference.as_wire() })
+            }
+            Self::Release { awaiting } => json!({ "kind": "release", "awaiting": awaiting }),
+        }
+    }
+
+    /// One entry a `node-held` record carried, read back.
+    ///
+    /// `None` for an entry this build cannot read whole, which is what a reason a
+    /// later build added looks like from here. The caller then treats the whole
+    /// hold as one it does not know about and states its own, which is the safe
+    /// direction: a hold restated is a duplicate span, and a hold silently taken
+    /// as understood is one whose release is never reported.
+    fn of_payload(entry: &Value) -> Option<Self> {
+        let ids = |key: &str| -> Option<Vec<String>> {
+            entry
+                .get(key)?
+                .as_array()?
+                .iter()
+                .map(|id| id.as_str().map(str::to_string))
+                .collect()
+        };
+        match entry.get("kind")?.as_str()? {
+            "dependencies" => Some(Self::Dependencies {
+                blocking: ids("blocking")?,
+            }),
+            "concurrency" => Some(Self::Concurrency {
+                ahead: ids("ahead")?,
+                limit: usize::try_from(entry.get("limit")?.as_u64()?).ok()?,
+            }),
+            "decision" => Some(Self::Decision {
+                reference: DecisionRef::of_wire(entry.get("reference")?.as_str()?),
+            }),
+            "release" => Some(Self::Release {
+                awaiting: ids("awaiting")?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Every node the loop is not running and has not settled, and what is holding
+/// it.
+///
+/// **Not narrowed to what the graph calls ready.** A node whose dependencies have
+/// not settled is as much a queued span as one the run's concurrency is holding,
+/// and a reader opening a timeline to find out why their run has not started
+/// wants both — so the subject is any node that is neither in flight nor at an
+/// outcome, whatever status the graph derives for it.
+///
+/// A node **no** stated reason is holding is absent, not present with an empty
+/// array: a node that is dispatchable and merely waiting for this pass to reach
+/// it is held by nothing, and so is a human action waiting on the person who has
+/// to take it — that node is waiting on the world rather than on this loop.
+///
+/// Called after the pass's dispatches, so `ahead` is what is really in flight and
+/// a node that just started is not reported as held by the run it just joined.
+fn holds_now(
+    state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
+    in_flight: &BTreeMap<String, Dispatch>,
+    decisions: &BTreeMap<DecisionRef, Decision>,
+    awaiting_release: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<HoldReason>> {
+    let concurrency = state.graph.concurrency as usize;
+    let ahead: Vec<String> = in_flight.keys().cloned().collect();
+    let mut holds: BTreeMap<String, Vec<HoldReason>> = BTreeMap::new();
+    for node in state.graph.iter() {
+        if in_flight.contains_key(&node.id) {
+            continue;
+        }
+        // `Waiting` and `Parked` are left out with the outcomes on purpose. A
+        // waiting human action is held by the person who has to take it, and a
+        // parked node by the planner that parked it; neither is this loop
+        // declining to run something, and neither is one of the four reasons.
+        let status = statuses
+            .get(&node.id)
+            .copied()
+            .unwrap_or(NodeStatus::Pending);
+        if !matches!(
+            status,
+            NodeStatus::Pending
+                | NodeStatus::Ready
+                | NodeStatus::Blocked
+                | NodeStatus::CompleteDraft
+        ) {
+            continue;
+        }
+        let mut reasons: Vec<HoldReason> = Vec::new();
+        let blocking = unsettled_deps(state, statuses, node);
+        if !blocking.is_empty() {
+            reasons.push(HoldReason::Dependencies { blocking });
+        }
+        if status == NodeStatus::Ready
+            && node.kind != NodeKind::Human
+            && in_flight.len() >= concurrency
+        {
+            reasons.push(HoldReason::Concurrency {
+                ahead: ahead.clone(),
+                limit: concurrency,
+            });
+        }
+        // One entry per decision, because two decisions holding one node are two
+        // reasons it is not running and clearing either one leaves the other.
+        for decision in decisions.values() {
+            if decision.unblocks.contains(&node.id) {
+                reasons.push(HoldReason::Decision {
+                    reference: decision.reference.clone(),
+                });
+            }
+        }
+        if let Some(awaiting) = awaiting_release.get(&node.id) {
+            reasons.push(HoldReason::Release {
+                awaiting: awaiting.clone(),
+            });
+        }
+        if !reasons.is_empty() {
+            holds.insert(node.id.clone(), reasons);
+        }
+    }
+    holds
+}
+
+/// The dependencies of one node that have not settled `done`, as the graph
+/// names them.
+///
+/// A dependency the graph no longer holds was detached by a `drop` and is not
+/// holding anything, which is the same reading [`graph::derive`] takes of it.
+fn unsettled_deps(
+    state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
+    node: &Node,
+) -> Vec<String> {
+    node.deps
+        .iter()
+        .filter(|dep| {
+            let status = if crate::crossdag::is_reference(dep) {
+                state.cross_dag.get(*dep).copied()
+            } else if state.graph.contains(dep) {
+                statuses.get(*dep).copied()
+            } else {
+                return false;
+            };
+            status != Some(NodeStatus::Done)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Report every hold that began, every one that changed, and every one that
+/// cleared.
+///
+/// **Transitions only.** The loop's floor is a wait rather than a rate, but even
+/// one record a pass would be one per settlement and one per edit for every node
+/// standing still — so this diffs against what it said last, exactly as
+/// [`report_decisions`] and [`announce_ready`] do, and a pass on which a node is
+/// held by what it was held by before says nothing at all.
+fn report_holds(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    holds: &BTreeMap<String, Vec<HoldReason>>,
+    reported: &mut BTreeMap<String, Vec<HoldReason>>,
+) -> Result<()> {
+    for (node, reasons) in holds {
+        if reported.get(node) == Some(reasons) {
+            continue;
+        }
+        journal.emit(
+            journal::PipelineKind::NodeHeld,
+            journal::labels(&paths.run, Some(node)),
+            journal::payload(&[(
+                "reasons",
+                Value::Array(reasons.iter().map(HoldReason::payload).collect()),
+            )]),
+        )?;
+    }
+    let cleared: Vec<(String, Vec<HoldReason>)> = reported
+        .iter()
+        .filter(|(node, _)| !holds.contains_key(*node))
+        .map(|(node, reasons)| (node.clone(), reasons.clone()))
+        .collect();
+    for (node, released) in cleared {
+        journal.emit(
+            journal::PipelineKind::NodeUnheld,
+            journal::labels(&paths.run, Some(&node)),
+            journal::payload(&[(
+                "released",
+                Value::Array(released.iter().map(HoldReason::payload).collect()),
+            )]),
+        )?;
+    }
+    *reported = holds.clone();
+    Ok(())
 }
 
 /// Say so when the graph this loop is about to converge was folded from a
@@ -1194,7 +1720,8 @@ fn reconcile_edits(
     channel: &ChannelState,
     launch: &LaunchRecord,
     in_flight: &mut BTreeMap<String, Dispatch>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut changed = false;
     for envelope in channel.claim_commands()? {
         let author = envelope.author;
         let mut applied = true;
@@ -1259,6 +1786,7 @@ fn reconcile_edits(
                         }
                     }
                     *state = projection::fold(&journal::read(&paths.journal()));
+                    changed = true;
                 }
                 Err(error) => {
                     applied = false;
@@ -1274,7 +1802,7 @@ fn reconcile_edits(
             reason,
         })?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// Validate one command, carry a `context` note into the running turn where its
@@ -1540,10 +2068,10 @@ fn adopt_releases(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &mut RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
     releases: &mut crate::release::Watch,
     in_flight: &BTreeMap<String, Dispatch>,
-) -> Result<()> {
-    let statuses = state.statuses();
+) -> Result<bool> {
     // Every node an arrival is owed to: the dispatches in flight, and the nodes
     // this run stopped short of merging. A node in neither has either not been
     // told anything to correct or has already settled on what it was told.
@@ -1560,7 +2088,7 @@ fn adopt_releases(
         .collect();
     let ready = releases.ready_to_adopt(&told);
     if ready.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     for (node, released) in ready {
         let note = crate::release::arrival_note(&released);
@@ -1601,7 +2129,7 @@ fn adopt_releases(
         )?;
     }
     *state = projection::fold(&journal::read(&paths.journal()));
-    Ok(())
+    Ok(true)
 }
 
 /// The nodes whose in-flight dispatch a command stops.
@@ -1633,14 +2161,14 @@ fn start_ready(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &mut RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
     rules: &ExecutorRules,
     launch: &LaunchRecord,
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
-) -> Result<()> {
-    let statuses = state.statuses();
+) -> Result<bool> {
     let concurrency = state.graph.concurrency as usize;
     // Two things become actionable here. A `ready` node is dispatched, and a
     // human action that has just become ready is *recorded* as waiting — the
@@ -1724,7 +2252,7 @@ fn start_ready(
     if settled_here {
         *state = projection::fold(&journal::read(&paths.journal()));
     }
-    Ok(())
+    Ok(settled_here)
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.
@@ -2013,7 +2541,7 @@ pub(crate) fn drain(
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
     loop {
-        match arriving.recv_timeout(POLL) {
+        match arriving.recv_timeout(TEARDOWN_TICK) {
             Ok(Ok(envelope)) => {
                 spoke = true;
                 if let Some(address) = addressed_by(&envelope) {
@@ -4522,6 +5050,331 @@ mod tests {
             "a node was announced ready more than once per time it became ready"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The four reasons and their fields are the ones the divergence record
+    /// proposes, and a consumer in another repository reads.
+    ///
+    /// They are private vocabulary, so `tests/contract.rs` — which drives the
+    /// public surface — cannot reach them, and the entry proposing them is the
+    /// only place they are written down. Both directions: a field added here
+    /// without a line there fails, and so does one the entry names that this
+    /// enum no longer carries.
+    #[test]
+    fn the_hold_reasons_are_the_ones_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("55."))
+            .expect("the record still carries entry 55");
+        let block: Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 55 carries the json block this test drives");
+
+        // One of each, so every variant's own payload is read rather than a list
+        // of names kept beside them.
+        let reasons = [
+            HoldReason::Dependencies {
+                blocking: vec!["build".into()],
+            },
+            HoldReason::Concurrency {
+                ahead: vec!["build".into()],
+                limit: 1,
+            },
+            HoldReason::Decision {
+                reference: DecisionRef::Surface(7),
+            },
+            HoldReason::Release {
+                awaiting: vec!["build".into()],
+            },
+        ];
+        let mine: Vec<String> = reasons
+            .iter()
+            .map(|reason| {
+                reason.payload()["kind"]
+                    .as_str()
+                    .expect("a kind")
+                    .to_string()
+            })
+            .collect();
+        let named: Vec<String> = serde_json::from_value(block["reason_kinds"].clone())
+            .expect("entry 55 names its kinds");
+        assert_eq!(mine, named);
+
+        for reason in &reasons {
+            let payload = reason.payload();
+            let kind = payload["kind"].as_str().expect("a kind");
+            let fields: Vec<String> = serde_json::from_value(block["fields"][kind].clone())
+                .unwrap_or_else(|e| panic!("entry 55 names {kind}'s fields: {e}"));
+            let carried: Vec<String> = payload
+                .as_object()
+                .expect("an object")
+                .keys()
+                .filter(|key| *key != "kind")
+                .cloned()
+                .collect();
+            assert_eq!(carried, fields, "{kind}");
+        }
+        // And the two payload keys the record itself is read by.
+        assert_eq!(block["held_payload"], json!("reasons"));
+        assert_eq!(block["unheld_payload"], json!("released"));
+        assert_eq!(
+            serde_json::from_value::<Vec<String>>(block["event_kinds"].clone())
+                .expect("entry 55 names its kinds"),
+            vec![
+                journal::PipelineKind::NodeHeld.as_str(),
+                journal::PipelineKind::NodeUnheld.as_str()
+            ]
+        );
+    }
+
+    /// Two reasons at once are two entries of one record, and losing one of them
+    /// leaves a record carrying only the other.
+    #[test]
+    fn a_hold_is_written_when_it_begins_when_it_changes_and_when_it_clears() {
+        let root = std::env::temp_dir().join(format!("onepipeline-holds-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut reported = BTreeMap::new();
+
+        let both: BTreeMap<String, Vec<HoldReason>> = [(
+            "ship".to_string(),
+            vec![
+                HoldReason::Dependencies {
+                    blocking: vec!["build".into()],
+                },
+                HoldReason::Concurrency {
+                    ahead: vec!["build".into()],
+                    limit: 1,
+                },
+            ],
+        )]
+        .into();
+        let one: BTreeMap<String, Vec<HoldReason>> = [(
+            "ship".to_string(),
+            vec![HoldReason::Concurrency {
+                ahead: vec!["build".into()],
+                limit: 1,
+            }],
+        )]
+        .into();
+
+        report_holds(&paths, &mut journal, &both, &mut reported).expect("reported");
+        // Said once. A hold that has not changed says nothing on the passes an
+        // arriving envelope or a settled sibling wakes the loop for.
+        report_holds(&paths, &mut journal, &both, &mut reported).expect("reported");
+        report_holds(&paths, &mut journal, &one, &mut reported).expect("reported");
+        report_holds(&paths, &mut journal, &one, &mut reported).expect("reported");
+        report_holds(&paths, &mut journal, &BTreeMap::new(), &mut reported).expect("reported");
+        // And nothing at all for a node that was never held.
+        report_holds(&paths, &mut journal, &BTreeMap::new(), &mut reported).expect("reported");
+
+        let written = journal::read(&paths.journal());
+        let kinds: Vec<String> = written.iter().map(|event| event.kind.0.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                journal::PipelineKind::NodeHeld.as_str(),
+                journal::PipelineKind::NodeHeld.as_str(),
+                journal::PipelineKind::NodeUnheld.as_str(),
+            ]
+        );
+        assert!(written
+            .iter()
+            .all(|event| event.labels.node.as_deref() == Some("ship")));
+        assert_eq!(
+            written[0].payload["reasons"],
+            json!([
+                { "kind": "dependencies", "blocking": ["build"] },
+                { "kind": "concurrency", "ahead": ["build"], "limit": 1 },
+            ]),
+            "a node held two ways carries one entry per reason in one record"
+        );
+        assert_eq!(
+            written[1].payload["reasons"],
+            json!([{ "kind": "concurrency", "ahead": ["build"], "limit": 1 }]),
+            "ceasing to be held one way leaves only the reason that remains"
+        );
+        assert_eq!(
+            written[2].payload["released"],
+            json!([{ "kind": "concurrency", "ahead": ["build"], "limit": 1 }])
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What the loop is holding and why, over the shapes a reader has to be able
+    /// to tell apart.
+    #[test]
+    fn a_node_no_stated_reason_holds_carries_nothing_and_the_rest_name_theirs() {
+        let mut state = state_of(
+            vec![
+                agent("build", &[]),
+                agent("ship", &["build"]),
+                Node {
+                    kind: NodeKind::Human,
+                    ..agent("approve", &[])
+                },
+                agent("after", &["approve"]),
+                agent("spare", &[]),
+            ],
+            &[("approve", NodeStatus::Waiting)],
+        );
+        state.graph.concurrency = 1;
+        let statuses = state.statuses();
+        // One dispatch in flight, which is the run's whole concurrency.
+        let in_flight: BTreeMap<String, Dispatch> = [(
+            "build".to_string(),
+            Dispatch {
+                node: agent("build", &[]),
+                cancel: CancellationToken::new(),
+                started: Instant::now(),
+                last_progress: Instant::now(),
+                reported_quiet: false,
+                control: None,
+            },
+        )]
+        .into();
+        let decisions: BTreeMap<DecisionRef, Decision> = [(
+            DecisionRef::Attestation("approve".into()),
+            Decision {
+                reference: DecisionRef::Attestation("approve".into()),
+                kind: "attestation".into(),
+                unblocks: vec!["after".into()],
+            },
+        )]
+        .into();
+        let awaiting: BTreeMap<String, Vec<String>> =
+            [("spare".to_string(), vec!["build".to_string()])].into();
+
+        let holds = holds_now(&state, &statuses, &in_flight, &decisions, &awaiting);
+
+        // The node in flight is what the loop *is* running, and the human action
+        // is waiting on a person rather than on this loop. Neither is held.
+        assert_eq!(holds.get("build"), None);
+        assert_eq!(holds.get("approve"), None);
+        // Behind the one dispatch this run's concurrency allows, and behind the
+        // dependency that dispatch is.
+        assert_eq!(
+            holds.get("ship"),
+            Some(&vec![HoldReason::Dependencies {
+                blocking: vec!["build".into()]
+            }]),
+            "a node whose dependency is running is held by the dependency"
+        );
+        // Two reasons at once: the attestation holds the subtree, and the
+        // dependency it is has not settled `done`.
+        assert_eq!(
+            holds.get("after"),
+            Some(&vec![
+                HoldReason::Dependencies {
+                    blocking: vec!["approve".into()]
+                },
+                HoldReason::Decision {
+                    reference: DecisionRef::Attestation("approve".into())
+                },
+            ])
+        );
+        // Ready, nothing depends on it, and the run has no slot for it — plus
+        // the release it adopts has not happened.
+        assert_eq!(
+            holds.get("spare"),
+            Some(&vec![
+                HoldReason::Concurrency {
+                    ahead: vec!["build".into()],
+                    limit: 1,
+                },
+                HoldReason::Release {
+                    awaiting: vec!["build".into()]
+                },
+            ])
+        );
+    }
+
+    /// A dependency in another run is named as the graph names it, and one a
+    /// `drop` detached holds nothing.
+    #[test]
+    fn a_cross_dag_dependency_that_has_not_settled_is_named_as_the_plan_wrote_it() {
+        let mut state = state_of(vec![agent("ship", &["run:other#build", "gone"])], &[]);
+        let statuses = state.statuses();
+        let holds = holds_now(
+            &state,
+            &statuses,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            holds.get("ship"),
+            Some(&vec![HoldReason::Dependencies {
+                blocking: vec!["run:other#build".into()]
+            }]),
+            "a dependency the graph no longer holds was detached and holds nothing"
+        );
+
+        // And once that upstream settles, the loop is not holding it at all: it
+        // is dispatchable and merely awaiting the pass that starts it.
+        state
+            .cross_dag
+            .insert("run:other#build".into(), NodeStatus::Done);
+        let statuses = state.statuses();
+        assert_eq!(
+            holds_now(
+                &state,
+                &statuses,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            )
+            .get("ship"),
+            None
+        );
+    }
+
+    /// The loop's own pacing: paced work is due at once and then on its interval,
+    /// and a wait with nothing to wait for is unbounded rather than a spin.
+    #[test]
+    fn paced_work_is_due_once_and_then_on_its_interval() {
+        assert!(due(None, Duration::from_secs(1)), "the first pass does it");
+        assert_eq!(until_due(None, Duration::from_secs(1)), Duration::ZERO);
+        let now = Instant::now();
+        assert!(!due(Some(now), Duration::from_secs(60)));
+        assert!(until_due(Some(now), Duration::from_secs(60)) > Duration::from_secs(50));
+        assert!(
+            due(Some(now), Duration::ZERO),
+            "a zero interval is always due"
+        );
+
+        // Nothing in flight is no deadline of the loop's own, so it waits on the
+        // channel alone rather than on a timer it invented.
+        assert_eq!(
+            next_quiet(&BTreeMap::new(), Duration::from_secs(2_400)),
+            Duration::MAX
+        );
+        let in_flight: BTreeMap<String, Dispatch> = [(
+            "build".to_string(),
+            Dispatch {
+                node: agent("build", &[]),
+                cancel: CancellationToken::new(),
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+            },
+        )]
+        .into();
+        let next = next_quiet(&in_flight, Duration::from_secs(2_400));
+        assert!(
+            next > Duration::from_secs(2_000) && next <= Duration::from_secs(2_400),
+            "{next:?}"
+        );
     }
 
     #[test]

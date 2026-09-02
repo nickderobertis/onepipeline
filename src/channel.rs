@@ -556,6 +556,30 @@ pub(crate) struct QueuedCommands {
     pub commands: Vec<Command>,
 }
 
+/// What the reconcile loop last saw of the channel's two files.
+///
+/// Compared rather than read: see [`ChannelState::fingerprint`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Fingerprint {
+    queue: Option<(u64, std::time::SystemTime)>,
+    commands: Option<(u64, std::time::SystemTime)>,
+}
+
+/// One file's length and modification time, or `None` where there is no file.
+///
+/// A modification time the platform declines to report reads as the epoch, so a
+/// host with no such clock falls back to comparing lengths — which is the whole
+/// answer for the append-only half and is never *worse* than not looking.
+fn mark(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((
+        metadata.len(),
+        metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    ))
+}
+
 /// The reconciler's answer to one submitted envelope.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandOutcome {
@@ -578,6 +602,23 @@ impl ChannelState {
 
     fn queue_path(&self) -> std::path::PathBuf {
         self.paths.channel("queue.json")
+    }
+
+    /// A cheap look at everything the reconcile loop reads off this channel.
+    ///
+    /// Two `stat` calls and no read, so a converged driver can check for an
+    /// arriving edit five times a second for nothing: the loop reconciles only
+    /// when this moved. An absent file fingerprints as absent, so the moment one
+    /// appears the fingerprint has changed.
+    ///
+    /// Length is the load-bearing half — the log only grows, and every queue
+    /// transition the loop can read changes the length too — and the timestamp is
+    /// the belt beside those braces.
+    pub(crate) fn fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            queue: mark(&self.queue_path()),
+            commands: mark(&self.paths.channel("commands.jsonl")),
+        }
     }
 
     /// The live queue.
@@ -787,5 +828,88 @@ impl ChannelState {
             .iter()
             .filter_map(|line| serde_json::from_str::<CommandOutcome>(line).ok())
             .find(|outcome| outcome.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn surface(id: u64, blocking: bool) -> Surface {
+        Surface {
+            id,
+            kind: "finding".to_owned(),
+            message: "something happened".to_owned(),
+            source: source::PROPOSAL.to_owned(),
+            blocking,
+            queued_at: 0,
+            workstream: Some("ship".to_owned()),
+        }
+    }
+
+    /// Every transition of the surface queue that changes what the reconcile loop
+    /// reads off it changes the length that loop fingerprints.
+    ///
+    /// The fingerprint is what a converged driver waits on, and it is two `stat`
+    /// calls rather than a read — so the one thing it must not do is let a
+    /// transition through unseen. A modification time can repeat on a filesystem
+    /// with coarse timestamps; a length is decided by the bytes. This holds the
+    /// half that does not depend on the clock: push, claim and answer, against the
+    /// decision set the loop actually derives from each.
+    #[test]
+    fn every_queue_change_the_loop_reads_shows_in_its_length() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-queuemark-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "marks");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        // What the loop reads: every blocking surface outstanding, whether it is
+        // waiting to be delivered or already delivered and unanswered.
+        let outstanding = |channel: &ChannelState| -> Vec<u64> {
+            let queue = channel.queue();
+            queue
+                .waiting
+                .iter()
+                .chain(queue.pending.iter())
+                .filter(|surface| surface.blocking)
+                .map(|surface| surface.id)
+                .collect()
+        };
+        let length = |channel: &ChannelState| -> Option<u64> {
+            mark(&channel.queue_path()).map(|(bytes, _)| bytes)
+        };
+
+        let empty = length(&channel);
+        // The queue issues the id, so what it handed back is what to look for.
+        let pushed = channel.push(surface(0, true)).expect("a surface is queued");
+        let queued = length(&channel);
+        assert_ne!(empty, queued, "a queued surface did not change the length");
+        assert_eq!(outstanding(&channel), vec![pushed.id]);
+
+        // A claim is the one transition that leaves the decision set alone, so it
+        // is the one a fingerprint could miss without losing anything.
+        let claimed = channel.claim().expect("the surface is claimed");
+        assert!(claimed.is_some());
+        assert_eq!(
+            outstanding(&channel),
+            vec![pushed.id],
+            "a claimed blocking surface stopped being outstanding"
+        );
+
+        channel
+            .answer(&Reply {
+                completion: None,
+                commands: Vec::new(),
+                ..Reply::default()
+            })
+            .expect("the surface is answered");
+        assert_ne!(
+            length(&channel),
+            queued,
+            "an answered surface did not change the length"
+        );
+        assert_eq!(outstanding(&channel), Vec::<u64>::new());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

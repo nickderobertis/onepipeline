@@ -1394,7 +1394,8 @@ The scheduler is **identical for both release styles** — one hold, indefinite,
 never failing — and what differs is only where the readiness answer comes from
 and what is reported. An automated target's answer is its probe, which is a
 subprocess: it is asked off the reconcile loop's own thread and paced on its own
-interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 120 seconds by default. A
+interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 60 seconds by default — the
+minute this loop promises for every answer it owes on a clock. A
 human-step target's answer is the acknowledgement record, for which this crate
 runs no probe because there is none to run. `awaiting-human-step` is carried as
 its own answer through the scheduler, the surface, and the payload and is never
@@ -1535,7 +1536,7 @@ stays private, which is the outcome it was asking for.
 
 What this crate does with it is one paced read and no new vocabulary. On the
 reconcile loop's own passes, on the release watch's interval — `ONEPIPELINE_RELEASE_POLL_SECONDS`,
-120 seconds by default, the same bound the probe is asked under and not a second
+60 seconds by default, the same bound the probe is asked under and not a second
 one — every node that has **settled** and whose repository declares release
 targets has its session read through that reader, under the launch's own
 `filters.vcs`: the same value the follow was opened with, crossing the same seam.
@@ -2866,6 +2867,88 @@ or not, and no checked-in record changes shape.
 This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
 could work around, and the only interface it adds is an optional field on a record
 this crate both writes and reads.
+
+## 55. A ready node that is not running is a gap in the timeline nothing accounts for — OPEN
+
+**Proposal (for the planner who owns the contract): add two kinds to this
+library's closed set, `node-held` and `node-unheld`, and one sentence saying that
+a node the loop is not running and has not settled is journalled with every
+reason holding it, on transition.**
+
+The contract says `node-ready` is emitted when a node's dependencies settle and
+`node-dispatched` when its dispatch starts, and says nothing about the span
+between them. That span is where an operator's question lives. A node held
+because the run reached its concurrency, a node held because its dependency has
+not settled, a node held by a decision point and a node held by a release all
+look **identical** on a timeline: empty space. So the one question an operator
+opens a timeline to answer — *was my run queued behind my own other work, or is
+it stuck?* — is the one question the record cannot answer.
+
+**The subject is wider than concurrency, deliberately.** A node whose
+dependencies have not settled is as much a queued span as one the concurrency is
+holding, and both belong on a timeline — so the record is about any node this
+loop is neither running nor settled on, whatever status the graph derives for it.
+It is **not** about every such node: it is written for a node one of four stated
+reasons is holding, so a node that is dispatchable and merely awaiting the pass
+that will start it, and a human action awaiting the person who has to take it,
+carry none. Neither is held by this loop.
+
+**The reasons compose, and that is the point.** A node can be behind three
+running nodes *and* waiting on a dependency, and a reader has to tell that from
+either alone — so one record carries one entry per reason holding the node at
+once, and a hold that loses one reason while another still holds is a new record
+carrying only what remains. Nothing has to be joined to read it.
+
+**Two of the four are already reported, and this does not restate them.**
+`decision-pending` stays the authoritative account of what a decision is — its
+kind, and the subtree it holds — and `release-wait` stays the authoritative
+account of what a release wait is — each awaited release's identity, target,
+style and age. The `decision` entry names only the reference and the `release`
+entry only the dependency ids: this record is authoritative for the *hold*, and
+each of those for the thing doing the holding.
+
+**On transition only.** The loop diffs the hold set against the last pass exactly
+as it diffs the decisions and the ready announcements, and says nothing on a pass
+where a node is held by what it was held by before. A record per pass would have
+been about forty a second per held node before this plan's pacing work and one
+per settlement after it, and either would bury the journal it exists to explain.
+
+**What a reader gets is the shrinking set.** A node behind three running
+dependencies is held first by all three, then by the two that are left, then by
+the last, and then it dispatches — three successive spans and a `node-unheld`,
+which falls out of the emission rule and needs no arithmetic per node.
+
+It arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40, 47 and 53's additions did.
+A consumer in another repository reads these field names, so the block below is
+the source: `tests/contract.rs` parses it out of this file, and every event kind
+named here must be one `PipelineKind` carries and the contract's own list does
+not.
+
+```json
+{
+  "event_kinds": ["node-held", "node-unheld"],
+  "reason_kinds": ["dependencies", "concurrency", "decision", "release"],
+  "fields": {
+    "dependencies": ["blocking"],
+    "concurrency": ["ahead", "limit"],
+    "decision": ["reference"],
+    "release": ["awaiting"]
+  },
+  "held_payload": "reasons",
+  "unheld_payload": "released"
+}
+```
+
+Driven end to end by `tests/e2e/holds.rs`, against real run stores: a node behind
+several dependencies finishing one at a time and naming the shrinking set, a node
+the concurrency holds for many passes reported once per transition rather than
+once per pass, a node held two ways at once losing one reason and keeping the
+other, a decision hold naming its reference without copying the record that owns
+it, and the two nodes nothing is holding — a dispatchable one and a human action —
+carrying no record at all. The release hold is driven by
+`adoption::a_published_node_is_held_until_the_release_answers_and_by_nothing_else`,
+beside the real probe and the real release-targets document that produce one.
 
 ## 56. A listing reads every byte of every run, and there is no cheap read to name — OPEN
 

@@ -56,10 +56,14 @@ pub const POLL_ENV: &str = "ONEPIPELINE_RELEASE_POLL_SECONDS";
 
 /// How often an automated target's probe is run when nothing overrides it.
 ///
-/// A probe is a subprocess, so this is a bound on how much a held run costs the
-/// host rather than a promise about latency: a release that arrives between two
-/// asks is noticed at the second one.
-pub const DEFAULT_POLL_SECONDS: u64 = 120;
+/// A probe is a subprocess, so this bounds what a held run costs the host rather
+/// than promising latency: a release arriving between two asks is noticed at the
+/// second one.
+///
+/// **A minute, and never longer** — the bound every other answer this loop owes
+/// on a clock is held to. A host wanting to spend less lengthens [`POLL_ENV`];
+/// the shipped value stays inside the promise.
+pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
 /// The environment variable bounding how often a held node's wait is surfaced.
 pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
@@ -421,6 +425,7 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
             // acknowledgement record. There is no spelling of this that could
             // start a subprocess for a human-step target, because the probe
             // lives on the other variant.
+            crate::loopstats::release_asked();
             let answer = Answer::of(&onevcs::release_status(
                 &question.reference,
                 question.target.as_ref(),
@@ -470,6 +475,8 @@ pub(crate) struct Watch {
     /// When the release records were last read. `None` before the first read,
     /// which is due immediately.
     relayed: Option<Instant>,
+    /// Whether a node the last refresh watched could not be described yet.
+    unresolved: bool,
     asker: Asker,
 }
 
@@ -523,6 +530,7 @@ impl Watch {
             adopted,
             arrived,
             surfaced: BTreeMap::new(),
+            unresolved: false,
             surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
@@ -557,17 +565,107 @@ impl Watch {
             .unwrap_or_default()
     }
 
+    /// How long the loop may go without taking this watch up.
+    ///
+    /// An arriving *answer* does not wait for it —
+    /// [`take_up_answers`](Self::take_up_answers) is what the loop waits on, and
+    /// it wakes within a fifth of a second of the asker answering. What this
+    /// paces is the work that is due on a clock rather than on an answer:
+    /// re-surfacing a wait that has not ended, and re-reading what the sibling
+    /// recorded about this run's own landed work. So it is the shorter of those
+    /// two intervals, held to a minute — which is the bound this loop promises
+    /// for an arriving release, and the ceiling a host that configures neither
+    /// falls back to.
+    pub(crate) fn take_up_every(&self) -> Duration {
+        self.surface_every
+            .min(self.relay_every)
+            .min(Duration::from_secs(60))
+    }
+
+    /// Take up whatever the asker has answered, and say whether it answered
+    /// anything.
+    ///
+    /// Named for the taking up rather than for the question it answers: the
+    /// asker's queue is drained here and the answers are stored, so a caller
+    /// reading this as a look at the run's state would be the caller that lost
+    /// them.
+    ///
+    /// What the reconcile loop waits on. The asker runs on its own thread at its
+    /// own pace, so an answer arrives without anything about this run changing —
+    /// and this is how it wakes the loop, rather than the loop going back and
+    /// asking on a timer of its own.
+    pub(crate) fn take_up_answers(&mut self) -> bool {
+        let mut arrived = false;
+        for (keys, answer) in self.asker.answered() {
+            arrived = true;
+            for key in keys {
+                self.answers.insert(key, answer.clone());
+            }
+        }
+        arrived
+    }
+
+    /// Whether any node in this run names a dependency outside its own
+    /// repository, which is the cheap half of asking whether one is waiting.
+    ///
+    /// What it decides is whether the loop wakes for a release at all, so it is
+    /// deliberately the wider question: a run whose nodes name no such dependency
+    /// has nothing to ask about and nothing to take up, and never pays the
+    /// interval above — which is most runs. A run that names one goes on waking
+    /// for it after the answer has arrived, because the answer this holds is a
+    /// cache of a thing another process writes.
+    pub(crate) fn names_a_release_dependency(&self) -> bool {
+        self.unresolved || self.dependencies.values().any(|of| !of.is_empty())
+    }
+
+    /// Whether anything this run landed could have a release recorded against it.
+    ///
+    /// The same question [`relay_releases`](Self::relay_releases) asks per node,
+    /// asked of the run: a repository declaring no release target has nothing
+    /// recorded about it, so there is nothing to go and read. Answered off the
+    /// per-driver cache, so asking again costs nothing.
+    pub(crate) fn relays_anything(&mut self, state: &RunState) -> bool {
+        let repositories: Vec<String> = state
+            .sessions
+            .keys()
+            .filter_map(|node| state.graph.get(node).and_then(|node| node.repo.clone()))
+            .collect();
+        repositories.into_iter().any(|repo| {
+            self.repositories
+                .of(&repo)
+                .is_some_and(|releases| !releases.targets.is_empty())
+        })
+    }
+
+    /// The dependencies one node is still waiting on the release of, by id.
+    ///
+    /// The ids alone. What each of those waits *is* — its identity, its target,
+    /// its style, how long it has been on — is
+    /// [`ReleaseWait`](journal::PipelineKind::ReleaseWait)'s account of it and is
+    /// not copied anywhere else.
+    pub(crate) fn awaited_deps(&self, node: &str) -> Vec<String> {
+        self.dependencies
+            .get(node)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|dependency| {
+                self.answers
+                    .get(&(node.to_owned(), dependency.dep.clone()))
+                    .and_then(Answer::version)
+                    .is_none()
+            })
+            .map(|dependency| dependency.dep.clone())
+            .collect()
+    }
+
     /// Take up the answers that have arrived, and ask about what is awaited now.
     ///
     /// `watching` is the nodes whose releases matter this pass: every node that
     /// is ready to start, and every fast-adoption node still running. Neither
     /// blocks on anything.
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
-        for (keys, answer) in self.asker.answered() {
-            for key in keys {
-                self.answers.insert(key, answer.clone());
-            }
-        }
+        self.take_up_answers();
         let now = crate::sys::now_millis();
         let mut waits: Vec<(Key, Dependency)> = Vec::new();
         for node in watching {
@@ -577,6 +675,13 @@ impl Watch {
                 waits.push((key, dependency));
             }
         }
+        // A node whose dependencies this run could not describe yet is answered
+        // again rather than left: what it is waiting on may be another run's
+        // ledger, which moves without anything here changing, so the loop has to
+        // keep coming back for it.
+        self.unresolved = watching
+            .iter()
+            .any(|node| !self.dependencies.contains_key(&node.id));
         self.asker.ask(questions_of(&waits));
     }
 
@@ -711,6 +816,7 @@ impl Watch {
         paths: &RunPaths,
         journal: &mut Journal,
         state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
         filter: Option<&crate::filter::EventFilter>,
     ) -> Result<()> {
         if !self
@@ -720,7 +826,6 @@ impl Watch {
             return Ok(());
         }
         self.relayed = Some(Instant::now());
-        let statuses = state.statuses();
         let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that
@@ -2130,5 +2235,94 @@ mod tests {
         }
         assert_eq!(poll_seconds(), DEFAULT_POLL_SECONDS);
         assert_eq!(surface_every_seconds(), DEFAULT_SURFACE_SECONDS);
+    }
+
+    /// The shipped probe interval is inside the bound this loop promises for
+    /// every other answer it owes on a clock.
+    ///
+    /// Read through the same function a driver reads it through rather than off
+    /// the constant, so a build that shipped a longer default fails here whether
+    /// it moved the constant or the fallback around it. What holds the *rate* end
+    /// to end — that a held run really is asked about no oftener than this,
+    /// however fast its loop runs — is
+    /// `adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`.
+    #[test]
+    fn the_shipped_probe_interval_is_no_longer_than_the_loop_promises() {
+        std::env::remove_var(POLL_ENV);
+        let shipped = Duration::from_secs(poll_seconds());
+        assert!(
+            shipped <= Duration::from_secs(60),
+            "the shipped probe interval is {shipped:?}, which is longer than the minute a held \
+             node is promised for every other answer this loop owes on a clock"
+        );
+    }
+
+    /// The e2e suite carries its own copy of [`DEFAULT_POLL_SECONDS`], because
+    /// this module is private and the suite drives the compiled binary from
+    /// outside the crate. This is the gate that keeps that copy exact: it reads
+    /// the literal out of the suite's own source and fails on drift in either
+    /// direction, which neither the suite's ceiling assertion nor the bound
+    /// above can see — both are `<=`, so a shipped value that *shrank* would
+    /// pass both while the suite went on asserting a bound this build no longer
+    /// ships.
+    #[test]
+    fn the_suites_copy_of_the_shipped_probe_interval_is_this_one() {
+        let suite = include_str!("../tests/e2e/adoption.rs");
+        let declaration = "const SHIPPED_POLL_SECONDS: u64 = ";
+        let start = suite
+            .find(declaration)
+            .expect("tests/e2e/adoption.rs declares SHIPPED_POLL_SECONDS")
+            + declaration.len();
+        let copied: u64 = suite[start..]
+            .split(';')
+            .next()
+            .expect("the declaration ends in a semicolon")
+            .trim()
+            .parse()
+            .expect("SHIPPED_POLL_SECONDS is a plain integer literal");
+        assert_eq!(
+            copied, DEFAULT_POLL_SECONDS,
+            "tests/e2e/adoption.rs holds a real build to a probe interval of {copied}s, but this \
+             build ships {DEFAULT_POLL_SECONDS}s"
+        );
+    }
+
+    /// The divergence record states this interval to the planner who owns the contract,
+    /// in prose, in both of the places it describes a paced read.
+    ///
+    /// Prose is where a copy rots unnoticed, so it is reconciled here rather than read:
+    /// every "N seconds by default" that record states is this constant. Stated as *every*
+    /// occurrence rather than as a count, so a third place that describes the interval is
+    /// covered the day it is written instead of failing this as a miscount.
+    #[test]
+    fn the_divergence_records_copies_of_the_shipped_probe_interval_are_this_one() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let phrase = " seconds by default";
+        let stated: Vec<u64> = record
+            .match_indices(phrase)
+            .map(|(at, _)| {
+                record[..at]
+                    .rsplit(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .filter(|digits| !digits.is_empty())
+                    .unwrap_or_else(|| {
+                        panic!("docs/contract-divergences.md states \"{phrase}\" after no number")
+                    })
+                    .parse()
+                    .expect("the interval the divergence record states is a plain integer")
+            })
+            .collect();
+        assert!(
+            !stated.is_empty(),
+            "docs/contract-divergences.md no longer states the probe interval at all, so this \
+             gate is reconciling nothing"
+        );
+        for interval in stated {
+            assert_eq!(
+                interval, DEFAULT_POLL_SECONDS,
+                "docs/contract-divergences.md tells the contract's owner this build polls \
+                 every {interval}s, but it ships {DEFAULT_POLL_SECONDS}s"
+            );
+        }
     }
 }
