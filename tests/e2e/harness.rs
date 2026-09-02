@@ -80,7 +80,9 @@ struct StoreQualified<T> {
 /// or `{"path": "/home/…"}` and which key is present is what tells them apart. An
 /// unknown key is an unknown *variant*, which is refused here exactly as an unknown
 /// field is refused on the structs around it — so this widens what the boundary accepts
-/// by the one shape `onetaskgraph` documents and by nothing else.
+/// by the one shape `onetaskgraph` documents and by nothing else. It is read *forward*:
+/// the revision the checks pin predates the field, and this is what lets the suite read
+/// a store served by the newer install a real host has.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StoreLocation {
@@ -185,11 +187,12 @@ enum StoreItemKind {
 /// A task page is read whether the source said where the task is or not, and both
 /// forms of saying are understood.
 ///
-/// `onetaskgraph` reports a `location` on every task its `local-md` plugin serves, so
-/// the *present* form is driven end to end by every journey in `store.rs` that reads a
-/// projected task back. What no real source here produces is the **absent** form — a
-/// source that simply does not say — and that is the case this pins, beside the two
-/// spellings of saying, against the boundary that actually validates them.
+/// The **absent** form is what every journey in `store.rs` drives end to end: the
+/// `onetaskgraph` revision the checks pin predates the field, so a task read back
+/// through it never says where it is. What no source here produces is either form of
+/// *saying* — a newer install on a real host reports one on every task its `local-md`
+/// plugin serves, and that is what turned this suite red — so the two spellings are
+/// pinned here, beside the silence, against the boundary that actually validates them.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // validated boundary rather than a journey: what is asserted is which store pages this
 // harness will accept, which is the thing every journey built on it takes for granted
@@ -230,21 +233,26 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The two spellings of `location` this suite accepts are the two `onetaskgraph`
-/// documents, asked of the real `onetaskgraph`.
+/// This boundary reads every `location` the real `onetaskgraph` declares — and the
+/// revision this suite pins declares none, which is why the field is optional here.
 ///
-/// Both this suite and `src/writeback.rs` carry a hand-written copy of that enum, and a
-/// copy of an external schema is exactly the thing that rots silently — the `location`
-/// field arrived here as a whole suite going red. So the authoritative source is asked
-/// rather than assumed: `onetaskgraph schema` prints the variants, and the copy is
-/// reconciled against them. `writeback::tests::the_suites_copy_of_a_location_is_this_one`
-/// holds the other copy against this one.
+/// Both this suite and `src/writeback.rs` carry a hand-written copy of a two-variant
+/// enum, and a copy of an external schema is exactly the thing that rots silently. But
+/// the copy is a *forward* tolerance rather than a mirror: `taskgraph::FIRST_REVISION`,
+/// which is the `onetaskgraph` every check here installs and drives, predates the field
+/// entirely, and the field arrived from the newer install a real host shells out to — as
+/// a whole suite going red. So what is asked of the authoritative source is the one
+/// thing that holds either way: whatever `onetaskgraph schema` declares, this boundary
+/// reads. Against the pinned revision that is an empty set beside a `Task` carrying no
+/// `location` at all; against a newer one it is the two spellings, and a third would
+/// fail here. `writeback::tests::the_suites_copy_of_a_location_is_this_one` holds the
+/// other copy against this one.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
 // against the real sibling's declared schema, which is not a journey: it asks the same
 // compiled `onetaskgraph` every journey reads its store through, and no journey can assert
 // about the validation standing between it and that store.
 #[test]
-fn the_locations_this_boundary_accepts_are_the_ones_onetaskgraph_declares() {
+fn this_boundary_reads_every_location_onetaskgraph_declares() {
     let world = World::new("harness-location-schema");
     let output = world
         .store_cmd(&["schema"])
@@ -257,26 +265,33 @@ fn the_locations_this_boundary_accepts_are_the_ones_onetaskgraph_declares() {
     );
     let schema: Value =
         serde_json::from_slice(&output.stdout).expect("the schema is machine-readable");
-    let variants = schema["roots"]["Task"]["$defs"]["Location"]["oneOf"]
-        .as_array()
-        .expect("onetaskgraph declares Location as a tagged union");
-    let mut declared: Vec<String> = variants
-        .iter()
-        .flat_map(|variant| {
-            variant["properties"]
-                .as_object()
-                .expect("each variant is an object with one key")
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>()
-        })
-        .collect();
+    let task = &schema["roots"]["Task"];
+    let mut declared: Vec<String> = match task["$defs"]["Location"]["oneOf"].as_array() {
+        Some(variants) => variants
+            .iter()
+            .flat_map(|variant| {
+                variant["properties"]
+                    .as_object()
+                    .expect("each variant is an object with one key")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+            })
+            .collect(),
+        // The pinned revision predates the field, which leaves nothing to reconcile
+        // against but is not nothing to assert: a task it declares carries no `location`
+        // either, so the two halves of its schema agree and the absent form this
+        // boundary reads is the only form this `onetaskgraph` can produce.
+        None => {
+            assert!(
+                task["properties"].get("location").is_none(),
+                "onetaskgraph reports a location it declares no shape for: {}",
+                task["properties"]
+            );
+            Vec::new()
+        }
+    };
     declared.sort();
-    assert_eq!(
-        declared,
-        ["path", "url"],
-        "onetaskgraph now declares a location this suite does not read"
-    );
     for spelling in &declared {
         let read: Result<StoreLocation, _> =
             serde_json::from_value(serde_json::json!({ spelling.as_str(): "somewhere" }));

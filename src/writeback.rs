@@ -1994,11 +1994,12 @@ mod tests {
     ///
     /// Two hand-written copies of `onetaskgraph`'s two-variant schema stand at the two
     /// boundaries that read an item back — this one, and the e2e suite's `StoreLocation`.
-    /// The suite's is reconciled against the *real* sibling's printed schema by
-    /// `harness::the_locations_this_boundary_accepts_are_the_ones_onetaskgraph_declares`;
-    /// this closes the triangle, so neither copy can move without the other. A copy of an
-    /// external schema is exactly what rots unnoticed: this field arrived by turning a
-    /// whole suite red.
+    /// The suite's is held against the *real* sibling's printed schema by
+    /// `harness::this_boundary_reads_every_location_onetaskgraph_declares`; this closes
+    /// the triangle, so neither copy can move without the other. A copy of an external
+    /// schema is exactly what rots unnoticed: this field arrived by turning a whole suite
+    /// red, from a newer install than the revision the checks pin — which declares no
+    /// location at all, so both copies are read forward.
     #[test]
     fn the_suites_copy_of_a_location_is_this_one() {
         let suite = include_str!("../tests/e2e/harness.rs");
