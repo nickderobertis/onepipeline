@@ -515,8 +515,7 @@ fn destination_project(
     // or a different/duplicate project here requires replacing the real onetaskgraph
     // executable with a scripted mock; the real-store journey drives the successful read,
     // total-replacement copy, and preservation of present and absent content end to end.
-    let response: ProjectPage =
-        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    let response: ProjectPage = answered(&output.stdout)?;
     if !response.errors.is_empty() {
         return Err("project show returned partial results".to_owned());
     }
@@ -530,7 +529,6 @@ fn destination_project(
             snapshot.project
         ));
     }
-    let _ = (response.next, response.plan);
     // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(project.item)
 }
@@ -587,8 +585,7 @@ fn destination_origins(
         // invalid qualified ids, missing node ids, or duplicate node ids here requires
         // replacing the real onetaskgraph executable with a scripted mock; real-store
         // success and outage/recovery are driven end to end instead.
-        let response: TaskPage =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let response: TaskPage = answered(&output.stdout)?;
         if !response.errors.is_empty() {
             return Err("task list returned partial results".to_owned());
         }
@@ -614,7 +611,6 @@ fn destination_origins(
                 return Err(format!("project has more than one task for node '{node}'"));
             }
         }
-        let _ = response.plan;
         let Some(next) = response.next else { break };
         if next.is_empty() {
             return Err("task list returned an empty next-page cursor".to_owned());
@@ -684,39 +680,66 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
     })
 }
 
+/// Read one of the store's answers, naming the field that refused it.
+///
+/// `serde_json`'s own error says the type it wanted and not where it wanted it, and this
+/// projection reads several fields of several shapes out of one paged response — so a
+/// `labels` answered as a string and a `metadata` answered as one are otherwise the same
+/// sentence. The path is the whole of what makes the refusal actionable, because of where
+/// it lands: write-back is best-effort, so this one line on the driver's own standard
+/// error and the planner surface built from it are all anybody gets. Read the same way
+/// `taskgraph::read` reads a project, for the same reason.
+fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> {
+    let mut reading = serde_json::Deserializer::from_slice(stdout);
+    let response: T =
+        serde_path_to_error::deserialize(&mut reading).map_err(|error| {
+            match error.path().to_string() {
+                path if path == "." => error.into_inner().to_string(),
+                path => format!("{path}: {}", error.into_inner()),
+            }
+        })?;
+    // Trailing bytes are still a refusal, exactly as `serde_json::from_slice` made them:
+    // a second document after the answer is not an answer this build can act on.
+    reading.end().map_err(|error| error.to_string())?;
+    Ok(response)
+}
+
 fn exit(status: &ExitStatus) -> String {
     status
         .code()
         .map_or_else(|| "on a signal".into(), |code| code.to_string())
 }
 
+// Every type below describes a response `onetaskgraph` composes, so none of them denies
+// unknown fields: that program adds one to its own answer in a patch release — `location`
+// on a project item, at 0.2.14 — and a consumer mirroring a producer's shape under
+// `deny_unknown_fields` makes each of those a hard read failure. A document this crate
+// authors and reads back is the opposite case and keeps the deny; this module authors only
+// the shadow project, which nothing reads back through a type. What the projection
+// consumes stays required and typed, and what it never read is no longer enumerated.
+
+/// One page of the store's answer to `task list`.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TaskPage {
     items: Vec<DestinationTask>,
     next: Option<String>,
-    plan: Value,
     errors: Vec<Value>,
 }
 
+/// The store's answer to `project show`.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ProjectPage {
     items: Vec<DestinationProject>,
-    next: Option<String>,
-    plan: Value,
     errors: Vec<Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DestinationProject {
     id: QualifiedId,
     item: DestinationProjectItem,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DestinationProjectItem {
     /// Not declared by a plan, so it is preserved rather than replaced.
     title: String,
@@ -726,82 +749,20 @@ struct DestinationProjectItem {
     labels: Vec<DestinationLabel>,
     /// Only the reserved keys this worker owns are rewritten; the rest are preserved.
     metadata: BTreeMap<String, Value>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] These fields enumerate the
-    // compiled sibling's complete, deny-unknown machine response but are not inputs this
-    // projection interprets. onetaskgraph owns and validates its native id, URL, timestamps,
-    // and repository identities, and a project's status is not a plan's to state.
-    #[serde(rename = "id")]
-    _id: String,
-    #[serde(rename = "status")]
-    _status: DestinationStatus,
-    #[serde(rename = "url")]
-    _url: Option<String>,
-    #[serde(rename = "created_at")]
-    _created_at: Option<String>,
-    #[serde(rename = "updated_at")]
-    _updated_at: Option<String>,
-    #[serde(rename = "repositories")]
-    _repositories: Vec<String>,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DestinationTask {
     id: QualifiedId,
     item: DestinationTaskItem,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DestinationTaskItem {
     /// Not modelled by a plan at all, so they are preserved rather than dropped.
     labels: Vec<DestinationLabel>,
     /// Read for `onepipeline.id`, which is how a destination task names its plan node.
     metadata: BTreeMap<String, Value>,
-    // llmlint: ignore-block[invalid_states_unrepresentable] A task's title, body, status,
-    // project and repositories are declared by the plan, so the projection replaces them
-    // and never reads the destination's; the remaining fields are onetaskgraph's own. They
-    // are enumerated because the sibling's machine response denies unknown fields.
-    #[serde(rename = "id")]
-    _id: String,
-    #[serde(rename = "title")]
-    _title: String,
-    #[serde(rename = "content")]
-    _content: Option<String>,
-    #[serde(rename = "status")]
-    _status: DestinationStatus,
-    #[serde(rename = "project")]
-    _project: Option<String>,
-    #[serde(rename = "url")]
-    _url: Option<String>,
-    #[serde(rename = "created_at")]
-    _created_at: Option<String>,
-    #[serde(rename = "updated_at")]
-    _updated_at: Option<String>,
-    #[serde(rename = "repositories")]
-    _repositories: Vec<String>,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DestinationStatus {
-    #[serde(rename = "category")]
-    _category: DestinationStatusCategory,
-    #[serde(rename = "name")]
-    _name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum DestinationStatusCategory {
-    Backlog,
-    Todo,
-    InProgress,
-    Done,
-    Cancelled,
-    Unknown,
 }
 
 /// One label a destination item carries, read back and written unchanged.
@@ -815,7 +776,6 @@ enum DestinationStatusCategory {
 // store legitimately holds into a projection failure, which is the defect this type exists
 // to fix rather than a stricter form of the fix.
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct DestinationLabel {
     id: String,
     name: String,
@@ -1557,7 +1517,7 @@ mod tests {
         snapshot: &Snapshot,
         origins: &BTreeMap<String, Origin>,
     ) -> Option<String> {
-        let missing = if destination._id == destination.title {
+        let missing = if snapshot.project.native() == destination.title {
             "its destination project's identifier is its own title, so writing the \
              identifier and preserving the title are the same bytes"
         } else if snapshot.nodes.len() < 2 {
