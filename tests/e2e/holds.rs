@@ -412,9 +412,8 @@ fn a_hold_reason_written_by_a_later_build_is_restated_rather_than_assumed() {
     let opened = held(&world, "unreadable", "ship");
     assert_eq!(opened.len(), 1, "{opened:?}");
 
-    // The same record as a later build would have written it: the hold is on, and the
-    // only reason it names is one this build has no variant for. Appended while nothing
-    // is driving, so the next driver folds it as its predecessor's word.
+    // A later build's own record, appended while nothing is driving, so the next
+    // driver folds it as its predecessor's word rather than as a live hold.
     let mut future = opened[0].clone();
     future["seq"] = json!(9_000);
     future["payload"] = json!({ "reasons": [{ "kind": "lunar-phase", "phase": "waxing" }] });

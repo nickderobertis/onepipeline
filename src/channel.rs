@@ -608,14 +608,12 @@ impl ChannelState {
     ///
     /// Two `stat` calls and no read, so a converged driver can check for an
     /// arriving edit five times a second for nothing: the loop reconciles only
-    /// when this moved. The two files are the two it reads — the surface queue
-    /// and the durable command log — and an absent file fingerprints as absent,
-    /// so the moment one appears the fingerprint has changed.
+    /// when this moved. An absent file fingerprints as absent, so the moment one
+    /// appears the fingerprint has changed.
     ///
-    /// Length is the load-bearing half: the log only grows, and every queue
-    /// transition the loop can read changes the length too, which
-    /// `tests::every_queue_change_the_loop_reads_shows_in_its_length` holds. The
-    /// timestamp is the belt beside the braces.
+    /// Length is the load-bearing half — the log only grows, and every queue
+    /// transition the loop can read changes the length too — and the timestamp is
+    /// the belt beside those braces.
     pub(crate) fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             queue: mark(&self.queue_path()),

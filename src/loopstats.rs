@@ -101,18 +101,15 @@ mod tests {
 
     #[test]
     fn nothing_is_written_when_nobody_asked_for_it() {
-        // The shipped configuration: the variable is unset, so a driver opens no
-        // file at all. Asserted through the one function that decides it, because
-        // the counters themselves are process-wide and a second test running
-        // beside this one moves them.
+        // Asserted through the one function that decides it, because the counters
+        // themselves are process-wide and a test running beside this one moves them.
         std::env::remove_var(STATS_ENV);
         assert!(!asked());
         std::env::set_var(STATS_ENV, "");
         assert!(!asked(), "an empty setting asks for nothing");
         std::env::remove_var(STATS_ENV);
-        // And the flush is a no-op rather than a panic when nobody asked, which is
-        // what makes counting free on every run but a measured one. It answers
-        // `Ok` without looking at the directory, which here does not exist.
+        // Unasked, the flush answers `Ok` without looking at the directory — which
+        // here does not exist, so a flush that looked would fail.
         let paths = crate::ledger::RunPaths::under(&std::env::temp_dir(), "nobody");
         flush(&paths).expect("an unmeasured run writes nothing and cannot fail");
         assert!(!paths.dir.join(STATS_FILE).exists());

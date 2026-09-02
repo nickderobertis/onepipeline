@@ -642,8 +642,7 @@ fn a_driver_that_cannot_write_the_counts_it_was_asked_for_says_so() {
         &plan_of("unwritable", vec![agent("hold", &[])]),
     );
     world.run(&["start", &plan, "--detach"]).exited(0);
-    // The driver has written the counts once, so the path it writes them to is
-    // the path this obstructs rather than one guessed before the run existed.
+    // Waited for, so what is obstructed below is the path the driver really writes.
     reporting(&world, "unwritable");
 
     // A non-empty directory where the counts go, so both halves of the atomic
