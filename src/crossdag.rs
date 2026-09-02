@@ -23,7 +23,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Mutex;
+use std::time::{Instant, SystemTime};
 
 use serde_json::{json, Value};
 
@@ -106,6 +107,68 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 /// A record this build cannot read is skipped, the same way every other reader
 /// of a journal skips one.
 fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    if let Some(answered) = answered_recently(root, reference) {
+        return answered;
+    }
+    let status = read_settled_status(root, reference);
+    remember(root, reference, status);
+    status
+}
+
+/// What this process has already read an upstream's ledger to learn, and when.
+///
+/// More than one part of a driver asks this same question. The reconcile loop
+/// asks it on its own paced deadline, and every reader that resolves a graph's
+/// edges quietly asks it beside them — a view rendering a row, and the summary
+/// document's writer, which is asked once per record appended to a journal. Each
+/// answer costs a read of **another run's whole ledger**, so two consumers asking
+/// inside one interval is that ledger read twice over for one answer, and the
+/// second read is one nobody chose to spend.
+///
+/// Held for [`UPSTREAM_EVERY`], which is not a freshness this invents: it is the
+/// interval the loop already re-reads on, and so the bound on how stale a
+/// cross-DAG answer is allowed to be. An answer younger than that is one the loop
+/// would have given from its own state anyway.
+///
+/// [`UPSTREAM_EVERY`]: crate::engine::UPSTREAM_EVERY
+static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
+
+/// One upstream node, under the runs root it was asked beneath.
+type Asked = (PathBuf, String, String);
+
+/// What that question answered, and when it was paid for.
+type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>)>;
+
+fn key(root: &Path, reference: &Reference) -> Asked {
+    (
+        root.to_path_buf(),
+        reference.run.clone(),
+        reference.node.clone(),
+    )
+}
+
+/// A lock another thread poisoned still holds a sound answer: every writer here
+/// replaces one whole entry, so nothing can be observed half-written.
+fn answers() -> std::sync::MutexGuard<'static, Answers> {
+    ANSWERED.lock().unwrap_or_else(|held| held.into_inner())
+}
+
+fn answered_recently(root: &Path, reference: &Reference) -> Option<Option<NodeStatus>> {
+    answers()
+        .get(&key(root, reference))
+        .filter(|(read_at, _)| read_at.elapsed() < crate::engine::UPSTREAM_EVERY)
+        .map(|(_, status)| *status)
+}
+
+fn remember(root: &Path, reference: &Reference, status: Option<NodeStatus>) {
+    let mut answers = answers();
+    // Dropped as they go stale rather than on a size, so what is held is one
+    // entry per upstream a live graph is actually asking about.
+    answers.retain(|_, (read_at, _)| read_at.elapsed() < crate::engine::UPSTREAM_EVERY);
+    answers.insert(key(root, reference), (Instant::now(), status));
+}
+
+fn read_settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
     let paths = RunPaths::under(root, &reference.run);
     if !paths.exists() {
         return None;

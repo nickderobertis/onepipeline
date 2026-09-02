@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -553,7 +554,7 @@ impl RunState {
     /// to and have no use for what may still be running for it: an edit, which
     /// asks [`Frontier::in_flight`] that question instead, and the derivation,
     /// which is about the graph rather than about any dispatch.
-    pub(crate) fn statuses_recorded(&self) -> BTreeMap<String, NodeStatus> {
+    fn statuses_recorded(&self) -> BTreeMap<String, NodeStatus> {
         self.recorded
             .iter()
             .map(|(id, recorded)| (id.clone(), recorded.status()))
@@ -592,8 +593,19 @@ impl RunState {
 
     /// Every node's status, with the derived gates recomputed against the graph
     /// as it stands now.
+    ///
+    /// Answered from what this process last derived where nothing the answer is
+    /// a function of has moved — see [`DERIVED`]. The uncached derivation is
+    /// [`statuses_with`](Self::statuses_with), which is what a caller resolving
+    /// its references some other way asks.
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
-        self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied())
+        let recorded = self.statuses_recorded();
+        if let Some(derived) = derived_already(&self.graph, &recorded, &self.cross_dag) {
+            return derived;
+        }
+        let derived = self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied());
+        remember_derived(&self.graph, &recorded, &self.cross_dag, &derived);
+        derived
     }
 
     /// Every node's status, resolving cross-DAG references through `upstream`.
@@ -604,6 +616,67 @@ impl RunState {
         crate::loopstats::statuses_derived();
         crate::graph::derive(&self.graph, &self.statuses_recorded(), upstream)
     }
+}
+
+/// What this process has already derived the graph's statuses from, and to.
+///
+/// Deriving is a fixpoint over every node and every edge, and a driver asks for
+/// it from two places that do not know about each other: the reconcile loop,
+/// once per fold, and the summary document's writer, once per record appended to
+/// the journal. Both derive from the same journal, so at the ordinary moment they
+/// are asking the identical question — and answering it twice is the whole of the
+/// cost, since the answer is a pure function of the three things keyed here.
+///
+/// Keyed on the whole of that input rather than on a digest of it, because a
+/// digest that collided would hand back another graph's statuses, and the
+/// comparison is a walk where the derivation it saves is a fixpoint.
+///
+/// A few entries rather than one: the two askers are not in lockstep, and a
+/// single slot would be evicted by whichever asked from the older state and then
+/// miss for both.
+static DERIVED: Mutex<Vec<Derivation>> = Mutex::new(Vec::new());
+
+/// How many states are remembered at once. Small: the askers are at most a
+/// record or two apart, and anything older is a state nothing will ask about
+/// again.
+const DERIVATIONS_HELD: usize = 4;
+
+type Statuses = BTreeMap<String, NodeStatus>;
+
+/// One remembered derivation: the three inputs, and what they derived to.
+struct Derivation {
+    graph: Graph,
+    recorded: Statuses,
+    cross_dag: Statuses,
+    derived: Statuses,
+}
+
+/// A lock another thread poisoned still holds sound answers: every writer pushes
+/// one whole entry, so nothing can be observed half-written.
+fn derivations() -> std::sync::MutexGuard<'static, Vec<Derivation>> {
+    DERIVED.lock().unwrap_or_else(|held| held.into_inner())
+}
+
+fn derived_already(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses) -> Option<Statuses> {
+    derivations()
+        .iter()
+        .find(|held| {
+            held.graph == *graph && held.recorded == *recorded && held.cross_dag == *cross_dag
+        })
+        .map(|held| held.derived.clone())
+}
+
+fn remember_derived(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses, derived: &Statuses) {
+    let mut held = derivations();
+    if held.len() >= DERIVATIONS_HELD {
+        held.remove(0);
+    }
+    held.push(Derivation {
+        graph: graph.clone(),
+        recorded: recorded.clone(),
+        cross_dag: cross_dag.clone(),
+        derived: derived.clone(),
+    });
 }
 
 /// Fold a run's whole journal.
