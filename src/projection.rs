@@ -553,7 +553,7 @@ impl RunState {
     /// to and have no use for what may still be running for it: an edit, which
     /// asks [`Frontier::in_flight`] that question instead, and the derivation,
     /// which is about the graph rather than about any dispatch.
-    fn statuses_recorded(&self) -> BTreeMap<String, NodeStatus> {
+    pub(crate) fn statuses_recorded(&self) -> BTreeMap<String, NodeStatus> {
         self.recorded
             .iter()
             .map(|(id, recorded)| (id.clone(), recorded.status()))

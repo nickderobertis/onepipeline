@@ -50,11 +50,12 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::event::Envelope;
-use crate::graph;
+use crate::graph::{self, Graph, NodeStatus};
 use crate::journal;
 use crate::ledger::{self, LaunchRecord, RunPaths, Skipped};
 use crate::projection::{self, RunState};
@@ -309,6 +310,7 @@ impl RunSummary {
             view.events.len() as u64,
             view.events.last().map(|event| event.kind.0.clone()),
             &telemetry::of_run(paths, &view.events),
+            &view.state.statuses(),
             stamp,
         ))
     }
@@ -317,6 +319,12 @@ impl RunSummary {
     ///
     /// The one place either producer builds a row, which is what makes the two
     /// the same row.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one input the row is built from, and the two \
+                  producers hold them separately: bundling them here would make \
+                  each caller compose a type whose only purpose is this call"
+    )]
     fn derive(
         run: &str,
         launch: &LaunchRecord,
@@ -324,9 +332,9 @@ impl RunSummary {
         event_count: u64,
         last_event_kind: Option<String>,
         timing: &RunTelemetry,
+        statuses: &BTreeMap<String, NodeStatus>,
         (journal_len, journal_mtime_ms): Stamp,
     ) -> Self {
-        let statuses = state.statuses();
         let mut node_counts: BTreeMap<String, u64> = BTreeMap::new();
         for status in statuses.values() {
             *node_counts.entry(status.as_str().to_string()).or_insert(0) += 1;
@@ -339,11 +347,13 @@ impl RunSummary {
             event_count,
             node_counts,
             stop_recorded: state.stop_recorded(),
-            graph_complete: !statuses.is_empty() && graph::is_terminal(&statuses),
+            graph_complete: !statuses.is_empty() && graph::is_terminal(statuses),
             decisions_pending: state.decisions_pending.len() as u64,
             surfaces_queued: state.surfaces_queued,
             surfaces_read: state.surfaces_read,
-            awaiting_human_action: state.awaiting_human_action(),
+            awaiting_human_action: statuses
+                .values()
+                .any(|status| *status == NodeStatus::Waiting),
             project: launch.project.clone(),
             launcher: launch.launcher.clone(),
             session: launch.session.clone(),
@@ -490,6 +500,33 @@ impl Folded {
 /// second is what an `oneharness-session` record does, published out of band and
 /// stamped when its session opened — and both are rare, which is what makes
 /// reading again affordable.
+/// The two answers the document carries that are *derived* rather than folded,
+/// held until the state they answer for moves.
+///
+/// Neither is cheap at the rate a journal is appended to. The statuses are a
+/// fixpoint over the whole graph, and the cross-DAG resolution reads **another
+/// run's ledger**. The reconcile loop bounds both — it derives once per fold and
+/// reads an upstream on [`engine::UPSTREAM_EVERY`] — so a document that
+/// recomputed them per record would put back on the writer exactly the cost the
+/// loop refuses, and would do it on every run whether anybody reads the document
+/// or not.
+///
+/// [`engine::UPSTREAM_EVERY`]: crate::engine::UPSTREAM_EVERY
+#[derive(Debug)]
+struct Derived {
+    /// The graph, and each node's *recorded* status, which together with
+    /// `cross_dag` are the whole input to the fixpoint — see
+    /// [`RunState::statuses_with`]. A fold leaving all three equal cannot have
+    /// moved a derived status, so the answer below still stands.
+    graph: Graph,
+    recorded: BTreeMap<String, NodeStatus>,
+    cross_dag: BTreeMap<String, NodeStatus>,
+    statuses: BTreeMap<String, NodeStatus>,
+    /// When the upstream ledgers behind `cross_dag` were last read — moved by a
+    /// read and by nothing else, so the interval paces reads rather than writes.
+    read_at: Instant,
+}
+
 #[derive(Debug)]
 pub(crate) struct Maintainer {
     paths: RunPaths,
@@ -521,6 +558,10 @@ pub(crate) struct Maintainer {
     /// `seq` and by nothing else, so a lower one arriving now belongs in front of
     /// a record this state has already frozen.
     settled_seq: BTreeMap<String, u64>,
+    /// See [`Derived`]. `None` until the first write, and dropped whole whenever
+    /// this state is rebuilt, so a rebuilt fold never answers from a cache taken
+    /// against the store it replaced.
+    derived: Option<Derived>,
 }
 
 impl Maintainer {
@@ -575,6 +616,7 @@ impl Maintainer {
             open_ts,
             accounted: before.min(after),
             settled_seq,
+            derived: None,
         }
     }
 
@@ -708,19 +750,8 @@ impl Maintainer {
     /// cache taking a run's own record down with it.
     fn write(&mut self) {
         let mut folded = self.current();
-        // Cross-DAG edges are resolved the way a view resolves them, so a row
-        // and the graph it opens cannot describe different graphs. A graph
-        // naming no other run pays a walk of its own nodes and nothing else; one
-        // that does names pays that edge's read, which is what any reader of it
-        // already pays.
-        folded.state.cross_dag = crate::crossdag::resolve_quietly(
-            &self
-                .paths
-                .dir
-                .parent()
-                .map_or_else(ledger::runs_root, Path::to_path_buf),
-            &folded.state.graph,
-        );
+        let (cross_dag, statuses) = self.derived(&folded.state);
+        folded.state.cross_dag = cross_dag;
         let summary = RunSummary::derive(
             &self.paths.run,
             &self.launch(),
@@ -728,9 +759,57 @@ impl Maintainer {
             folded.events,
             folded.last_event_kind.clone(),
             &folded.aggregate.finish(&self.paths.run, &folded.state),
+            &statuses,
             (self.accounted, journal_stamp(&self.paths).1),
         );
         let _ = ledger::write_json(&self.paths.summary(), &summary);
+    }
+
+    /// This state's cross-DAG resolution and derived statuses, recomputed only
+    /// where what they answer for has moved. See [`Derived`].
+    ///
+    /// Cross-DAG edges are resolved the way a view resolves them, so a row and
+    /// the graph it opens cannot describe different graphs — but on the reconcile
+    /// loop's own interval rather than per record, because that resolution reads
+    /// another run's ledger and a run being driven is appended to far faster than
+    /// an upstream settles. A graph naming no other run resolves to nothing and
+    /// reads nothing, so it pays the interval no attention either way.
+    fn derived(
+        &mut self,
+        state: &RunState,
+    ) -> (BTreeMap<String, NodeStatus>, BTreeMap<String, NodeStatus>) {
+        let held = self.derived.as_ref();
+        let due = crate::engine::due(held.map(|held| held.read_at), crate::engine::UPSTREAM_EVERY);
+        let (cross_dag, read_at) = match held {
+            Some(held) if !due => (held.cross_dag.clone(), held.read_at),
+            _ => (
+                crate::crossdag::resolve_quietly(
+                    &self
+                        .paths
+                        .dir
+                        .parent()
+                        .map_or_else(ledger::runs_root, Path::to_path_buf),
+                    &state.graph,
+                ),
+                Instant::now(),
+            ),
+        };
+        let recorded = state.statuses_recorded();
+        let unmoved = self.derived.as_ref().filter(|held| {
+            held.graph == state.graph && held.recorded == recorded && held.cross_dag == cross_dag
+        });
+        let statuses = match unmoved {
+            Some(held) => held.statuses.clone(),
+            None => state.statuses_with(&|dependency| cross_dag.get(dependency).copied()),
+        };
+        self.derived = Some(Derived {
+            graph: state.graph.clone(),
+            recorded,
+            cross_dag: cross_dag.clone(),
+            statuses: statuses.clone(),
+            read_at,
+        });
+        (cross_dag, statuses)
     }
 
     /// The run's launch record, as the row's attribution needs it.

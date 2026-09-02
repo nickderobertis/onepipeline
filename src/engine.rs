@@ -209,7 +209,7 @@ const CHANNEL_POLL: Duration = Duration::from_millis(200);
 /// **fresh** the answer must be rather than how often to fetch it. Half a second
 /// sits inside the second the contract promises a consumer whose upstream settles
 /// elsewhere. A graph naming no cross-DAG edge reads nothing at all.
-const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
+pub(crate) const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 
 /// The schema version a run result is written as.
 ///
@@ -1095,7 +1095,7 @@ fn converge(
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.
-fn due(last: Option<Instant>, every: Duration) -> bool {
+pub(crate) fn due(last: Option<Instant>, every: Duration) -> bool {
     last.is_none_or(|last| last.elapsed() >= every)
 }
 
