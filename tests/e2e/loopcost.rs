@@ -20,11 +20,6 @@
 // once — the minute-long windows run beside each other under nextest and the rest of
 // the file is seconds — and the minute is not a knob: it is the interval every bound here
 // is stated over.
-// llmlint: ignore-file[e2e_not_mocked] the crate under test is the compiled binary,
-// driven as a subprocess over real run stores, and the counts are the real loop's own.
-// Only `oneagentgraph` is substituted, at its own subprocess boundary, so a journey can
-// hold a dispatch open without paying for a model turn — the same seam and rationale
-// `harness.rs` carries.
 
 use std::time::{Duration, Instant};
 

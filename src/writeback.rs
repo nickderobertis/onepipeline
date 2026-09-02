@@ -768,6 +768,8 @@ struct DestinationProjectItem {
     _updated_at: Option<String>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
+    #[serde(rename = "location", default)]
+    _location: Option<DestinationLocation>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -807,7 +809,24 @@ struct DestinationTaskItem {
     _updated_at: Option<String>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
+    #[serde(rename = "location", default)]
+    _location: Option<DestinationLocation>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// Where the destination says an item is, when it says at all.
+///
+/// Externally tagged with exactly the two variants `onetaskgraph` documents, so the JSON
+/// is `{"url": …}` or `{"path": …}`. Enumerated here for the same reason every other
+/// unread field on those items is: the sibling's machine response denies unknown fields,
+/// so a field it reports has to be nameable here even though this projection has nothing
+/// to do with it. Absent means the source did not say where the item is, which is not the
+/// same as saying it is nowhere.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DestinationLocation {
+    Url(String),
+    Path(String),
 }
 
 #[derive(Deserialize)]

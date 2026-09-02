@@ -7,11 +7,6 @@
 //! were four different answers that all rendered as the same empty span. These
 //! journeys drive each of them and read the record back off a real run store.
 
-// llmlint: ignore-file[e2e_not_mocked] the crate under test is the compiled binary,
-// driven as a subprocess over real run stores. Only `oneagentgraph` is substituted, at
-// its own subprocess boundary, so a journey can hold a dispatch open without paying for a
-// model turn — the same seam and the same rationale `harness.rs` carries.
-
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::{json, Value};
 

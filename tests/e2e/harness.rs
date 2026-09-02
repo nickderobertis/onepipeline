@@ -74,6 +74,23 @@ struct StoreQualified<T> {
     item: T,
 }
 
+/// Where the store says an entity is, on the two terms a reader can act on.
+///
+/// Externally tagged with exactly two variants, so the JSON is `{"url": "https://…"}`
+/// or `{"path": "/home/…"}` and which key is present is what tells them apart. An
+/// unknown key is an unknown *variant*, which is refused here exactly as an unknown
+/// field is refused on the structs around it — so this widens what the boundary accepts
+/// by the one shape `onetaskgraph` documents and by nothing else.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoreLocation {
+    /// The entity lives at an external website, and this is a link a reader can open.
+    Url(String),
+    /// The entity is a file on the machine the source runs on, and this is its absolute
+    /// path.
+    Path(String),
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoreTask {
@@ -84,6 +101,11 @@ struct StoreTask {
     labels: Vec<StoreLabel>,
     project: Option<String>,
     url: Option<String>,
+    /// Absent where the source does not say, which means *it did not say* rather than
+    /// *this is nowhere*. Skipped on the way out so a task the source placed nowhere
+    /// renders exactly as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<StoreLocation>,
     created_at: Option<String>,
     updated_at: Option<String>,
     #[serde(default)]
@@ -101,6 +123,9 @@ struct StoreProject {
     status: StoreStatus,
     labels: Vec<StoreLabel>,
     url: Option<String>,
+    /// On exactly the terms of [`StoreTask::location`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<StoreLocation>,
     created_at: Option<String>,
     updated_at: Option<String>,
     #[serde(default)]
@@ -156,6 +181,90 @@ enum StoreItemKind {
     Task,
     Project,
 }
+
+/// A task page is read whether the source said where the task is or not, and both
+/// forms of saying are understood.
+///
+/// `onetaskgraph` reports a `location` on every task its `local-md` plugin serves, so
+/// the *present* form is driven end to end by every journey in `store.rs` that reads a
+/// projected task back. What no real source here produces is the **absent** form — a
+/// source that simply does not say — and that is the case this pins, beside the two
+/// spellings of saying, against the boundary that actually validates them.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
+// validated boundary rather than a journey: what is asserted is which store pages this
+// harness will accept, which is the thing every journey built on it takes for granted
+// and none of them can assert about itself.
+#[test]
+fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
+    let page = |task: &str| {
+        format!(
+            r#"{{"items":[{{"id":"local:t","item":{task}}}],"next":null,
+               "plan":{{}},"errors":[]}}"#
+        )
+    };
+    let task = |extra: &str| {
+        format!(
+            r#"{{"id":"t","title":"probe","content":null,
+               "status":{{"category":"todo","name":"todo"}},"labels":[],
+               "project":null,"url":null{extra},"created_at":null,
+               "updated_at":null,"metadata":{{}},"repositories":[]}}"#
+        )
+    };
+    for (form, extra) in [
+        ("said nothing", String::new()),
+        (
+            "a path on this machine",
+            r#","location":{"path":"/home/who/tasks/t.md"}"#.to_owned(),
+        ),
+        (
+            "a link to open",
+            r#","location":{"url":"https://example.invalid/t"}"#.to_owned(),
+        ),
+    ] {
+        let read: Result<StoreResponse<StoreQualified<StoreTask>>, _> =
+            serde_json::from_str(&page(&task(&extra)));
+        let read = read.unwrap_or_else(|error| {
+            panic!("a store page whose source {form} is not read by this harness: {error}")
+        });
+        assert_eq!(read.items.len(), 1, "the page held one task where {form}");
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Widening the boundary by one documented field did not stop it refusing the rest.
+///
+/// The reason this boundary denies unknown fields is that a store page carrying
+/// something the suite has never heard of is the suite reading a `onetaskgraph` it was
+/// not written against — which is exactly how the `location` field announced itself. So
+/// accepting that one field must not become accepting anything, and the refusal is
+/// pinned rather than assumed.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: the subject is what the
+// harness refuses, and a journey cannot assert about the validation standing between it
+// and the store it reads.
+#[test]
+fn a_field_this_boundary_has_never_heard_of_is_still_refused() {
+    let task = r#"{"id":"t","title":"probe","content":null,
+        "status":{"category":"todo","name":"todo"},"labels":[],"project":null,
+        "url":null,"whereabouts":{"path":"/tmp/t.md"},"created_at":null,
+        "updated_at":null,"metadata":{},"repositories":[]}"#;
+    let read: Result<StoreTask, _> = serde_json::from_str(task);
+    let error = read
+        .err()
+        .expect("a task carrying a field this suite has never heard of is refused")
+        .to_string();
+    assert!(
+        error.contains("whereabouts"),
+        "the refusal does not name the field that caused it: {error}"
+    );
+
+    // And an unknown *variant* of the field that was widened, for the same reason.
+    let placed_oddly = task.replace(
+        r#""whereabouts":{"path":"/tmp/t.md"}"#,
+        r#""location":{"shelf":"third from the left"}"#,
+    );
+    serde_json::from_str::<StoreTask>(&placed_oddly)
+        .err()
+        .expect("a location spelled a way onetaskgraph does not document is refused");
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
