@@ -46,6 +46,7 @@ mod session;
 mod session_reuse;
 mod shipped;
 mod store;
+mod summary;
 mod surface;
 mod turns;
 mod views;

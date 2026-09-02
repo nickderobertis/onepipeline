@@ -32,6 +32,15 @@ pub struct Journal {
     paths: RunPaths,
     stream: String,
     next_seq: u64,
+    /// The run's summary document, kept current by this writer.
+    ///
+    /// Here rather than in a later pass because *here* is where a record is
+    /// known the moment it exists: a summary maintained by the reconcile loop
+    /// would be as old as the last pass for a run that is still recording, which
+    /// is the run a listing most needs to be right about. Folding the record
+    /// that was just appended costs O(1); the alternative is a pass over the
+    /// store per row.
+    summary: crate::summary::Maintainer,
 }
 
 impl Journal {
@@ -46,6 +55,7 @@ impl Journal {
             .max()
             .map_or(0, |max| max + 1);
         Self {
+            summary: crate::summary::Maintainer::of(paths),
             paths: paths.clone(),
             stream,
             next_seq,
@@ -99,10 +109,25 @@ impl Journal {
         self.append(&envelope)
     }
 
-    fn append(&self, envelope: &Envelope) -> Result<()> {
+    fn append(&mut self, envelope: &Envelope) -> Result<()> {
         let line = serde_json::to_string(envelope)
             .map_err(|e| crate::error::Error::Invalid(format!("event: {e}")))?;
-        ledger::append_line(&self.paths.journal(), &line)
+        // The record's own bytes, terminator included, which is what the store
+        // grows by: the summary beside it counts what it folded rather than
+        // trusting a length another appender may have moved. See
+        // `summary::Stamp`.
+        let bytes = line.len() as u64 + 1;
+        // And what the same call cut off in front of it, which the summary's own
+        // count is a byte offset past: `ledger::append_line_healed`.
+        let healed = ledger::append_line_healed(&self.paths.journal(), &line)?;
+        // After the record has reached the file, so the summary never describes a
+        // store that does not hold what it describes — and so a read of the
+        // store, which is the answer to a record this state cannot place, reads
+        // a store that already holds it. An append that failed took its own
+        // bytes back off the file and returned above, with no summary written
+        // for them.
+        self.summary.appended(envelope, healed, bytes);
+        Ok(())
     }
 }
 
@@ -191,6 +216,27 @@ pub fn read(path: &Path) -> Vec<Envelope> {
             Reading::Whole(envelope) => Some(envelope),
             Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+        })
+        .collect()
+}
+
+/// Every record a run's journal has grown by since its first `from` bytes, each
+/// with how many bytes of the file it occupies.
+///
+/// A record this build cannot read comes back as `None` **with its size**, and
+/// that is the point of the pairing: the caller is counting the store's bytes,
+/// and a line it could not parse is still a line the file holds. Dropping it
+/// would leave the count short for ever and every later read of that run would
+/// re-read the whole store.
+pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+    ledger::read_records_from(path, from)
+        .iter()
+        .map(|record| {
+            let whole = match reading(record) {
+                Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
+                Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+            };
+            (whole, record.bytes + u64::from(record.terminated))
         })
         .collect()
 }

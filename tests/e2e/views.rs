@@ -1835,6 +1835,95 @@ fn an_older_run_root_is_read_and_the_rest_are_counted_rather_than_listed_a_line_
     }
 }
 
+/// The other five keys a run root on this host was written before, and the run
+/// each one of them used to take away.
+///
+/// The same incident as the journey above, and the rest of it: `launcher` was
+/// one field of six, and a record missing any of `session`, `pid`, `host`,
+/// `started_at`, or `heartbeat_interval` was refused by name just as loudly —
+/// 141 of 443 run roots on one host, a third of its history, invisible to the
+/// view an operator opens to see what is running. Each key is taken off a run
+/// this build launched and settled through the CLI, so what is read is a record
+/// that is otherwise entirely ordinary, and every claim is read off the CLI.
+#[test]
+fn a_run_root_written_before_any_of_the_five_launch_keys_is_still_reported() {
+    let world = World::new("views-older-keys");
+    let run = settled(&world, "readable", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a launch
+    // record without a key this build always writes — that is what makes it an older
+    // build's record — so the only way to hold one is to take the key off the record this
+    // build's own run wrote.
+    let five = ["session", "pid", "host", "started_at", "heartbeat_interval"];
+    let older = |name: &str, without: &[&str]| {
+        let mut record = world.run_json(&run, "launch.json");
+        record["run_id"] = serde_json::json!(name);
+        let fields = record.as_object_mut().expect("a launch record");
+        for key in without {
+            assert!(
+                fields.remove(*key).is_some(),
+                "the record this build wrote carries no `{key}` to take away"
+            );
+        }
+        // The two subdirectories every run root has had since it was made: a
+        // root without them is a run whose record of what it is running has
+        // gone, which is a different refusal from the one under test.
+        for beside in ["channel", "dispatches"] {
+            std::fs::create_dir_all(world.runs.join(name).join(beside)).expect("a run root");
+        }
+        std::fs::write(
+            world.runs.join(name).join("launch.json"),
+            record.to_string(),
+        )
+        .expect("a launch record from a build that predates the key");
+    };
+    for key in five {
+        older(&format!("without-{key}"), &[key]);
+    }
+    // And the shape those 141 roots actually hold: none of the five, and no
+    // start token beside the pid that is not there either.
+    older("without-any-of-them", &[&five[..], &["started"]].concat());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        let rendered = world.run(&view);
+        rendered.exited(0).out_has(&run);
+        for key in five {
+            rendered.out_has(&format!("without-{key}"));
+        }
+        rendered
+            .out_has("without-any-of-them")
+            .out_lacks("run root(s) skipped");
+    }
+    // An unattributed launch is nobody's, which is the label an empty recorded
+    // session has always had — and `runs` is the view that names an owner.
+    world.run(&["runs"]).exited(0).out_has("[unknown]");
+
+    // And nothing acts on the pid that record does not carry. The run is
+    // nobody's, so the stop is forced — and it reaches nothing, because a record
+    // that names no host names no process on this one.
+    let stopped = world.run(&["stop", "without-any-of-them", "--force"]);
+    stopped
+        .exited(0)
+        .out_has(r#""teardown":"elsewhere""#)
+        .err_has("belongs to [unknown]");
+    // The run that carries this host and no pid is the case a guard on the host
+    // name alone would miss: `0` is not a process here, so a reader that probed
+    // it would report a teardown over a pid nobody wrote.
+    let stopped = world.run(&["stop", "without-pid", "--force"]);
+    stopped.exited(0);
+    assert!(
+        !stopped.stdout.contains(r#""teardown":"signalled""#),
+        "a pid nobody recorded was signalled:\n{}",
+        stopped.stdout
+    );
+    assert!(
+        !stopped.stderr.contains("pid 0"),
+        "a pid nobody recorded was aimed at:\n{}",
+        stopped.stderr
+    );
+}
+
 /// A root whose every run was refused is not a root with nothing in it.
 ///
 /// The two used to render identically, and only one of them means there is

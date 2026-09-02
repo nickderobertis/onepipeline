@@ -418,10 +418,22 @@ pub fn barrier(path: &Path, party: &str, parties: std::num::NonZeroUsize) {
 
 /// An RFC 3339 millisecond UTC timestamp, in the envelope's one format.
 pub fn now() -> String {
+    moved_by(0)
+}
+
+/// The same stamp, moved by a signed number of milliseconds — behind now where
+/// the offset is negative, past it where it is positive.
+///
+/// What a producer publishing **out of its own order** needs: a record stamped
+/// when its session opened rather than when it was written reaches a consumer
+/// behind records already on the wire, and one a scenario places in front of
+/// them has to be stamped in front of them.
+pub fn moved_by(ms: i64) -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add_signed(ms);
     let secs = millis / 1_000;
     let ms = millis % 1_000;
     let days = (secs / 86_400) as i64;

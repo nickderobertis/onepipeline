@@ -450,7 +450,15 @@ serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
 # envelope or reply carries its payload's fields in the order they arrived —
 # what the contract's deterministic rendering promise needs.
-serde_json = { version = "1", features = ["preserve_order"] }
+#
+# `float_roundtrip` is what makes a number this crate wrote the number it reads
+# back. The default parser is allowed to land one bit away, and every document
+# here is written by this crate and read again by it: a run's telemetry is
+# `cost_usd`, and a cost read back that is not the cost recorded makes two
+# accounts of one run disagree over a measurement neither of them took twice.
+# Measured rather than assumed — `0.12000000000000001` is written out in full and
+# read back as `0.12` without it.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Plan files are JSON; the executor-rules file and the agent-graph configs are
 # YAML. serde_norway is the maintained fork of the deprecated serde_yaml, and is
 # the same reader the sibling crates use.

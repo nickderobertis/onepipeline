@@ -2866,3 +2866,108 @@ or not, and no checked-in record changes shape.
 This arrives with a **patch** version bump: it is a `fix` for a refusal nothing
 could work around, and the only interface it adds is an optional field on a record
 this crate both writes and reads.
+
+## 56. A listing reads every byte of every run, and there is no cheap read to name — OPEN
+
+**Proposal (for the planner who owns the contract): name the per-run summary
+document and the bounded read over it in the Views paragraph, and add the
+summary's own schema to the shipped surface — `views::RunSummary`,
+`views::Listing`, `views::SUMMARY_SCHEMA_VERSION`, `RunPaths::summary()`, and the
+telemetry document types the summary carries.**
+
+The contract's Views paragraph names eight **CLI** views and nothing a consumer
+reads structurally. Every library entry point behind them returns a `String`
+shaped for a terminal, and the only constructor for a run — the private
+`RunView::open` — folds the run's *entire* merged event store into memory. A
+listing builds one per run root. So asking a host what is running reads every
+byte every run ever recorded, asking it for one row costs more than asking it for
+fifty, and one idle subscriber to a run's event stream pins a core. On the host
+this was measured on, `runs` and `status` fold gigabytes; the operator's own
+words for it are that reading a run by hand from its journal is faster than
+opening the tool.
+
+What is missing is not the *ability* to read but a **cheap** read, and the
+contract's vocabulary has nowhere to put one. So this crate now ships:
+
+- **`summary.json` beside each run's `plan.json` and `result.json`**, maintained
+  by the run's own **journal writer** — each appended record folded into the
+  document as it is appended, at O(1) per record — so it is current for a run
+  that is still recording rather than as of some later pass. `RunPaths::summary()`
+  is where it is, which is a **seventh** method on a type the contract says
+  promises six.
+- **`views::RunSummary`**, at the schema version and with the fields the block
+  below states — which is where they are written down, once, rather than in prose
+  here as well: the run's own record of itself (the ordering key a listing sorts
+  by, the last recorded kind, the record count, each node's status word to the
+  number of nodes carrying it, the two settled-run facts and the four a run's
+  phase is derived from), the launch record's own account of the run so a row's
+  attribution needs no second read, the run's aggregate clock, and the stamp a
+  stale document is detected by. **Liveness is deliberately not on it**: how a run
+  is being driven is read from the host at the moment of the question, and a
+  stored answer is stale the instant it is written. What the document carries is
+  what `views::liveness` takes as *input*.
+- **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
+  run roots it could not read with each root's own reason — on the same terms
+  `Survey::skipped` already states, because a cheap listing that reported only
+  what it could read would reintroduce at the new surface the silent omission
+  `Survey` exists to remove.
+- **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
+  because `RunSummary::timing` **is** the telemetry document whose shape the
+  Views paragraph already fixes — eight buckets that sum exactly, per-party
+  usage, an unmeasured bucket served absent. The summary references that type
+  rather than restating its fields, so there is one declaration of what a run's
+  clock is; a field a consumer cannot name is a field it cannot read, which is
+  why the type is exported rather than merely reached through.
+
+The document's version and its whole inventory, which
+`the_summary_document_is_what_the_divergence_record_names` in `tests/contract.rs`
+holds to `views::RunSummary` itself — a field added to the type and not named
+here fails, and a name here the type does not carry fails too, so this proposal
+cannot go on describing a document the build stopped writing:
+
+```json
+{
+  "schema_version": 1,
+  "fields": [
+    "schema_version",
+    "run_id",
+    "last_write_at",
+    "last_event_kind",
+    "event_count",
+    "node_counts",
+    "stop_recorded",
+    "graph_complete",
+    "decisions_pending",
+    "surfaces_queued",
+    "surfaces_read",
+    "awaiting_human_action",
+    "project",
+    "launcher",
+    "session",
+    "started_at",
+    "pid",
+    "host",
+    "started",
+    "timing",
+    "journal_len",
+    "journal_mtime_ms"
+  ]
+}
+```
+
+**Nothing existing changed.** `RunView`, `Survey`, and every `views` entry point
+behave exactly as before; a run with no summary document, or one stale against
+its journal's recorded length or modification time, is folded through that same
+path and cached, so a run recorded by a build that predates the document lists
+identically and only more slowly. That fallback is what makes this landing
+non-breaking, and one derivation runs over both paths, so the row a listing
+serves and the row a full fold produces are one row.
+
+**The consumer this was written for pins this crate at an exact version**, so
+what lands here reaches it through a release rather than through a branch.
+
+`docs/contract.md` names none of this yet, and the code does not amend it. The
+sentence this would change is the Views paragraph's first, which today reads
+`Views (CLI): runs, status, host, monitor …`; the proposal is a second sentence
+beside it naming the structured read and the document behind it.
+
