@@ -159,6 +159,18 @@ pub struct RunState {
     /// for into one it has. What a fresh driver does with it is seed what it
     /// believes it is already holding, so it neither restates a hold its
     /// predecessor opened nor loses the release of one.
+    ///
+    /// The typed reading happens where the reasons are *used*, not here:
+    /// `engine`'s `HoldReason::of_payload` refuses a payload it cannot read, and
+    /// a node whose reasons do not all parse is dropped from what the driver
+    /// believes it holds rather than folded in malformed.
+    // llmlint: ignore[invalid_states_unrepresentable] a typed enum here cannot
+    // reject anything this one accepts: the array is a persisted record a *later*
+    // build may have written, so any enum able to round-trip it needs an
+    // `Unknown(Value)` variant, which is this type again behind one more parse.
+    // The rejecting boundary is `HoldReason::of_payload` at the point of use,
+    // named above; making it the fold's boundary instead would silently discard a
+    // reason a newer driver wrote, which is the bug this field exists to avoid.
     pub holds: BTreeMap<String, Vec<Value>>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,

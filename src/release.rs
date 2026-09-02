@@ -56,16 +56,13 @@ pub const POLL_ENV: &str = "ONEPIPELINE_RELEASE_POLL_SECONDS";
 
 /// How often an automated target's probe is run when nothing overrides it.
 ///
-/// A probe is a subprocess, so this is a bound on how much a held run costs the
-/// host rather than a promise about latency: a release that arrives between two
-/// asks is noticed at the second one.
+/// A probe is a subprocess, so this bounds what a held run costs the host rather
+/// than promising latency: a release arriving between two asks is noticed at the
+/// second one.
 ///
-/// **A minute, and never longer.** That is the bound this loop already promises
-/// for every other answer it owes on a clock — [`Watch::take_up_every`] holds the
-/// take-up to it whatever a host configures — so a shipped default above it would
-/// be the one answer a held run waits longer than a minute for, and nothing about
-/// a run says which. A host that wants to spend less on probes lengthens
-/// [`POLL_ENV`]; the *shipped* value stays inside the promise.
+/// **A minute, and never longer** — the bound every other answer this loop owes
+/// on a clock is held to. A host wanting to spend less lengthens [`POLL_ENV`];
+/// the shipped value stays inside the promise.
 pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
 /// The environment variable bounding how often a held node's wait is surfaced.
@@ -2254,6 +2251,36 @@ mod tests {
             shipped <= Duration::from_secs(60),
             "the shipped probe interval is {shipped:?}, which is longer than the minute a held \
              node is promised for every other answer this loop owes on a clock"
+        );
+    }
+
+    /// The e2e suite carries its own copy of [`DEFAULT_POLL_SECONDS`], because
+    /// this module is private and the suite drives the compiled binary from
+    /// outside the crate. This is the gate that keeps that copy exact: it reads
+    /// the literal out of the suite's own source and fails on drift in either
+    /// direction, which neither the suite's ceiling assertion nor the bound
+    /// above can see — both are `<=`, so a shipped value that *shrank* would
+    /// pass both while the suite went on asserting a bound this build no longer
+    /// ships.
+    #[test]
+    fn the_suites_copy_of_the_shipped_probe_interval_is_this_one() {
+        let suite = include_str!("../tests/e2e/adoption.rs");
+        let declaration = "const SHIPPED_POLL_SECONDS: u64 = ";
+        let start = suite
+            .find(declaration)
+            .expect("tests/e2e/adoption.rs declares SHIPPED_POLL_SECONDS")
+            + declaration.len();
+        let copied: u64 = suite[start..]
+            .split(';')
+            .next()
+            .expect("the declaration ends in a semicolon")
+            .trim()
+            .parse()
+            .expect("SHIPPED_POLL_SECONDS is a plain integer literal");
+        assert_eq!(
+            copied, DEFAULT_POLL_SECONDS,
+            "tests/e2e/adoption.rs holds a real build to a probe interval of {copied}s, but this \
+             build ships {DEFAULT_POLL_SECONDS}s"
         );
     }
 }

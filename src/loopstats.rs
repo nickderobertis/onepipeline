@@ -1,22 +1,16 @@
 //! What one reconcile loop actually did, counted while it does it.
 //!
-//! The loop's cost is a **property of the finished tree** rather than a claim
-//! about it: a converged run does no scheduling work, refolds nothing, and
-//! publishes nothing until something happens. None of that is visible in a
-//! journal — the whole point is that nothing is written — and none of it is
-//! measurable from outside the process, because what a busy loop costs a host is
-//! CPU, which a loaded machine can hand out any way it likes. So the loop counts
-//! its own work, and a journey reads the counts.
+//! A converged run's cost is that it does nothing, which a journal cannot show —
+//! nothing is written — and which CPU time cannot measure, because a loaded host
+//! hands that out as it likes. So the loop counts its own work as *work done*,
+//! and a journey reads the counts.
 //!
-//! Counted **always**, because a relaxed atomic increment beside a journal
-//! append or a subprocess spawn costs nothing measurable, and a counter that
-//! only exists under a flag is one nothing has proven counts the real path.
-//! **Written** only when [`STATS_ENV`] names a file, because a run nobody is
-//! measuring has no reason to write one.
+//! Counted **always**: a relaxed increment costs nothing measurable, and a
+//! counter that exists only under a flag is one nothing has proven counts the
+//! real path. **Written** only when [`STATS_ENV`] names a file.
 //!
-//! The counts are per **process**, not per run: a driver drives one run, so the
-//! two are the same thing wherever this is read, and a journey takes a delta
-//! across an interval rather than an absolute.
+//! The counts are per **process**, and a journey takes a delta across an
+//! interval rather than an absolute.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

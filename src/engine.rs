@@ -194,32 +194,21 @@ const TEARDOWN_TICK: Duration = Duration::from_millis(25);
 
 /// How long the loop waits before looking at the planner's channel again.
 ///
-/// **Not a pass rate.** A look is two `stat` calls on the two files the loop
-/// reads off the channel, and a pass runs only when one of them moved — so a run
-/// where nothing is happening costs the host a fifth of a second of sleep
-/// between two syscalls, rather than the forty whole-state reconciliations a
-/// second it used to cost. Each of those refolded this run's journal, re-read
-/// another run's, and published the board twice, all to discover that nothing
-/// had happened; one driver spent 01:39:24 of CPU over two and a half hours on a
-/// run with a single node in flight.
+/// **Not a pass rate.** A look is two `stat` calls, and a pass runs only when one
+/// of them moved, so a converged run costs the host two syscalls a fifth of a
+/// second rather than a whole-state reconciliation.
 ///
-/// What this interval *is* is the bound on how long an edit another process
-/// wrote waits to be read. The contract states that as a second, and a fifth of
-/// it leaves the pass it triggers the rest of the budget.
+/// What the interval bounds is how long an edit another process wrote waits to
+/// be read. The contract states that as a second, and a fifth of it leaves the
+/// pass it triggers the rest of the budget.
 const CHANNEL_POLL: Duration = Duration::from_millis(200);
 
 /// How often another run's ledger is re-read to answer a cross-DAG edge.
 ///
-/// Read on an interval rather than on every pass, and that distinction is the
-/// whole of it: the ledger answering the edge is written by a process this one
-/// does not control, which is a statement about how **fresh** the answer has to
-/// be and not about how often to go and get it. A second is the freshness a
-/// consumer whose upstream settles in another run is promised, comfortably inside
-/// the second the contract states for it. A graph naming no cross-DAG edge never
-/// reads one at all, and one whose upstreams have not moved does not *wake* the
-/// loop either, because the wait looks at their length before it wakes anything —
-/// it is re-read when this interval comes due and not before, which is the whole
-/// of what the interval buys.
+/// That ledger is written by a process this one does not control, which fixes how
+/// **fresh** the answer must be rather than how often to fetch it. Half a second
+/// sits inside the second the contract promises a consumer whose upstream settles
+/// elsewhere. A graph naming no cross-DAG edge reads nothing at all.
 const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 
 /// The schema version a run result is written as.
@@ -759,11 +748,9 @@ fn converge(
             read.map(|reasons| (node.clone(), reasons))
         })
         .collect();
-    // The graph's derived statuses, computed at most once per change to the
-    // folded state rather than once per place that wants them. Deriving is a
-    // fixpoint over every node and every edge, and the loop asked for it four
-    // times a pass — so this is the difference between paying for what the run
-    // recorded and paying for how often the loop happened to look.
+    // The graph's derived statuses, cached so the fixpoint over every node and
+    // edge is paid at most once per change to the folded state rather than once
+    // per caller that wants it.
     let mut derived: Option<BTreeMap<String, NodeStatus>> = None;
     // When each piece of paced work was last done. `None` is due now, which is
     // what makes the first pass do all of it.
@@ -771,15 +758,10 @@ fn converge(
     // Assigned by every pass before the wait reads it: taking the release watch
     // up is part of what a pass *is*, so there is no "not yet" for it to be in.
     let mut took_up_releases;
-    // Whether the board has been told what the run looks like now.
-    //
-    // The write-back publisher was called twice a pass, and each call folds the
-    // run's whole journal twice to build the snapshot it compares — so on a run
-    // where nothing was happening it was the single most expensive thing the loop
-    // did, and it was doing it eighty times a second to publish a snapshot
-    // identical to the last one. Now it is called once per change to what the
-    // snapshot is made of, which is the number of times the board can actually
-    // be behind.
+    // Whether the board has been told what the run looks like now. Publishing
+    // folds the run's whole journal, so it is paid once per change to what the
+    // snapshot is made of — the number of times the board can actually be
+    // behind — rather than once per pass.
     let mut unpublished = true;
     // What the channel looked like when this loop last read it.
     let mut channel_seen = channel.fingerprint();
@@ -1094,10 +1076,13 @@ fn converge(
     // host-level process control rather than an input either CLI exposes, and the window
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
-    let settled = statuses_of(&mut derived, state);
+    // Every node's status as the teardown leaves it, which is not the same as
+    // every node being settled: this also runs when the channel disconnected
+    // under a run that still has pending and blocked nodes.
+    let final_statuses = statuses_of(&mut derived, state);
     crate::loopstats::flush(paths)?;
     if let Some(writeback) = &writeback {
-        writeback.publish(paths, launch, state, &settled);
+        writeback.publish(paths, launch, state, &final_statuses);
         writeback.wait_briefly();
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
@@ -1106,7 +1091,7 @@ fn converge(
         report_unprojected(paths, journal, writeback)?;
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(graph::state_of(&settled))
+    Ok(graph::state_of(&final_statuses))
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.
@@ -1213,23 +1198,16 @@ fn wait_for_work(
 
 /// One reason the loop is not running a node it has not settled.
 ///
-/// **They compose.** A node can be held by more than one of these at once — its
-/// dependencies have not settled *and* the run has reached its concurrency, say —
-/// and a reader has to be able to tell that from either one alone. So a hold
-/// carries one entry per reason holding the node, in one record, rather than one
-/// record per reason: "this node is behind three running nodes", "this node's
-/// dependency has not settled", and both at once are three different answers and
-/// they are told apart from the `reasons` array without joining anything.
+/// **They compose.** A node can be held by more than one at once, so a hold
+/// carries one entry per reason in one record rather than one record per reason:
+/// "behind three running nodes", "a dependency has not settled", and both at
+/// once are three different answers, told apart from the `reasons` array alone.
 ///
-/// **Two of the four are already reported elsewhere, and this does not restate
-/// them.** [`DecisionPending`](journal::PipelineKind::DecisionPending) is the
-/// authoritative account of what a decision point is — its kind, and the subtree
-/// it holds — and [`ReleaseWait`](journal::PipelineKind::ReleaseWait) is the
-/// authoritative account of what a release wait is — each awaited release's
-/// identity, target, style and age. The entries here name *which* decision and
-/// *which* dependencies, and carry no copy of either account: this record is
-/// authoritative for the hold, and each of those is authoritative for the thing
-/// doing the holding.
+/// **Two of the four are reported elsewhere, and this does not restate them.**
+/// [`DecisionPending`](journal::PipelineKind::DecisionPending) and
+/// [`ReleaseWait`](journal::PipelineKind::ReleaseWait) stay authoritative for
+/// what that decision and that wait *are*; the entries here name only which one
+/// holds the node. This record is authoritative for the hold itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HoldReason {
     /// Its dependencies have not all settled `done`.

@@ -608,25 +608,16 @@ impl ChannelState {
 
     /// A cheap look at everything the reconcile loop reads off this channel.
     ///
-    /// Two `stat` calls and no read at all, which is what lets a converged
-    /// driver check for an arriving edit five times a second without costing the
-    /// host anything: the loop compares this against what it last saw and
-    /// reconciles only when it moved.
+    /// Two `stat` calls and no read, so a converged driver can check for an
+    /// arriving edit five times a second for nothing: the loop reconciles only
+    /// when this moved. The two files are the two it reads — the surface queue
+    /// and the durable command log — and an absent file fingerprints as absent,
+    /// so the moment one appears the fingerprint has changed.
     ///
-    /// The two files are exactly the two that loop reads — the surface queue,
-    /// which is what says whether a blocking decision is outstanding, and the
-    /// durable command log an edit is submitted to. A file that is not there yet
-    /// fingerprints as absent, which is a value like any other: the moment one
-    /// appears the fingerprint has changed.
-    ///
-    /// Length **and** modification time, and the length is the load-bearing half:
-    /// the command log only ever grows, and every queue transition that changes
-    /// what the loop reads off it changes its length too — a surface pushed grows
-    /// it, a surface answered shrinks it, and a surface *claimed* moves it from
-    /// `waiting` to `pending`, which
-    /// [`decisions_now`](crate::engine) reads together and so
-    /// cannot tell apart anyway. `tests::every_queue_change_the_loop_reads_shows_in_its_length`
-    /// holds that. The timestamp is the belt beside the braces.
+    /// Length is the load-bearing half: the log only grows, and every queue
+    /// transition the loop can read changes the length too, which
+    /// `tests::every_queue_change_the_loop_reads_shows_in_its_length` holds. The
+    /// timestamp is the belt beside the braces.
     pub(crate) fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             queue: mark(&self.queue_path()),
