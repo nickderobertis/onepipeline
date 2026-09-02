@@ -2283,4 +2283,43 @@ mod tests {
              build ships {DEFAULT_POLL_SECONDS}s"
         );
     }
+
+    /// The divergence record states this interval to the planner who owns the contract,
+    /// in prose, in both of the places it describes a paced read.
+    ///
+    /// Prose is where a copy rots unnoticed, so it is reconciled here rather than read:
+    /// every "N seconds by default" that record states is this constant. Stated as *every*
+    /// occurrence rather than as a count, so a third place that describes the interval is
+    /// covered the day it is written instead of failing this as a miscount.
+    #[test]
+    fn the_divergence_records_copies_of_the_shipped_probe_interval_are_this_one() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let phrase = " seconds by default";
+        let stated: Vec<u64> = record
+            .match_indices(phrase)
+            .map(|(at, _)| {
+                record[..at]
+                    .rsplit(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .filter(|digits| !digits.is_empty())
+                    .unwrap_or_else(|| {
+                        panic!("docs/contract-divergences.md states \"{phrase}\" after no number")
+                    })
+                    .parse()
+                    .expect("the interval the divergence record states is a plain integer")
+            })
+            .collect();
+        assert!(
+            !stated.is_empty(),
+            "docs/contract-divergences.md no longer states the probe interval at all, so this \
+             gate is reconciling nothing"
+        );
+        for interval in stated {
+            assert_eq!(
+                interval, DEFAULT_POLL_SECONDS,
+                "docs/contract-divergences.md tells the contract's owner this build polls \
+                 every {interval}s, but it ships {DEFAULT_POLL_SECONDS}s"
+            );
+        }
+    }
 }

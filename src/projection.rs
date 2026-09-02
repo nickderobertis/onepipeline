@@ -915,6 +915,13 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        // llmlint: ignore-block[boundary_inputs_validated] the journal is this crate's own
+        // record rather than external input, on the ruling `journal.rs` already carries for
+        // the same reader: a record written by a build this one does not know is *skipped and
+        // reported*, never refused. Validating a reason's shape here would refuse the whole
+        // fold over a reason a newer driver wrote, which is the case this field exists to
+        // survive; the rejecting boundary is `engine`'s `HoldReason::of_payload`, which drops
+        // a node whose reasons it cannot read rather than admitting a malformed one.
         Some(journal::PipelineKind::NodeHeld) => {
             if let (Some(node), Some(reasons)) = (
                 event.labels.node.clone(),
@@ -922,7 +929,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             ) {
                 state.holds.insert(node, reasons.clone());
             }
-        }
+        } // llmlint: ignore-end[boundary_inputs_validated]
         Some(journal::PipelineKind::NodeUnheld) => {
             if let Some(node) = event.labels.node.as_ref() {
                 state.holds.remove(node);
