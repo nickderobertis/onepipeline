@@ -246,14 +246,15 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
 /// pinned revision that is an empty set beside a `Task` carrying no `location` at all;
 /// against a newer one it is the two spellings, and a third would fail here.
 ///
-/// **The copy is this suite's alone.** `src/writeback.rs` carried a second one, for this
-/// same field and this same reason, for as long as it mirrored the store's shape under
-/// `deny_unknown_fields`. It no longer denies unknown fields at all, so it neither
-/// enumerates `location` nor can be refused over how one is spelled, and
+/// **The copy is this suite's alone.** `src/writeback.rs` names `location` too, but no
+/// longer as a second copy of this shape: those types stopped denying unknown fields, and
+/// the field is held there as the raw document, so no spelling of one can be refused and
+/// there is nothing there for this enum to agree with. That is what
 /// `store::a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know`
-/// drives that against the real binary. So there is one copy left to rot rather than two,
-/// and it is this one because this suite's own reader is still the one that refuses what
-/// it does not recognise — which is what the test below it pins.
+/// drives, at a `{"kind": …, "url": …}` neither spelling below would have accepted. So one
+/// copy is left to rot rather than two, and it is this one, because this suite's own reader
+/// is still the one that refuses what it does not recognise — which is what the test below
+/// it pins.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own boundary
 // against the real sibling's declared schema, which is not a journey: it asks the same
 // compiled `onetaskgraph` every journey reads its store through, and no journey can assert
@@ -938,7 +939,18 @@ impl World {
             .env_remove("ONEHARNESS_HARNESSES")
             .env_remove("ONEHARNESS_MODEL")
             .env_remove("ONEHARNESS_MODELS")
-            .env_remove("ONEHARNESS_MODE");
+            .env_remove("ONEHARNESS_MODE")
+            // And the scratch directory *this* suite's own dispatch was given,
+            // for the same reason one step further in: a turn with no scratch of
+            // its own reads this variable as the one it was handed. Every turn a
+            // journey launches is then holding a directory, and the outer
+            // dispatch's at that — so a supervisory member arrives at
+            // `concurrent_dispatches_each_hold_their_own_scratch_directory_throughout`'s
+            // barrier as a third party, and the set of directories live at one
+            // instant holds one belonging to no dispatch under test. What a
+            // dispatch is given is composed per dispatch by `executor`, so
+            // removing it here leaves every genuine one untouched.
+            .env_remove("ONEPIPELINE_NODE_SCRATCH_DIR");
         command
     }
 
