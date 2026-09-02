@@ -25,7 +25,6 @@ use serde_json::json;
 /// nothing is opened.
 pub(crate) const STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
 
-/// Where in a run's directory those counts are written.
 pub(crate) const STATS_FILE: &str = "loop-stats.json";
 
 /// Scheduling passes: iterations of the reconcile body.

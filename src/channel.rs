@@ -561,9 +561,7 @@ pub(crate) struct QueuedCommands {
 /// Compared rather than read: see [`ChannelState::fingerprint`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Fingerprint {
-    /// The surface queue.
     queue: Option<(u64, std::time::SystemTime)>,
-    /// The durable command log.
     commands: Option<(u64, std::time::SystemTime)>,
 }
 

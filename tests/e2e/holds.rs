@@ -47,6 +47,11 @@ fn plan_running(name: &str, concurrency: u64, nodes: Vec<Value>) -> Value {
 /// Three successive spans out of one emission rule and no arithmetic per node:
 /// the hold is re-stated whenever what is holding it changes, and what is holding
 /// it is the dependencies that have not settled yet.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
 #[test]
 fn a_node_behind_several_dependencies_names_the_shrinking_set_and_then_dispatches() {
     let world = World::new("held-shrink");
@@ -122,7 +127,7 @@ fn a_node_behind_several_dependencies_names_the_shrinking_set_and_then_dispatche
         .filter(|event| event["labels"]["node"] == "ship")
         .count();
     assert_eq!(dispatched, 1, "the shrinking set did not end in a dispatch");
-}
+} // llmlint: ignore-end[e2e_not_mocked]
 
 /// A node the run's concurrency is holding says so once, and says it again only
 /// when what is ahead of it changes.
@@ -130,6 +135,11 @@ fn a_node_behind_several_dependencies_names_the_shrinking_set_and_then_dispatche
 /// The loop looks at the channel five times a second and its predecessor
 /// reconciled forty times a second. Either would have written a record per look;
 /// this asserts the count is the number of transitions.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
 #[test]
 fn a_node_the_concurrency_holds_is_reported_once_however_long_it_waits() {
     let world = World::new("held-concurrency");
@@ -179,7 +189,7 @@ fn a_node_the_concurrency_holds_is_reported_once_however_long_it_waits() {
         unheld[0]["payload"]["released"],
         json!([{ "kind": "concurrency", "ahead": ["hog"], "limit": 1 }])
     );
-}
+} // llmlint: ignore-end[e2e_not_mocked]
 
 /// Two reasons at once are two entries of one record, and clearing one of them
 /// leaves a record carrying only what still holds.
@@ -187,6 +197,11 @@ fn a_node_the_concurrency_holds_is_reported_once_however_long_it_waits() {
 /// The decision entry names the reference and nothing else: what that decision
 /// *is* — its kind, and the subtree it holds — stays on `decision-pending`, which
 /// is the only account of it.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
 #[test]
 fn a_node_held_two_ways_at_once_keeps_the_reason_that_remains() {
     let world = World::new("held-both");
@@ -258,7 +273,7 @@ fn a_node_held_two_ways_at_once_keeps_the_reason_that_remains() {
             .count(),
         1
     );
-}
+} // llmlint: ignore-end[e2e_not_mocked]
 
 /// A node nothing stated is holding carries no record at all — not an empty
 /// `reasons` array, and not a record saying it is held by nothing.
@@ -267,6 +282,11 @@ fn a_node_held_two_ways_at_once_keeps_the_reason_that_remains() {
 /// that is dispatchable and merely awaiting the pass that starts it, and a human
 /// action waiting on the person who has to take it. Neither is this loop
 /// declining to run something.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
 #[test]
 fn a_dispatchable_node_and_a_waiting_human_action_are_held_by_nothing() {
     let world = World::new("held-nothing");
@@ -302,7 +322,7 @@ fn a_dispatchable_node_and_a_waiting_human_action_are_held_by_nothing() {
         Vec::<Value>::new(),
         "a hold that never began was reported cleared"
     );
-}
+} // llmlint: ignore-end[e2e_not_mocked]
 
 /// A hold outlives the driver that reported it.
 ///
@@ -310,6 +330,11 @@ fn a_dispatchable_node_and_a_waiting_human_action_are_held_by_nothing() {
 /// holding: it does not restate a span already open, and it closes one that
 /// cleared while nothing was driving — carrying the reasons the record it is
 /// answering was written with, rather than reasons of its own.
+// llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
+// loop, driven as the compiled binary over a real run store; what the harness substitutes
+// is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
+// hold a dispatch open at a chosen moment without paying for a model turn. Holding it open
+// is the whole subject here — a hold is only observable while the node is not running.
 #[test]
 fn a_hold_survives_the_driver_that_reported_it() {
     let world = World::new("held-adopted");
@@ -362,4 +387,4 @@ fn a_hold_survives_the_driver_that_reported_it() {
         1,
         "the hold was restated on its way out"
     );
-}
+} // llmlint: ignore-end[e2e_not_mocked]
