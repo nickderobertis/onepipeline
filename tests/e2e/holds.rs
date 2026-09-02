@@ -397,6 +397,14 @@ fn a_hold_survives_the_driver_that_reported_it() {
 /// would never be reported, because this driver could not recognise what cleared. So the
 /// whole hold reads as one it does not know about and the driver states its own — a
 /// duplicate span, which a reader can see, rather than a lost one, which nobody can.
+// llmlint: ignore-block[tests_mirror_real_usage] the state under test is a record written
+// by a build that is **not** this one, so by construction no interface this build exposes
+// can produce it: a reason it had a variant for would not be the case under test. Writing
+// the predecessor's line into the ledger is the simulation of the only real producer there
+// is — another `onepipeline` — and everything downstream of it is real: the shipped binary
+// adopts the run, folds that ledger and writes what it decides. This is the same forward
+// compatibility `journal.rs` is built around, where a record from an unknown version is
+// skipped and reported rather than refused.
 // llmlint: ignore-block[e2e_not_mocked] the layer under test is this crate's reconcile
 // loop, driven as the compiled binary over a real run store; what the harness substitutes
 // is `oneagentgraph`, a sibling behind its own subprocess boundary, so that a journey can
@@ -450,3 +458,4 @@ fn a_hold_reason_written_by_a_later_build_is_restated_rather_than_assumed() {
     );
 }
 // llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
