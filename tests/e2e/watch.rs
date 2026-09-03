@@ -20,8 +20,8 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, plan_of, Run, World, NOTHING_DRIVING, REFUSED, SURFACE_WAITING, USAGE_ERROR,
-    WATCH_ELAPSED,
+    agent, ended, human, plan_of, Run, World, NOTHING_DRIVING, REFUSED, SURFACE_WAITING,
+    USAGE_ERROR, WATCH_ELAPSED,
 };
 
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
@@ -135,7 +135,6 @@ fn a_watch_emits_a_line_for_every_class_a_supervisor_acts_on() {
             "the base moved under us",
         ])
         .exited(0);
-    // And a node settling.
     world.release("build.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
@@ -273,7 +272,6 @@ fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
         !world.events_of(&run, "completion-requested").is_empty()
     });
 
-    // And the run is ended.
     world.run(&["stop", &run, "--force"]).exited(0);
     world.until("the stop to be recorded", |world| {
         !world.events_of(&run, "run-stopped").is_empty()
@@ -427,6 +425,156 @@ fn a_blocking_surface_returns_a_status_of_its_own_and_only_when_asked_for() {
     // what lets the frame stream end and the process exit.
     drop(stdin);
     ended(serving);
+    world.release("build.go");
+}
+
+/// A profile that excludes a meaningful event suppresses it, exactly as it does
+/// for `monitor`: what makes an event *meaningful* decides what a watch may
+/// emit, and the profile decides what this reader is shown of it.
+#[test]
+fn a_profile_that_excludes_a_meaningful_event_keeps_it_off_the_watch() {
+    let world = World::new("watch-filtered");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchfiltered", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "the base moved under us",
+        ])
+        .exited(0);
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let shaped = world.run(&[
+        "watch",
+        &run,
+        "--filter",
+        r#"{"exclude": [{"kind": "planner-surface-queued"}]}"#,
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&shaped, "settled", 0);
+    let kinds = emitted(&shaped);
+    assert!(
+        kinds.iter().any(|kind| kind == "node-settled"),
+        "the profile took an event it does not exclude: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "planner-surface-queued"),
+        "the profile excluded the surface and the watch emitted it anyway: {kinds:?}"
+    );
+    shaped.err_lacks("the base moved under us");
+}
+
+/// A run held on a **ready human action** is not a run held on a blocking
+/// surface, and `--until surface` deliberately does not return on one.
+///
+/// The scope this verb was given, asserted rather than left to a reader of the
+/// divergence record: `status` calls both a decision point, this returns on one
+/// of them, and which one is the thing a caller has to know.
+#[test]
+fn a_run_waiting_on_a_person_is_not_a_blocking_surface_and_the_wait_runs_out() {
+    let world = World::new("watch-human");
+    let run = "watchhuman";
+    // A held node beside the action, so the run is still being *driven* while it
+    // waits on a person: a plan whose only node is a ready human action has no
+    // driver left, which is the different answer this journey is not about.
+    world.script("build.wait", "hold");
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), human("sign", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the human action to be waiting on a person", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["payload"]["status"] == json!("waiting"))
+    });
+
+    let watched = world.run(&["watch", run, "--timeout", "3", "--tick-interval", "1"]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    // Nothing is unread either: a ready human action produces no surface, which
+    // is exactly why a watch cannot report it as one.
+    assert!(
+        watched.stderr.contains("0 unread planner surfaces"),
+        "a ready human action was counted as an unread surface:\n{}",
+        watched.stderr
+    );
+
+    world.release("build.go");
+}
+
+/// A watch that cannot write what it has to say refuses, rather than going on
+/// emitting into a descriptor nobody can take it.
+///
+/// Unix-only because `/dev/full` is: what it buys is a descriptor that accepts a
+/// write and then fails it, which is the shape a closed pipe has and which no
+/// portable spelling of this suite can produce on demand. The behaviour it holds
+/// is not platform-specific — a watch is a blocking verb, and one that swallowed
+/// a failed write would be reporting a run to nobody for as long as its timeout.
+#[cfg(unix)]
+#[test]
+fn a_watch_whose_output_cannot_be_written_refuses_instead_of_going_on() {
+    let world = World::new("watch-unwritable");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchunwritable", vec![agent("build", &[])]);
+
+    for descriptor in ["stdout", "stderr"] {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("this host has /dev/full");
+        let mut command = world.cmd(&["watch", &run, "--timeout", "600", "--tick-interval", "1"]);
+        if descriptor == "stdout" {
+            command.stdout(full).stderr(std::process::Stdio::piped());
+        } else {
+            command.stderr(full).stdout(std::process::Stdio::piped());
+        }
+        // The wait is ten minutes and the interval is one second, so a command
+        // that returns at all returned because a write failed rather than
+        // because it ran out of time.
+        let finished = command.output().expect("the watch runs");
+        assert_ne!(
+            finished.status.code(),
+            Some(0),
+            "a watch whose {descriptor} could not be written reported success: {}{}",
+            String::from_utf8_lossy(&finished.stdout),
+            String::from_utf8_lossy(&finished.stderr)
+        );
+        if descriptor == "stdout" {
+            // Standard error still works here, so the refusal is reportable and
+            // says which descriptor failed.
+            assert_eq!(finished.status.code(), Some(REFUSED));
+            let said = String::from_utf8_lossy(&finished.stderr);
+            assert!(
+                said.contains("could not write to standard output"),
+                "the refusal does not say which descriptor failed: {said}"
+            );
+        } else {
+            // Nothing can be reported when the reporting descriptor is the dead
+            // one, so what this holds is that the watch **stopped**: exactly the
+            // one record it had written before the failed write, and no more.
+            let written = String::from_utf8_lossy(&finished.stdout);
+            assert_eq!(
+                written
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count(),
+                1,
+                "the watch went on emitting past a write it could not make: {written}"
+            );
+        }
+    }
+
     world.release("build.go");
 }
 

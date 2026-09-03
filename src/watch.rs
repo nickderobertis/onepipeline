@@ -30,8 +30,6 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
-
 use crate::cli::{WatchArgs, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
     Error, Result, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
@@ -270,6 +268,73 @@ fn parse_cursor(token: &str) -> Result<u64> {
     at.parse().map_err(|_| refusal())
 }
 
+/// One line of the machine-readable form.
+///
+/// A serialized type rather than an object built by hand at each site: the tag
+/// and the fields are the wire contract a caller branches on, and three
+/// `json!` literals would be three places for it to drift. Externally tagged on
+/// `watch`, so the key that says which record this is arrives beside the fields
+/// that only that record has.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "watch", rename_all = "kebab-case")]
+enum Record<'a> {
+    /// One meaningful event, as the envelope itself rather than as a rendering
+    /// of it — exactly as `next` hands its caller the events it read, so a
+    /// consumer needing a field this crate does not put on the line never has to
+    /// go back to the store for it.
+    Event {
+        /// The whole envelope, as its producer wrote it.
+        event: &'a Envelope,
+    },
+    /// The watch is alive, and this is what is waiting unread.
+    Heartbeat {
+        run_id: &'a str,
+        unread: UnreadRecord<'a>,
+    },
+    /// Why the watch returned, with the status a caller branches on and the
+    /// cursor the next one resumes from.
+    Return {
+        run_id: &'a str,
+        condition: &'static str,
+        exit: i32,
+        cursor: &'a str,
+        unread: UnreadRecord<'a>,
+    },
+}
+
+/// How many planner surfaces are unread and of which kinds, on the wire.
+#[derive(Debug, serde::Serialize)]
+struct UnreadRecord<'a> {
+    count: usize,
+    /// Absent as `null` rather than as a zero, which would read as a queue
+    /// somebody had just emptied.
+    oldest_seconds: Option<u64>,
+    kinds: Vec<UnreadKind<'a>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct UnreadKind<'a> {
+    kind: &'a str,
+    count: usize,
+}
+
+impl<'a> UnreadRecord<'a> {
+    fn of(unread: &'a Unread) -> Self {
+        Self {
+            count: unread.count,
+            oldest_seconds: unread.oldest_seconds,
+            kinds: unread
+                .kinds
+                .iter()
+                .map(|(kind, count)| UnreadKind {
+                    kind,
+                    count: *count,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The two forms a watch writes, on the two descriptors that keep them apart.
 ///
 /// The human stream goes to standard error and the machine-readable one to
@@ -292,20 +357,10 @@ impl Emitter {
         }
     }
 
-    /// One meaningful event, as a line and as the envelope itself.
-    ///
-    /// The machine form carries the whole envelope rather than a rendering of
-    /// it, exactly as `next` hands its caller the events it read: a consumer
-    /// that needs a field this crate does not put on the line should not have to
-    /// go back to the store for it.
     fn event(&mut self, view: &RunView, event: &Envelope) -> Result<()> {
-        self.say(
-            &views::event_line(view, event),
-            &json!({"watch": "event", "event": event}),
-        )
+        self.say(&views::event_line(view, event), &Record::Event { event })
     }
 
-    /// One heartbeat: that the watch is alive, and what is waiting unread.
     fn heartbeat(&mut self, view: &RunView) -> Result<()> {
         let unread = view.unread();
         self.say(
@@ -315,11 +370,10 @@ impl Emitter {
                 views::liveness_word(view),
                 unread_phrase(&unread)
             ),
-            &json!({
-                "watch": "heartbeat",
-                "run_id": view.paths.run,
-                "unread": unread_json(&unread),
-            }),
+            &Record::Heartbeat {
+                run_id: &view.paths.run,
+                unread: UnreadRecord::of(&unread),
+            },
         )
     }
 
@@ -335,14 +389,13 @@ impl Emitter {
                 ending.as_str(),
                 unread_phrase(&unread)
             ),
-            &json!({
-                "watch": "return",
-                "run_id": view.paths.run,
-                "condition": ending.as_str(),
-                "exit": ending.exit_code(),
-                "cursor": cursor,
-                "unread": unread_json(&unread),
-            }),
+            &Record::Return {
+                run_id: &view.paths.run,
+                condition: ending.as_str(),
+                exit: ending.exit_code(),
+                cursor: &cursor,
+                unread: UnreadRecord::of(&unread),
+            },
         )?;
         Ok(ending.exit_code())
     }
@@ -352,10 +405,12 @@ impl Emitter {
     /// A write that fails is the caller's pipe closing, which is not this run's
     /// failure — but it is the end of what this watch can report, so it refuses
     /// rather than going on emitting into a descriptor nobody is reading.
-    fn say(&mut self, human: &str, machine: &Value) -> Result<()> {
+    fn say(&mut self, human: &str, machine: &Record<'_>) -> Result<()> {
         let broken = |what: &str, error: std::io::Error| {
             Error::Invalid(format!("the watch could not write to {what}: {error}"))
         };
+        let machine = serde_json::to_string(machine)
+            .map_err(|e| Error::Invalid(format!("the watch could not render a record: {e}")))?;
         writeln!(self.machine, "{machine}").map_err(|e| broken("standard output", e))?;
         self.machine
             .flush()
@@ -381,19 +436,6 @@ fn unread_phrase(unread: &Unread) -> String {
     }
 }
 
-/// The same answer, as the machine form carries it.
-fn unread_json(unread: &Unread) -> Value {
-    json!({
-        "count": unread.count,
-        "oldest_seconds": unread.oldest_seconds,
-        "kinds": unread
-            .kinds
-            .iter()
-            .map(|(kind, count)| json!({"kind": kind, "count": count}))
-            .collect::<Vec<Value>>(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,10 +451,14 @@ mod tests {
         let codes: std::collections::BTreeSet<i32> =
             endings.iter().map(|end| end.exit_code()).collect();
         assert_eq!(codes.len(), endings.len(), "two endings share a status");
-        // And the one this crate already assigns elsewhere is reused rather than
-        // given a fresh number.
-        assert_eq!(Ending::NothingDriving.exit_code(), EXIT_NOTHING_DRIVING);
+        // Each mapping by name, not only their distinctness: the four constants
+        // are the crate's public promise and this match is the only thing that
+        // honours it, so a mapping quietly swapped here would leave every caller
+        // branching on the wrong one.
         assert_eq!(Ending::Settled.exit_code(), EXIT_SUCCESS);
+        assert_eq!(Ending::NothingDriving.exit_code(), EXIT_NOTHING_DRIVING);
+        assert_eq!(Ending::SurfaceWaiting.exit_code(), EXIT_SURFACE_WAITING);
+        assert_eq!(Ending::Elapsed.exit_code(), EXIT_WATCH_ELAPSED);
     }
 
     #[test]
@@ -458,6 +504,72 @@ mod tests {
                 kind.as_str()
             );
         }
+
+        // Everything else the entry states in this build's own numbers: the two
+        // defaults a caller gets when it names neither, the cursor spelling a
+        // later invocation is handed, and each terminal status. Read out of the
+        // constants, so a value moved in the code and left in the proposal fails
+        // here rather than misinforming the person ruling on it.
+        for stated in [
+            format!("(default {})", crate::cli::DEFAULT_WATCH_TIMEOUT_SECONDS),
+            format!("(default {})", crate::cli::DEFAULT_WATCH_TICK_SECONDS),
+            format!("`{WATCH_CURSOR_VERSION}:<byte>`"),
+            format!("`{}`", Ending::Settled.exit_code()),
+            format!("`{}`", Ending::NothingDriving.exit_code()),
+            format!("`{}`", Ending::SurfaceWaiting.exit_code()),
+            format!("`{}`", Ending::Elapsed.exit_code()),
+        ] {
+            assert!(
+                entry.contains(&stated),
+                "the entry no longer states {stated}, which this build does"
+            );
+        }
+    }
+
+    /// The entry describes the machine-readable form by naming its records, and
+    /// the records are a serialized type: this is what keeps the two the same
+    /// answer.
+    #[test]
+    fn the_divergence_entry_names_the_records_the_machine_form_actually_writes() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split_once("\n## 58.")
+            .expect("this verb is recorded under entry 58")
+            .1;
+        let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
+
+        let unread = Unread::default();
+        let written = [
+            Record::Heartbeat {
+                run_id: "demo",
+                unread: UnreadRecord::of(&unread),
+            },
+            Record::Return {
+                run_id: "demo",
+                condition: Ending::Settled.as_str(),
+                exit: Ending::Settled.exit_code(),
+                cursor: "1:0",
+                unread: UnreadRecord::of(&unread),
+            },
+        ];
+        for shape in &written {
+            let rendered = serde_json::to_value(shape).expect("the record serializes");
+            let tag = rendered["watch"].as_str().expect("every record is tagged");
+            assert!(
+                entry.contains(&format!("\"watch\":\"{tag}\"")),
+                "the entry describes no `{tag}` record, which this build writes"
+            );
+        }
+        // The one variant that borrows an envelope, asserted the same way.
+        assert!(
+            entry.contains("\"watch\":\"event\""),
+            "the entry describes no `event` record, which this build writes"
+        );
     }
 
     #[test]
@@ -471,6 +583,10 @@ mod tests {
     fn an_empty_queue_says_so_rather_than_saying_nothing() {
         let quiet = unread_phrase(&Unread::default());
         assert!(quiet.contains('0'), "{quiet}");
-        assert_eq!(unread_json(&Unread::default())["count"], json!(0));
+        let empty = Unread::default();
+        let rendered =
+            serde_json::to_value(UnreadRecord::of(&empty)).expect("the record serializes");
+        assert_eq!(rendered["count"], serde_json::json!(0));
+        assert_eq!(rendered["oldest_seconds"], serde_json::Value::Null);
     }
 }

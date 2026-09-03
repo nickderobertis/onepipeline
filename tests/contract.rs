@@ -21,7 +21,10 @@ use onepipeline::channel::{
 };
 use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
-use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
+use onepipeline::error::{
+    EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
+    EXIT_WATCH_ELAPSED,
+};
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Phase, PipelineKind, Source,
     ENVELOPE_VERSION, PIPELINE_KINDS,
@@ -4161,6 +4164,62 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         assert!(
             surface.contains(view),
             "`{view}` is not a command the binary offers"
+        );
+    }
+
+    // `watch` is documented in a passage of its own, and everything it restates
+    // is read out of the code here: the flags are clap's, the defaults are the
+    // constants, and the four terminal statuses are the exit codes. A number
+    // moved in the crate and left in the README fails the suite rather than
+    // sending a supervisor to branch on a status the binary no longer returns.
+    assert!(
+        surface.contains("watch"),
+        "`watch` is not a command the binary offers"
+    );
+    let passage = readme
+        .split_once("`onepipeline watch RUN` is the bounded wait")
+        .expect("the README documents the watch verb")
+        .1
+        .split_once("## Where a dispatch runs")
+        .expect("that passage ends where the README's next heading begins")
+        .0
+        .to_string();
+    let watch = Cli::command()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "watch")
+        .expect("the binary offers `watch`")
+        .clone();
+    for flag in watch
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+    {
+        assert!(
+            passage.contains(&format!("`--{flag}`")) || passage.contains(&format!("`--{flag} ")),
+            "the README's watch passage does not name `--{flag}`, which the verb takes"
+        );
+    }
+    for (what, stated) in [
+        (
+            "the run settling",
+            format!("exit `{EXIT_SUCCESS}` when the run settled complete"),
+        ),
+        (
+            "nothing driving the run",
+            format!("`{EXIT_NOTHING_DRIVING}` when nothing is driving it"),
+        ),
+        (
+            "a blocking surface waiting",
+            format!("`{EXIT_SURFACE_WAITING}` when a blocking surface is waiting"),
+        ),
+        (
+            "the wait elapsing",
+            format!("`{EXIT_WATCH_ELAPSED}` when the"),
+        ),
+    ] {
+        assert!(
+            passage.contains(&stated),
+            "the README's watch passage states a different status than the crate does for \
+             {what}: it should say '{stated}'"
         );
     }
 }

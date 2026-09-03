@@ -805,6 +805,76 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A tailer stops **before** the record its writer has not finished, and
+    /// picks it up once the writer has.
+    ///
+    /// The defect this pins is a record silently lost. Every other reader here
+    /// accounts for a half-written line so a byte count cannot fall behind, and a
+    /// tailer that did the same would move its cursor past a record it never
+    /// emitted — and never come back for it, because the offset it resumes from is
+    /// already beyond it. On a live run that is the newest thing there is to say.
+    #[test]
+    fn a_tail_stops_at_a_record_its_writer_has_not_finished_and_resumes_it_later() {
+        let root = scratch("tail");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        journal
+            .emit(PipelineKind::RunStarted, labels("demo", None), payload(&[]))
+            .expect("appended");
+
+        let (whole, after_whole) = finished_after(&paths.journal(), 0);
+        assert_eq!(whole.len(), 1, "the finished record was not read");
+        assert_eq!(
+            after_whole,
+            fs::metadata(paths.journal()).expect("the journal").len(),
+            "a tail that read the whole file stopped short of its end"
+        );
+
+        // What a writer that has appended a record's first bytes leaves behind.
+        let torn = serde_json::to_string(&event("2026-08-08T00:00:01.000Z", "w", 0))
+            .expect("a record renders");
+        let opening = &torn[..torn.len() / 2];
+        fs::write(
+            paths.journal(),
+            format!(
+                "{}{opening}",
+                fs::read_to_string(paths.journal()).expect("the journal reads")
+            ),
+        )
+        .expect("the torn tail is written");
+
+        let (nothing, held) = finished_after(&paths.journal(), after_whole);
+        assert!(
+            nothing.is_empty(),
+            "a tail emitted a record its writer had not finished: {nothing:?}"
+        );
+        assert_eq!(
+            held, after_whole,
+            "a tail moved its cursor past a record it did not emit, so nothing will \
+             ever read that record"
+        );
+
+        // The writer finishes it, and the same cursor picks it up.
+        fs::write(
+            paths.journal(),
+            format!(
+                "{}{}\n",
+                fs::read_to_string(paths.journal()).expect("the journal reads"),
+                &torn[opening.len()..]
+            ),
+        )
+        .expect("the record is finished");
+        let (finished, past) = finished_after(&paths.journal(), held);
+        assert_eq!(finished.len(), 1, "the finished record was still not read");
+        assert_eq!(finished[0].stream, "w");
+        assert_eq!(
+            past,
+            fs::metadata(paths.journal()).expect("the journal").len()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_line_this_build_cannot_read_is_skipped_but_still_reported() {
         let root = scratch("unreadable");
