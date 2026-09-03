@@ -104,9 +104,9 @@ fn agreed(watched: &Run, condition: &str, code: i32) {
 /// Every class a supervisor acts on reaches the watch as a line of its own — and
 /// the machine-readable form carries the same three.
 ///
-/// The graph edit is issued by the **monitor**, which is the author whose edits
-/// went unnoticed on the run this verb comes from: four destructive ones matched
-/// no wake condition, and what eventually surfaced them was the run dying.
+/// The graph edit is issued by the **monitor**, because an edit is emitted
+/// whichever author issued it and the monitor's is the author a supervisor is
+/// least expecting.
 #[test]
 fn a_watch_emits_a_line_for_every_class_a_supervisor_acts_on() {
     let world = World::new("watch-classes");

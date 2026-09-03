@@ -1,16 +1,8 @@
 //! `onepipeline watch` — a bounded, resumable wait on one run.
 //!
-//! Watching dispatched work is the one supervisory duty this crate had no verb
-//! behind, so every supervisor wrote a shell loop around `monitor` and `status`
-//! and each one went silent differently. The two failures that cost real runs
-//! were both prose matching: one watch matched a word inside an embedded
-//! host-health report and called a healthy dispatch dead, and another filtered
-//! out the one line saying a question was waiting and went quiet while
-//! twenty-six updates queued behind a question asked three times.
-//!
-//! So this verb blocks, emits a line per event a supervisor acts on, says
-//! something on an interval when nothing has happened, and returns a **status**
-//! rather than a sentence:
+//! The verb blocks, emits a line per event a supervisor acts on, says something
+//! on an interval when nothing has happened, and returns a **status** rather
+//! than a sentence, so a caller branches without matching prose:
 //!
 //! | the run settled `complete` | [`EXIT_SUCCESS`] |
 //! | nothing is driving it | [`EXIT_NOTHING_DRIVING`] |
@@ -18,10 +10,10 @@
 //! | the wait elapsed, run still live | [`EXIT_WATCH_ELAPSED`] |
 //!
 //! Every heartbeat states how many planner surfaces are unread and of which
-//! kinds. That is the property the verb is worth having for: a caller that
-//! matches only on event lines cannot lose the signal that a question is
-//! waiting, because the signal rides the line that is emitted when nothing is
-//! happening.
+//! kinds, so a caller matching only on event lines cannot lose the signal that a
+//! question is waiting: it rides the line written *because* nothing is
+//! happening. `docs/contract-divergences.md` entry 58 is the proposal, and the
+//! record of what this cost before there was a verb.
 //!
 //! Everything here **reads**, exactly as [`crate::views`] does. A watch takes no
 //! lock a writer needs, consumes no surface, and records nothing: watching a run
@@ -55,14 +47,9 @@ const POLL: Duration = Duration::from_secs(1);
 /// line per meaningful event" a stream a person reads rather than the whole
 /// store: the siblings' token-by-token detail is what `monitor --all` is for.
 ///
-/// Every class the run this verb comes from lost is here. A **graph edit**,
-/// whichever author issued it — four destructive edits matched no wake condition
-/// on that run and what eventually surfaced them was the run dying — and a
-/// refused one beside it, because an edit that did not land is as much a thing
-/// to act on as one that did. A **node settling**, at any outcome. A **surface
-/// being raised**, before anybody has read it. And the three facts that end a
-/// supervisor's assumptions about the run as a whole: a decision beginning to
-/// hold a subtree, that hold clearing, and the run being stopped.
+/// A **graph edit** is here whichever author issued it, and a refused one beside
+/// it, because an edit that did not land is as much a thing to act on as one
+/// that did.
 const MEANINGFUL: [PipelineKind; 8] = [
     PipelineKind::EditCommitted,
     PipelineKind::EditRejected,
@@ -134,7 +121,7 @@ impl serde::Serialize for Ending {
 pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) -> Result<i32> {
     let mut cursor = match args.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
-        None => 0,
+        None => Cursor(0),
     };
     // Checked, because the seconds are a caller's: `Instant` addition panics on
     // overflow, and a wait longer than this host's clock can hold is a value to
@@ -154,8 +141,8 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
 
     loop {
         let view = RunView::open(paths)?;
-        let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor);
-        cursor = at;
+        let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.0);
+        cursor = Cursor(at);
         journal::merge_order(&mut fresh);
         for event in fresh
             .iter()
@@ -216,8 +203,29 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
     None
 }
 
-fn render_cursor(at: u64) -> String {
-    format!("{WATCH_CURSOR_VERSION}:{at}")
+/// A place in one run's journal, as a later invocation is handed it.
+///
+/// A type rather than a string, because the token is a promise to that later
+/// invocation: a record carrying an arbitrary string could hand one a place this
+/// build never reached, and a value of this is always a byte a watch finished
+/// reading. It renders and parses in exactly one spelling, so the token a caller
+/// is given is the token this build reads back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cursor(u64);
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{WATCH_CURSOR_VERSION}:{}", self.0)
+    }
+}
+
+impl serde::Serialize for Cursor {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
 }
 
 /// The byte a cursor token names **in this run's journal**, or a refusal.
@@ -233,8 +241,8 @@ fn render_cursor(at: u64) -> String {
 /// newline, so a cursor that does not sit just past one is pointing into the
 /// middle of a record, and resuming there would hand the caller a fragment as
 /// though it were an event.
-fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<u64> {
-    let at = parse_cursor(token)?;
+fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
+    let Cursor(at) = parse_cursor(token)?;
     let journal = paths.journal();
     let held = std::fs::metadata(&journal).map_or(0, |file| file.len());
     if at > held {
@@ -252,7 +260,7 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<u64> {
             paths.run
         )));
     }
-    Ok(at)
+    Ok(Cursor(at))
 }
 
 fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
@@ -272,7 +280,7 @@ fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
 /// External input like any other: a token is typed at a command line, and one
 /// this build cannot place is refused by name rather than resumed from as though
 /// its digits meant a byte count.
-fn parse_cursor(token: &str) -> Result<u64> {
+fn parse_cursor(token: &str) -> Result<Cursor> {
     let refusal = || {
         Error::Invalid(format!(
             "'{token}' is not a cursor this build reads; a cursor is what an earlier \
@@ -283,7 +291,7 @@ fn parse_cursor(token: &str) -> Result<u64> {
     if version != WATCH_CURSOR_VERSION {
         return Err(refusal());
     }
-    at.parse().map_err(|_| refusal())
+    at.parse().map(Cursor).map_err(|_| refusal())
 }
 
 /// One line of the machine-readable form.
@@ -315,7 +323,7 @@ enum Record<'a> {
         /// its own exit code contradicts.
         #[serde(flatten)]
         ending: Ending,
-        cursor: &'a str,
+        cursor: Cursor,
         unread: UnreadRecord<'a>,
     },
 }
@@ -397,9 +405,8 @@ impl Emitter {
 
     /// The last thing a watch says: why it returned, what is unread, and the
     /// cursor the next one resumes from.
-    fn returned(&mut self, view: &RunView, ending: Ending, cursor: u64) -> Result<i32> {
+    fn returned(&mut self, view: &RunView, ending: Ending, cursor: Cursor) -> Result<i32> {
         let unread = view.unread();
-        let cursor = render_cursor(cursor);
         self.say(
             &format!(
                 "-- watch {} {}  {}  cursor {cursor}",
@@ -410,7 +417,7 @@ impl Emitter {
             &Record::Return {
                 run_id: &view.paths.run,
                 ending,
-                cursor: &cursor,
+                cursor,
                 unread: UnreadRecord::of(&unread),
             },
         )?;
@@ -457,6 +464,30 @@ fn unread_phrase(unread: &Unread) -> String {
 mod tests {
     use super::*;
 
+    /// Entry 58 of the divergence record, which is where this verb's surface is
+    /// *proposed*.
+    ///
+    /// The tests below hold that proposal to what this build actually does: an
+    /// entry naming a flag, a kind, a default or a status the code does not have
+    /// is a proposal for something nobody built, put in front of the person who
+    /// rules on it.
+    fn divergence_entry() -> String {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split_once("\n## 58.")
+            .expect("this verb is recorded under entry 58")
+            .1
+            .to_string();
+        entry
+            .split_once("\n## ")
+            .map_or(entry.clone(), |(head, _)| head.to_string())
+    }
+
     #[test]
     fn each_terminal_condition_returns_a_status_of_its_own() {
         let endings = [
@@ -488,7 +519,16 @@ mod tests {
 
     #[test]
     fn a_cursor_round_trips_and_anything_else_is_refused() {
-        assert_eq!(parse_cursor(&render_cursor(4096)).expect("reads"), 4096);
+        assert_eq!(
+            parse_cursor(&Cursor(4096).to_string()).expect("reads"),
+            Cursor(4096)
+        );
+        // The token a caller is handed and the token it renders on the wire are
+        // the one spelling this build reads back.
+        assert_eq!(
+            serde_json::to_value(Cursor(4096)).expect("a cursor serializes"),
+            serde_json::json!("1:4096")
+        );
         for token in ["", "4096", "2:4096", "1:", "1:x", "1:-1", "1:4096:0"] {
             let refused = parse_cursor(token).expect_err("refused");
             assert!(
@@ -507,17 +547,7 @@ mod tests {
     /// a reader noticing.
     #[test]
     fn the_divergence_entry_names_exactly_the_kinds_this_build_calls_meaningful() {
-        let record = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("docs")
-                .join("contract-divergences.md"),
-        )
-        .expect("the divergence record ships");
-        let entry = record
-            .split_once("\n## 58.")
-            .expect("this verb is recorded under entry 58")
-            .1;
-        let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
+        let entry = divergence_entry();
 
         for kind in crate::event::PIPELINE_KINDS {
             let named = entry.contains(&format!("`{}`", kind.as_str()));
@@ -551,22 +581,59 @@ mod tests {
         }
     }
 
+    /// The entry proposes a command **schema**, and clap is what a caller is
+    /// actually given.
+    ///
+    /// Both ways, because both drift the same distance: a flag the code grew and
+    /// the proposal never mentioned is surface nobody ruled on, and a flag the
+    /// proposal names and the code dropped is a promise to a person deciding
+    /// about something that is not there.
+    #[test]
+    fn the_divergence_entry_proposes_exactly_the_flags_this_build_offers() {
+        use clap::CommandFactory;
+
+        let entry = divergence_entry();
+        let schema = entry
+            .split_once("add `onepipeline watch")
+            .expect("the entry proposes the command")
+            .1
+            .split_once('`')
+            .expect("the proposed command is one fenced span")
+            .0;
+        let proposed: std::collections::BTreeSet<String> = schema
+            .split_whitespace()
+            .filter_map(|word| {
+                word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                    .strip_prefix("--")
+                    .map(str::to_string)
+            })
+            .collect();
+        let offered: std::collections::BTreeSet<String> = crate::cli::Cli::command()
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "watch")
+            .expect("the binary offers `watch`")
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_string))
+            .collect();
+        assert_eq!(
+            proposed, offered,
+            "the entry proposes a different set of flags than this build offers"
+        );
+        // The one flag the entry mentions that this verb must never take: the
+        // pacemaker's cadence is `start`'s clock, and the entry says so in prose
+        // rather than in the schema.
+        assert!(
+            !offered.contains("heartbeat-interval"),
+            "`watch` took `start`'s pacemaker flag"
+        );
+    }
+
     /// The entry describes the machine-readable form by naming its records, and
     /// the records are a serialized type: this is what keeps the two the same
     /// answer.
     #[test]
     fn the_divergence_entry_names_the_records_the_machine_form_actually_writes() {
-        let record = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("docs")
-                .join("contract-divergences.md"),
-        )
-        .expect("the divergence record ships");
-        let entry = record
-            .split_once("\n## 58.")
-            .expect("this verb is recorded under entry 58")
-            .1;
-        let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
+        let entry = divergence_entry();
 
         let unread = Unread::default();
         let written = [
@@ -577,7 +644,7 @@ mod tests {
             Record::Return {
                 run_id: "demo",
                 ending: Ending::Settled,
-                cursor: "1:0",
+                cursor: Cursor(0),
                 unread: UnreadRecord::of(&unread),
             },
         ];
