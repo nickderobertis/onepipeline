@@ -306,6 +306,33 @@ renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
 
+`onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
+it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
+It blocks, writing one line per event a supervisor acts on — a graph edit whichever
+author issued it (`edit-committed`, `edit-rejected`), a node settling at any outcome
+(`node-settled`), a surface being raised (`planner-surface-queued`), a decision
+beginning or clearing to hold a subtree (`decision-pending`, `decision-cleared`), a
+completion being asked for (`completion-requested`), and the run being stopped
+(`run-stopped`) — and one heartbeat line per `--tick-interval SECONDS` of silence, so
+a quiet run and a dead stream are not the same thing seen from outside. **Every
+heartbeat says how many planner surfaces are unread and of which kinds**, so a caller
+matching only on event lines cannot lose the one signal that a question is waiting.
+The human lines go to standard error and one NDJSON record per line to standard
+output — a `watch` of `event`, of `heartbeat`, and one final `return` carrying
+`run_id`, `condition`, `exit`, `cursor` and `unread` — so nothing has to match
+prose.
+
+It returns on four conditions, each with a status of its own: exit `0` when the
+run settled complete, `3` when nothing is driving it — the same code every other
+verb here uses for that — `4` when a blocking surface is waiting to be answered,
+and `5` when the `--timeout SECONDS` wait elapsed with the run still live. It
+prints a cursor on exit, and `--cursor` resumes from one without re-emitting what
+the earlier watch already did. `--until settled` waits through a blocking surface
+rather than returning on it, still counting it on every heartbeat.
+`--tick-interval` is **this stream's** clock and is not `start`'s
+`--heartbeat-interval`, which sets the pacemaker agent's cadence; neither verb
+accepts the other's flag.
+
 ## Where a dispatch runs
 
 The [executor seam](docs/contract.md) decides. v1 ships the local executor only;

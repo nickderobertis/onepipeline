@@ -299,6 +299,14 @@ jobs:
   # `--git` install with no revision, and the `install` job above is what proves
   # this revision — but a check that can only report after the merge gates
   # nothing, which is how the documented command stayed broken through a release.
+  #
+  # So the smoke below runs the *default branch's* copy of
+  # `scripts/smoke-published.sh`, not this checkout's: that script asserts the
+  # binary's whole command list, which `tests/contract.rs` holds to the binary
+  # its own revision compiles, so a branch adding a verb would fail here on a
+  # verb the installed binary cannot have yet. Do not point the smoke step back
+  # at the checkout — the checkout is here for README.md, and repointing it
+  # reinstates that mismatch for every pull request that adds a subcommand.
   install-documented:
     strategy:
       fail-fast: false
@@ -309,8 +317,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # For README.md and scripts/smoke-published.sh. The install itself resolves
-      # everything it builds from the remote, which is the point.
+      # For README.md, which is the one source of the command below. The install
+      # itself resolves everything it builds from the remote, which is the point.
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Install (the command the README gives users)
@@ -331,7 +339,13 @@ jobs:
           echo "running README.md's command: ${argv[*]}"
           "${argv[@]}"
       - name: Smoke-test the installed binary
-        run: bash scripts/smoke-published.sh --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
+        run: |
+          # `origin/HEAD` is the remote's default branch — the same revision the
+          # `--git` install with no revision above just resolved — so this is
+          # that binary's own copy of the assertions rather than the branch's.
+          git fetch --depth=1 origin HEAD
+          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
+          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
 
   # The other end-user install path: the maturin wheel `pip install
   # onepipeline-cli` serves. Built and installed from this revision so the

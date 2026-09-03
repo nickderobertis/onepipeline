@@ -83,6 +83,7 @@ mod sys;
 mod taskgraph;
 mod telemetry;
 mod vcs;
+mod watch;
 mod writeback;
 
 pub use error::{Error, Result};

@@ -116,6 +116,23 @@ pub const EXIT_REFUSED: i32 = 2;
 /// Nothing is driving the run — the state to intervene in.
 pub const EXIT_NOTHING_DRIVING: i32 = 3;
 
+/// A blocking surface is waiting to be answered.
+///
+/// `watch`'s own, and the one of its four returns that has no code above it
+/// already: `0` is the run settling, [`EXIT_NOTHING_DRIVING`] is the state
+/// `adopt` is the way back from, and [`EXIT_QUEUED`] and [`EXIT_REFUSED`] are
+/// each spoken for by a different question. A caller branches on this rather
+/// than on prose — which is the failure the verb exists to end, a watch that
+/// matched a word and called a healthy run dead.
+pub const EXIT_SURFACE_WAITING: i32 = 4;
+
+/// A bounded wait elapsed with the run still live.
+///
+/// Not a failure and not completion: the run is being driven and had not
+/// finished when the wait ran out, so the caller resumes from the cursor the
+/// watch printed.
+pub const EXIT_WATCH_ELAPSED: i32 = 5;
+
 #[cfg(test)]
 mod tests {
     use super::*;

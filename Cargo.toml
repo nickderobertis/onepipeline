@@ -235,6 +235,14 @@ resolver = "2"
 #   It is the exact release containing onevcs #117, #119, #121, and #123: the
 #   live-worktree close refusal and dirty-tree rescue, draft change requests,
 #   preserved holder records, and producer-declared adoption instructions.
+# - `onevcs` 0.19.0 stops a branch that landed and then gained further commits
+#   being answered as never landed: onevcs #127 keeps the landing evidence beside
+#   the unlanded count instead of falling back to a content comparison that says
+#   the whole branch is unpublished. Nothing here decides a landing — `src/lifecycle.rs`
+#   relays that library's own sentence — so what moved is the answer a supervisor
+#   reads, not a call site. Taken because `onevcs-testing` 0.5.3 requires exactly
+#   this `onevcs`, so the two move together, and a lock carrying them apart would
+#   resolve `onevcs` twice.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -339,7 +347,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.18.0"
+onevcs = "0.19.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -380,7 +388,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.5.2"
+onevcs-testing = "0.5.3"
 
 [package]
 name = "onepipeline"

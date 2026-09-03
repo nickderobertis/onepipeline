@@ -3197,6 +3197,131 @@ one qualification that is not about an op but about a *record*: a `requeue` is
 judged against the park it would undo, so the monitor may return its own park to
 the frontier and not one the planner made.
 
+## 58. Watching a run is the one supervisory duty with no verb behind it — OPEN
+
+**Proposal (for the contract this repository implements): add `onepipeline watch
+RUN [--filter NAME|SPEC] [--all] [--timeout SECONDS] [--tick-interval SECONDS]
+[--cursor CURSOR] [--until surface|settled]` to the views line, with the two exit
+codes it needs beside the three the contract already assigns.**
+
+`docs/contract.md` fixes the read surface as `Views (CLI): runs, status, host,
+monitor RUN [--filter NAME|SPEC] [--all], results, goals, transcript RUN [NODE],
+telemetry [--breakdown]`, and fixes three process exit codes: `1` accepted-not-
+yet-reconciled, `2` refused, `3` nothing is driving the run. Between those two
+sentences there is no verb a supervisor can put in a wake loop, and the document
+is committed as approved, so the verb is here and the amendment is this entry.
+
+**What the surface is missing, measured on the runs that lost work to it.**
+`monitor` makes one pass over the store and returns; an attached `start` streams
+until it is killed. Neither is a *bounded* wait, so a watch that had to survive
+one supervisory turn was written as a shell loop. `status` takes no options at
+all, so every one of those loops read it by matching prose — and two of them
+failed differently. One matched a word inside an embedded host-health report and
+called a healthy dispatch dead. Another filtered out the one line that says a
+question is waiting, and went silent while twenty-six updates queued behind a
+question asked three times, with every other indicator green. On a third run,
+four destructive graph edits matched no wake condition at all and were never
+noticed; what eventually surfaced them was the run dying.
+
+**What this build now does.** `onepipeline watch RUN` blocks. It takes the run
+and the profile selection `monitor` takes — the same `ReadArgs`, so a profile
+this run does not have refuses the command before anything blocks — and four
+more:
+
+- `--timeout SECONDS` (default 300) bounds the wait. `0` reads once and returns.
+- `--tick-interval SECONDS` (default 30) is how long a silence may last before
+  the stream says it is still there. `0` turns the heartbeat off. Deliberately
+  **not** `--heartbeat-interval`: that flag is `start`'s and sets the pacemaker
+  agent's cadence. The two are different clocks on different verbs, and clap
+  refuses each on the other.
+- `--cursor CURSOR` resumes from what an earlier watch printed.
+- `--until surface|settled` names the one terminal condition that is a choice.
+
+It writes one line per meaningful event and one heartbeat line per interval of
+silence. **Meaningful** is a closed set of this crate's own kinds —
+`edit-committed`, `edit-rejected`, `node-settled`, `planner-surface-queued`,
+`decision-pending`, `decision-cleared`, `completion-requested`, `run-stopped` —
+which is every class a supervisor acts on and not the siblings' token-by-token
+detail, which is what `monitor --all` is for. A graph edit is emitted whichever
+author issued it, so the monitor's edits reach the same line a planner's do.
+
+**A record has to be this crate's by source as well as by kind.** A kind is a
+wire string that no library owns, and this stream is three libraries merged, so a
+sibling that one day spells `node-settled` the way this one does would — under a
+kind test alone, and under `--all`, which is the selection that admits it —
+reach a supervisor as a node settling, reporting as settled work that settled
+nothing.
+
+**Every heartbeat states how many planner surfaces are unread and of which
+kinds.** That is the property the verb is worth having for, rather than an
+ornament on it: the failure it replaces is a watcher that filtered the one line
+that mattered, and putting the count on the line that is written *because
+nothing is happening* is what makes it unfilterable by a caller matching events.
+A zero is said out loud — "0 unread planner surfaces" — because "nothing is
+waiting" and "this line does not mention what is waiting" read identically.
+
+**Four terminal conditions, four exit statuses.** The run settled `complete` is
+`0`. Nothing is driving the run is `3`, which is the code this crate already
+assigns to that condition and is reused rather than given a number of its own. A
+blocking surface waiting to be answered is `4` and the wait elapsing with the run
+still live is `5` — two new public constants in `src/error.rs`,
+`EXIT_SURFACE_WAITING` and `EXIT_WATCH_ELAPSED`, because `1` and `2` are each
+spoken for by a different question and overloading either would put a caller back
+to reading prose.
+
+**Settled here is the graph being `complete`, not the loop having nothing left to
+do.** A run whose one node failed has converged, and returning `0` over it would
+be the false completion this crate exists to stop reporting; such a run reaches
+the caller as `3`, exactly as it does through an attached `start`.
+
+The two forms go out on the two descriptors an attached `start` already splits:
+the human lines on standard error, and one NDJSON record per line on standard
+output — `{"watch":"event","event":{…}}`,
+`{"watch":"heartbeat","run_id":…,"unread":…}`, and a final
+`{"watch":"return","run_id":…,"condition":…,"exit":…,"cursor":…,"unread":…}` — each
+flushed
+as it is written, because a blocking verb whose consumer sees nothing until it
+exits is the silence this verb exists to end. The machine form carries the whole
+envelope rather than a rendering of it, as `next` already hands its caller the
+events it read.
+
+The cursor is `1:<run>:<byte>`: the run, and the offset into that run's journal
+that the watch had finished reading. It is versioned because it is a promise to a
+*later* invocation, which may be a different build, and it is validated at the
+boundary like every other external input — a token this build cannot place is
+refused by name rather than resumed from as though its digits meant a byte count.
+**It names the run because a byte alone is a place in every journal there is.** A
+supervisor watching several runs holds several of these, and one pasted against
+the wrong run is the token that does not fail: it parses, it lands inside the
+wrong journal's record boundaries, and it resumes from a point that means
+nothing. A length check cannot see it, because a byte from a longer journal is a
+plausible byte of a shorter one. The run is what makes it refusable by name. The
+tail
+read behind it (`journal::finished_after`) stops at a record whose writer has not
+finished it rather than accounting for it, which is the one place it differs from
+the summary maintainer's `read_after` beside it: a tailer that advanced past a
+half-written line would never come back for the rest of it, and on a live run
+that line is the newest thing there is to say.
+
+**What this does not do, and is the part the contract owner should rule on.**
+`--until surface` returns on a blocking surface and on nothing else that is
+waiting for a person. This crate's own `decision_outstanding` is wider — a ready
+`kind: human` node is a decision point too, and `status` reports it as one — so a
+watch over a run parked on an attestation runs to its timeout and returns `5`.
+That is honest rather than complete: the value is spelled `surface` and not
+`decision` precisely so it does not claim the wider fact. Whether the verb should
+grow a fifth terminal condition for a ready human action, or whether
+`surface-waiting` should widen to mean every decision point, is the contract
+owner's call and not this repository's.
+
+`monitor` and `status` are untouched: no flag, no output, and no exit code of
+either changed, so an existing caller of them is unaffected.
+`tests/e2e/watch.rs` drives the verb through the compiled binary — a line for a
+graph edit the monitor issued, for a node settling and for a surface being raised;
+a heartbeat carrying an unread count and its kinds; each of the four returns with
+its own status; a resumed watch that repeats nothing; and the machine form
+carrying the same events, counts, kinds and terminal condition as the human form
+beside it.
 
 ## 59. A settlement projection cannot leave the destination's own `onetaskgraph.origin` alone — OPEN
 

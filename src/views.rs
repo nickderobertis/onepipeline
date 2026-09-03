@@ -228,7 +228,7 @@ pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
 /// waiting on, and a verdict that ignored it would report the run as abandoned —
 /// sending an operator to intervene in a run whose next move is already sitting
 /// in their own queue.
-fn blocking_surface(paths: &RunPaths) -> bool {
+pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
     let queue = crate::channel::ChannelState::new(paths).queue();
     queue
         .waiting
@@ -375,7 +375,7 @@ impl RunView {
     /// Crate-visible and behind the pair above: the count and the staleness are
     /// what the contract names, and which kinds are waiting is a rendering — see
     /// [`Unread`] for why the line carries it.
-    fn unread(&self) -> Unread {
+    pub(crate) fn unread(&self) -> Unread {
         Unread::of(&crate::channel::ChannelState::new(&self.paths).queue())
     }
 
@@ -425,15 +425,15 @@ impl RunView {
 /// of routine `monitor` updates against a handful of questions a bare count read
 /// the same either way.
 #[derive(Debug, Default)]
-struct Unread {
-    count: usize,
+pub(crate) struct Unread {
+    pub(crate) count: usize,
     /// Absent when nothing is waiting, rather than a zero that reads as a queue
     /// somebody has just emptied.
-    oldest_seconds: Option<u64>,
+    pub(crate) oldest_seconds: Option<u64>,
     /// Blocking kinds first — that is what the run is held on — then rarest
     /// first, since a rare kind behind a common one is the burial this repairs;
     /// then by name, so the line is stable to read.
-    kinds: Vec<(String, usize)>,
+    pub(crate) kinds: Vec<(String, usize)>,
 }
 
 /// How many kinds a line names before it summarises the rest.
@@ -443,7 +443,7 @@ struct Unread {
 const MAX_NAMED_KINDS: usize = 4;
 
 impl Unread {
-    fn of(queue: &crate::channel::Queue) -> Self {
+    pub(crate) fn of(queue: &crate::channel::Queue) -> Self {
         let mut counts: BTreeMap<String, (bool, usize)> = BTreeMap::new();
         for surface in &queue.waiting {
             // The kind is a stranger's: an observer's frame names it in that
@@ -478,7 +478,7 @@ impl Unread {
 
     /// The kinds, bounded: past [`MAX_NAMED_KINDS`] the line says how many it
     /// left out rather than ending where a reader cannot tell it was cut.
-    fn phrase(&self) -> String {
+    pub(crate) fn phrase(&self) -> String {
         let named: Vec<String> = self
             .kinds
             .iter()
@@ -1963,18 +1963,8 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
     for event in shaped(view, filter) {
-        let id = match event.source {
-            Source::Pipeline => format!("graph:{}", event.labels.node.as_deref().unwrap_or("-")),
-            Source::Agentgraph => format!("agent:{}", event.stream),
-            Source::Vcs => format!("vcs:{}", event.stream),
-        };
-        out.push_str(&format!(
-            "{}  {:<28} {}{}\n",
-            event.ts,
-            id,
-            summarize(event),
-            superseded_suffix(view, event)
-        ));
+        out.push_str(&event_line(view, event));
+        out.push('\n');
     }
     // The run's own state has no node, so it has no graph id: it reaches the
     // reader as a trailer rather than as an event line.
@@ -1986,6 +1976,29 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
         graph::state_of(&view.state.statuses()).as_str()
     ));
     out
+}
+
+/// One event as a reader is shown it: the typed id a detail lookup resolves,
+/// what the event says, and what this crate knows about it since.
+///
+/// Crate-visible and without its terminator, because two verbs render the same
+/// line and only one of them is building a document: `monitor` joins these into
+/// one pass over the store, and `watch` writes one as each record arrives. A
+/// second spelling of the line would let a supervisor's live view and their
+/// replay of the same run disagree about what happened.
+pub(crate) fn event_line(view: &RunView, event: &Envelope) -> String {
+    let id = match event.source {
+        Source::Pipeline => format!("graph:{}", event.labels.node.as_deref().unwrap_or("-")),
+        Source::Agentgraph => format!("agent:{}", event.stream),
+        Source::Vcs => format!("vcs:{}", event.stream),
+    };
+    format!(
+        "{}  {:<28} {}{}",
+        event.ts,
+        id,
+        summarize(event),
+        superseded_suffix(view, event)
+    )
 }
 
 /// What a line about a superseded node says beyond the event itself, or nothing
