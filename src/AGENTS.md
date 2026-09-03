@@ -48,6 +48,14 @@ Rules:
 - `projection.rs` folds the journal into the plan of record. The run's
   `plan.json` is its launch record and is never rewritten, and the store the
   plan was read from is never re-read to decide what the run is doing.
+- `writeback.rs` projects that folded graph back onto the `onetaskgraph` project
+  it was launched from, through that binary's own `project copy` out of a shadow
+  `local-md` store under the run. A copy rewrites an edge to the destination's
+  own id only where its far end is a **member of the copied set**, so the shadow
+  names each far task `<project>/<task>`: a bare file name resolves to
+  `<shadow-source>:<file>`, which is a member of nothing, and the destination is
+  then left holding an edge into the run's scratch that no reader of that plan
+  can resolve.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
 - `report.rs` is **half public**: `retain` and the constants an accepted

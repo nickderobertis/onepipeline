@@ -933,11 +933,20 @@ fn write_shadow(
         if let Some(url) = snapshot.change_urls.get(id) {
             metadata.insert(CHANGE_URL_KEY.into(), json!(url));
         }
+        // Each edge names the far shadow task the way that shadow store names its
+        // own — `<project>/<task>` — and not by its file alone. What a copy does with
+        // an edge is decided by whether its far end is a member of the copied set: a
+        // far end that is one is rewritten to the destination's own id for that node,
+        // and one that is not is carried through as the source's own qualified id. A
+        // bare file name resolves to `<shadow-source>:<file>`, which is a member of
+        // nothing, so every edge between two nodes of this plan reached the
+        // destination naming the run's scratch store — and a plan whose edges name a
+        // source the store does not contain cannot be read back at all.
         let local_deps: Vec<String> = deps
             .iter()
             .filter_map(Value::as_str)
             .filter(|dep| !crate::graph::is_cross_dag(dep))
-            .map(task_file)
+            .map(|dep| format!("{}/{}", project_file(&snapshot.project), task_file(dep)))
             .collect();
         let cross: Vec<String> = deps
             .iter()
@@ -1714,8 +1723,13 @@ mod tests {
         assert_eq!(front["status"], "in progress");
         assert_eq!(
             front["depends_on"],
-            json!([super::task_file("design")]),
-            "the projection lost the plan's dependency edge"
+            json!([format!(
+                "{}/{}",
+                super::project_file(&fixture.snapshot.project),
+                super::task_file("design")
+            )]),
+            "the projection lost the plan's dependency edge, or named its far end \
+             the way no store resolves to a task of this project"
         );
         assert_eq!(front["metadata"]["onepipeline.id"], "build");
         assert_eq!(front["metadata"]["onepipeline.persona"], "engineer");

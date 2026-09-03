@@ -895,6 +895,88 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
     );
 }
 
+/// A plan still reads back after a run of it has settled, and after several.
+///
+/// A projection is a **copy**, and a copy carries whatever the shadow store says
+/// about the far end of a dependency edge. Written as the far task's file name
+/// alone, that far end resolves to the shadow source's own name for it — a
+/// member of no copied set, so the copy carries it through verbatim and the
+/// destination is left holding an edge into a directory under the run's own
+/// scratch. Every read of the plan afterwards is then refused for a dependency
+/// target the store cannot resolve, which is the record an operator goes back to
+/// when a run has gone wrong.
+///
+/// Asserted as the edges the store answers with, held against the ones it
+/// answered with before the run — not as how many there are, which is what the
+/// journeys above ask and what cannot tell an edge that moved from one that
+/// stayed. And twice, because a projection that damaged the destination once
+/// would have a second run of the same plan to damage further.
+#[test]
+fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with() {
+    let world = World::new("store-settled-readback");
+    let project = world.plan(
+        "readback",
+        &plan_of(
+            "readback",
+            vec![agent("first", &[]), agent("second", &["first"])],
+        ),
+    );
+    // Every task's edges, by node id, as the store itself resolves them.
+    let edges = |world: &World| -> BTreeMap<String, Vec<Value>> {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .map(|task| {
+                (
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()
+                        .expect("a task of this plan names its node")
+                        .to_owned(),
+                    world.store_deps(task["id"].as_str().expect("a task has a qualified id")),
+                )
+            })
+            .collect()
+    };
+    let authored = edges(&world);
+    assert_eq!(
+        authored.get("second").map(Vec::len),
+        Some(1),
+        "the fixture authored no dependency edge, so this journey could not tell a \
+         preserved one from a rewritten one: {authored:?}"
+    );
+
+    // Two runs of the one plan. The second mints a run of its own beside the
+    // first, and projects onto the same destination items.
+    for run in ["readback", "readback-2"] {
+        world.run(&["start", &project, "--attach"]).exited(0);
+        world.until_store("the settlement to reach the plan it was launched from", |world| {
+            world
+                .store_tasks(&project)
+                .iter()
+                .filter(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+                .count()
+                == 2
+        });
+        assert_eq!(
+            world.run_json(run, "result.json")["state"],
+            "complete",
+            "the run this readback is about did not settle"
+        );
+
+        assert_eq!(
+            edges(&world),
+            authored,
+            "settlement rewrote the plan's own dependency edges after {run}"
+        );
+        // And what that costs when it is wrong: the plan is readable, through the
+        // engine's own loader, by the verb whose job is to read one without
+        // launching it. A rewritten edge is refused here naming a dependency
+        // target nothing resolves, which is every command that reads a plan after
+        // a run of it has settled.
+        world.run(&["plan", "check", &project]).exited(0);
+    }
+}
+
 /// The reserved keys the write-back owns and overwrites on a projected item.
 ///
 /// Everything else is the complement — what a total replacement has to carry
