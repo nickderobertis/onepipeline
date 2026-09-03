@@ -3057,10 +3057,12 @@ beside it naming the structured read and the document behind it.
 
 ## 59. A settlement projection cannot leave the destination's own `onetaskgraph.origin` alone — OPEN
 
-**Proposal (for `onetaskgraph`): let a copy update a destination item without
-rewriting the correspondence that item already records. A copy that found its
-destination through the *source* item's declared origin has learnt nothing new
-about where the destination came from, and records one anyway.**
+**Proposal (for `onetaskgraph`, filed as
+[nickderobertis/onetaskgraph#266](https://github.com/nickderobertis/onetaskgraph/issues/266)):
+let a copy update a destination item without rewriting the correspondence that
+item already records. A copy that found its destination through the *source*
+item's declared origin has learnt nothing new about where the destination came
+from, and records one anyway.**
 
 The write-back projects a run's folded graph onto the plan it was launched from
 by writing a shadow `local-md` store under the run and asking `onetaskgraph
