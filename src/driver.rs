@@ -2163,8 +2163,17 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
         node_validator: view.launch.node_validator().map(str::to_owned),
         ..view.state.frontier()
     };
+    // Advanced as it goes, and on a **copy**, because two of the facts an edit is
+    // judged against move *within* an envelope: a monitor that parks a node and
+    // requeues it in one reply is undoing its own park, and a frontier held still
+    // for the whole envelope would tell it the planner had made that park. The
+    // copy is what keeps this a check: the applying pass below judges the same
+    // commands again, and it has to start from the run's own frontier rather than
+    // from one this pass has already walked forward.
+    let mut checking = frontier.clone();
     for command in &envelope.commands {
-        edits::compile(&mut projected, &frontier, command)?;
+        let operations = edits::compile(&mut projected, &checking, envelope.author, command)?;
+        edits::advance(&mut checking, &operations);
     }
 
     // And, once every command in it has passed both, the envelope as a whole —
@@ -2191,6 +2200,9 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
             let mut compiled: Vec<edits::Operation> = Vec::new();
+            // This pass's own copy, walked forward as each command commits, for
+            // the reason the checking pass above holds one.
+            let mut frontier = frontier.clone();
             for command in &envelope.commands {
                 // Nothing is driving this run, so nothing of it is in flight —
                 // the note is still asked of the member the node's last dispatch
@@ -2210,6 +2222,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                         return Err(error);
                     }
                 };
+                edits::advance(&mut frontier, &operations);
                 compiled.extend(operations.iter().cloned());
                 journal.emit(
                     journal::PipelineKind::EditCommitted,
@@ -2220,35 +2233,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                         ("operations", json!(operations)),
                     ]),
                 )?;
-                for operation in &operations {
-                    match operation {
-                        edits::Operation::CompletionRequested { reason } => journal.emit(
-                            journal::PipelineKind::CompletionRequested,
-                            journal::labels(&paths.run, None),
-                            journal::payload(&[("reason", json!(reason))]),
-                        )?,
-                        edits::Operation::HumanAttested { node } => journal.emit(
-                            journal::PipelineKind::HumanAttested,
-                            journal::labels(&paths.run, Some(node)),
-                            journal::payload(&[("ref", json!(node))]),
-                        )?,
-                        edits::Operation::FindingRaised {
-                            node,
-                            message,
-                            blocking,
-                        } => engine::raise(
-                            paths,
-                            &mut journal,
-                            engine::finding_surface(
-                                envelope.author,
-                                node.clone(),
-                                message,
-                                *blocking,
-                            ),
-                        )?,
-                        _ => {}
-                    }
-                }
+                engine::record_operation_facts(paths, &mut journal, envelope.author, &operations)?;
                 // The planner is told what the monitor did here as well as in
                 // the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the
@@ -2311,7 +2296,7 @@ fn apply_here(
     author: Author,
     command: &Command,
 ) -> Result<Vec<edits::Operation>> {
-    let operations = edits::compile(graph, frontier, command)?;
+    let operations = edits::compile(graph, frontier, author, command)?;
     let Command::Note {
         id,
         addressee,

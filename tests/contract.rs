@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
-use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
+use onepipeline::channel::{
+    allows, Author, Command as Edit, Dependents, Reply, SettleOutcome, SurfaceKind,
+};
 use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
@@ -1263,6 +1265,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Reparent { .. } => "reparent",
         Edit::Retry { .. } => "retry",
         Edit::Cancel { .. } => "cancel",
+        Edit::Settle { .. } => "settle",
         Edit::Requeue { .. } => "requeue",
         Edit::Attest { .. } => "attest",
         Edit::Complete { .. } => "complete",
@@ -1344,7 +1347,13 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
                 node,
             },
         ),
-        ("cancel", Edit::Cancel { id: "x".into() }),
+        (
+            "cancel",
+            Edit::Cancel {
+                id: "x".into(),
+                reason: None,
+            },
+        ),
         (
             "requeue",
             Edit::Requeue {
@@ -1428,7 +1437,10 @@ fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
     assert_eq!(OPS.len(), 9);
 
     assert_eq!(
-        op_of(&Edit::Cancel { id: "x".into() }),
+        op_of(&Edit::Cancel {
+            id: "x".into(),
+            reason: None
+        }),
         "cancel",
         "the exhaustive match above is what proves the variant set, and it runs"
     );
@@ -1520,6 +1532,123 @@ fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_nam
         every_surface_kind(),
         declared,
         "the surface kinds this build carries are not the contract's plus entry 39's"
+    );
+}
+
+/// The park-and-settle surface this build carries **beyond** the contract is
+/// exactly what the divergence record proposes.
+///
+/// The contract is committed as approved and names none of it, so entry 57 is
+/// the only place it is written down — and a divergence nothing gates quietly
+/// stops being true. The entry's own block is the source: what parses here is
+/// what a planner would type, and the refusals are what a monitor would be told.
+#[test]
+fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("57.");
+
+    // The op it adds, as the wire carries it, and the authors it is for.
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 57 names the op it adds");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 57 says which of them the monitor may issue");
+    assert!(!fixtures.is_empty(), "{block}");
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(
+            !OPS.contains(&op),
+            "`{op}` is on the contract's own list, so it is no divergence"
+        );
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+        allows(Author::Planner, &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let verdict = allows(Author::Monitor, &edit);
+        if monitor_may.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        // Refused, and the refusal names the op, says the decision is the
+        // planner's, and says what to do instead — an observer told only "no"
+        // has nothing to act on.
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(
+            refusal.contains(op)
+                && refusal.contains("planner's decision")
+                && refusal.contains("Surface it to the planner"),
+            "the refusal does not say whose decision it is or what to do instead: {refusal}"
+        );
+    }
+
+    // The optional field the contract's own `cancel` gains. It rides that op
+    // rather than a new one, so what the entry has to prove is that the op is
+    // still `cancel` and that the reason survives the round trip.
+    let parked = block["cancel"].clone();
+    let cancel: Edit = serde_json::from_value(parked.clone()).expect("the cancel fixture parses");
+    assert_eq!(
+        op_of(&cancel),
+        "cancel",
+        "the reason moved `cancel` off its op"
+    );
+    assert!(
+        OPS.contains(&"cancel"),
+        "`cancel` is the contract's own op, which is why only its field is the divergence"
+    );
+    assert_eq!(
+        serde_json::to_value(&cancel).expect("serializes"),
+        parked,
+        "the park's reason does not round-trip"
+    );
+    // And a `cancel` written before the field existed is still exactly the
+    // `cancel` it was: it parses, carries no reason, and writes none back.
+    let bare: Edit =
+        serde_json::from_value(json!({"op": "cancel", "id": "build"})).expect("it parses");
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        json!({"op": "cancel", "id": "build"}),
+        "a park stating no reason gained one"
+    );
+
+    // The outcome vocabulary a `settle` accepts, held against the type: the
+    // entry's list is the set, and a fourth word is refused rather than guessed
+    // at.
+    let outcomes: Vec<String> = serde_json::from_value(block["settle_outcomes"].clone())
+        .expect("entry 57 names the outcomes a settle accepts");
+    assert_eq!(outcomes.len(), 2, "{block}");
+    for word in &outcomes {
+        let parsed: SettleOutcome = serde_json::from_value(json!(word))
+            .unwrap_or_else(|e| panic!("`{word}` is an outcome this build accepts: {e}"));
+        assert_eq!(parsed.as_str(), word, "`{word}` round-trips unchanged");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serializes"),
+            json!(word),
+            "`{word}` round-trips unchanged"
+        );
+    }
+    // A status a node can be *in* but may not be *put* at: `skipped` is derived
+    // from the graph on every pass, so a node settled at one would be re-derived
+    // out of it and the operator's statement would silently not hold.
+    for refused in ["skipped", "parked", "ready"] {
+        assert!(
+            serde_json::from_value::<SettleOutcome>(json!(refused)).is_err(),
+            "`{refused}` is a status a settle may not put a node at, and it was accepted"
+        );
+    }
+
+    // The word the settlement is written under is gated where it is *written* —
+    // `tests/e2e/live_edit.rs` reads this same field out of this same entry and
+    // holds it against the record the compiled binary produced, which is the
+    // only place the claim can be about a run rather than about a string.
+    assert!(
+        block["settled_outcome_word"].is_string(),
+        "entry 57 no longer names the word a settlement from evidence is written under"
     );
 }
 
@@ -3218,7 +3347,10 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             id: "x".into(),
             node,
         },
-        Edit::Cancel { id: "x".into() },
+        Edit::Cancel {
+            id: "x".into(),
+            reason: None,
+        },
         Edit::Requeue {
             id: "x".into(),
             amend: None,
@@ -3243,10 +3375,15 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             id: "x".into(),
             text: "the ruling".into(),
         },
+        Edit::Settle {
+            id: "x".into(),
+            outcome: SettleOutcome::Done,
+            evidence: "it merged".into(),
+        },
     ];
     assert_eq!(
         every.len(),
-        OPS.len() + 2,
+        OPS.len() + 3,
         "an op is missing from this table; `op_of` above is what says so"
     );
 

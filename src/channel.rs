@@ -68,7 +68,7 @@ impl Author {
     }
 
     /// Whether this is the default, so serialization can omit it.
-    fn is_planner(&self) -> bool {
+    pub(crate) fn is_planner(&self) -> bool {
         matches!(self, Self::Planner)
     }
 }
@@ -134,6 +134,14 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
             "a note may bind a criterion the node's judge decides against, which is the \
              planner's decision; `context` is the note that binds nothing"
         }
+        // The op that writes an outcome the run itself never observed. An
+        // observer's whole authority is what the stream shows it, and this one
+        // is deliberately the opposite: a person read a merge, or a wait that
+        // can never clear, somewhere the run cannot see.
+        Command::Settle { .. } => {
+            "settling a node from evidence declares an outcome this run never observed, \
+             which is the planner's decision rather than an observation"
+        }
     };
     Err(crate::Error::Refused(format!(
         "'{}' is not an op the monitor may issue: {refused}. Surface it to the planner instead",
@@ -156,6 +164,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Amend { .. } => "amend",
         Command::Note { .. } => "note",
         Command::Finding { .. } => "finding",
+        Command::Settle { .. } => "settle",
     }
 }
 
@@ -166,10 +175,11 @@ pub fn target_of(command: &Command) -> Option<String> {
         Command::Drop { id, .. }
         | Command::Reparent { id, .. }
         | Command::Retry { id, .. }
-        | Command::Cancel { id }
+        | Command::Cancel { id, .. }
         | Command::Requeue { id, .. }
         | Command::Context { id, .. }
         | Command::Note { id, .. }
+        | Command::Settle { id, .. }
         | Command::Amend { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
@@ -293,6 +303,17 @@ pub enum Command {
     Cancel {
         /// The node to park.
         id: String,
+        /// Why, in the parking author's own words.
+        ///
+        /// Optional, so every `cancel` written before this field existed still
+        /// parks exactly as it did — but it is the fact the record was missing:
+        /// a park carrying only a node id is indistinguishable, downstream, from
+        /// a node sitting idle for no reason anybody decided, and an observer
+        /// reading it as one has requeued deliberate decisions. Present and
+        /// blank is refused rather than recorded, as every other text this
+        /// vocabulary carries is: a reason nobody can read is not one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Return a parked node to the desired frontier, optionally amending it.
     Requeue {
@@ -401,6 +422,65 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// Settle a node at what the operator can see it actually reached, from
+    /// evidence this run never observed.
+    ///
+    /// The op for a record that has gone wrong rather than for work that has:
+    /// a change that merged while the node read `failed`, a wait that can never
+    /// clear. Without it the only route is replacing the node with a stand-in
+    /// that dispatches nothing and carries the evidence in prose — which loses
+    /// the node's identity, renames it in every downstream reference, and
+    /// forces a rewiring cascade through its dependents.
+    ///
+    /// So it **keeps the node**: its id, its lineage, and its dependents' edges
+    /// are all exactly as they were, and the only thing that moves is what the
+    /// run's record says became of it.
+    Settle {
+        /// The node to settle. It must be one the graph holds, and one whose
+        /// record does not already say what this states — a settle that changes
+        /// nothing is a duplicate rather than a correction. A node that settled
+        /// **something else** is exactly what this is for: a change that merged
+        /// while the node read `failed` is the case the op exists for, and the
+        /// earlier settlement stays in the journal beside this one.
+        id: String,
+        /// What it settled as.
+        outcome: SettleOutcome,
+        /// What the operator saw, in their own words. Required and never blank:
+        /// this is journalled as the reason the node is in the state it is, and
+        /// a settlement nothing accounts for is the record this op exists to
+        /// stop writing.
+        evidence: String,
+    },
+}
+
+/// What a `settle` states a node actually reached.
+///
+/// The two settled statuses a node can be **put** at, and deliberately not every
+/// status a node can be *in*. `pending`, `ready`, `blocked` and `skipped` are
+/// derived from the graph on every pass rather than recorded, so a node settled
+/// at one of them would be re-derived out of it before the next dispatch and the
+/// operator's statement would silently not hold; `parked` and `cancelled` have
+/// ops of their own. A wait that can never clear is settled `failed` carrying
+/// the evidence that says so, which is a record that sticks. A value outside
+/// these two is refused by serde, naming what it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettleOutcome {
+    /// The work was done, whatever this run's record says.
+    Done,
+    /// It was not, and nothing further is going to change that.
+    Failed,
+}
+
+impl SettleOutcome {
+    /// The word a record names this outcome with, which is the status word the
+    /// node's settlement is written under.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// Whether a flag is at its `false` default, so serialization can omit it.

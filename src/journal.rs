@@ -617,6 +617,14 @@ pub const SETTLED_HEAD: &str = "head";
 /// does not fold it, finds at the moment it happened.
 pub const ADOPTED_ABANDONED: &str = "abandoned";
 
+/// The `outcome` a `node-settled` carries when a `settle` wrote it rather than a
+/// dispatch.
+///
+/// Its own word, so a reader of the run can tell what the harness watched happen
+/// from what a person told it had happened. The settlement's `detail` is the
+/// evidence they gave, which is the reason the node is in that state.
+pub const SETTLED_FROM_EVIDENCE: &str = "settled-from-evidence";
+
 /// The payload of a `node-settled` event, as the projection folds it.
 pub fn settled_payload(
     status: &str,

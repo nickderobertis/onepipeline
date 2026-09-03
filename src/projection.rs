@@ -56,6 +56,13 @@ pub struct RunState {
     pub recorded: BTreeMap<String, Recorded>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
+    /// What each parked node's park recorded: who issued it, and why.
+    ///
+    /// Kept because a `requeue` is judged against the park rather than against
+    /// the node, and nothing else in this state says whose decision the park
+    /// was. Cleared when the node is requeued, which is the moment the park
+    /// stops being a decision anything is held by.
+    pub parks: BTreeMap<String, edits::Park>,
     /// The branch each settled node left behind, as its dispatch reported it.
     ///
     /// Not the same thing as the branch a node's *plan* pins: this is what the
@@ -544,6 +551,7 @@ impl RunState {
         Frontier {
             recorded: self.statuses_recorded(),
             attestations: self.attestations.clone(),
+            parks: self.parks.clone(),
             in_flight: BTreeMap::new(),
             // The launch's, and only a caller holding the launch record has it.
             node_validator: None,
@@ -870,7 +878,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                         // `drop` leaves, and the two take opposite actions.
                         state.superseded.insert(node.clone(), replacement.clone());
                     }
-                    Operation::NodeParked { node } => {
+                    Operation::NodeParked { node, by, reason } => {
+                        // Who decided, and why. The park is what a later
+                        // `requeue` is judged against, so this is folded rather
+                        // than left in the record for a reader to go and find.
+                        state
+                            .parks
+                            .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
                         // What the node was *before* the park decides which park
                         // this is: a cancel of a running node asks a dispatch to
                         // stop and leaves it running, and one of a node that
@@ -887,6 +901,27 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                     }
                     Operation::NodeRequeued { node, .. } => {
                         state.recorded.remove(node);
+                        // The park is over, so nothing is held by whoever made
+                        // it: a later park of the same node is judged on its own
+                        // author rather than on this one's.
+                        state.parks.remove(node);
+                    }
+                    // The record moving without the graph moving, which is the
+                    // whole of what a settlement from evidence does. Its own
+                    // `node-settled` says the same thing to a reader that does
+                    // not fold operations; folding it here is what makes replay
+                    // of the edit alone reconstruct what the reconciler did.
+                    Operation::SettledFromEvidence {
+                        node,
+                        outcome,
+                        evidence: _,
+                    } => {
+                        state
+                            .recorded
+                            .insert(node.clone(), Recorded::At(edits::settled_status(*outcome)));
+                        state
+                            .outcomes
+                            .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
                     }
                     // Only a note that is still owed to a dispatch. One the
                     // running turn already took has been read, and holding it
@@ -1833,8 +1868,13 @@ mod tests {
                     .collect(),
                 ..Frontier::default()
             };
-            let operations = edits::compile(&mut live, &frontier, &command)
-                .unwrap_or_else(|e| panic!("the {what} is accepted: {e}"));
+            let operations = edits::compile(
+                &mut live,
+                &frontier,
+                crate::channel::Author::Planner,
+                &command,
+            )
+            .unwrap_or_else(|e| panic!("the {what} is accepted: {e}"));
 
             let mut events = vec![pipeline(
                 journal::PipelineKind::RunStarted,
@@ -2374,7 +2414,9 @@ mod tests {
                 &[(
                     "operations",
                     json!([Operation::NodeParked {
-                        node: "sweep".into()
+                        node: "sweep".into(),
+                        by: crate::channel::Author::Planner,
+                        reason: None
                     }]),
                 )],
             ),
@@ -2776,7 +2818,11 @@ mod tests {
                 None,
                 &[(
                     "operations",
-                    json!([Operation::NodeParked { node: node.into() }]),
+                    json!([Operation::NodeParked {
+                        node: node.into(),
+                        by: crate::channel::Author::Planner,
+                        reason: None
+                    }]),
                 )],
             )
         };
@@ -2826,7 +2872,9 @@ mod tests {
             &[(
                 "operations",
                 json!([Operation::NodeParked {
-                    node: "sweep".into()
+                    node: "sweep".into(),
+                    by: crate::channel::Author::Planner,
+                    reason: None
                 }]),
             )],
         );
@@ -2866,6 +2914,137 @@ mod tests {
         ]);
         assert!(!state.recorded.contains_key("sweep"));
         assert!(!state.graph.get("sweep").expect("sweep").parked);
+    }
+
+    /// A park's own account of itself reaches the frontier a later `requeue` is
+    /// judged against, and the requeue ends it.
+    #[test]
+    fn a_parks_author_and_reason_fold_onto_the_frontier_and_a_requeue_clears_them() {
+        let disk = "a third very large build would fill the disk this host has 8G left on";
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let park = pipeline(
+            journal::PipelineKind::EditCommitted,
+            1,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NodeParked {
+                    node: "build".into(),
+                    by: crate::channel::Author::Monitor,
+                    reason: Some(disk.into())
+                }]),
+            )],
+        );
+        let state = fold(&[started.clone(), park.clone()]);
+        assert_eq!(
+            state.frontier().parks.get("build"),
+            Some(&edits::Park::of(
+                crate::channel::Author::Monitor,
+                Some(disk)
+            )),
+            "the park's own account of itself did not reach the frontier"
+        );
+
+        // A record written before the park carried either field reads back as
+        // the planner's, with no reason — and replays into the same graph.
+        let old = pipeline(
+            journal::PipelineKind::EditCommitted,
+            1,
+            None,
+            &[(
+                "operations",
+                json!([{"kind": "node-parked", "node": "build"}]),
+            )],
+        );
+        let before = fold(&[started.clone(), old]);
+        assert_eq!(
+            before.frontier().parks.get("build"),
+            Some(&edits::Park::default())
+        );
+        assert_eq!(
+            before.graph, state.graph,
+            "a park written before those fields existed replays into another graph"
+        );
+
+        let requeue = pipeline(
+            journal::PipelineKind::EditCommitted,
+            2,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NodeRequeued {
+                    node: "build".into(),
+                    amend: None
+                }]),
+            )],
+        );
+        let state = fold(&[started, park, requeue]);
+        assert!(
+            state.frontier().parks.is_empty(),
+            "a requeued node is still held by the park it returned from"
+        );
+    }
+
+    /// A node settled from evidence carries that word and that reason, and its
+    /// dependents start on it.
+    #[test]
+    fn a_settlement_from_evidence_moves_the_record_and_releases_the_dependents() {
+        let evidence = "the change merged at 3f9a1c2 while the dispatch was dying";
+        let plan = plan_of_nodes(vec![agent("publish", &[]), agent("announce", &["publish"])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                1,
+                Some("publish"),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!("task-failed")),
+                ],
+            ),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                2,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::SettledFromEvidence {
+                        node: "publish".into(),
+                        outcome: crate::channel::SettleOutcome::Done,
+                        evidence: evidence.into()
+                    }]),
+                )],
+            ),
+        ];
+        let state = fold(&events);
+        assert_eq!(state.recorded["publish"].status(), NodeStatus::Done);
+        assert_eq!(
+            state.outcomes["publish"],
+            journal::SETTLED_FROM_EVIDENCE,
+            "the settlement reads as one a dispatch reported"
+        );
+        assert_eq!(
+            state.statuses()["announce"],
+            NodeStatus::Ready,
+            "the dependent is still held by a settlement that has been corrected"
+        );
+        // And the node itself is untouched: its id, its lineage, and its
+        // dependent's edge are all exactly what the plan stated.
+        assert_eq!(
+            state.graph.get("announce").map(|node| node.deps.clone()),
+            Some(vec!["publish".to_string()])
+        );
     }
 
     #[test]

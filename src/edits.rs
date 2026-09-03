@@ -17,7 +17,7 @@ use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::channel::{Command, Dependents};
+use crate::channel::{Author, Command, Dependents, SettleOutcome};
 use crate::error::{Error, Result};
 use crate::graph::{self, Graph, NodeStatus};
 use crate::plan::Node;
@@ -84,11 +84,37 @@ pub enum Operation {
         /// The dependents whose derived state the replacement resets.
         reset: Vec<String>,
     },
-    /// A node was parked by a planner `cancel`.
+    // llmlint: ignore-block[invalid_states_unrepresentable] `reason` is the
+    // `Option<String>` the wire spells it as, and it is a **durable record field**: a
+    // newtype refusing a blank would have to deserialize a record this build did not
+    // write, which is the one place the invariant cannot hold, and refusing to read one
+    // would lose the park itself along with its empty reason. The state is narrowed at both
+    // ends instead — `compile_cancel` refuses a blank reason at the trust boundary, and
+    // `Park::of` is the only way to build the value anything judges a `requeue` against, so
+    // a blank one an older build wrote reads as the park having stated none.
+    /// A node was parked by a `cancel`.
     NodeParked {
         /// The node.
         node: String,
+        /// The envelope author that issued the park.
+        ///
+        /// Written on every park, including the planner's, so the record says
+        /// who decided rather than leaving a reader to infer it from the
+        /// `edit-committed` around it. Absent from a record written before this
+        /// field existed, which reads back as [`Author::Planner`] — every park
+        /// written then was one, because the monitor had no author to be.
+        #[serde(default)]
+        by: Author,
+        /// Why, in that author's own words, when it stated one.
+        ///
+        /// The fact the record was missing: a park holding only a node id is
+        /// indistinguishable downstream from a node idle for no reason anybody
+        /// decided. Omitted where the `cancel` stated none, which is every park
+        /// recorded before the command could carry one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A parked node returned to the desired frontier.
     NodeRequeued {
         /// The node.
@@ -121,6 +147,29 @@ pub enum Operation {
         message: String,
         /// Whether the planner's answer holds the node's subtree back.
         blocking: bool,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] `node` is the `String` every
+    // neighbouring variant spells a node id with, narrowed where it is judged —
+    // `compile_settle` refuses a node the graph does not hold and one that has already
+    // settled — and `evidence` is refused blank there too. `outcome` is not a string at
+    // all: it is the closed `SettleOutcome`, so a record this build did not write carrying
+    // a fourth word is refused by its own deserialization.
+    /// A node was settled at what an operator could see it had reached, from
+    /// evidence this run never observed.
+    ///
+    /// It mutates nothing about the graph — the node keeps its id, its lineage,
+    /// and its dependents' edges — so replay reconstructs it by moving the
+    /// node's recorded state and touching no edge, exactly as the reconciler
+    /// did. What it says is a fact about the *record*, which is the thing that
+    /// was wrong.
+    SettledFromEvidence {
+        /// The node.
+        node: String,
+        /// What it settled as.
+        outcome: SettleOutcome,
+        /// What the operator saw, journalled as the reason for the state.
+        evidence: String,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] both fields are spelled as the
@@ -208,6 +257,15 @@ pub struct Frontier {
     pub recorded: BTreeMap<String, NodeStatus>,
     /// The human actions already attested.
     pub attestations: BTreeSet<String>,
+    /// What each parked node's park recorded about itself, by node.
+    ///
+    /// Carried because a `requeue` is judged against the **park** rather than
+    /// against the node: the monitor may return its own park to the frontier
+    /// and may not undo one the planner made. A node this map has no entry for
+    /// reads as the planner's park with no reason — which is what a park
+    /// recorded before the record carried an author was, and what a `parked:
+    /// true` written into the plan file itself is.
+    pub parks: BTreeMap<String, Park>,
     /// The dispatches the loop still has running, by node.
     ///
     /// Not derivable from [`recorded`](Self::recorded), which is the whole
@@ -238,6 +296,53 @@ pub struct Frontier {
     /// by a live edit reached a dispatch having been checked by nothing.
     pub node_validator: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// What one park recorded about itself, as a later edit reads it.
+///
+/// The two facts a park carrying only a node id could not state: who decided,
+/// and why. Its [`Default`] is the planner's park with no reason, which is what
+/// every park recorded before this existed was.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Park {
+    /// The envelope author that issued it.
+    pub by: Author,
+    /// Why, when it stated one and that one says something.
+    ///
+    /// Private, and reachable only through [`Park::of`], because *present and
+    /// blank* is the one state this type must not hold: `compile_cancel` refuses
+    /// a blank reason at the boundary, but the operation this is folded from is a
+    /// durable record that an older build — or a person with an editor — can have
+    /// written one into, and a refusal reading "whose reason was:" with nothing
+    /// after it is worse than one that says the park carried none.
+    reason: Option<String>,
+}
+
+impl Park {
+    /// One park, with a reason that says nothing read as no reason at all.
+    ///
+    /// The single constructor, so the normalization happens once rather than at
+    /// each of the places a park is folded or judged.
+    pub(crate) fn of(by: Author, reason: Option<&str>) -> Self {
+        Self {
+            by,
+            reason: reason
+                .filter(|reason| !reason.trim().is_empty())
+                .map(str::to_string),
+        }
+    }
+
+    /// The park as a refusal names it: who made it, and what it said.
+    ///
+    /// A park that stated no reason says so outright rather than trailing off —
+    /// "it carried none" is a different fact from a reason nobody quoted, and a
+    /// reader acts differently on each.
+    fn named(&self) -> String {
+        match &self.reason {
+            Some(reason) => format!("the {}, whose reason was: {reason}", self.by.as_str()),
+            None => format!("the {}, which stated no reason", self.by.as_str()),
+        }
+    }
 }
 
 /// One dispatch the loop still has in flight, as an edit sees it.
@@ -275,12 +380,55 @@ impl LiveDispatch {
 /// The graph is mutated in place only on success: a command that fails
 /// validation leaves it exactly as it was, so a rejected edit in the middle of
 /// an envelope cannot half-apply.
+///
+/// The `author` is the envelope's, and it is part of the judgement rather than
+/// only of the record: a `cancel` writes it onto the park it commits, and a
+/// `requeue` is judged against the park it would undo. Which ops an author may
+/// issue at all is [`crate::channel::allows`], asked before this.
 pub fn compile(
     graph: &mut Graph,
     frontier: &Frontier,
+    author: Author,
     command: &Command,
 ) -> Result<Vec<Operation>> {
-    compile_with(graph, frontier, command, Delivery::Deferred)
+    compile_with(graph, frontier, author, command, Delivery::Deferred)
+}
+
+/// Carry one command's compiled operations onto the frontier the **next**
+/// command of the same envelope is judged against.
+///
+/// A caller that validates a whole envelope before committing any of it holds
+/// one frontier for all of it, and two of the facts this vocabulary judges
+/// against move *within* an envelope. A park is a decision a later `requeue` is
+/// judged against: without this, a monitor that parks a node and requeues it in
+/// one envelope is refused for undoing "the planner's" park — the park it just
+/// made itself. And a settlement is the state a later `settle` would be saying
+/// nothing about.
+///
+/// The graph itself needs no such call: [`compile`] mutates it in place, so the
+/// next command already sees it. This is the rest of the frontier, and only the
+/// parts a command can move — what a *dispatch* does is the loop's to observe
+/// rather than an envelope's to predict.
+pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
+    for operation in operations {
+        match operation {
+            Operation::NodeParked { node, by, reason } => {
+                frontier
+                    .parks
+                    .insert(node.clone(), Park::of(*by, reason.as_deref()));
+            }
+            Operation::NodeRequeued { node, .. } => {
+                frontier.parks.remove(node);
+                frontier.recorded.remove(node);
+            }
+            Operation::SettledFromEvidence { node, outcome, .. } => {
+                frontier
+                    .recorded
+                    .insert(node.clone(), settled_status(*outcome));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// [`compile`], for a caller that has already delivered the note.
@@ -294,16 +442,20 @@ pub fn compile(
 pub fn compile_with(
     graph: &mut Graph,
     frontier: &Frontier,
+    author: Author,
     command: &Command,
     delivery: Delivery,
 ) -> Result<Vec<Operation>> {
     // Validate against a copy, so a refusal partway through a multi-edge
     // mutation cannot leave the caller's graph in a state nothing submitted.
     let mut candidate = graph.clone();
-    let operations = compile_into(&mut candidate, frontier, command, delivery)?;
+    let operations = compile_into(&mut candidate, frontier, author, command, delivery)?;
     if !matches!(
         command,
-        Command::Complete { .. } | Command::Attest { .. } | Command::Finding { .. }
+        Command::Complete { .. }
+            | Command::Attest { .. }
+            | Command::Finding { .. }
+            | Command::Settle { .. }
     ) {
         // The resulting graph must still satisfy the normal plan schema.
         let plan = candidate.to_plan(&crate::plan::Plan {
@@ -829,6 +981,7 @@ fn listed(noun: &str, names: &[&String]) -> Option<String> {
 fn compile_into(
     graph: &mut Graph,
     frontier: &Frontier,
+    author: Author,
     command: &Command,
     delivery: Delivery,
 ) -> Result<Vec<Operation>> {
@@ -837,8 +990,17 @@ fn compile_into(
         Command::Drop { id, dependents } => compile_drop(graph, frontier, id, *dependents),
         Command::Reparent { id, deps } => compile_reparent(graph, frontier, id, deps),
         Command::Retry { id, node } => compile_retry(graph, frontier, id, node),
-        Command::Cancel { id } => compile_cancel(graph, frontier, id),
-        Command::Requeue { id, amend } => compile_requeue(graph, frontier, id, amend.as_ref()),
+        Command::Cancel { id, reason } => {
+            compile_cancel(graph, frontier, author, id, reason.as_deref())
+        }
+        Command::Requeue { id, amend } => {
+            compile_requeue(graph, frontier, author, id, amend.as_ref())
+        }
+        Command::Settle {
+            id,
+            outcome,
+            evidence,
+        } => compile_settle(graph, frontier, id, *outcome, evidence),
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -1165,7 +1327,27 @@ fn pin_retry_branch(mut node: Node) -> Node {
     node
 }
 
-fn compile_cancel(graph: &mut Graph, frontier: &Frontier, id: &str) -> Result<Vec<Operation>> {
+fn compile_cancel(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    author: Author,
+    id: &str,
+    reason: Option<&str>,
+) -> Result<Vec<Operation>> {
+    // Blank is refused rather than recorded, exactly as `amend`'s ruling and a
+    // `finding`'s message are: a park whose stated reason is nothing at all
+    // reads, everywhere downstream, as a park that stated no reason — and the
+    // two are different decisions.
+    let reason = match reason {
+        Some(reason) if reason.trim().is_empty() => {
+            return Err(refuse(format!(
+                "cancel: node '{id}' would be parked stating an empty reason; say why it is \
+                 being held, or state no reason at all"
+            )))
+        }
+        Some(reason) => Some(reason.to_string()),
+        None => None,
+    };
     let Some(node) = graph.get(id) else {
         return Err(refuse(format!("cancel: no node '{id}'")));
     };
@@ -1189,12 +1371,15 @@ fn compile_cancel(graph: &mut Graph, frontier: &Frontier, id: &str) -> Result<Ve
     }
     Ok(vec![Operation::NodeParked {
         node: id.to_string(),
+        by: author,
+        reason,
     }])
 }
 
 fn compile_requeue(
     graph: &mut Graph,
     frontier: &Frontier,
+    author: Author,
     id: &str,
     amend: Option<&Map<String, Value>>,
 ) -> Result<Vec<Operation>> {
@@ -1203,6 +1388,22 @@ fn compile_requeue(
     };
     if !node.parked {
         return Err(refuse(format!("requeue: node '{id}' is not parked")));
+    }
+    // A park is a decision, and whose it was decides who may undo it. The
+    // monitor exists to apply unambiguous fixes without waiting for a planner,
+    // and an idle node is exactly what one looks like — so a node the planner
+    // held is the one case where the fix is not unambiguous, and the refusal
+    // hands over the decision itself rather than only turning the edit down. A
+    // park this frontier has no record of reads as the planner's: that is what a
+    // record written before parks carried an author was, and what a `parked:
+    // true` a plan file states is.
+    let park = frontier.parks.get(id).cloned().unwrap_or_default();
+    if author == Author::Monitor && park.by != Author::Monitor {
+        return Err(refuse(format!(
+            "requeue: node '{id}' was parked by {}. Undoing that is the parking author's \
+             decision rather than an observation: surface it to the planner instead",
+            park.named()
+        )));
     }
     // Parked is not the same as stopped. A `cancel` parks the node and *asks*
     // its dispatch to end; until that dispatch settles it still holds the
@@ -1261,6 +1462,86 @@ fn compile_requeue(
     Ok(vec![Operation::NodeRequeued {
         node: id.to_string(),
         amend: amend.filter(|a| !a.is_empty()).cloned(),
+    }])
+}
+
+/// The status a `settle` puts a node's record at.
+///
+/// Exhaustive over the outcome the wire carries, so a fourth word cannot arrive
+/// here as a status this build had to guess at.
+pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
+    match outcome {
+        SettleOutcome::Done => NodeStatus::Done,
+        SettleOutcome::Failed => NodeStatus::Failed,
+    }
+}
+
+/// Validate one `settle`: the operator is writing down what this run could not
+/// observe, so what there is to judge is whether the run can still be told.
+///
+/// It mutates no edge and no node definition, which is the whole point of it
+/// existing: the alternative a planner had was replacing the node with a
+/// stand-in, which renames it in every downstream reference and forces a
+/// rewiring cascade through its dependents. So the graph is not touched here at
+/// all — only the record of what became of the node moves, and the node keeps
+/// its id and its lineage by construction rather than by care.
+///
+/// Four refusals, and each one is a different thing to do next. Blank evidence:
+/// the journal would record the reason for a state as nothing. A node the graph
+/// does not hold: the settlement would be about no work at all, so the ids it
+/// does hold are named. A node whose record **already says what the settle
+/// states**: it is named as having settled that way, because a settle that
+/// changes nothing is either a mistake or a duplicate and neither should read as
+/// a correction. And a node whose dispatch is still in flight, for the reason a
+/// `requeue` refuses one: the dispatch will settle the node itself, on top of
+/// this, and a settlement silently overwritten is worse than one refused.
+///
+/// A node that settled **something else** is deliberately not refused, and that
+/// is the whole point of the op: the case it exists for is a change that merged
+/// while the node read `failed`. `attest` already accepts a node that settled
+/// failed for the same reason (open divergence 36). The settlement is not
+/// erased — the earlier `node-settled` stays in the journal, and this writes a
+/// second one carrying the evidence — so what a reader sees is a record that was
+/// corrected rather than one that was rewritten.
+fn compile_settle(
+    graph: &Graph,
+    frontier: &Frontier,
+    id: &str,
+    outcome: SettleOutcome,
+    evidence: &str,
+) -> Result<Vec<Operation>> {
+    if evidence.trim().is_empty() {
+        return Err(refuse(format!(
+            "settle: node '{id}' would be settled {} on no evidence at all; the evidence is \
+             journalled as the reason the node is in that state, so state what was seen",
+            outcome.as_str()
+        )));
+    }
+    if !graph.contains(id) {
+        return Err(refuse(format!(
+            "settle: no node '{id}' in this run; it has: {}",
+            graph.ids().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    if frontier.recorded.get(id).copied() == Some(settled_status(outcome)) {
+        return Err(refuse(format!(
+            "settle: node '{id}' has already settled {0}, so this settles nothing — the \
+             record already says {0}. A settle stating a **different** outcome is accepted: \
+             correcting a record the world has moved past is what this op is for",
+            outcome.as_str()
+        )));
+    }
+    if let Some(live) = frontier.in_flight.get(id) {
+        return Err(refuse(format!(
+            "settle: node '{id}' still has a dispatch in flight ({}); that dispatch will \
+             settle the node itself, so wait for it and settle it then if it settled wrongly",
+            live.named()
+        )));
+    }
+    Ok(vec![Operation::SettledFromEvidence {
+        node: id.to_string(),
+        outcome,
+        evidence: evidence.to_string(),
     }])
 }
 
@@ -1481,11 +1762,16 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Operation::NodeParked { node } => {
+        Operation::NodeParked { node, .. } => {
             if let Some(node) = graph.get_mut(node) {
                 node.parked = true;
             }
         }
+        // A settlement from evidence is a fact about the run's *record*: the
+        // node keeps its id, its lineage, and its dependents' edges, so replay
+        // reconstructs it by changing nothing here, exactly as the reconciler
+        // did. What moves is folded where the recorded statuses are.
+        Operation::SettledFromEvidence { .. } => {}
         Operation::NodeRequeued { node, amend } => {
             let Some(existing) = graph.get(node).cloned() else {
                 return;
@@ -1538,8 +1824,26 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
+
+    /// The reconciler as the planner reaches it.
+    ///
+    /// Shadows [`super::compile`] deliberately: the author is part of the
+    /// judgement for two ops and irrelevant to the other eleven, so every test
+    /// below that is not about authorship reads as the planner — which is what
+    /// an envelope stating no author is. The monitor's own cases call
+    /// `super::compile` with the author spelt out, which is what makes them
+    /// visible as the cases about authorship.
+    fn compile(
+        graph: &mut Graph,
+        frontier: &Frontier,
+        command: &Command,
+    ) -> Result<Vec<Operation>> {
+        super::compile(graph, frontier, Author::Planner, command)
+    }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
         Node {
@@ -1931,7 +2235,10 @@ mod tests {
         compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Cancel { id: "sweep".into() },
+            &Command::Cancel {
+                id: "sweep".into(),
+                reason: None,
+            },
         )
         .expect("a pending node parks");
         assert!(graph.get("sweep").expect("sweep").parked);
@@ -1939,7 +2246,10 @@ mod tests {
         let message = compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Cancel { id: "sweep".into() },
+            &Command::Cancel {
+                id: "sweep".into(),
+                reason: None,
+            },
         )
         .unwrap_err()
         .to_string();
@@ -1949,7 +2259,10 @@ mod tests {
         let message = compile(
             &mut graph,
             &frontier(&[("done", NodeStatus::Done)]),
-            &Command::Cancel { id: "done".into() },
+            &Command::Cancel {
+                id: "done".into(),
+                reason: None,
+            },
         )
         .unwrap_err()
         .to_string();
@@ -1959,12 +2272,405 @@ mod tests {
             &mut graph,
             &Frontier::default(),
             &Command::Cancel {
-                id: "nowhere".into()
+                id: "nowhere".into(),
+                reason: None
             }
         )
         .unwrap_err()
         .to_string()
         .contains("no node"));
+    }
+
+    /// A park says who decided and why, and a `cancel` that states no reason is
+    /// still a park.
+    #[test]
+    fn a_park_records_the_author_who_issued_it_and_the_reason_it_carried() {
+        let disk = "a third very large build would fill the disk this host has 8G left on";
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let operations = super::compile(
+            &mut graph,
+            &Frontier::default(),
+            Author::Monitor,
+            &Command::Cancel {
+                id: "build".into(),
+                reason: Some(disk.into()),
+            },
+        )
+        .expect("a pending node parks");
+        assert_eq!(
+            operations,
+            vec![Operation::NodeParked {
+                node: "build".into(),
+                by: Author::Monitor,
+                reason: Some(disk.into()),
+            }],
+            "the park does not say who made it or why"
+        );
+
+        // A park stating no reason still parks, and is the planner's when the
+        // planner made it.
+        let mut graph = graph_of(vec![agent("sweep", &[])]);
+        let operations = compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Cancel {
+                id: "sweep".into(),
+                reason: None,
+            },
+        )
+        .expect("a park stating no reason still parks");
+        assert_eq!(
+            operations,
+            vec![Operation::NodeParked {
+                node: "sweep".into(),
+                by: Author::Planner,
+                reason: None,
+            }]
+        );
+        assert!(graph.get("sweep").expect("sweep").parked);
+
+        // Present and blank is refused rather than recorded: a reason nobody can
+        // read is indistinguishable downstream from a park that stated none.
+        let mut graph = graph_of(vec![agent("sweep", &[])]);
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Cancel {
+                id: "sweep".into(),
+                reason: Some("   ".into()),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("empty reason"), "{message}");
+        assert!(
+            !graph.get("sweep").expect("sweep").parked,
+            "a refused cancel parked the node anyway"
+        );
+    }
+
+    /// A park written before the record carried an author or a reason reads back
+    /// as the planner's, with none — and replays into the same graph.
+    #[test]
+    fn a_park_recorded_before_those_fields_existed_reads_back_as_the_planners() {
+        let old: Operation = serde_json::from_value(json!({
+            "kind": "node-parked",
+            "node": "sweep",
+        }))
+        .expect("a record written before the fields existed still reads");
+        assert_eq!(
+            old,
+            Operation::NodeParked {
+                node: "sweep".into(),
+                by: Author::Planner,
+                reason: None,
+            }
+        );
+
+        // And it replays into the graph that record's own build reconstructed.
+        let mut graph = graph_of(vec![agent("sweep", &[])]);
+        apply(&mut graph, &old);
+        let mut expected = agent("sweep", &[]);
+        expected.parked = true;
+        assert_eq!(graph.get("sweep"), Some(&expected));
+    }
+
+    /// A park whose recorded reason says nothing reads as one that stated none.
+    ///
+    /// `compile_cancel` refuses a blank reason at the boundary, so the only way
+    /// one reaches this type is a record an older build — or a person with an
+    /// editor — wrote. A refusal quoting it would read "whose reason was:" and
+    /// then stop.
+    #[test]
+    fn a_recorded_reason_that_says_nothing_reads_as_a_park_that_stated_none() {
+        assert_eq!(
+            Park::of(Author::Planner, Some("  \n ")),
+            Park::of(Author::Planner, None),
+            "a blank recorded reason was kept as a reason"
+        );
+        assert_ne!(
+            Park::of(Author::Monitor, Some("it is redundant")),
+            Park::of(Author::Monitor, None),
+            "a reason that says something was dropped"
+        );
+
+        let mut graph = graph_of(vec![{
+            let mut node = agent("build", &[]);
+            node.parked = true;
+            node
+        }]);
+        let message = super::compile(
+            &mut graph,
+            &Frontier {
+                parks: [("build".to_string(), Park::of(Author::Planner, Some("   ")))]
+                    .into_iter()
+                    .collect(),
+                ..Frontier::default()
+            },
+            Author::Monitor,
+            &Command::Requeue {
+                id: "build".into(),
+                amend: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("stated no reason"),
+            "a blank reason was quoted as one: {message}"
+        );
+    }
+
+    /// A `requeue` is judged against the park it would undo, not against the
+    /// node: the monitor may return its own park and not the planner's.
+    #[test]
+    fn a_monitor_may_requeue_only_a_park_it_made_itself() {
+        let disk = "a third very large build would fill the disk this host has 8G left on";
+        let parked = |by: Author, reason: Option<&str>| Frontier {
+            parks: [("build".to_string(), Park::of(by, reason))]
+                .into_iter()
+                .collect(),
+            ..Frontier::default()
+        };
+        let requeue = Command::Requeue {
+            id: "build".into(),
+            amend: None,
+        };
+        let graph = || {
+            let mut node = agent("build", &[]);
+            node.parked = true;
+            graph_of(vec![node])
+        };
+
+        // The refusal names the park's author and quotes what it said.
+        let message = super::compile(
+            &mut graph(),
+            &parked(Author::Planner, Some(disk)),
+            Author::Monitor,
+            &requeue,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("parked by the planner") && message.contains(disk),
+            "{message}"
+        );
+        assert!(
+            message.contains("surface it to the planner"),
+            "the refusal does not say what to do instead: {message}"
+        );
+
+        // A park that carried no reason says so, rather than trailing off.
+        let message = super::compile(
+            &mut graph(),
+            &parked(Author::Planner, None),
+            Author::Monitor,
+            &requeue,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("stated no reason"), "{message}");
+
+        // A park nothing recorded reads as the planner's, which is what a
+        // `parked: true` written into the plan file itself is.
+        let message = super::compile(
+            &mut graph(),
+            &Frontier::default(),
+            Author::Monitor,
+            &requeue,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("parked by the planner"), "{message}");
+
+        // Its own park it may undo, and the planner may undo any park.
+        let mut live = graph();
+        super::compile(
+            &mut live,
+            &parked(Author::Monitor, Some("it was plainly redundant")),
+            Author::Monitor,
+            &requeue,
+        )
+        .expect("the monitor may requeue its own park");
+        assert!(!live.get("build").expect("build").parked);
+
+        let mut live = graph();
+        super::compile(
+            &mut live,
+            &parked(Author::Planner, Some(disk)),
+            Author::Planner,
+            &requeue,
+        )
+        .expect("the planner may requeue any park");
+        assert!(!live.get("build").expect("build").parked);
+    }
+
+    /// A settle keeps the node it is about: id, lineage, dependents' edges.
+    #[test]
+    fn a_settle_moves_the_record_and_leaves_the_graph_exactly_as_it_was() {
+        let evidence = "the change merged at 3f9a1c2 while the dispatch was dying";
+        let mut graph = graph_of(vec![agent("publish", &[]), agent("announce", &["publish"])]);
+        let before = graph.clone();
+        let operations = compile(
+            &mut graph,
+            &frontier(&[("publish", NodeStatus::Running)]),
+            &Command::Settle {
+                id: "publish".into(),
+                outcome: crate::channel::SettleOutcome::Done,
+                evidence: evidence.into(),
+            },
+        )
+        .expect("a node the graph holds settles from evidence");
+        assert_eq!(
+            operations,
+            vec![Operation::SettledFromEvidence {
+                node: "publish".into(),
+                outcome: crate::channel::SettleOutcome::Done,
+                evidence: evidence.into(),
+            }]
+        );
+        assert_eq!(
+            graph.get("publish"),
+            before.get("publish"),
+            "the settled node's own definition moved"
+        );
+        assert_eq!(
+            graph.get("announce").map(|node| node.deps.clone()),
+            Some(vec!["publish".to_string()]),
+            "the dependent's edge was rewired"
+        );
+
+        // Replay reconstructs the same graph, because the operation touches none
+        // of it.
+        let mut replayed = before.clone();
+        apply(&mut replayed, &operations[0]);
+        assert_eq!(replayed, before);
+    }
+
+    /// The four ways a settle is refused, each naming a different next step.
+    #[test]
+    fn a_settle_is_refused_without_evidence_a_node_or_a_state_left_to_settle() {
+        let settle = |id: &str, evidence: &str| Command::Settle {
+            id: id.into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: evidence.into(),
+        };
+        let mut graph = graph_of(vec![agent("publish", &[])]);
+
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &settle("publish", "  \n "),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("no evidence at all"), "{message}");
+
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &settle("nowhere", "it merged"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("no node 'nowhere'") && message.contains("publish"),
+            "the refusal does not name the nodes the run does have: {message}"
+        );
+
+        // A record that already says what the settle states settles nothing, and
+        // is named as having settled that way.
+        let message = compile(
+            &mut graph,
+            &frontier(&[("publish", NodeStatus::Done)]),
+            &settle("publish", "it merged"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("already settled done")
+                && message.contains("settles nothing")
+                && message.contains("different"),
+            "the refusal does not say that a different outcome is accepted: {message}"
+        );
+
+        // A node that settled **something else** is the case this op exists for:
+        // a change that merged while the node read `failed`.
+        compile(
+            &mut graph,
+            &frontier(&[("publish", NodeStatus::Failed)]),
+            &settle("publish", "it merged at 3f9a1c2 after the dispatch died"),
+        )
+        .expect("a node the run recorded failed is exactly what a settle corrects");
+
+        let in_flight = Frontier {
+            in_flight: [(
+                "publish".to_string(),
+                LiveDispatch {
+                    graph_run: Some("run-7".into()),
+                    running_for_seconds: 90,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Frontier::default()
+        };
+        let message = compile(&mut graph, &in_flight, &settle("publish", "it merged"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("dispatch in flight") && message.contains("run-7"),
+            "{message}"
+        );
+    }
+
+    /// A ready node's own fields move through the park-and-requeue path this
+    /// build already has, with the node's id, its lineage and its dependents'
+    /// edges all surviving — including the field that decides how it waits on a
+    /// dependency.
+    #[test]
+    fn a_ready_nodes_fields_change_in_place_through_park_and_requeue() {
+        let mut waiting = agent("consume", &["build"]);
+        waiting.adoption = Some(onevcs::releases::Adoption::Published);
+        let mut graph = graph_of(vec![
+            agent("build", &[]),
+            waiting,
+            agent("after", &["consume"]),
+        ]);
+        // Ready: its dependency is done and the journal records nothing about it.
+        let ready = frontier(&[("build", NodeStatus::Done)]);
+
+        compile(
+            &mut graph,
+            &ready,
+            &Command::Cancel {
+                id: "consume".into(),
+                reason: Some("it is waiting on a release nobody is going to cut".into()),
+            },
+        )
+        .expect("a ready node parks");
+        let mut amend = Map::new();
+        amend.insert("adoption".into(), json!("fast"));
+        compile(
+            &mut graph,
+            &ready,
+            &Command::Requeue {
+                id: "consume".into(),
+                amend: Some(amend),
+            },
+        )
+        .expect("the parked node returns with its field changed");
+
+        let moved = graph.get("consume").expect("consume");
+        assert_eq!(moved.adoption, Some(onevcs::releases::Adoption::Fast));
+        assert!(!moved.parked, "the node is still parked");
+        assert_eq!(moved.id, "consume", "the node was renamed");
+        assert_eq!(moved.deps, vec!["build".to_string()], "its lineage moved");
+        assert_eq!(
+            graph.get("after").map(|node| node.deps.clone()),
+            Some(vec!["consume".to_string()]),
+            "its dependent was rewired"
+        );
     }
 
     #[test]
@@ -2259,6 +2965,7 @@ mod tests {
         let operations = compile_with(
             &mut graph,
             &frontier(&[("build", NodeStatus::Running)]),
+            Author::Planner,
             &note_for("build", "the fixture moved"),
             Delivery::Live,
         )
@@ -2479,7 +3186,10 @@ mod tests {
                 id: "docs".into(),
                 text: "the ruling".into(),
             },
-            Command::Cancel { id: "docs".into() },
+            Command::Cancel {
+                id: "docs".into(),
+                reason: None,
+            },
             // Offered: this requeue's amendment rewrites the task.
             Command::Requeue {
                 id: "docs".into(),
@@ -2490,7 +3200,10 @@ mod tests {
                         .clone(),
                 ),
             },
-            Command::Cancel { id: "fresh".into() },
+            Command::Cancel {
+                id: "fresh".into(),
+                reason: None,
+            },
             // Not offered: this one raises a turn budget, which changes nothing
             // a dispatch is asked to do — and neither does a cancel or a note.
             Command::Requeue {
@@ -2702,7 +3415,10 @@ mod tests {
             },
             // Changes the plan without changing any node's definition, so it is
             // the plan below rather than a change of its own.
-            Command::Cancel { id: "fresh".into() },
+            Command::Cancel {
+                id: "fresh".into(),
+                reason: None,
+            },
         ];
         for command in &commands {
             compile(&mut graph, &Frontier::default(), command).expect("each command compiles");
@@ -2974,7 +3690,10 @@ mod tests {
                 id: "a".into(),
                 node: agent("a-2", &[]),
             },
-            Command::Cancel { id: "c".into() },
+            Command::Cancel {
+                id: "c".into(),
+                reason: None,
+            },
             Command::Requeue {
                 id: "c".into(),
                 amend: None,
@@ -3017,6 +3736,8 @@ mod tests {
             },
             Operation::NodeParked {
                 node: "gone".into(),
+                by: Author::Planner,
+                reason: None,
             },
             Operation::TaskAmended {
                 node: "gone".into(),
