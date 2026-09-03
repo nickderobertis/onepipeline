@@ -942,7 +942,6 @@ fn a_watch_holds_at_a_record_its_writer_has_not_finished_and_emits_it_after() {
     );
 }
 
-/// Add to a run's journal exactly what a writer puts there: bytes on the end.
 /// A cursor is a place in **one** run's journal, and one pasted against another
 /// run is refused by name rather than resumed from.
 ///
