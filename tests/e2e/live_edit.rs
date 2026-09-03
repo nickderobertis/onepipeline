@@ -1620,3 +1620,420 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
 
     world.release("slow.go");
 }
+
+/// The reason `docs/contract-divergences.md` entry 57 names for one of its
+/// fixtures, read out of the entry itself.
+///
+/// The entry's block is the source for what this build carries beyond the
+/// contract, and `tests/contract.rs` holds the *types* against it. This reads the
+/// same block so the journey holds the **record a run actually wrote** against it
+/// too: a word only a test knows is a word the divergence record could stop
+/// naming without anything saying so.
+fn from_entry_57(field: &str) -> Value {
+    let record = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("57."))
+        .expect("the divergence record still carries entry 57");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 57 carries the json block this journey drives");
+    let block: Value = serde_json::from_str(block).expect("entry 57's block is JSON");
+    block[field].clone()
+}
+
+/// A park says who made it and why, and the monitor may not undo the planner's.
+///
+/// The failure this closes, measured on a live run: a manager parked a node to
+/// keep a third very large build off a disk with little room left, the monitor
+/// read an idle node and requeued it, then cancelled it, and four dispatches
+/// were destroyed in five minutes — one of them with uncommitted work lost. What
+/// the observer lacked was the one fact that would have stopped it, so the park
+/// carries it and the refusal reads it back.
+#[test]
+fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners() {
+    let world = World::new("edit-park-authored");
+    let disk = from_entry_57("cancel")["reason"]
+        .as_str()
+        .expect("entry 57's cancel fixture states a reason")
+        .to_string();
+    let run = live(
+        &world,
+        "authored",
+        vec![agent("slow", &[]), agent("sweep", &["slow"])],
+        &["slow"],
+    );
+
+    // The planner parks, stating why.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": disk}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+    let park = operations(&world, &run)
+        .into_iter()
+        .find(|operation| operation["kind"] == "node-parked")
+        .expect("the park was recorded");
+    assert_eq!(
+        park,
+        json!({"kind": "node-parked", "node": "sweep", "by": "planner", "reason": disk}),
+        "the park does not say who made it or why"
+    );
+
+    // The monitor may not undo it, and is told whose decision it was and what it
+    // said — which is what sends it to the planner instead of round the loop.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "author": "monitor",
+                    "commands": [{"op": "requeue", "id": "sweep"}]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("parked by the planner")
+        .err_has(&disk)
+        .err_has("surface it to the planner");
+
+    // Its own park it may undo. The node it parks is one it added itself, behind
+    // the held node, so it is pending rather than running when it is parked.
+    for command in [
+        json!({"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                     "task": "## What\nsweep up", "deps": ["slow"]}}),
+        json!({"op": "cancel", "id": "extra", "reason": "it is plainly redundant"}),
+        json!({"op": "requeue", "id": "extra"}),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+            )
+            .exited(0)
+            .out_has("\"applied\"");
+    }
+    let monitors = operations(&world, &run)
+        .into_iter()
+        .find(|operation| operation["node"] == "extra" && operation["kind"] == "node-parked")
+        .expect("the monitor's own park was recorded");
+    assert_eq!(
+        monitors,
+        json!({"kind": "node-parked", "node": "extra", "by": "monitor",
+               "reason": "it is plainly redundant"})
+    );
+
+    // And the planner may undo any park, including the one it made.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "sweep"}])),
+        )
+        .exited(0);
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    for id in ["sweep", "extra"] {
+        let node = result["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("the run holds '{id}': {result}"));
+        assert_eq!(node["status"], "done", "a requeued node was not dispatched");
+    }
+}
+
+/// A settle writes what an operator can see a node reached, and the node keeps
+/// its id, its lineage, and its dependents' edges.
+///
+/// The alternative it replaces is replacing the node with a stand-in that
+/// dispatches nothing and carries the evidence in prose — which renames it in
+/// every downstream reference and forces a rewiring cascade. Four of those were
+/// needed on one run.
+#[test]
+fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
+    let world = World::new("edit-settle");
+    let run = live(
+        &world,
+        "settled",
+        vec![
+            agent("slow", &[]),
+            agent("publish", &["slow"]),
+            agent("announce", &["publish"]),
+        ],
+        &["slow"],
+    );
+    let evidence = "the change merged at 3f9a1c2 while the dispatch was dying; \
+                    the run recorded the death and never the merge";
+    let settle = |id: &str, evidence: &str| json!({"op": "settle", "id": id, "outcome": "done", "evidence": evidence});
+
+    // The monitor may not settle from evidence at all: an observer's authority is
+    // what the stream showed it, and this op is the opposite.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "author": "monitor", "commands": [settle("publish", evidence)]})
+                .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("settle")
+        .err_has("planner's decision")
+        .err_has("Surface it to the planner");
+
+    // Nor is a node the graph does not hold, nor a settlement with nothing
+    // behind it.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([settle("nowhere", evidence)])),
+        )
+        .exited(REFUSED)
+        .err_has("no node 'nowhere'");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([settle("publish", "  ")])),
+        )
+        .exited(REFUSED)
+        .err_has("no evidence at all");
+
+    // The planner's settle is applied, and the node is left exactly as it was.
+    let announce = world
+        .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "announce")
+        .expect("the dependent is on the board");
+    // The count rather than the ids: the write-back copies through a shadow
+    // project, so a dependency's *qualified* id on the board is whichever source
+    // the last copy resolved it through, and what this journey is about is
+    // whether the dependent still depends on exactly what it did.
+    let wired = world
+        .store_deps(announce["id"].as_str().expect("a qualified task id"))
+        .len();
+    assert_eq!(wired, 1, "the fixture's dependent is not wired to anything");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([settle("publish", evidence)])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the settlement to commit", |world| {
+        committed(world, &run).contains(&"settle".to_string())
+    });
+    let compiled: Vec<Value> = operations(&world, &run)
+        .into_iter()
+        .filter(|operation| operation["kind"] == "settled-from-evidence")
+        .collect();
+    assert_eq!(
+        compiled,
+        vec![json!({"kind": "settled-from-evidence", "node": "publish",
+                    "outcome": "done", "evidence": evidence})]
+    );
+    assert!(
+        operations(&world, &run).iter().all(|operation| {
+            !["edge-added", "edge-removed", "node-dropped", "node-added"]
+                .contains(&operation["kind"].as_str().unwrap_or_default())
+        }),
+        "the settlement moved the graph: {:?}",
+        operations(&world, &run)
+    );
+
+    // The run's own record says the node settled, under a word of its own, with
+    // the evidence as the reason it is in that state.
+    world.until("the settlement to reach the journal", |world| {
+        !world
+            .events_of(&run, "node-settled")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "publish")
+            .count()
+            .eq(&0)
+    });
+    let settlement = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "publish")
+        .expect("the node settled");
+    assert_eq!(settlement["payload"]["status"], "done");
+    assert_eq!(
+        settlement["payload"]["outcome"],
+        from_entry_57("settled_outcome_word"),
+        "the settlement is not written under the word entry 57 names"
+    );
+    assert_eq!(settlement["payload"]["detail"], json!(evidence));
+
+    // A second settle is refused, naming what it settled as: a settlement is a
+    // record of an attempt and is corrected by a `retry`, never overwritten.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(
+                json!([{"op": "settle", "id": "publish", "outcome": "failed",
+                              "evidence": "on reflection it did not merge"}]),
+            ),
+        )
+        .exited(REFUSED)
+        .err_has("already settled done")
+        .err_has("retry");
+
+    // Its dependent was never rewired, and it starts on the settlement.
+    assert_eq!(
+        world
+            .store_deps(announce["id"].as_str().expect("a qualified task id"))
+            .len(),
+        wired,
+        "the dependent's edges moved"
+    );
+    world.until("the dependent to start on the settlement", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "announce")
+    });
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    let publish = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["id"] == "publish")
+        .expect("the settled node kept its id");
+    assert_eq!(publish["status"], "done");
+}
+
+/// A ready node's own fields move without replacing it, through the park and
+/// requeue this build already has.
+///
+/// No second op for it: `cancel` accepts a node nothing has recorded a status
+/// for — which is exactly a ready one — and `requeue`'s `amend` merges any field
+/// but `id` and `deps`. So the node that was waiting on its dependency's
+/// *release* is moved to waiting on its *work* with its id, its lineage and its
+/// dependents' edges all surviving, and both halves journalled.
+///
+/// The node is genuinely ready rather than merely unstarted: `hog` holds the
+/// run's only concurrency slot, so `consume` is eligible and not dispatched, and
+/// the run says so in its own `node-held` record before the edit lands.
+// llmlint: ignore-block[e2e_not_mocked] a ready-and-unstarted node is only observable
+// while nothing is running it, which is the agent double's whole job here — the module
+// note above carries the full rationale.
+#[test]
+fn a_ready_nodes_own_fields_change_in_place_with_its_lineage_intact() {
+    let world = World::new("edit-ready-fields");
+    world.script("hog.wait", "hold");
+    let mut consume = agent("consume", &["approve"]);
+    consume["adoption"] = json!("published");
+    let mut plan = plan_of(
+        "readyfields",
+        vec![
+            agent("hog", &[]),
+            human("approve", &[]),
+            consume,
+            agent("after", &["consume"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let path = world.plan("readyfields", &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the only slot to be taken", |world| {
+        world
+            .events_of("readyfields", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "hog")
+    });
+
+    // The person acts, so `consume` is eligible — and the concurrency cap holds
+    // it there, which is what makes it ready rather than merely unstarted.
+    world.run(&["attest", "readyfields", "approve"]).exited(0);
+    world.until("the ready node to be held by the cap", |world| {
+        world
+            .events_of("readyfields", "node-held")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consume")
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", "readyfields"],
+            &envelope(json!([
+                {"op": "cancel", "id": "consume",
+                 "reason": "it waits on a release nobody is going to cut"},
+                {"op": "requeue", "id": "consume", "amend": {"adoption": "fast"}},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("both halves to commit", |world| {
+        let ops = committed(world, "readyfields");
+        ops.contains(&"cancel".to_string()) && ops.contains(&"requeue".to_string())
+    });
+    let requeued = operations(&world, "readyfields")
+        .into_iter()
+        .find(|operation| operation["kind"] == "node-requeued")
+        .expect("the requeue was recorded");
+    assert_eq!(requeued["amend"], json!({"adoption": "fast"}));
+
+    // The node kept its id and its lineage, its dependent was never rewired, and
+    // nothing added or dropped a node to do it.
+    assert!(
+        operations(&world, "readyfields").iter().all(|operation| ![
+            "node-added",
+            "node-dropped",
+            "edge-added",
+            "edge-removed"
+        ]
+        .contains(&operation["kind"].as_str().unwrap_or_default())),
+        "the field change replaced the node instead of amending it"
+    );
+    world.until_store("the amended node to reach the project", |world| {
+        board_metadata(world, "readyfields", "consume")
+            .is_some_and(|metadata| metadata["onepipeline.adoption"] == "fast")
+    });
+    let after = world
+        .store_tasks(&format!(
+            "plans:{}",
+            crate::harness::project_id("readyfields")
+        ))
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "after")
+        .expect("the dependent is on the board");
+    assert_eq!(
+        world
+            .store_deps(after["id"].as_str().expect("a qualified task id"))
+            .len(),
+        1,
+        "the dependent lost the edge it depended on"
+    );
+
+    world.release("hog.go");
+    world.until("the run to settle", |world| {
+        world.run_file("readyfields", "result.json").is_file()
+    });
+    let result = world.run_json("readyfields", "result.json");
+    for id in ["consume", "after"] {
+        let node = result["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("the run holds '{id}': {result}"));
+        assert_eq!(
+            node["status"], "done",
+            "the amended node was not dispatched"
+        );
+    }
+} // llmlint: ignore-end[e2e_not_mocked]
