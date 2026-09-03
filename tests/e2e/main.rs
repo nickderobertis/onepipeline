@@ -52,8 +52,8 @@ mod summary;
 mod surface;
 mod turns;
 mod views;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] eleven journeys,
-// 20.7s together, driving the binary they test — cheaper than single journeys already in
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] twelve journeys,
+// 15.1s together, driving the binary they test — cheaper than single journeys already in
 // this file that nextest marks SLOW past 120s. The `onepipeline-note-journeys` edge the
 // rule points at belongs to this project already and is unaffected by where this module
 // sits; that project is edged on conversational cost, which this module has none of.
