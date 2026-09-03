@@ -125,6 +125,13 @@ merge. Red there is closed by one `cargo update -p <spec>` on any branch, never
 by requiring it here. `published-smoke.yml` gates nothing either — it runs after
 `release.yml` completes, and reports by opening an issue.
 
+**A job's assertions and the artifact it installs come from one revision.**
+`install-documented` installs the remote's default branch — README's `cargo
+install --git` one-liner names no ref — so it is smoked with *that* revision's
+`scripts/smoke-published.sh`, not the branch's; the site says why. Paired the
+other way, such a job is unsatisfiable for the very pull request that changes
+what it asserts.
+
 **Releases are fully automated; the only human action is merging a PR.**
 `release-plz` is the single version driver: it opens a release PR, and merging it
 tags `vX.Y.Z` and cuts the GitHub Release. That Release — created with a PAT,
