@@ -31,15 +31,11 @@ use crate::views::{self, RunView, Unread};
 /// watch left open for an hour pays three and a half thousand times.
 const POLL: Duration = Duration::from_secs(1);
 
-/// The events a supervisor acts on.
+/// The events a supervisor acts on: a closed set of *this crate's* own kinds.
 ///
-/// This crate's own kinds and a chosen few of them, which is what makes "one
-/// line per meaningful event" a stream a person reads rather than the whole
-/// store: the siblings' token-by-token detail is what `monitor --all` is for.
-///
-/// A **graph edit** is here whichever author issued it, and a refused one beside
-/// it, because an edit that did not land is as much a thing to act on as one
-/// that did.
+/// The siblings' token-by-token detail is what `monitor --all` is for. Divergence
+/// entry 58 argues the selection; what matters here is that it is closed, and
+/// that an edit is in it whichever author issued it and whether or not it landed.
 const MEANINGFUL: [PipelineKind; 8] = [
     PipelineKind::EditCommitted,
     PipelineKind::EditRejected,
@@ -198,18 +194,10 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
 
 /// A place in one run's journal, as a later invocation is handed it.
 ///
-/// A type rather than a string, because the token is a promise to that later
-/// invocation: a record carrying an arbitrary string could hand one a place this
-/// build never reached, and a value of this is always a byte a watch finished
-/// reading. It renders and parses in exactly one spelling, so the token a caller
-/// is given is the token this build reads back.
-///
-/// **It names the run as well as the byte**, because a byte alone is a place in
-/// *some* journal and every run has one. A supervisor watching several runs holds
-/// several of these at once, and the failure that costs is not a token that fails
-/// to parse — it is one that parses, lands inside a record boundary of the wrong
-/// run's journal, and resumes from a point that means nothing, silently. Carrying
-/// the run makes that token refusable by name instead.
+/// A type rather than a string, so the token a caller is given renders and parses
+/// in exactly one spelling. It carries the run as well as the byte: a byte alone
+/// is a place in every journal there is, so without the run a cursor pasted
+/// against the wrong one resumes rather than being refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cursor {
     run: String,
@@ -242,19 +230,11 @@ impl serde::Serialize for Cursor {
 
 /// The byte a cursor token names **in this run's journal**, or a refusal.
 ///
-/// Three questions, and the token only answers the first on its own. That it
-/// parses says it is this build's spelling. That it names *this* run is what the
-/// run in it is for: a supervisor watching several runs holds several cursors,
-/// and one pasted against the wrong run is refused here by name rather than
-/// resumed from — the case a length check alone cannot see, because a byte from a
-/// longer journal lands inside a shorter one and looks like a place.
-///
-/// Then the store's own two: a cursor past the end names a byte this run never
-/// reached — this one, before its journal was healed — and would read nothing and
-/// report a run where nothing was happening. And a boundary as well as a length,
-/// because every record this crate appends ends in a newline, so a cursor not
-/// sitting just past one points into the middle of a record, and resuming there
-/// would hand the caller a fragment as though it were an event.
+/// Four checks, in order: the token is this build's spelling, it names *this*
+/// run, its byte is within the journal, and that byte sits just past a newline.
+/// The last is a boundary check and not a second length check — every record here
+/// ends in a newline, so a byte in range but mid-record would resume by handing
+/// the caller a fragment as though it were an event.
 fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     let Cursor { run, at } = parse_cursor(token)?;
     if run != paths.run {
@@ -476,10 +456,8 @@ impl Emitter {
 
 /// How many planner surfaces are unread and of which kinds, as one clause.
 ///
-/// A zero is said out loud rather than left out. "Nothing is waiting" and "this
-/// line does not mention what is waiting" read identically to a script and to a
-/// tired person, and telling them apart is the whole point of putting the count
-/// on the quiet line.
+/// A zero is said out loud rather than left out: "nothing is waiting" and "this
+/// line does not mention what is waiting" are otherwise the same line.
 fn unread_phrase(unread: &Unread) -> String {
     match unread.count {
         0 => "0 unread planner surfaces".to_string(),
