@@ -1743,7 +1743,7 @@ fn reconcile_edits(
         let mut reason = None;
         for command in &envelope.commands {
             let compiled = crate::channel::allows(author, command).and_then(|()| {
-                compile_and_deliver(paths, journal, state, command, launch, in_flight)
+                compile_and_deliver(paths, journal, state, author, command, launch, in_flight)
             });
             match compiled {
                 Ok(operations) => {
@@ -1764,34 +1764,7 @@ fn reconcile_edits(
                             ("operations", json!(operations)),
                         ]),
                     )?;
-                    // Two of the compiled operations are facts about the run
-                    // rather than mutations of its graph, and a reader looking
-                    // for either should not have to read the operation list.
-                    // Each gets its own kind here too.
-                    for operation in &operations {
-                        match operation {
-                            edits::Operation::CompletionRequested { reason } => journal.emit(
-                                journal::PipelineKind::CompletionRequested,
-                                journal::labels(&paths.run, None),
-                                journal::payload(&[("reason", json!(reason))]),
-                            )?,
-                            edits::Operation::HumanAttested { node } => journal.emit(
-                                journal::PipelineKind::HumanAttested,
-                                journal::labels(&paths.run, Some(node)),
-                                journal::payload(&[("ref", json!(node))]),
-                            )?,
-                            edits::Operation::FindingRaised {
-                                node,
-                                message,
-                                blocking,
-                            } => raise(
-                                paths,
-                                journal,
-                                finding_surface(author, node.clone(), message, *blocking),
-                            )?,
-                            _ => {}
-                        }
-                    }
+                    record_operation_facts(paths, journal, author, &operations)?;
                     // An edit the monitor made is the planner's to review: it
                     // was applied on the monitor's own judgement, so the planner
                     // learns of it without being asked to approve it first.
@@ -1832,6 +1805,7 @@ fn compile_and_deliver(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &RunState,
+    author: crate::channel::Author,
     command: &Command,
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
@@ -1852,7 +1826,7 @@ fn compile_and_deliver(
         ..state.frontier()
     };
     let mut candidate = state.graph.clone();
-    let operations = edits::compile(&mut candidate, &frontier, command)?;
+    let operations = edits::compile(&mut candidate, &frontier, author, command)?;
     if let Command::Note {
         id,
         addressee,
@@ -1883,7 +1857,7 @@ fn compile_and_deliver(
         return Ok(operations);
     }
     let mut candidate = state.graph.clone();
-    edits::compile_with(&mut candidate, &frontier, command, delivery)
+    edits::compile_with(&mut candidate, &frontier, author, command, delivery)
 }
 
 /// Put one refused edit into the run's record: the rejection, and the surface that
@@ -2150,7 +2124,7 @@ fn adopt_releases(
 /// The nodes whose in-flight dispatch a command stops.
 fn cancelled_by(command: &Command) -> Vec<String> {
     match command {
-        Command::Drop { id, .. } | Command::Retry { id, .. } | Command::Cancel { id } => {
+        Command::Drop { id, .. } | Command::Retry { id, .. } | Command::Cancel { id, .. } => {
             vec![id.clone()]
         }
         _ => Vec::new(),
@@ -3442,6 +3416,72 @@ fn executor_rules() -> Result<ExecutorRules> {
         Some(path) if !path.is_empty() => ExecutorRules::load(std::path::Path::new(&path)),
         _ => Ok(ExecutorRules::shipped_default()),
     }
+}
+
+/// Put the facts one command's operations state — but its `edit-committed` does
+/// not surface — into the run's own record, each under its own kind.
+///
+/// Four of the compiled operations are facts about the *run* rather than
+/// mutations of its graph, and a reader looking for any of them should not have
+/// to open an operation list to find it. Shared by the two writers of the graph
+/// — the reconcile loop, and a `reply` that found nothing driving the run and
+/// became the single writer itself — because which of them applied an edit is an
+/// accident of timing, and a fact recorded on one path only is silence on the
+/// other.
+///
+/// # Errors
+///
+/// The reason the run's own journal or channel could not be written.
+pub(crate) fn record_operation_facts(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    author: crate::channel::Author,
+    operations: &[edits::Operation],
+) -> Result<()> {
+    for operation in operations {
+        match operation {
+            edits::Operation::CompletionRequested { reason } => journal.emit(
+                journal::PipelineKind::CompletionRequested,
+                journal::labels(&paths.run, None),
+                journal::payload(&[("reason", json!(reason))]),
+            )?,
+            edits::Operation::HumanAttested { node } => journal.emit(
+                journal::PipelineKind::HumanAttested,
+                journal::labels(&paths.run, Some(node)),
+                journal::payload(&[("ref", json!(node))]),
+            )?,
+            edits::Operation::FindingRaised {
+                node,
+                message,
+                blocking,
+            } => raise(
+                paths,
+                journal,
+                finding_surface(author, node.clone(), message, *blocking),
+            )?,
+            // A node an operator settled from evidence settles like any other:
+            // under this crate's own `node-settled`, so every reader of a run —
+            // the views, the write-back, the telemetry, a consumer folding the
+            // store — sees one settlement shape rather than one it has to know
+            // to look for in an operation list. What tells the two apart is the
+            // outcome word, and the evidence is the detail.
+            edits::Operation::SettledFromEvidence {
+                node,
+                outcome,
+                evidence,
+            } => journal.emit(
+                journal::PipelineKind::NodeSettled,
+                journal::labels(&paths.run, Some(node)),
+                journal::settled_payload(
+                    outcome.as_str(),
+                    Some(journal::SETTLED_FROM_EVIDENCE),
+                    Some(evidence),
+                ),
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Record one node's settlement.
@@ -5409,7 +5449,10 @@ mod tests {
     #[test]
     fn only_the_commands_that_stop_a_dispatch_name_a_node_to_cancel() {
         assert_eq!(
-            cancelled_by(&Command::Cancel { id: "a".into() }),
+            cancelled_by(&Command::Cancel {
+                id: "a".into(),
+                reason: None
+            }),
             vec!["a".to_string()]
         );
         assert_eq!(

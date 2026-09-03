@@ -11,11 +11,11 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–54 are open**. Each states what the code does
+Entries **10–22, 33, 35–40 and 46–57 are open**. Each states what the code does
 today and the proposal it is waiting on. Most are questions for a *producer*
 rather than for this crate, because `oneagentgraph` and `onevcs` are independent
 tools that expose general integration hooks only and nothing in them may know
-about this one; the rest — 36 to 40, and 46 to 54 — are for the planner who owns
+about this one; the rest — 36 to 40, and 46 to 57 — are for the planner who owns
 the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -3053,6 +3053,129 @@ what lands here reaches it through a release rather than through a branch.
 sentence this would change is the Views paragraph's first, which today reads
 `Views (CLI): runs, status, host, monitor …`; the proposal is a second sentence
 beside it naming the structured read and the document behind it.
+
+
+## 57. A park carries nothing, and nothing can settle a node from evidence — OPEN
+
+**Proposal (for the planner who owns the contract): give `cancel` an optional
+`reason` and record the park's author beside it; refuse a monitor `requeue` of a
+park the planner made, quoting that park's own words; and add a `settle` op,
+planner-only, that writes what an operator can see a node reached without
+replacing the node.**
+
+Two facts the live-edit vocabulary cannot state, and one it turns out already
+can.
+
+**A park carries nothing.** The recorded operation for a parked node held only
+the node id, so nothing downstream could tell a decision somebody made from a
+node idle for no visible reason. On the run this came from, a manager parked a
+node to keep a third very large build off a disk with little room left; the
+monitor — whose judgement was otherwise good — read an idle node, requeued it,
+then cancelled it, and four dispatches were destroyed in five minutes, one of
+them with uncommitted work lost. The monitor is meant to apply unambiguous fixes
+without waiting for a planner, and taking that away would cost more than it
+saves. What it lacked was the one fact that would have stopped it: that a human
+had decided, and why.
+
+So `cancel` gains an optional `reason`, `node-parked` gains `by` and `reason`,
+and a monitor `requeue` of a park it did not make is **refused** with the park's
+author and its reason read back to it — or with the statement that the park
+carried none, which is a different fact from a reason nobody quoted. A monitor
+requeuing its own park is accepted, and so is a planner requeuing any park. A
+park this build has no record of — one written before the record carried an
+author, or a `parked: true` a plan file states — reads as the planner's, which is
+what every one of them was.
+
+**Nothing could settle a node from evidence.** When work merged but the run
+recorded it failed, or a wait can never clear, the operator can see the truth and
+had no way to write it down. The only route was replacing the node with a
+stand-in that dispatches nothing and carries the evidence in prose — which loses
+the node's identity, renames it in every downstream reference, and forces a
+rewiring cascade through its dependents. Four such replacements were needed on
+one run. `settle` is the op for a record that has gone wrong rather than for work
+that has: it keeps the node's id and its lineage, leaves its dependents' edges
+untouched, and journals the operator's evidence as the reason the node is in the
+state it is.
+
+It is the planner's alone and is **not** on the monitor's allowlist. An
+observer's whole authority is what the stream shows it; this op is deliberately
+the opposite — a person read a merge, or a wait that can never end, somewhere the
+run cannot see. Four refusals, each a different thing to do next: blank evidence,
+a node the graph does not hold (naming the ids it does), a node that has already
+settled (naming what it settled as, because a settlement is corrected by a
+`retry` that says the work is to be done again, never by overwriting the record
+of the attempt that made it), and a node whose dispatch is still in flight, which
+is refused for the reason `requeue` refuses one — that dispatch will settle the
+node itself, on top of this.
+
+An accepted `settle` emits this crate's own `node-settled` for the node, so every
+reader of a run — the views, the status write-back, the telemetry, a consumer
+folding the store — sees one settlement shape rather than one it has to know to
+go looking for in an operation list. What tells the two apart is the outcome
+word, `settled-from-evidence`, and the evidence is the settlement's `detail`.
+
+**A ready node's own fields already move without replacing it, and this is the
+documenting rather than the building.** Moving one node off a kind of dependency
+wait had been done by dropping and re-adding it and its dependent, purely because
+it sat ready. That was never necessary: `cancel` accepts a node nothing has
+recorded a status for, which is exactly a ready one, and `requeue`'s `amend`
+merges any field but `id` and `deps` onto the node before it returns to the
+frontier. So `cancel` then `requeue --amend {"adoption": "fast"}` moves a node
+waiting on a dependency's *release* to waiting on its *work* with the node's id,
+its lineage and its dependents' edges all surviving, and both halves journalled
+as their own operations. No second op is proposed for it; a `tests/e2e/` journey
+drives it, so the path stays true rather than being rediscovered.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+the op named here must be one this build accepts and the contract's own list does
+not, must round-trip as written, and must be allowed for exactly the authors
+named; the `cancel` fixture must be the contract's own op carrying the new
+optional field; and the outcome words must be exactly the ones a `settle`
+accepts.
+
+```json
+{
+  "ops": [
+    {
+      "op": "settle",
+      "id": "publish",
+      "outcome": "done",
+      "evidence": "the change merged at 3f9a1c2 while the node's dispatch was dying; the run recorded the death and never the merge"
+    }
+  ],
+  "monitor_may_issue": [],
+  "cancel": {
+    "op": "cancel",
+    "id": "build",
+    "reason": "a third very large build would fill the disk this host has 8G left on"
+  },
+  "settle_outcomes": ["done", "failed"],
+  "settled_outcome_word": "settled-from-evidence"
+}
+```
+
+`reason` is optional on `cancel` and a `cancel` stating none still parks, so
+every park written before this field existed is exactly the park it was; present
+and blank is refused rather than recorded, as `amend`'s ruling and a `finding`'s
+message already are. On `settle`, `id`, `outcome` and `evidence` are all
+required, and the outcome vocabulary is the two settled statuses a node can be
+**put** at. It is deliberately not every status a node can be *in*: `pending`,
+`ready`, `blocked` and `skipped` are derived from the graph on every reconcile
+pass rather than recorded, so a node settled at one of them would be re-derived
+out of it before the next dispatch and the operator's statement would silently
+not hold — and `parked` and `cancelled` have ops of their own. A wait that can
+never clear is settled `failed` carrying the evidence that says so, which is a
+record that sticks.
+
+`docs/contract.md` names none of this, and the code does not amend it. Two
+sentences of the Channel paragraph would change: the op list
+`add | drop | reparent | retry | cancel | requeue | attest | complete | context`
+gains `settle`, and the per-author allowlist sentence — which today says
+`monitor` may issue `retry | requeue | cancel | context | add` only — gains the
+one qualification that is not about an op but about a *record*: a `requeue` is
+judged against the park it would undo, so the monitor may return its own park to
+the frontier and not one the planner made.
 
 
 ## 59. A settlement projection cannot leave the destination's own `onetaskgraph.origin` alone — OPEN

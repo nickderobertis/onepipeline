@@ -2164,7 +2164,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
         ..view.state.frontier()
     };
     for command in &envelope.commands {
-        edits::compile(&mut projected, &frontier, command)?;
+        edits::compile(&mut projected, &frontier, envelope.author, command)?;
     }
 
     // And, once every command in it has passed both, the envelope as a whole —
@@ -2220,35 +2220,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                         ("operations", json!(operations)),
                     ]),
                 )?;
-                for operation in &operations {
-                    match operation {
-                        edits::Operation::CompletionRequested { reason } => journal.emit(
-                            journal::PipelineKind::CompletionRequested,
-                            journal::labels(&paths.run, None),
-                            journal::payload(&[("reason", json!(reason))]),
-                        )?,
-                        edits::Operation::HumanAttested { node } => journal.emit(
-                            journal::PipelineKind::HumanAttested,
-                            journal::labels(&paths.run, Some(node)),
-                            journal::payload(&[("ref", json!(node))]),
-                        )?,
-                        edits::Operation::FindingRaised {
-                            node,
-                            message,
-                            blocking,
-                        } => engine::raise(
-                            paths,
-                            &mut journal,
-                            engine::finding_surface(
-                                envelope.author,
-                                node.clone(),
-                                message,
-                                *blocking,
-                            ),
-                        )?,
-                        _ => {}
-                    }
-                }
+                engine::record_operation_facts(paths, &mut journal, envelope.author, &operations)?;
                 // The planner is told what the monitor did here as well as in
                 // the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the
@@ -2311,7 +2283,7 @@ fn apply_here(
     author: Author,
     command: &Command,
 ) -> Result<Vec<edits::Operation>> {
-    let operations = edits::compile(graph, frontier, command)?;
+    let operations = edits::compile(graph, frontier, author, command)?;
     let Command::Note {
         id,
         addressee,
