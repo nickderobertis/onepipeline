@@ -244,7 +244,24 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
         )));
     }
     let journal = paths.journal();
-    let held = std::fs::metadata(&journal).map_or(0, |file| file.len());
+    // The length the checks below are made against, and it is read rather than
+    // assumed. A run whose driver has appended nothing has no journal file yet,
+    // and byte 0 of it is a place a cursor may legitimately name — but every
+    // other way a length fails to be read is the boundary check having nothing
+    // to check, and treating that as a zero-length journal would accept
+    // `1:<run>:0` off a store this process cannot read at all.
+    let held = match std::fs::metadata(&journal) {
+        Ok(file) => file.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(Error::Invalid(format!(
+                "cursor '{token}' resumes at byte {at} of run '{}', whose journal could not \
+                 be read ({error}); a cursor is checked against the journal it names, and \
+                 one that cannot be read is refused rather than resumed from",
+                paths.run
+            )))
+        }
+    };
     if at > held {
         return Err(Error::Invalid(format!(
             "cursor '{token}' resumes at byte {at} of run '{}', whose store holds {held}; \

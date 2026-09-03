@@ -1016,6 +1016,65 @@ fn a_cursor_from_another_run_is_refused_rather_than_resumed_from() {
     agreed(&resumed, "settled", 0);
 }
 
+/// A journal whose length this watch cannot read refuses the cursor checked
+/// against it, rather than measuring as an empty one every cursor fits inside.
+///
+/// The journal's length is what the bounds and record-boundary checks are made
+/// against, so a length that could not be read leaves them checking nothing: a
+/// cursor at byte 0 would be accepted off a store this process cannot measure at
+/// all. A journal that is merely *absent* is a different fact — a run whose
+/// driver has appended nothing yet — and byte 0 of that one stays legal.
+#[cfg(unix)]
+#[test]
+fn a_cursor_checked_against_an_unreadable_journal_is_refused() {
+    let world = World::new("watch-unreadable-journal");
+    let run = running(&world, "watchunreadable", vec![agent("build", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    // A path whose length cannot be read, in the one spelling this suite can
+    // produce on demand without a privileged mount: a symlink to itself, which
+    // answers every attempt to measure it with a loop. What this holds is not
+    // that failure in particular but any failure to read the length.
+    let journal = world.run_file(&run, "events.jsonl");
+    let saved = std::fs::read(&journal).expect("the journal reads");
+    std::fs::remove_file(&journal).expect("the journal is moved aside");
+    std::os::unix::fs::symlink("events.jsonl", &journal).expect("the loop is made");
+
+    let start = format!("1:{run}:0");
+    let refused = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &start,
+    ]);
+    std::fs::remove_file(&journal).expect("the loop is removed");
+    std::fs::write(&journal, saved).expect("the journal is put back");
+    refused
+        .exited(REFUSED)
+        .err_has("whose journal could not be read");
+
+    // The same token against the same run, once the journal can be measured, is
+    // accepted — so what the refusal above rejected is the unreadable journal
+    // and nothing about the cursor.
+    let resumed = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &start,
+    ]);
+    agreed(&resumed, "settled", 0);
+}
+
 /// A kind is a wire string that no library owns, so a **sibling's** event spelled
 /// like one of this crate's own is not emitted as one.
 ///
