@@ -394,6 +394,43 @@ pub fn compile(
     compile_with(graph, frontier, author, command, Delivery::Deferred)
 }
 
+/// Carry one command's compiled operations onto the frontier the **next**
+/// command of the same envelope is judged against.
+///
+/// A caller that validates a whole envelope before committing any of it holds
+/// one frontier for all of it, and two of the facts this vocabulary judges
+/// against move *within* an envelope. A park is a decision a later `requeue` is
+/// judged against: without this, a monitor that parks a node and requeues it in
+/// one envelope is refused for undoing "the planner's" park — the park it just
+/// made itself. And a settlement is the state a later `settle` would be saying
+/// nothing about.
+///
+/// The graph itself needs no such call: [`compile`] mutates it in place, so the
+/// next command already sees it. This is the rest of the frontier, and only the
+/// parts a command can move — what a *dispatch* does is the loop's to observe
+/// rather than an envelope's to predict.
+pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
+    for operation in operations {
+        match operation {
+            Operation::NodeParked { node, by, reason } => {
+                frontier
+                    .parks
+                    .insert(node.clone(), Park::of(*by, reason.as_deref()));
+            }
+            Operation::NodeRequeued { node, .. } => {
+                frontier.parks.remove(node);
+                frontier.recorded.remove(node);
+            }
+            Operation::SettledFromEvidence { node, outcome, .. } => {
+                frontier
+                    .recorded
+                    .insert(node.clone(), settled_status(*outcome));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// [`compile`], for a caller that has already delivered the note.
 ///
 /// Only a `context` command reads `delivery`, and only the reconciler has an

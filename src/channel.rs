@@ -436,10 +436,12 @@ pub enum Command {
     /// are all exactly as they were, and the only thing that moves is what the
     /// run's record says became of it.
     Settle {
-        /// The node to settle. It must be one the graph holds and one that has
-        /// not settled already — a settlement is corrected by `retry`, which
-        /// says the work is to be done again, and never by overwriting the
-        /// record of the attempt that made it.
+        /// The node to settle. It must be one the graph holds, and one whose
+        /// record does not already say what this states — a settle that changes
+        /// nothing is a duplicate rather than a correction. A node that settled
+        /// **something else** is exactly what this is for: a change that merged
+        /// while the node read `failed` is the case the op exists for, and the
+        /// earlier settlement stays in the journal beside this one.
         id: String,
         /// What it settled as.
         outcome: SettleOutcome,

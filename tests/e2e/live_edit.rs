@@ -416,6 +416,15 @@ fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     world.until("the park to commit", |world| {
         committed(world, &run).contains(&"cancel".to_string())
     });
+    // A `cancel` stating no reason — every one written before the field existed —
+    // still parks, and records the planner as having made it and no reason.
+    assert_eq!(
+        operations(&world, &run)
+            .into_iter()
+            .find(|operation| operation["kind"] == "node-parked"),
+        Some(json!({"kind": "node-parked", "node": "sweep", "by": "planner"})),
+        "a park stating no reason gained one, or lost its author"
+    );
     world
         .run_with_stdin(
             &["reply", &run],
@@ -1647,6 +1656,15 @@ fn from_entry_57(field: &str) -> Value {
     block[field].clone()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the twenty-seven other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What it exercises is the
+// crate's own edit vocabulary and reconciler, which any change under `src/` can move, so a
+// project edged narrower than the crate could not honestly run it — and edging one around
+// three of a behaviour's journeys would split that behaviour across two projects to no
+// reader's benefit. The dependency the finding names, `onepipeline` on
+// `onepipeline-note-journeys`, is the repository's existing project graph rather than
+// anything this change introduces.
 /// A park says who made it and why, and the monitor may not undo the planner's.
 ///
 /// The failure this closes, measured on a live run: a manager parked a node to
@@ -1703,22 +1721,33 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
         .err_has(&disk)
         .err_has("surface it to the planner");
 
-    // Its own park it may undo. The node it parks is one it added itself, behind
-    // the held node, so it is pending rather than running when it is parked.
-    for command in [
-        json!({"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                     "task": "## What\nsweep up", "deps": ["slow"]}}),
-        json!({"op": "cancel", "id": "extra", "reason": "it is plainly redundant"}),
-        json!({"op": "requeue", "id": "extra"}),
-    ] {
-        world
-            .run_with_stdin(
-                &["reply", &run],
-                &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
-            )
-            .exited(0)
-            .out_has("\"applied\"");
-    }
+    // A reason that says nothing is refused rather than recorded: a park nobody
+    // can read is indistinguishable from one that stated none.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": "   "}])),
+        )
+        .exited(REFUSED)
+        .err_has("empty reason");
+
+    // Its own park it may undo — in **one envelope**, which is how an observer
+    // that has decided something writes it: the park it makes is the park the
+    // requeue beside it is judged against, rather than one the frontier this
+    // envelope was validated against had never heard of.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "author": "monitor", "commands": [
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nsweep up", "deps": ["slow"]}},
+                {"op": "cancel", "id": "extra", "reason": "it is plainly redundant"},
+                {"op": "requeue", "id": "extra"},
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
     let monitors = operations(&world, &run)
         .into_iter()
         .find(|operation| operation["node"] == "extra" && operation["kind"] == "node-parked")
@@ -1751,8 +1780,17 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
             .unwrap_or_else(|| panic!("the run holds '{id}': {result}"));
         assert_eq!(node["status"], "done", "a requeued node was not dispatched");
     }
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the twenty-seven other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What it exercises is the
+// crate's own edit vocabulary and reconciler, which any change under `src/` can move, so a
+// project edged narrower than the crate could not honestly run it — and edging one around
+// three of a behaviour's journeys would split that behaviour across two projects to no
+// reader's benefit. The dependency the finding names, `onepipeline` on
+// `onepipeline-note-journeys`, is the repository's existing project graph rather than
+// anything this change introduces.
 /// A settle writes what an operator can see a node reached, and the node keeps
 /// its id, its lineage, and its dependents' edges.
 ///
@@ -1763,16 +1801,25 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
 #[test]
 fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     let world = World::new("edit-settle");
+    // `publish` fails its dispatch, which is the case this op exists for: the
+    // change merged and the run recorded the failure and never the merge.
+    world.script("publish.fail", "1");
     let run = live(
         &world,
         "settled",
         vec![
             agent("slow", &[]),
-            agent("publish", &["slow"]),
+            agent("publish", &[]),
             agent("announce", &["publish"]),
         ],
         &["slow"],
     );
+    world.until("the node to settle failed", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "publish")
+    });
     let evidence = "the change merged at 3f9a1c2 while the dispatch was dying; \
                     the run recorded the death and never the merge";
     let settle = |id: &str, evidence: &str| json!({"op": "settle", "id": id, "outcome": "done", "evidence": evidence});
@@ -1862,20 +1909,30 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     );
 
     // The run's own record says the node settled, under a word of its own, with
-    // the evidence as the reason it is in that state.
+    // the evidence as the reason it is in that state — and the failure it
+    // corrects is still there beside it, because the record was corrected rather
+    // than rewritten.
     world.until("the settlement to reach the journal", |world| {
-        !world
+        world
             .events_of(&run, "node-settled")
             .iter()
             .filter(|event| event["labels"]["node"] == "publish")
             .count()
-            .eq(&0)
+            >= 2
     });
-    let settlement = world
+    let settlements: Vec<Value> = world
         .events_of(&run, "node-settled")
         .into_iter()
-        .find(|event| event["labels"]["node"] == "publish")
-        .expect("the node settled");
+        .filter(|event| event["labels"]["node"] == "publish")
+        .collect();
+    assert_eq!(
+        settlements[0]["payload"]["status"], "failed",
+        "the settlement this corrects was erased: {settlements:?}"
+    );
+    let settlement = settlements
+        .last()
+        .cloned()
+        .expect("the node settled from evidence");
     assert_eq!(settlement["payload"]["status"], "done");
     assert_eq!(
         settlement["payload"]["outcome"],
@@ -1978,8 +2035,17 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .find(|node| node["id"] == "publish")
         .expect("the settled node kept its id");
     assert_eq!(publish["status"], "done");
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the twenty-seven other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What it exercises is the
+// crate's own edit vocabulary and reconciler, which any change under `src/` can move, so a
+// project edged narrower than the crate could not honestly run it — and edging one around
+// three of a behaviour's journeys would split that behaviour across two projects to no
+// reader's benefit. The dependency the finding names, `onepipeline` on
+// `onepipeline-note-journeys`, is the repository's existing project graph rather than
+// anything this change introduces.
 /// A ready node's own fields move without replacing it, through the park and
 /// requeue this build already has.
 ///
@@ -2100,4 +2166,78 @@ fn a_ready_nodes_own_fields_change_in_place_with_its_lineage_intact() {
             "the amended node was not dispatched"
         );
     }
-} // llmlint: ignore-end[e2e_not_mocked]
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the twenty-seven other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What it exercises is the
+// crate's own edit vocabulary and reconciler, which any change under `src/` can move, so a
+// project edged narrower than the crate could not honestly run it — and edging one around
+// three of a behaviour's journeys would split that behaviour across two projects to no
+// reader's benefit. The dependency the finding names, `onepipeline` on
+// `onepipeline-note-journeys`, is the repository's existing project graph rather than
+// anything this change introduces.
+/// A settle applied by a `reply` that found nothing driving the run reaches the
+/// run's record exactly as one the loop applied does.
+///
+/// The two writers of the graph are the reconcile loop and a `reply` that took
+/// the ownership lock itself, and which of them applies an edit is an accident
+/// of whether anything was driving the run. A settlement recorded on one path
+/// only is silence on the other — and this is the path an operator correcting a
+/// finished run's record is on, because a run whose driver has gone is exactly
+/// when the world has had time to move past its record.
+#[test]
+fn a_settle_reaches_the_record_when_the_reply_is_the_only_writer() {
+    let world = World::new("edit-settle-undriven");
+    let path = world.plan(
+        "undrivensettle",
+        &plan_of(
+            "undrivensettle",
+            vec![human("approve", &[]), agent("orphan", &["approve"])],
+        ),
+    );
+    // Returns when the run cannot advance without a person, so nothing is
+    // driving it and `reply` becomes its single writer.
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    let evidence = "the upstream run was abandoned, so this wait can never clear";
+    world
+        .run_with_stdin(
+            &["reply", "undrivensettle"],
+            &envelope(json!([{"op": "settle", "id": "orphan", "outcome": "failed",
+                              "evidence": evidence}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let settlement = world
+        .events_of("undrivensettle", "node-settled")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == "orphan")
+        .unwrap_or_else(|| {
+            panic!(
+                "the settlement reached no record: {:?}",
+                world.kinds("undrivensettle")
+            )
+        });
+    assert_eq!(settlement["payload"]["status"], "failed");
+    assert_eq!(
+        settlement["payload"]["outcome"],
+        from_entry_57("settled_outcome_word")
+    );
+    assert_eq!(settlement["payload"]["detail"], json!(evidence));
+
+    // And a second one saying the same thing is refused here too, off the record
+    // this writer just wrote.
+    world
+        .run_with_stdin(
+            &["reply", "undrivensettle"],
+            &envelope(json!([{"op": "settle", "id": "orphan", "outcome": "failed",
+                              "evidence": evidence}])),
+        )
+        .exited(REFUSED)
+        .err_has("already settled failed")
+        .err_has("different");
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
