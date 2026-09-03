@@ -26,7 +26,7 @@ use crate::cli::{WatchArgs, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
     Error, Result, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
 };
-use crate::event::{Envelope, PipelineKind};
+use crate::event::{Envelope, PipelineKind, Source};
 use crate::filter::EventFilter;
 use crate::graph::{self, GraphState};
 use crate::journal;
@@ -121,7 +121,7 @@ impl serde::Serialize for Ending {
 pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) -> Result<i32> {
     let mut cursor = match args.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
-        None => Cursor(0),
+        None => Cursor::start(&paths.run),
     };
     // Checked, because the seconds are a caller's: `Instant` addition panics on
     // overflow, and a wait longer than this host's clock can hold is a value to
@@ -141,8 +141,8 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
 
     loop {
         let view = RunView::open(paths)?;
-        let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.0);
-        cursor = Cursor(at);
+        let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
+        cursor.at = at;
         journal::merge_order(&mut fresh);
         for event in fresh
             .iter()
@@ -153,10 +153,10 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
         }
 
         if let Some(ending) = concluded(&view, paths, args.until) {
-            return out.returned(&view, ending, cursor);
+            return out.returned(&view, ending, &cursor);
         }
         if Instant::now() >= deadline {
-            return out.returned(&view, Ending::Elapsed, cursor);
+            return out.returned(&view, Ending::Elapsed, &cursor);
         }
         if !tick.is_zero() && quiet_since.elapsed() >= tick {
             out.heartbeat(&view)?;
@@ -168,12 +168,17 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
 
 /// Whether this is an event a supervisor acts on.
 ///
-/// Asked of the kind rather than of the source, so a sibling that one day emits
-/// a kind spelled like one of these is not folded into this crate's vocabulary
-/// by accident: [`PipelineKind::from_wire`] answers `None` for everything that
-/// is not this library's own.
+/// Asked of the source **and** the kind, because either alone admits the other's
+/// events. The kind is a wire string that no library owns: this crate's stream is
+/// merged with two siblings' before it reaches here, and a sibling that one day
+/// spells a kind the way this one does would be folded into this crate's
+/// vocabulary by a kind test alone — emitting, as a node settling, something that
+/// settled no node. [`PipelineKind::from_wire`] narrows the string to this
+/// library's own words; [`Source::Pipeline`] is what says the record came from
+/// this library.
 fn meaningful(event: &Envelope) -> bool {
-    PipelineKind::from_wire(&event.kind).is_some_and(|kind| MEANINGFUL.contains(&kind))
+    event.source == Source::Pipeline
+        && PipelineKind::from_wire(&event.kind).is_some_and(|kind| MEANINGFUL.contains(&kind))
 }
 
 /// The terminal condition this pass reached, if it reached one.
@@ -210,12 +215,33 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
 /// build never reached, and a value of this is always a byte a watch finished
 /// reading. It renders and parses in exactly one spelling, so the token a caller
 /// is given is the token this build reads back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cursor(u64);
+///
+/// **It names the run as well as the byte**, because a byte alone is a place in
+/// *some* journal and every run has one. A supervisor watching several runs holds
+/// several of these at once, and the failure that costs is not a token that fails
+/// to parse — it is one that parses, lands inside a record boundary of the wrong
+/// run's journal, and resumes from a point that means nothing, silently. Carrying
+/// the run makes that token refusable by name instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Cursor {
+    /// The run whose journal `at` is a byte of.
+    run: String,
+    at: u64,
+}
+
+impl Cursor {
+    /// The start of a run's journal: what a watch given no cursor resumes from.
+    fn start(run: &str) -> Self {
+        Self {
+            run: run.to_string(),
+            at: 0,
+        }
+    }
+}
 
 impl std::fmt::Display for Cursor {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(out, "{WATCH_CURSOR_VERSION}:{}", self.0)
+        write!(out, "{WATCH_CURSOR_VERSION}:{}:{}", self.run, self.at)
     }
 }
 
@@ -230,19 +256,27 @@ impl serde::Serialize for Cursor {
 
 /// The byte a cursor token names **in this run's journal**, or a refusal.
 ///
-/// Two questions, and the second is the one that costs. A token that parses is
-/// only a number; whether that number is a place in *this* store is a fact about
-/// the store, and a watch handed a cursor from another run — or from this one
-/// before its journal was healed — would read past the end of the file, find
-/// nothing, and report a run where nothing was happening. It is refused instead,
-/// naming both numbers.
+/// Three questions, and the token only answers the first on its own. That it
+/// parses says it is this build's spelling. That it names *this* run is what the
+/// run in it is for: a supervisor watching several runs holds several cursors,
+/// and one pasted against the wrong run is refused here by name rather than
+/// resumed from — the case a length check alone cannot see, because a byte from a
+/// longer journal lands inside a shorter one and looks like a place.
 ///
-/// A boundary as well as a length: every record this crate appends ends in a
-/// newline, so a cursor that does not sit just past one is pointing into the
-/// middle of a record, and resuming there would hand the caller a fragment as
-/// though it were an event.
+/// Then the store's own two: a cursor past the end names a byte this run never
+/// reached — this one, before its journal was healed — and would read nothing and
+/// report a run where nothing was happening. And a boundary as well as a length,
+/// because every record this crate appends ends in a newline, so a cursor not
+/// sitting just past one points into the middle of a record, and resuming there
+/// would hand the caller a fragment as though it were an event.
 fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
-    let Cursor(at) = parse_cursor(token)?;
+    let Cursor { run, at } = parse_cursor(token)?;
+    if run != paths.run {
+        return Err(Error::Invalid(format!(
+            "cursor '{token}' was printed by a watch of run '{run}', and this is a watch of              run '{}'; a cursor is only readable by the run it was printed for",
+            paths.run
+        )));
+    }
     let journal = paths.journal();
     let held = std::fs::metadata(&journal).map_or(0, |file| file.len());
     if at > held {
@@ -260,7 +294,7 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
             paths.run
         )));
     }
-    Ok(Cursor(at))
+    Ok(Cursor { run, at })
 }
 
 fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
@@ -275,23 +309,34 @@ fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
     file.read_exact(&mut last).is_ok() && last[0] == b'\n'
 }
 
-/// The byte a cursor token names, or a refusal saying what was read.
+/// The run and the byte a cursor token names, or a refusal saying what was read.
 ///
 /// External input like any other: a token is typed at a command line, and one
 /// this build cannot place is refused by name rather than resumed from as though
 /// its digits meant a byte count.
+///
+/// The byte is taken from the **last** separator rather than the second, so a run
+/// whose id contains one is read back as the id it was printed as instead of
+/// being refused for a colon nobody chose.
 fn parse_cursor(token: &str) -> Result<Cursor> {
     let refusal = || {
         Error::Invalid(format!(
             "'{token}' is not a cursor this build reads; a cursor is what an earlier \
-             `onepipeline watch` printed, spelled `{WATCH_CURSOR_VERSION}:<byte>`"
+             `onepipeline watch` printed, spelled `{WATCH_CURSOR_VERSION}:<run>:<byte>`"
         ))
     };
-    let (version, at) = token.split_once(':').ok_or_else(refusal)?;
+    let (version, rest) = token.split_once(':').ok_or_else(refusal)?;
     if version != WATCH_CURSOR_VERSION {
         return Err(refusal());
     }
-    at.parse().map(Cursor).map_err(|_| refusal())
+    let (run, at) = rest.rsplit_once(':').ok_or_else(refusal)?;
+    if run.is_empty() {
+        return Err(refusal());
+    }
+    Ok(Cursor {
+        run: run.to_string(),
+        at: at.parse().map_err(|_| refusal())?,
+    })
 }
 
 /// One line of the machine-readable form.
@@ -323,7 +368,7 @@ enum Record<'a> {
         /// its own exit code contradicts.
         #[serde(flatten)]
         ending: Ending,
-        cursor: Cursor,
+        cursor: &'a Cursor,
         unread: UnreadRecord<'a>,
     },
 }
@@ -405,7 +450,7 @@ impl Emitter {
 
     /// The last thing a watch says: why it returned, what is unread, and the
     /// cursor the next one resumes from.
-    fn returned(&mut self, view: &RunView, ending: Ending, cursor: Cursor) -> Result<i32> {
+    fn returned(&mut self, view: &RunView, ending: Ending, cursor: &Cursor) -> Result<i32> {
         let unread = view.unread();
         self.say(
             &format!(
@@ -519,17 +564,37 @@ mod tests {
 
     #[test]
     fn a_cursor_round_trips_and_anything_else_is_refused() {
-        assert_eq!(
-            parse_cursor(&Cursor(4096).to_string()).expect("reads"),
-            Cursor(4096)
-        );
+        let cursor = Cursor {
+            run: "demo".to_string(),
+            at: 4096,
+        };
+        assert_eq!(parse_cursor(&cursor.to_string()).expect("reads"), cursor);
         // The token a caller is handed and the token it renders on the wire are
         // the one spelling this build reads back.
         assert_eq!(
-            serde_json::to_value(Cursor(4096)).expect("a cursor serializes"),
-            serde_json::json!("1:4096")
+            serde_json::to_value(&cursor).expect("a cursor serializes"),
+            serde_json::json!("1:demo:4096")
         );
-        for token in ["", "4096", "2:4096", "1:", "1:x", "1:-1", "1:4096:0"] {
+        // A run id carrying the separator round-trips as itself, because the byte
+        // is taken from the last one rather than the second.
+        let colonised = Cursor {
+            run: "demo:2".to_string(),
+            at: 8,
+        };
+        assert_eq!(
+            parse_cursor(&colonised.to_string()).expect("reads"),
+            colonised
+        );
+        for token in [
+            "",
+            "4096",
+            "1:4096",
+            "2:demo:4096",
+            "1:demo:",
+            "1:demo:x",
+            "1:demo:-1",
+            "1::4096",
+        ] {
             let refused = parse_cursor(token).expect_err("refused");
             assert!(
                 refused
@@ -568,7 +633,7 @@ mod tests {
         for stated in [
             format!("(default {})", crate::cli::DEFAULT_WATCH_TIMEOUT_SECONDS),
             format!("(default {})", crate::cli::DEFAULT_WATCH_TICK_SECONDS),
-            format!("`{WATCH_CURSOR_VERSION}:<byte>`"),
+            format!("`{WATCH_CURSOR_VERSION}:<run>:<byte>`"),
             format!("`{}`", Ending::Settled.exit_code()),
             format!("`{}`", Ending::NothingDriving.exit_code()),
             format!("`{}`", Ending::SurfaceWaiting.exit_code()),
@@ -644,7 +709,7 @@ mod tests {
             Record::Return {
                 run_id: "demo",
                 ending: Ending::Settled,
-                cursor: Cursor(0),
+                cursor: &Cursor::start("demo"),
                 unread: UnreadRecord::of(&unread),
             },
         ];
@@ -714,7 +779,7 @@ mod tests {
         let returned = Record::Return {
             run_id: "demo",
             ending: Ending::Settled,
-            cursor: Cursor(0),
+            cursor: &Cursor::start("demo"),
             unread: UnreadRecord::of(&unread),
         };
         for shape in [
@@ -725,7 +790,7 @@ mod tests {
             Record::Return {
                 run_id: "demo",
                 ending: Ending::Settled,
-                cursor: Cursor(0),
+                cursor: &Cursor::start("demo"),
                 unread: UnreadRecord::of(&unread),
             },
         ] {

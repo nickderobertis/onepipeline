@@ -3245,6 +3245,13 @@ which is every class a supervisor acts on and not the siblings' token-by-token
 detail, which is what `monitor --all` is for. A graph edit is emitted whichever
 author issued it, so the monitor's edits reach the same line a planner's do.
 
+**A record has to be this crate's by source as well as by kind.** A kind is a
+wire string that no library owns, and this stream is three libraries merged, so a
+sibling that one day spells `node-settled` the way this one does would — under a
+kind test alone, and under `--all`, which is the selection that admits it —
+reach a supervisor as a node settling, reporting as settled work that settled
+nothing.
+
 **Every heartbeat states how many planner surfaces are unread and of which
 kinds.** That is the property the verb is worth having for, rather than an
 ornament on it: the failure it replaces is a watcher that filtered the one line
@@ -3276,11 +3283,18 @@ exits is the silence this verb exists to end. The machine form carries the whole
 envelope rather than a rendering of it, as `next` already hands its caller the
 events it read.
 
-The cursor is `1:<byte>`: the offset into the run's journal that the watch had
-finished reading. It is versioned because it is a promise to a *later*
-invocation, which may be a different build, and it is validated at the boundary
-like every other external input — a token this build cannot place is refused by
-name rather than resumed from as though its digits meant a byte count. The tail
+The cursor is `1:<run>:<byte>`: the run, and the offset into that run's journal
+that the watch had finished reading. It is versioned because it is a promise to a
+*later* invocation, which may be a different build, and it is validated at the
+boundary like every other external input — a token this build cannot place is
+refused by name rather than resumed from as though its digits meant a byte count.
+**It names the run because a byte alone is a place in every journal there is.** A
+supervisor watching several runs holds several of these, and one pasted against
+the wrong run is the token that does not fail: it parses, it lands inside the
+wrong journal's record boundaries, and it resumes from a point that means
+nothing. A length check cannot see it, because a byte from a longer journal is a
+plausible byte of a shorter one. The run is what makes it refusable by name. The
+tail
 read behind it (`journal::finished_after`) stops at a record whose writer has not
 finished it rather than accounting for it, which is the one place it differs from
 the summary maintainer's `read_after` beside it: a tailer that advanced past a

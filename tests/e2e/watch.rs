@@ -886,6 +886,170 @@ fn a_watch_holds_at_a_record_its_writer_has_not_finished_and_emits_it_after() {
 }
 
 /// Add to a run's journal exactly what a writer puts there: bytes on the end.
+/// A cursor is a place in **one** run's journal, and one pasted against another
+/// run is refused by name rather than resumed from.
+///
+/// This is the refusal neither store check can make. The token below is built to
+/// pass both of them against the run it is aimed at: its byte is lifted from
+/// *that* run's own journal, so it is in range and sits exactly on one of its
+/// record boundaries. Only the run inside the token says it was printed somewhere
+/// else — and without it this watch would resume, silently, from a position in a
+/// different run that happens to be a number.
+#[test]
+fn a_cursor_from_another_run_is_refused_rather_than_resumed_from() {
+    let world = World::new("watch-foreign-cursor");
+    let mine = running(&world, "watchcursormine", vec![agent("build", &[])]);
+    let theirs = running(&world, "watchcursortheirs", vec![agent("build", &[])]);
+    for run in [&mine, &theirs] {
+        world.until("the run to settle", |world| {
+            world.run_file(run, "result.json").is_file()
+        });
+    }
+
+    let watched = world.run(&["watch", &mine, "--timeout", "0", "--tick-interval", "0"]);
+    agreed(&watched, "settled", 0);
+    let cursor = returned(&watched)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+    assert!(
+        cursor.starts_with(&format!("1:{mine}:")),
+        "the cursor does not name the run it was printed for: {cursor}"
+    );
+
+    // A byte that is a real record boundary of the run this is about to be aimed
+    // at, so the length and boundary checks both pass and the run is the only
+    // thing left that can refuse it.
+    let journal = std::fs::read_to_string(world.run_file(&theirs, "events.jsonl"))
+        .expect("the journal reads");
+    let boundary = journal
+        .find('\n')
+        .expect("the other run recorded at least one record")
+        + 1;
+    let foreign = format!("1:{mine}:{boundary}");
+
+    world
+        .run(&[
+            "watch",
+            &theirs,
+            "--timeout",
+            "0",
+            "--tick-interval",
+            "0",
+            "--cursor",
+            &foreign,
+        ])
+        .exited(REFUSED)
+        // The refusal is *this* one, and not the length or boundary refusal
+        // standing in for it: those two cannot see this token at all.
+        .err_has("was printed by a watch of run")
+        .err_has(&mine)
+        .err_has(&theirs);
+
+    // The same byte, named for the run it belongs to, is accepted — so what the
+    // refusal above rejected is the run in the token and nothing else about it.
+    let own = format!("1:{theirs}:{boundary}");
+    let resumed = world.run(&[
+        "watch",
+        &theirs,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &own,
+    ]);
+    agreed(&resumed, "settled", 0);
+}
+
+/// A kind is a wire string that no library owns, so a **sibling's** event spelled
+/// like one of this crate's own is not emitted as one.
+///
+/// The merged stream carries three libraries, and this verb's meaningful set is
+/// this crate's vocabulary. An event from `oneagentgraph` that happens to spell
+/// `node-settled` would, on a kind test alone, reach a supervisor as a node
+/// settling — reporting as settled work that settled nothing.
+#[test]
+fn a_siblings_event_spelled_like_this_crates_own_is_not_emitted_as_one() {
+    let world = World::new("watch-collision");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchcollision", vec![agent("build", &[])]);
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    // `--all` throughout: the shipped profile already rejects a sibling's records,
+    // so under it this journey would pass whether or not the verb checked the
+    // source. The widest selection is the one where the kind is all that is left
+    // to tell the two libraries apart, which is the case under test.
+    let first = world.run(&[
+        "watch",
+        &run,
+        "--all",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&first, "settled", 0);
+    let cursor = returned(&first)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the journal is appended to
+    // directly because no verb of this binary can be asked to emit a *sibling's*
+    // envelope under this crate's own kind: the relay writes a sibling's records with
+    // that sibling's own vocabulary, and the collision under test is a spelling this
+    // build must survive rather than one it can be made to produce. The run has
+    // settled first, so this journey is the only writer, and the `watch` below is a
+    // real invocation reading a real store.
+    let settlement: Value = std::fs::read_to_string(world.run_file(&run, "events.jsonl"))
+        .expect("the journal reads")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["kind"] == json!("node-settled"))
+        .expect("a settled run recorded a settlement");
+    let mut collision = settlement;
+    collision["ts"] = json!("2099-01-01T00:00:00.000Z");
+    collision["stream"] = json!("a-sibling-that-spells-it-the-same-way");
+    collision["source"] = json!("agentgraph");
+    append(
+        &world.run_file(&run, "events.jsonl"),
+        &format!(
+            "{}\n",
+            serde_json::to_string(&collision).expect("the record renders")
+        ),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let after = world.run(&[
+        "watch",
+        &run,
+        "--all",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &cursor,
+    ]);
+    agreed(&after, "settled", 0);
+    assert!(
+        emitted(&after).is_empty(),
+        "a sibling's event reached the watch as one of this crate's own:\n{}",
+        after.stdout
+    );
+    assert!(
+        !after
+            .stderr
+            .contains("a-sibling-that-spells-it-the-same-way"),
+        "the human form named a sibling's event as a settlement:\n{}",
+        after.stderr
+    );
+}
+
 fn append(journal: &std::path::Path, bytes: &str) {
     std::fs::OpenOptions::new()
         .append(true)
@@ -925,22 +1089,57 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
         .exited(REFUSED)
         .err_has("nosuchprofile");
 
-    // A cursor is external input like any other. A token this build cannot read;
-    // one that reads but names a place past the store, which would otherwise
-    // read as a run where nothing was happening; and one that reads, fits, and
-    // points into the middle of a record rather than after one.
-    for token in ["nonsense", "2:0", "1:later", "1:-1"] {
+    // A cursor is external input like any other. Tokens this build cannot read —
+    // no separator, a version it does not speak, a byte that is not one, and the
+    // pre-run spelling that named a byte without the run it was a byte of.
+    for token in [
+        "nonsense",
+        "2:watchrefusals:0",
+        "1:watchrefusals:later",
+        "1:watchrefusals:-1",
+        "1::0",
+        "1:0",
+    ] {
         world
             .run(&["watch", &run, "--cursor", token, "--timeout", "600"])
             .exited(REFUSED)
             .err_has("is not a cursor this build reads");
     }
+    // Then the three a token can read as and still not be a place in this run:
+    // another run's, one past the end of this store — which would otherwise read
+    // as a run where nothing was happening — and one that fits but points into
+    // the middle of a record rather than after one.
     world
-        .run(&["watch", &run, "--cursor", "1:99999999", "--timeout", "600"])
+        .run(&[
+            "watch",
+            &run,
+            "--cursor",
+            "1:someotherrun:0",
+            "--timeout",
+            "600",
+        ])
+        .exited(REFUSED)
+        .err_has("was printed by a watch of run");
+    world
+        .run(&[
+            "watch",
+            &run,
+            "--cursor",
+            "1:watchrefusals:99999999",
+            "--timeout",
+            "600",
+        ])
         .exited(REFUSED)
         .err_has("whose store holds");
     world
-        .run(&["watch", &run, "--cursor", "1:3", "--timeout", "600"])
+        .run(&[
+            "watch",
+            &run,
+            "--cursor",
+            "1:watchrefusals:3",
+            "--timeout",
+            "600",
+        ])
         .exited(REFUSED)
         .err_has("inside a record");
     // And a wait no clock can reach is a value to refuse, not a process to abort.
