@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/nickderobertis/onepipeline/compare/v0.19.0...v0.20.0) - 2026-09-03
+
+### Added
+
+- *(edits)* say who parked a node and why, and settle one from evidence ([#193](https://github.com/nickderobertis/onepipeline/pull/193))
+
+### Fixed
+
+- keep the write-back off a plan's own records, and hand back a launch whose observer died ([#191](https://github.com/nickderobertis/onepipeline/pull/191))
+
 ## [0.19.0](https://github.com/nickderobertis/onepipeline/compare/v0.18.5...v0.19.0) - 2026-09-02
 
 ### Added
