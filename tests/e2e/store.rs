@@ -906,11 +906,22 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
 /// target the store cannot resolve, which is the record an operator goes back to
 /// when a run has gone wrong.
 ///
-/// Asserted as the edges the store answers with, held against the ones it
-/// answered with before the run — not as how many there are, which is what the
-/// journeys above ask and what cannot tell an edge that moved from one that
-/// stayed. And twice, because a projection that damaged the destination once
-/// would have a second run of the same plan to damage further.
+/// Asserted as **which record each node is** and the edges that record holds,
+/// both held against what the store answered with before the run — not as how
+/// many of either there are, which is what the journeys above ask and what
+/// cannot tell a record that moved from one that stayed. The identity half is
+/// the other way a projection loses the destination: correspondence is found
+/// through the origin the shadow declares, so a projection that stopped
+/// declaring it would write the run's own records *beside* the operator's rather
+/// than onto them, and a plan whose nodes each read back twice is as unusable as
+/// one whose edges name nowhere. And twice over, because a projection that
+/// damaged the destination once would have a second run of the same plan to
+/// damage further.
+///
+/// What this cannot hold is the destination's own `onetaskgraph.origin`, which
+/// `copy` stamps with the copied item's qualified id on everything it writes:
+/// divergence 59 records that, and it is a correspondence for the *next* copy
+/// down rather than anything a read of this plan goes through.
 #[test]
 fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with() {
     let world = World::new("store-settled-readback");
@@ -921,25 +932,40 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
             vec![agent("first", &[]), agent("second", &["first"])],
         ),
     );
-    // Every task's edges, by node id, as the store itself resolves them.
-    let edges = |world: &World| -> BTreeMap<String, Vec<Value>> {
-        world
-            .store_tasks(&project)
-            .into_iter()
+    // Which record each node of the plan *is*, and the edges that record holds, as
+    // the store itself resolves them. Keyed by node id and never by the record's
+    // own id, so a projection that wrote a second record for a node is a changed
+    // value here rather than a key nothing compares against.
+    let records = |world: &World| -> BTreeMap<String, (String, Vec<Value>)> {
+        let tasks = world.store_tasks(&project);
+        let held: BTreeMap<String, (String, Vec<Value>)> = tasks
+            .iter()
             .map(|task| {
+                let id = task["id"]
+                    .as_str()
+                    .expect("a task has a qualified id")
+                    .to_owned();
+                let deps = world.store_deps(&id);
                 (
                     task["item"]["metadata"]["onepipeline.id"]
                         .as_str()
                         .expect("a task of this plan names its node")
                         .to_owned(),
-                    world.store_deps(task["id"].as_str().expect("a task has a qualified id")),
+                    (id, deps),
                 )
             })
-            .collect()
+            .collect();
+        assert_eq!(
+            held.len(),
+            tasks.len(),
+            "the plan holds more than one record for a node of it, so a projection wrote \
+             beside the operator's records rather than onto them: {tasks:?}"
+        );
+        held
     };
-    let authored = edges(&world);
+    let authored = records(&world);
     assert_eq!(
-        authored.get("second").map(Vec::len),
+        authored.get("second").map(|(_, deps)| deps.len()),
         Some(1),
         "the fixture authored no dependency edge, so this journey could not tell a \
          preserved one from a rewritten one: {authored:?}"
@@ -965,9 +991,9 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
         );
 
         assert_eq!(
-            edges(&world),
+            records(&world),
             authored,
-            "settlement rewrote the plan's own dependency edges after {run}"
+            "settlement rewrote the plan's own records or the edges between them after {run}"
         );
         // And what that costs when it is wrong: the plan is readable, through the
         // engine's own loader, by the verb whose job is to read one without
