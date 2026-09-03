@@ -3076,9 +3076,11 @@ outgoing metadata of every item it writes, set to the qualified id of the item
 being copied. It does so whatever the source item declares under that key,
 whatever `--match-by` was given, and whether the destination item was created or
 merely updated; and because the value differs, an item nothing else about the
-projection would change is written anyway. Measured against 0.2.18 in all three
-forms: a source item declaring the destination's own origin, one declaring none,
-and `--match-by onepipeline.id`.
+projection would change is written anyway. Measured in all three forms — a source
+item declaring the destination's own origin, one declaring none, and `--match-by
+onepipeline.id` — against `onetaskgraph` 0.2.18 and against revision
+`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which is the revision
+`taskgraph::FIRST_REVISION` pins and the one every check here installs.
 
 So a destination item this crate projects onto is left carrying
 `onetaskgraph.origin: onepipeline-writeback:<hex>` — a source that exists only as
