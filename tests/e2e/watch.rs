@@ -573,12 +573,17 @@ fn a_run_waiting_on_a_person_is_not_a_blocking_surface_and_the_wait_runs_out() {
 /// A watch that cannot write what it has to say refuses, rather than going on
 /// emitting into a descriptor nobody can take it.
 ///
-/// Unix-only because `/dev/full` is: what it buys is a descriptor that accepts a
-/// write and then fails it, which is the shape a closed pipe has and which no
-/// portable spelling of this suite can produce on demand. The behaviour it holds
-/// is not platform-specific — a watch is a blocking verb, and one that swallowed
-/// a failed write would be reporting a run to nobody for as long as its timeout.
-#[cfg(unix)]
+/// The unwritable descriptor is a pipe whose reader is gone, which is the shape
+/// this failure actually has — the caller reading a blocking watch went away —
+/// and which every platform this suite runs on provides. It replaces
+/// `/dev/full`, which proved the property on Linux alone: the `cross` matrix's
+/// macOS leg has no such device node, so the journey panicked opening it and
+/// reported on the host rather than on the binary. A descriptor opened
+/// read-only is not the portable substitute it looks like — `std` turns the
+/// `EBADF` that produces into a *successful* write, so the binary never sees a
+/// failed one and watches out its whole timeout. The behaviour is not
+/// platform-specific: a watch is a blocking verb, and one that swallowed a
+/// failed write would be reporting a run to nobody for as long as its timeout.
 #[test]
 fn a_watch_whose_output_cannot_be_written_refuses_instead_of_going_on() {
     let world = World::new("watch-unwritable");
@@ -586,15 +591,19 @@ fn a_watch_whose_output_cannot_be_written_refuses_instead_of_going_on() {
     let run = running(&world, "watchunwritable", vec![agent("build", &[])]);
 
     for descriptor in ["stdout", "stderr"] {
-        let full = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/full")
-            .expect("this host has /dev/full");
+        // The reader is dropped before the watch starts, so the *first* write to
+        // this descriptor fails rather than the one that happens to fill the pipe.
+        let (reader, unwritable) = std::io::pipe().expect("a pipe to hand the watch");
+        drop(reader);
         let mut command = world.cmd(&["watch", &run, "--timeout", "600", "--tick-interval", "1"]);
         if descriptor == "stdout" {
-            command.stdout(full).stderr(std::process::Stdio::piped());
+            command
+                .stdout(unwritable)
+                .stderr(std::process::Stdio::piped());
         } else {
-            command.stderr(full).stdout(std::process::Stdio::piped());
+            command
+                .stderr(unwritable)
+                .stdout(std::process::Stdio::piped());
         }
         // The wait is ten minutes and the interval is one second, so a command
         // that returns at all returned because a write failed rather than
