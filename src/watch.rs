@@ -106,6 +106,25 @@ impl Ending {
     }
 }
 
+/// The two wire fields a return record states about why it ended, written from
+/// the one value the process exits with.
+///
+/// Hand-written rather than derived because the pair is the whole promise: a
+/// record that took `condition` and `exit` as two fields could be given a word
+/// and a status that disagree, which is the caller reading prose again.
+impl serde::Serialize for Ending {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut record = serializer.serialize_map(Some(2))?;
+        record.serialize_entry("condition", self.as_str())?;
+        record.serialize_entry("exit", &self.exit_code())?;
+        record.end()
+    }
+}
+
 /// Block until the run needs a supervisor, or until the wait runs out.
 ///
 /// The run and the profile are resolved by the caller, so a run that does not
@@ -236,7 +255,6 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<u64> {
     Ok(at)
 }
 
-/// Whether the byte before `at` ends a record.
 fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(journal) else {
@@ -282,10 +300,7 @@ enum Record<'a> {
     /// of it — exactly as `next` hands its caller the events it read, so a
     /// consumer needing a field this crate does not put on the line never has to
     /// go back to the store for it.
-    Event {
-        /// The whole envelope, as its producer wrote it.
-        event: &'a Envelope,
-    },
+    Event { event: &'a Envelope },
     /// The watch is alive, and this is what is waiting unread.
     Heartbeat {
         run_id: &'a str,
@@ -295,8 +310,11 @@ enum Record<'a> {
     /// cursor the next one resumes from.
     Return {
         run_id: &'a str,
-        condition: &'static str,
-        exit: i32,
+        /// The word and the status, both written from the one [`Ending`] the
+        /// process is about to exit with, so the record cannot name a condition
+        /// its own exit code contradicts.
+        #[serde(flatten)]
+        ending: Ending,
         cursor: &'a str,
         unread: UnreadRecord<'a>,
     },
@@ -391,8 +409,7 @@ impl Emitter {
             ),
             &Record::Return {
                 run_id: &view.paths.run,
-                condition: ending.as_str(),
-                exit: ending.exit_code(),
+                ending,
                 cursor: &cursor,
                 unread: UnreadRecord::of(&unread),
             },
@@ -459,6 +476,14 @@ mod tests {
         assert_eq!(Ending::NothingDriving.exit_code(), EXIT_NOTHING_DRIVING);
         assert_eq!(Ending::SurfaceWaiting.exit_code(), EXIT_SURFACE_WAITING);
         assert_eq!(Ending::Elapsed.exit_code(), EXIT_WATCH_ELAPSED);
+
+        // On the wire the word and the status are one value's two spellings, so
+        // a record can never state a condition its own exit code contradicts.
+        for ending in endings {
+            let rendered = serde_json::to_value(ending).expect("an ending serializes");
+            assert_eq!(rendered["condition"], serde_json::json!(ending.as_str()));
+            assert_eq!(rendered["exit"], serde_json::json!(ending.exit_code()));
+        }
     }
 
     #[test]
@@ -551,8 +576,7 @@ mod tests {
             },
             Record::Return {
                 run_id: "demo",
-                condition: Ending::Settled.as_str(),
-                exit: Ending::Settled.exit_code(),
+                ending: Ending::Settled,
                 cursor: "1:0",
                 unread: UnreadRecord::of(&unread),
             },

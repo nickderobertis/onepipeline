@@ -682,6 +682,117 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
     world.release("build.go");
 }
 
+/// A watch holds its cursor **before** a record whose writer has not finished it,
+/// and emits that record once the writer has.
+///
+/// The tail behind the cursor is the one place a supervisor loses an event
+/// outright rather than late: a watch that counted a half-written line as read
+/// would move its cursor past it and never come back for it, and on a live run
+/// the line being appended is the newest thing there is to say. Driven through
+/// the binary because the cursor is the binary's output — what a caller resumes
+/// from is the token printed on exit, not a value a function returned.
+#[test]
+fn a_watch_holds_at_a_record_its_writer_has_not_finished_and_emits_it_after() {
+    let world = World::new("watch-torn");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchtorn", vec![agent("build", &[])]);
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the journal is appended to
+    // directly because the case under test is a *writer caught halfway through an
+    // append*, which is a moment rather than a command: no verb of this binary can be
+    // asked to leave half a record behind, and a driver reached that state by chance
+    // would make the journey a race. The run has settled first, so this journey is the
+    // only writer while it stands in for that moment, and everything it then asks is a
+    // real `watch` invocation.
+    let journal = world.run_file(&run, "events.jsonl");
+    let settlement: Value = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["kind"] == json!("node-settled"))
+        .expect("a settled run recorded a settlement");
+    // A record of its own rather than a second copy of that one: its own stream
+    // and a later timestamp, so what the resumed watch emits can only be this.
+    let mut appended = settlement;
+    appended["ts"] = json!("2099-01-01T00:00:00.000Z");
+    appended["stream"] = json!("a-writer-caught-halfway");
+    let record = serde_json::to_string(&appended).expect("the record renders");
+    let (opening, rest) = record.split_at(record.len() / 2);
+
+    let first = world.run(&["watch", &run, "--timeout", "0", "--tick-interval", "0"]);
+    agreed(&first, "settled", 0);
+    let cursor = returned(&first)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+
+    append(&journal, opening);
+    let held = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &cursor,
+    ]);
+    agreed(&held, "settled", 0);
+    assert!(
+        emitted(&held).is_empty(),
+        "a watch emitted a record whose writer had not finished it:\n{}",
+        held.stdout
+    );
+    assert_eq!(
+        returned(&held)["cursor"].as_str(),
+        Some(cursor.as_str()),
+        "a watch moved its cursor past a record it did not emit, so nothing will \
+         ever emit that record:\n{}",
+        held.stdout
+    );
+
+    append(&journal, &format!("{rest}\n"));
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let after = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &cursor,
+    ]);
+    agreed(&after, "settled", 0);
+    assert_eq!(
+        emitted(&after),
+        vec!["node-settled".to_string()],
+        "the finished record never reached the watch resuming from the cursor that \
+         stopped before it:\n{}",
+        after.stdout
+    );
+    assert_ne!(
+        returned(&after)["cursor"].as_str(),
+        Some(cursor.as_str()),
+        "the cursor never moved past the record it finally emitted:\n{}",
+        after.stdout
+    );
+}
+
+/// Add to a run's journal exactly what a writer puts there: bytes on the end.
+fn append(journal: &std::path::Path, bytes: &str) {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal)
+        .expect("the journal is appendable")
+        .write_all(bytes.as_bytes())
+        .expect("the bytes are appended");
+}
+
 /// Everything a watch refuses, it refuses **before** it blocks.
 ///
 /// A watch that waited out its whole timeout to report a mistyped profile or a

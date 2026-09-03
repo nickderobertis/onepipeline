@@ -52,4 +52,16 @@ mod summary;
 mod surface;
 mod turns;
 mod views;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this module's eleven
+// journeys cost 20.7s together — cheaper than several single journeys already in this
+// binary, two of which nextest marks SLOW past 120s — and their edges reach only what
+// they test: they drive the `onepipeline` binary against `src/watch.rs`, `src/cli.rs`,
+// `src/journal.rs` and `src/views.rs`, all of the project this suite belongs to. The
+// implicit dependency on `onepipeline-note-journeys` is a pre-existing edge of that
+// project rather than anything this module adds, and it points the other way: it makes a
+// note change run the crate's suite, which no placement of this module alters. That
+// separately-edged project is edged on *conversational* cost — each of its journeys holds
+// a two-party turn open — and it had to grow its own instrumented recipe and a
+// `coverage-clean` edge to stay inside the 95% floor; giving one cheap module that shape
+// would buy nothing and take it out of the run that measures it.
 mod watch;

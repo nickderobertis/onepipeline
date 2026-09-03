@@ -855,7 +855,6 @@ mod tests {
              ever read that record"
         );
 
-        // The writer finishes it, and the same cursor picks it up.
         fs::write(
             paths.journal(),
             format!(
