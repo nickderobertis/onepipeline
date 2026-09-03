@@ -1687,7 +1687,6 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
         &["slow"],
     );
 
-    // The planner parks, stating why.
     world
         .run_with_stdin(
             &["reply", &run],
@@ -1758,7 +1757,6 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
                "reason": "it is plainly redundant"})
     );
 
-    // And the planner may undo any park, including the one it made.
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2240,4 +2238,83 @@ fn a_settle_reaches_the_record_when_the_reply_is_the_only_writer() {
         .exited(REFUSED)
         .err_has("already settled failed")
         .err_has("different");
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the twenty-eight other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What it exercises is the
+// crate's own edit vocabulary and reconciler, which any change under `src/` can move, so a
+// project edged narrower than the crate could not honestly run it.
+/// A park recorded before the operation carried an author reads back as the
+/// planner's, with no reason, and holds the monitor off exactly as one written
+/// today does.
+///
+/// The compatibility half of the park's new fields, and the one an operator
+/// meets first: a runs root outlives the build that wrote it, so the parks a
+/// monitor is judged against on the day this ships are all the old shape. Read
+/// as "no author" rather than as the planner's, they would let an observer undo
+/// every decision made before the field existed — which is the failure the
+/// fields were added for, arriving through the door left open behind them.
+#[test]
+fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
+    let world = World::new("edit-park-legacy");
+    let path = world.plan(
+        "legacypark",
+        &plan_of(
+            "legacypark",
+            vec![human("approve", &[]), agent("sweep", &["approve"])],
+        ),
+    );
+    // Returns awaiting the person, so nothing is driving the run and its store
+    // is not being written while this journey reads and rewrites it.
+    world.run(&["start", &path, "--attach"]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", "legacypark"],
+            &envelope(json!([{"op": "cancel", "id": "sweep",
+                              "reason": "the disk this host has 8G left on"}])),
+        )
+        .exited(0);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the case is a record **this build does
+    // not write**, and no invocation of this build can produce one: every park it commits
+    // carries `by`, so reaching the compatibility path through the front door is impossible
+    // by construction. The record is rewritten rather than the run raced — nothing is
+    // driving it — and everything after this is the real binary reading a real store, which
+    // is exactly how it meets an older run's journal.
+    let journal = world.run_file("legacypark", "events.jsonl");
+    let aged = std::fs::read_to_string(&journal)
+        .expect("the run's journal reads")
+        .replace(
+            r#"{"kind":"node-parked","node":"sweep","by":"planner","reason":"the disk this host has 8G left on"}"#,
+            r#"{"kind":"node-parked","node":"sweep"}"#,
+        );
+    assert!(
+        !aged.contains(r#""by":"planner""#),
+        "the park was not aged into the shape an older build wrote: {aged}"
+    );
+    std::fs::write(&journal, aged).expect("the aged journal is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world
+        .run_with_stdin(
+            &["reply", "legacypark"],
+            &json!({"version": 1, "author": "monitor",
+                    "commands": [{"op": "requeue", "id": "sweep"}]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("parked by the planner")
+        .err_has("stated no reason")
+        .err_has("surface it to the planner");
+
+    // And the planner still gets it back, so an aged park is a held decision
+    // rather than a node nothing can move.
+    world
+        .run_with_stdin(
+            &["reply", "legacypark"],
+            &envelope(json!([{"op": "requeue", "id": "sweep"}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
