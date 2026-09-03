@@ -299,6 +299,19 @@ jobs:
   # `--git` install with no revision, and the `install` job above is what proves
   # this revision — but a check that can only report after the merge gates
   # nothing, which is how the documented command stayed broken through a release.
+  #
+  # That split revision is why the smoke below is the default branch's copy of
+  # the script and not this checkout's. `scripts/smoke-published.sh` asserts the
+  # binary's whole command list, and `tests/contract.rs` holds that list to the
+  # binary this revision compiles — so a branch adding a verb necessarily adds it
+  # to the script, and running that script against a binary built from the
+  # default branch fails on a verb the default branch has not got yet. Every
+  # pull request that adds a subcommand would go red here for the one reason
+  # this job does not exist to catch. Pairing each revision's script with its own
+  # binary lowers nothing: this revision's script against this revision's binary
+  # is what the `install` job above proves, on the same three platforms. So do
+  # not "fix" the smoke step back to the checked-out script — the checkout is
+  # here for README.md, and pointing it at the script restores the mismatch.
   install-documented:
     strategy:
       fail-fast: false
@@ -309,8 +322,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # For README.md and scripts/smoke-published.sh. The install itself resolves
-      # everything it builds from the remote, which is the point.
+      # For README.md, which is the one source of the command below. The install
+      # itself resolves everything it builds from the remote, which is the point.
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Install (the command the README gives users)
@@ -331,7 +344,13 @@ jobs:
           echo "running README.md's command: ${argv[*]}"
           "${argv[@]}"
       - name: Smoke-test the installed binary
-        run: bash scripts/smoke-published.sh --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
+        run: |
+          # `origin/HEAD` is the remote's default branch — the same revision the
+          # `--git` install with no revision above just resolved — so this is
+          # that binary's own copy of the assertions rather than the branch's.
+          git fetch --depth=1 origin HEAD
+          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
+          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
 
   # The other end-user install path: the maturin wheel `pip install
   # onepipeline-cli` serves. Built and installed from this revision so the
