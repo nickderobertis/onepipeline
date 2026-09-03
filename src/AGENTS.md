@@ -74,6 +74,13 @@ So **whole-state work belongs on a change, never on a pass**: a per-pass
 `state.statuses()`, `writeback.publish`, `upstreams.resolve` or
 `projection::fold` puts back a CPU sink big enough to make this host unusable.
 
+The other half of that is: a pass that **moved the run's own state re-passes at
+once**. A settlement the pass itself made — an `expects_no_diff` node, a human
+action recorded as waiting — has no dispatch thread to report it and writes
+nothing to the channel, so a wait after one is a wait for a message nobody will
+send. What it readied then sits `ready` for the life of the run while every view
+reports the run healthy and being driven, and an attached launch never returns.
+
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 
 - `start_ready` runs **before** the terminal check. A ready human action derives

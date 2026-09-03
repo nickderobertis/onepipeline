@@ -772,9 +772,25 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
+        // Whether this pass moved the run's own state, which is the one change
+        // the wait below cannot be woken by. A dispatch's settlement arrives as a
+        // message and an edit arrives on the channel, but a settlement *this pass
+        // made* — a node with no diff to produce, a human action recorded as
+        // waiting — has nobody left to announce it, and neither does an edit this
+        // pass applied. What such a settlement readies is started by the next
+        // pass, so a pass that moved anything is followed by one rather than by a
+        // wait: waiting there is waiting for a dispatch nobody started, on a
+        // channel nobody is going to write.
+        //
+        // Bounded by what it counts. Each of the three below reports `true` only
+        // for work it *consumed* — a claimed envelope, a settled or dispatched
+        // node — so the extra passes are one per change rather than one per look,
+        // and a converged run still runs none at all.
+        let mut moved = false;
         if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
@@ -847,6 +863,7 @@ fn converge(
         if adopt_releases(paths, journal, state, &statuses, &mut releases, &in_flight)? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Start what became actionable *before* asking whether the run is over.
@@ -869,6 +886,7 @@ fn converge(
         )? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Why every node the loop is not running and has not settled is not
@@ -906,12 +924,13 @@ fn converge(
             }
         }
 
-        // Nothing more to do until something happens. The longest this loop may go
-        // without a pass is stated here rather than inside the wait: the two paced
-        // reads, and the earliest stall threshold. Each is `Duration::MAX` where
-        // this run can never need it — a graph naming no cross-DAG edge, a run
-        // with no release business, nothing in flight — so a converged driver
-        // waits on the channel alone.
+        // Nothing more to do until something happens — unless this pass is what
+        // happened, in which case the next one is due now. The longest this loop
+        // may go without a pass is otherwise stated here rather than inside the
+        // wait: the two paced reads, and the earliest stall threshold. Each is
+        // `Duration::MAX` where this run can never need it — a graph naming no
+        // cross-DAG edge, a run with no release business, nothing in flight — so a
+        // converged driver waits on the channel alone.
         let next = [
             if has_upstreams {
                 until_due(read_upstreams, UPSTREAM_EVERY)
@@ -925,7 +944,11 @@ fn converge(
             },
             next_quiet(&in_flight, stall_after),
         ];
-        let deadline = next.into_iter().min().unwrap_or(Duration::MAX);
+        let deadline = if moved {
+            Duration::ZERO
+        } else {
+            next.into_iter().min().unwrap_or(Duration::MAX)
+        };
         // Scoped, because the two things it reads are things the pass writes:
         // the closure's borrows end with the wait, before the messages it hands
         // back are applied.
