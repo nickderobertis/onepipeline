@@ -391,7 +391,9 @@ fn a_watch_told_not_to_tick_stays_silent_for_the_whole_wait() {
         ])
         .exited(0);
 
-    // Long enough that the default interval would have beaten several times.
+    // Four seconds of real waiting. The journey above beats four times over the
+    // same span on a one-second interval, so silence here is the flag working
+    // rather than the wait being too short for anything to have happened.
     let watched = world.run(&["watch", &run, "--timeout", "4", "--tick-interval", "0"]);
     agreed(&watched, "elapsed", WATCH_ELAPSED);
     let beats: Vec<Value> = machine(&watched)

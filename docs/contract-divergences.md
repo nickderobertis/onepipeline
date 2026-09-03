@@ -3276,8 +3276,10 @@ the caller as `3`, exactly as it does through an attached `start`.
 
 The two forms go out on the two descriptors an attached `start` already splits:
 the human lines on standard error, and one NDJSON record per line on standard
-output — `{"watch":"event","event":{…}}`, `{"watch":"heartbeat",…}`, and a final
-`{"watch":"return","condition":…,"exit":…,"cursor":…,"unread":…}` — each flushed
+output — `{"watch":"event","event":{…}}`,
+`{"watch":"heartbeat","run_id":…,"unread":…}`, and a final
+`{"watch":"return","run_id":…,"condition":…,"exit":…,"cursor":…,"unread":…}` — each
+flushed
 as it is written, because a blocking verb whose consumer sees nothing until it
 exits is the silence this verb exists to end. The machine form carries the whole
 envelope rather than a rendering of it, as `next` already hands its caller the

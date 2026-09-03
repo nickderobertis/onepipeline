@@ -696,6 +696,11 @@ mod tests {
     /// The entry describes the machine-readable form by naming its records, and
     /// the records are a serialized type: this is what keeps the two the same
     /// answer.
+    ///
+    /// Down to the **fields**, because the tag is the part a consumer finds and
+    /// the fields are the part it reads. An entry that named every record and
+    /// silently dropped a key would be a proposal to add a field this build does
+    /// not write, or to leave one out that it does.
     #[test]
     fn the_divergence_entry_names_the_records_the_machine_form_actually_writes() {
         let entry = divergence_entry();
@@ -720,10 +725,33 @@ mod tests {
                 entry.contains(&format!("\"watch\":\"{tag}\"")),
                 "the entry describes no `{tag}` record, which this build writes"
             );
+            // Read within *this* record's own fragment of the entry rather than
+            // across the whole of it: every record here carries `run_id` and two
+            // carry `unread`, so a whole-entry search would find a key dropped
+            // from one record still standing in the next.
+            let shown = entry
+                .split_once(&format!("{{\"watch\":\"{tag}\""))
+                .unwrap_or_else(|| panic!("the entry shows the `{tag}` record"))
+                .1
+                .split_once('}')
+                .unwrap_or_else(|| panic!("the entry's `{tag}` record is closed"))
+                .0;
+            for key in rendered
+                .as_object()
+                .expect("a record is an object")
+                .keys()
+                .filter(|key| *key != "watch")
+            {
+                assert!(
+                    shown.contains(&format!("\"{key}\":")),
+                    "the entry's `{tag}` record does not carry `{key}`, which this build writes"
+                );
+            }
         }
-        // The one variant that borrows an envelope, asserted the same way.
+        // The one variant that borrows an envelope, asserted the same way: its
+        // payload is the whole envelope, so the field is the only key to hold.
         assert!(
-            entry.contains("\"watch\":\"event\""),
+            entry.contains("\"watch\":\"event\"") && entry.contains("\"event\":"),
             "the entry describes no `event` record, which this build writes"
         );
     }
@@ -775,13 +803,17 @@ mod tests {
             );
         }
 
+        // Every record this build writes, by its tag and by its own keys, read off
+        // the serialized form rather than copied. These are what a caller branches
+        // on, so a key renamed in the code and left standing in the README is a
+        // script reading a field that is no longer there.
+        //
+        // Across the passage rather than per record, because the README describes
+        // these in prose and two of them share most of their keys: what it holds
+        // is that no key this build writes goes unmentioned. The per-record
+        // reconciliation is the divergence entry's, below, where the records are
+        // written as JSON fragments that can be told apart.
         let unread = Unread::default();
-        let returned = Record::Return {
-            run_id: "demo",
-            ending: Ending::Settled,
-            cursor: &Cursor::start("demo"),
-            unread: UnreadRecord::of(&unread),
-        };
         for shape in [
             Record::Heartbeat {
                 run_id: "demo",
@@ -800,6 +832,18 @@ mod tests {
                 passage.contains(&format!("`{tag}`")),
                 "the README's watch passage describes no `{tag}` record, which this build writes"
             );
+            for key in rendered
+                .as_object()
+                .expect("a record is an object")
+                .keys()
+                .filter(|key| *key != "watch")
+            {
+                assert!(
+                    passage.contains(&format!("`{key}`")),
+                    "the README's watch passage does not name `{key}`, which the `{tag}` \
+                     record carries"
+                );
+            }
         }
         // The variant that borrows an envelope, asserted the same way: it cannot
         // be built here without a run to borrow one from, and its tag is what the
@@ -808,23 +852,6 @@ mod tests {
             passage.contains("`event`"),
             "the README's watch passage describes no `event` record, which this build writes"
         );
-
-        // The return record's own keys, read off the serialized form rather than
-        // copied: this is the record a caller branches on, so a key renamed in the
-        // code and left standing in the README is a script reading a field that is
-        // no longer there. The tag itself is asserted above.
-        let rendered = serde_json::to_value(&returned).expect("the record serializes");
-        for key in rendered
-            .as_object()
-            .expect("the return record is an object")
-            .keys()
-            .filter(|key| *key != "watch")
-        {
-            assert!(
-                passage.contains(&format!("`{key}`")),
-                "the README's watch passage does not name `{key}`, which the return record carries"
-            );
-        }
     }
 
     #[test]
