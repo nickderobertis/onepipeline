@@ -949,14 +949,17 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
     // first, and projects onto the same destination items.
     for run in ["readback", "readback-2"] {
         world.run(&["start", &project, "--attach"]).exited(0);
-        world.until_store("the settlement to reach the plan it was launched from", |world| {
-            world
-                .store_tasks(&project)
-                .iter()
-                .filter(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
-                .count()
-                == 2
-        });
+        world.until_store(
+            "the settlement to reach the plan it was launched from",
+            |world| {
+                world
+                    .store_tasks(&project)
+                    .iter()
+                    .filter(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+                    .count()
+                    == 2
+            },
+        );
         assert_eq!(
             world.run_json(run, "result.json")["state"],
             "complete",
