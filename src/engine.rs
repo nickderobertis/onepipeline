@@ -773,19 +773,11 @@ fn converge(
     loop {
         crate::loopstats::pass();
         // Whether this pass moved the run's own state, which is the one change
-        // the wait below cannot be woken by. A dispatch's settlement arrives as a
-        // message and an edit arrives on the channel, but a settlement *this pass
-        // made* — a node with no diff to produce, a human action recorded as
-        // waiting — has nobody left to announce it, and neither does an edit this
-        // pass applied. What such a settlement readies is started by the next
-        // pass, so a pass that moved anything is followed by one rather than by a
-        // wait: waiting there is waiting for a dispatch nobody started, on a
-        // channel nobody is going to write.
-        //
-        // Bounded by what it counts. Each of the three below reports `true` only
-        // for work it *consumed* — a claimed envelope, a settled or dispatched
-        // node — so the extra passes are one per change rather than one per look,
-        // and a converged run still runs none at all.
+        // the wait below cannot be woken by: what a pass settles or applies itself
+        // has no dispatch left to report it and writes nothing to the channel, so
+        // what it readies is the next pass's to start. Each of the three below
+        // reports `true` only for work it *consumed*, which bounds this at one
+        // extra pass per change and leaves a converged run running none.
         let mut moved = false;
         if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
             derived = None;

@@ -1707,14 +1707,11 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
 /// An attached launch whose observer graph has stopped still drives the run to
 /// settlement, and still returns.
 ///
-/// `OBSERVER DEAD` on a live run is the state an operator is told to watch for —
-/// the run is being driven and nobody is watching it — so it is also the state a
-/// wedge is hardest to see from: the driver goes on saying the run is being
-/// driven, `status` reports a node `ready`, and the launcher that is supposed to
-/// hand control back on one of three conditions reaches none of them. The plan
-/// here has work left when the observer goes, and the node that work belongs to
-/// is readied by a dependency that settled without a dispatch — which is the
-/// frontier this run has to keep moving with nothing left to report it.
+/// The third of the launch's three return conditions, on the run state that
+/// hides a wedge best: every view goes on reporting a run being driven. The plan
+/// has work left when the observer goes, and that work is readied by a
+/// dependency that settled without a dispatch — so the frontier has to keep
+/// moving with nothing left to report it.
 #[test]
 fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_advances() {
     let world = World::new("driver-observer-outlived");

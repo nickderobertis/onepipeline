@@ -897,31 +897,17 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
 
 /// A plan still reads back after a run of it has settled, and after several.
 ///
-/// A projection is a **copy**, and a copy carries whatever the shadow store says
-/// about the far end of a dependency edge. Written as the far task's file name
-/// alone, that far end resolves to the shadow source's own name for it — a
-/// member of no copied set, so the copy carries it through verbatim and the
-/// destination is left holding an edge into a directory under the run's own
-/// scratch. Every read of the plan afterwards is then refused for a dependency
-/// target the store cannot resolve, which is the record an operator goes back to
-/// when a run has gone wrong.
-///
 /// Asserted as **which record each node is** and the edges that record holds,
-/// both held against what the store answered with before the run — not as how
-/// many of either there are, which is what the journeys above ask and what
-/// cannot tell a record that moved from one that stayed. The identity half is
-/// the other way a projection loses the destination: correspondence is found
-/// through the origin the shadow declares, so a projection that stopped
-/// declaring it would write the run's own records *beside* the operator's rather
-/// than onto them, and a plan whose nodes each read back twice is as unusable as
-/// one whose edges name nowhere. And twice over, because a projection that
-/// damaged the destination once would have a second run of the same plan to
-/// damage further.
+/// both against what the store answered with before the run — not as how many of
+/// either there are, which is what the journeys above ask and what cannot tell a
+/// record that moved from one that stayed. Two ways a projection loses the
+/// destination, and neither shows up as a count: an edge whose far end names the
+/// run's own scratch, which no reader of the plan can resolve, and a record
+/// written beside the operator's rather than onto it.
 ///
-/// What this cannot hold is the destination's own `onetaskgraph.origin`, which
-/// `copy` stamps with the copied item's qualified id on everything it writes:
-/// divergence 59 records that, and it is a correspondence for the *next* copy
-/// down rather than anything a read of this plan goes through.
+/// Twice over, because a projection that damaged the destination once would have
+/// a second run of the same plan to damage further. The destination's own
+/// `onetaskgraph.origin` is out of reach here and divergence 59 says why.
 #[test]
 fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with() {
     let world = World::new("store-settled-readback");
@@ -932,10 +918,8 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
             vec![agent("first", &[]), agent("second", &["first"])],
         ),
     );
-    // Which record each node of the plan *is*, and the edges that record holds, as
-    // the store itself resolves them. Keyed by node id and never by the record's
-    // own id, so a projection that wrote a second record for a node is a changed
-    // value here rather than a key nothing compares against.
+    // Keyed by node id and never by the record's own id, so a second record for a
+    // node is a changed value here rather than a key nothing compares against.
     let records = |world: &World| -> BTreeMap<String, (String, Vec<Value>)> {
         let tasks = world.store_tasks(&project);
         let held: BTreeMap<String, (String, Vec<Value>)> = tasks
@@ -995,11 +979,8 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
             authored,
             "settlement rewrote the plan's own records or the edges between them after {run}"
         );
-        // And what that costs when it is wrong: the plan is readable, through the
-        // engine's own loader, by the verb whose job is to read one without
-        // launching it. A rewritten edge is refused here naming a dependency
-        // target nothing resolves, which is every command that reads a plan after
-        // a run of it has settled.
+        // Through the engine's own loader, which is how every command that reads a
+        // plan reaches one and is not what the store queries above go through.
         world.run(&["plan", "check", &project]).exited(0);
     }
 }

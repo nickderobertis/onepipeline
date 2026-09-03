@@ -305,16 +305,11 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
 
 /// A node readied by a settlement **the pass itself made** is still dispatched.
 ///
-/// An `expects_no_diff` node never spends a dispatch, so no thread will ever
-/// report its settlement back: the pass that found it ready is the only thing
-/// that knows it settled, and the pass that starts what it readied is the very
-/// next one. A loop that went back to waiting instead waits on a channel nobody
-/// will write for a dispatch nobody started — the dependent sits `ready` for the
-/// life of the run, every view reports the run as healthy and being driven, and
-/// an attached launcher never returns.
-///
-/// Attached deliberately: the frontier and the return are one fact here, and a
-/// detached form would prove the first while leaving the second to a reader.
+/// An `expects_no_diff` node never spends a dispatch, so nothing will ever report
+/// its settlement back and the pass that starts what it readied is the very next
+/// one. Attached deliberately: the frontier and the launch's return are one fact
+/// here, and a detached form would prove the first and leave the second to a
+/// reader.
 #[test]
 fn a_node_readied_by_a_settlement_no_dispatch_reported_is_still_dispatched() {
     let world = World::new("plan-nodiff-dependent");
