@@ -51,8 +51,6 @@ const MEANINGFUL: [PipelineKind; 8] = [
     PipelineKind::RunStopped,
 ];
 
-/// Why a watch returned.
-///
 /// A closed set with a code each, so a caller branches on the status and never
 /// on the words beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,13 +212,11 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
 /// the run makes that token refusable by name instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cursor {
-    /// The run whose journal `at` is a byte of.
     run: String,
     at: u64,
 }
 
 impl Cursor {
-    /// The start of a run's journal: what a watch given no cursor resumes from.
     fn start(run: &str) -> Self {
         Self {
             run: run.to_string(),
@@ -344,13 +340,10 @@ enum Record<'a> {
     /// consumer needing a field this crate does not put on the line never has to
     /// go back to the store for it.
     Event { event: &'a Envelope },
-    /// The watch is alive, and this is what is waiting unread.
     Heartbeat {
         run_id: &'a str,
         unread: UnreadRecord<'a>,
     },
-    /// Why the watch returned, with the status a caller branches on and the
-    /// cursor the next one resumes from.
     Return {
         run_id: &'a str,
         /// The word and the status, both written from the one [`Ending`] the
@@ -363,7 +356,6 @@ enum Record<'a> {
     },
 }
 
-/// How many planner surfaces are unread and of which kinds, on the wire.
 #[derive(Debug, serde::Serialize)]
 struct UnreadRecord<'a> {
     count: usize,
@@ -726,15 +718,29 @@ mod tests {
                 .split_once('}')
                 .unwrap_or_else(|| panic!("the entry's `{tag}` record is closed"))
                 .0;
-            for key in rendered
+            let written: std::collections::BTreeSet<&str> = rendered
                 .as_object()
                 .expect("a record is an object")
                 .keys()
+                .map(String::as_str)
                 .filter(|key| *key != "watch")
-            {
+                .collect();
+            for key in &written {
                 assert!(
                     shown.contains(&format!("\"{key}\":")),
                     "the entry's `{tag}` record does not carry `{key}`, which this build writes"
+                );
+            }
+            // And the other way: a key the entry kept past the code would pass
+            // every assertion above, and it is the worse drift — the entry is
+            // read by the person ruling on this surface, so a field standing in
+            // it that nothing writes is a proposal to approve something that does
+            // not exist.
+            for shown_key in shown.split('"').skip(1).step_by(2) {
+                assert!(
+                    shown_key == "watch" || written.contains(shown_key),
+                    "the entry's `{tag}` record carries `{shown_key}`, which this build does \
+                     not write"
                 );
             }
         }
