@@ -4167,11 +4167,14 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         );
     }
 
-    // `watch` is documented in a passage of its own, and everything it restates
-    // is read out of the code here: the flags are clap's, the defaults are the
-    // constants, and the four terminal statuses are the exit codes. A number
-    // moved in the crate and left in the README fails the suite rather than
-    // sending a supervisor to branch on a status the binary no longer returns.
+    // `watch` is documented in a passage of its own, and the two things it
+    // restates that a caller writes code against are read out of the code here:
+    // the flags are clap's, and the four terminal statuses are the exit-code
+    // constants. A status moved in the crate and left in the README fails the
+    // suite rather than sending a supervisor to branch on one the binary no
+    // longer returns. The same passage's event set and NDJSON record schema are
+    // reconciled against `MEANINGFUL` and `Record`, which are private to the
+    // module, by that module's own `the_readme_passage_...` unit test.
     assert!(
         surface.contains("watch"),
         "`watch` is not a command the binary offers"

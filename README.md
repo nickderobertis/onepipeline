@@ -309,15 +309,18 @@ Anything nothing in the stack measures is reported absent, never as a zero.
 `onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
 it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
 It blocks, writing one line per event a supervisor acts on — a graph edit whichever
-author issued it, a node settling at any outcome, a surface being raised, a decision
-beginning or clearing to hold a subtree, and the run being stopped — and one
-heartbeat line per `--tick-interval SECONDS` of silence, so a quiet run and a dead
-stream are not the same thing seen from outside. **Every heartbeat says how many
-planner surfaces are unread and of which kinds**, so a caller matching only on event
-lines cannot lose the one signal that a question is waiting. The human lines go to
-standard error and one NDJSON record per line to standard output — the events, the
-heartbeats, and a final record naming the condition, the exit code and the cursor —
-so nothing has to match prose.
+author issued it (`edit-committed`, `edit-rejected`), a node settling at any outcome
+(`node-settled`), a surface being raised (`planner-surface-queued`), a decision
+beginning or clearing to hold a subtree (`decision-pending`, `decision-cleared`), a
+completion being asked for (`completion-requested`), and the run being stopped
+(`run-stopped`) — and one heartbeat line per `--tick-interval SECONDS` of silence, so
+a quiet run and a dead stream are not the same thing seen from outside. **Every
+heartbeat says how many planner surfaces are unread and of which kinds**, so a caller
+matching only on event lines cannot lose the one signal that a question is waiting.
+The human lines go to standard error and one NDJSON record per line to standard
+output — a `watch` of `event`, of `heartbeat`, and one final `return` carrying
+`run_id`, `condition`, `exit`, `cursor` and `unread` — so nothing has to match
+prose.
 
 It returns on four conditions, each with a status of its own: exit `0` when the
 run settled complete, `3` when nothing is driving it — the same code every other

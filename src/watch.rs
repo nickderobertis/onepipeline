@@ -663,6 +663,105 @@ mod tests {
         );
     }
 
+    /// The README's own passage about this verb, bounded by the heading that
+    /// follows it, so a kind or a key named elsewhere in that document cannot
+    /// satisfy an assertion about what this passage says.
+    fn readme_watch_passage() -> String {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        readme
+            .split_once("`onepipeline watch RUN` is the bounded wait")
+            .expect("the README documents this verb")
+            .1
+            .split_once("\n## ")
+            .expect("that passage ends where the README's next heading begins")
+            .0
+            .to_string()
+    }
+
+    /// The README restates this verb's event set and its NDJSON records, because
+    /// that passage is what a supervisor writes their script against — and a
+    /// restatement with no gate is exactly where the two drift apart.
+    ///
+    /// `tests/contract.rs` reconciles the same passage's flags and terminal
+    /// statuses; the meaningful set and the record schema are private to this
+    /// module, so they are reconciled here rather than by widening them.
+    ///
+    /// The kinds are asserted **both ways**, as the divergence entry's are: a kind
+    /// the README names and this build does not emit sends a script matching for a
+    /// word that never arrives, and a kind this build emits and the README omits
+    /// is a signal nobody was told to watch for — which is the failure this whole
+    /// verb exists to end.
+    #[test]
+    fn the_readme_passage_names_every_meaningful_kind_and_every_record_this_verb_writes() {
+        let passage = readme_watch_passage();
+
+        for kind in crate::event::PIPELINE_KINDS {
+            let named = passage.contains(&format!("`{}`", kind.as_str()));
+            assert_eq!(
+                named,
+                MEANINGFUL.contains(kind),
+                "the README's watch passage names `{}` ({named}), and this build calls it \
+                 meaningful ({})",
+                kind.as_str(),
+                MEANINGFUL.contains(kind)
+            );
+        }
+
+        let unread = Unread::default();
+        let returned = Record::Return {
+            run_id: "demo",
+            ending: Ending::Settled,
+            cursor: Cursor(0),
+            unread: UnreadRecord::of(&unread),
+        };
+        for shape in [
+            Record::Heartbeat {
+                run_id: "demo",
+                unread: UnreadRecord::of(&unread),
+            },
+            Record::Return {
+                run_id: "demo",
+                ending: Ending::Settled,
+                cursor: Cursor(0),
+                unread: UnreadRecord::of(&unread),
+            },
+        ] {
+            let rendered = serde_json::to_value(&shape).expect("the record serializes");
+            let tag = rendered["watch"].as_str().expect("every record is tagged");
+            assert!(
+                passage.contains(&format!("`{tag}`")),
+                "the README's watch passage describes no `{tag}` record, which this build writes"
+            );
+        }
+        // The variant that borrows an envelope, asserted the same way: it cannot
+        // be built here without a run to borrow one from, and its tag is what the
+        // passage promises.
+        assert!(
+            passage.contains("`event`"),
+            "the README's watch passage describes no `event` record, which this build writes"
+        );
+
+        // The return record's own keys, read off the serialized form rather than
+        // copied: this is the record a caller branches on, so a key renamed in the
+        // code and left standing in the README is a script reading a field that is
+        // no longer there. The tag itself is asserted above.
+        let rendered = serde_json::to_value(&returned).expect("the record serializes");
+        for key in rendered
+            .as_object()
+            .expect("the return record is an object")
+            .keys()
+            .filter(|key| *key != "watch")
+        {
+            assert!(
+                passage.contains(&format!("`{key}`")),
+                "the README's watch passage does not name `{key}`, which the return record carries"
+            );
+        }
+    }
+
     #[test]
     fn a_wait_longer_than_the_clock_can_name_is_refused_rather_than_panicking() {
         assert!(Instant::now()

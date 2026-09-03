@@ -101,14 +101,16 @@ fn agreed(watched: &Run, condition: &str, code: i32) {
     );
 }
 
-/// Every class a supervisor acts on reaches the watch as a line of its own — and
-/// the machine-readable form carries the same three.
+/// The three classes this verb exists for — a graph edit, a surface being raised
+/// and a node settling — each reach the watch as a line of its own, and the
+/// machine-readable form carries the same three. The other five meaningful kinds
+/// are driven by the journey below this one.
 ///
 /// The graph edit is issued by the **monitor**, because an edit is emitted
 /// whichever author issued it and the monitor's is the author a supervisor is
 /// least expecting.
 #[test]
-fn a_watch_emits_a_line_for_every_class_a_supervisor_acts_on() {
+fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     let world = World::new("watch-classes");
     world.script("build.wait", "hold");
     let run = running(&world, "watchclasses", vec![agent("build", &[])]);
