@@ -82,18 +82,13 @@ const MEANINGFUL: [PipelineKind; 8] = [
 /// on the words beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
-    /// The graph reached `complete`: every node of it is `done`.
     Settled,
-    /// A blocking surface is waiting to be answered.
     SurfaceWaiting,
-    /// No process is driving the run: its driver died, or it is parked.
     NothingDriving,
-    /// The wait ran out with the run still being driven.
     Elapsed,
 }
 
 impl Ending {
-    /// The word the machine-readable form carries, and the human one repeats.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Settled => "settled",
@@ -103,7 +98,6 @@ impl Ending {
         }
     }
 
-    /// The process exit code this ending returns.
     const fn exit_code(self) -> i32 {
         match self {
             Self::Settled => EXIT_SUCCESS,
@@ -122,10 +116,21 @@ impl Ending {
 /// loop it replaces.
 pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) -> Result<i32> {
     let mut cursor = match args.cursor.as_deref() {
-        Some(token) => parse_cursor(token)?,
+        Some(token) => resolve_cursor(paths, token)?,
         None => 0,
     };
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    // Checked, because the seconds are a caller's: `Instant` addition panics on
+    // overflow, and a wait longer than this host's clock can hold is a value to
+    // refuse rather than a reason to abort the process.
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(args.timeout))
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "a wait of {} seconds is further ahead than this host's clock can name; \
+                 give `--timeout` a value it can reach",
+                args.timeout
+            ))
+        })?;
     let tick = Duration::from_secs(args.tick_interval);
     let mut quiet_since = Instant::now();
     let mut out = Emitter::new();
@@ -194,9 +199,56 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
     None
 }
 
-/// The token a watch prints for the byte it stopped at.
 fn render_cursor(at: u64) -> String {
     format!("{WATCH_CURSOR_VERSION}:{at}")
+}
+
+/// The byte a cursor token names **in this run's journal**, or a refusal.
+///
+/// Two questions, and the second is the one that costs. A token that parses is
+/// only a number; whether that number is a place in *this* store is a fact about
+/// the store, and a watch handed a cursor from another run — or from this one
+/// before its journal was healed — would read past the end of the file, find
+/// nothing, and report a run where nothing was happening. It is refused instead,
+/// naming both numbers.
+///
+/// A boundary as well as a length: every record this crate appends ends in a
+/// newline, so a cursor that does not sit just past one is pointing into the
+/// middle of a record, and resuming there would hand the caller a fragment as
+/// though it were an event.
+fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<u64> {
+    let at = parse_cursor(token)?;
+    let journal = paths.journal();
+    let held = std::fs::metadata(&journal).map_or(0, |file| file.len());
+    if at > held {
+        return Err(Error::Invalid(format!(
+            "cursor '{token}' resumes at byte {at} of run '{}', whose store holds {held}; \
+             a cursor is only readable by the run the watch that printed it was watching",
+            paths.run
+        )));
+    }
+    if at > 0 && !ends_a_record(&journal, at) {
+        return Err(Error::Invalid(format!(
+            "cursor '{token}' resumes at byte {at} of run '{}', which is inside a record \
+             rather than after one; a cursor is what an earlier `onepipeline watch` \
+             printed, and never a byte count of its own",
+            paths.run
+        )));
+    }
+    Ok(at)
+}
+
+/// Whether the byte before `at` ends a record.
+fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(journal) else {
+        return false;
+    };
+    if file.seek(SeekFrom::Start(at - 1)).is_err() {
+        return false;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).is_ok() && last[0] == b'\n'
 }
 
 /// The byte a cursor token names, or a refusal saying what was read.
@@ -375,6 +427,44 @@ mod tests {
                 "{token:?}: {refused}"
             );
         }
+    }
+
+    /// The divergence record is where this verb's surface is *proposed*, and the
+    /// meaningful set is the part of it a reader has to trust: an entry naming a
+    /// kind this build does not emit, or silent about one it does, is a proposal
+    /// for something nobody built. The two are held together here rather than by
+    /// a reader noticing.
+    #[test]
+    fn the_divergence_entry_names_exactly_the_kinds_this_build_calls_meaningful() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split_once("\n## 58.")
+            .expect("this verb is recorded under entry 58")
+            .1;
+        let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
+
+        for kind in crate::event::PIPELINE_KINDS {
+            let named = entry.contains(&format!("`{}`", kind.as_str()));
+            assert_eq!(
+                named,
+                MEANINGFUL.contains(kind),
+                "the entry and this build disagree about whether `{}` is a kind a watch \
+                 emits",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_wait_longer_than_the_clock_can_name_is_refused_rather_than_panicking() {
+        assert!(Instant::now()
+            .checked_add(Duration::from_secs(u64::MAX))
+            .is_none());
     }
 
     #[test]

@@ -20,10 +20,10 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, plan_of, Run, World, NOTHING_DRIVING, REFUSED, SURFACE_WAITING, WATCH_ELAPSED,
+    agent, ended, plan_of, Run, World, NOTHING_DRIVING, REFUSED, SURFACE_WAITING, USAGE_ERROR,
+    WATCH_ELAPSED,
 };
 
-/// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &path, "--detach"]).exited(0);
@@ -176,6 +176,125 @@ fn a_watch_emits_a_line_for_every_class_a_supervisor_acts_on() {
         json!("monitor"),
         "{edit}"
     );
+
+    // The profile selection is `monitor`'s and shapes the event view exactly as
+    // it does there: the shipped `planner` profile a watch reads through when it
+    // is given neither is every pipeline-level event, so the same three survive
+    // `--all` and the shipped `monitor` profile too. Given neither — and given no
+    // bound either — the defaults carry a watch over a run that has finished.
+    for selection in [
+        vec!["watch", &run],
+        vec!["watch", &run, "--all"],
+        vec!["watch", &run, "--filter", "monitor"],
+    ] {
+        let again = world.run(&selection);
+        agreed(&again, "settled", 0);
+        let kinds = emitted(&again);
+        for kind in ["edit-committed", "planner-surface-queued", "node-settled"] {
+            assert!(
+                kinds.iter().any(|emitted| emitted == kind),
+                "{selection:?} lost `{kind}`, leaving {kinds:?}"
+            );
+        }
+    }
+}
+
+/// The decision, completion and stop records a supervisor acts on reach the
+/// watch as lines too — including the edit the reconciler refused, which is as
+/// much a thing to act on as one that landed.
+#[test]
+fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
+    let world = World::new("watch-decisions");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchdecisions", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the durable queue is written
+    // directly for the one reason `live_edit.rs` writes it directly: an edit the
+    // *reconciler* refuses is the case a user cannot type, because the submission check
+    // would reject this one first and `edit-rejected` — the record this journey is here
+    // to see emitted — would never be written. Everything else below goes through the
+    // binary's own verbs.
+    std::fs::write(
+        world.run_file(&run, "channel/commands.jsonl"),
+        format!(
+            "{}\n",
+            json!({"id": 0, "commands": [{"op": "cancel", "id": "nowhere"}]})
+        ),
+    )
+    .expect("the command is queued");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.until("the reconciler to refuse the edit", |world| {
+        !world.events_of(&run, "edit-rejected").is_empty()
+    });
+
+    // A blocking surface begins holding the subtree that depends on the node it
+    // names, and answering it releases exactly that subtree.
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"is this still wanted?","blocking":true,"node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the decision to begin holding the subtree", |world| {
+        !world.events_of(&run, "decision-pending").is_empty()
+    });
+    world.run(&["next", &run]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(0);
+    world.until("the decision to clear", |world| {
+        !world.events_of(&run, "decision-cleared").is_empty()
+    });
+    drop(stdin);
+    ended(serving);
+
+    // The planner asks for completion, independently of any graph mutation.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [
+                {"op": "complete", "reason": "that is as far as this goes"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the completion request to be recorded", |world| {
+        !world.events_of(&run, "completion-requested").is_empty()
+    });
+
+    // And the run is ended.
+    world.run(&["stop", &run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(&run, "run-stopped").is_empty()
+    });
+
+    let watched = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    let kinds = emitted(&watched);
+    for kind in [
+        "edit-rejected",
+        "decision-pending",
+        "decision-cleared",
+        "completion-requested",
+        "run-stopped",
+    ] {
+        assert!(
+            kinds.iter().any(|emitted| emitted == kind),
+            "the watch calls `{kind}` meaningful and emitted none, only {kinds:?}"
+        );
+    }
+
+    world.release("build.go");
 }
 
 /// With nothing happening, the watch says so on the interval it was given — and
@@ -360,7 +479,9 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
         ])
         .exited(0);
 
-    let first = world.run(&["watch", &run, "--timeout", "2", "--tick-interval", "0"]);
+    // `--timeout 0` reads once and returns, which is the shape a caller uses to
+    // take a cursor without waiting at all.
+    let first = world.run(&["watch", &run, "--timeout", "0", "--tick-interval", "0"]);
     agreed(&first, "elapsed", WATCH_ELAPSED);
     assert!(
         first.stderr.contains("the first thing"),
@@ -413,20 +534,79 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
     world.release("build.go");
 }
 
-/// A cursor is external input, and one this build cannot place is refused by
-/// name rather than resumed from as though its digits meant a byte count.
+/// Everything a watch refuses, it refuses **before** it blocks.
+///
+/// A watch that waited out its whole timeout to report a mistyped profile or a
+/// cursor from another run would be worse than the shell loop it replaces, so
+/// each of these is given a bound long enough that a command which returned
+/// after waiting could not be mistaken for one that refused.
 #[test]
-fn a_cursor_this_build_cannot_place_refuses_the_watch_before_it_blocks() {
-    let world = World::new("watch-bad-cursor");
+fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
+    let world = World::new("watch-refusals");
     world.script("build.wait", "hold");
-    let run = running(&world, "watchbadcursor", vec![agent("build", &[])]);
+    let run = running(&world, "watchrefusals", vec![agent("build", &[])]);
 
-    for token in ["nonsense", "2:0", "1:later"] {
+    // A run this host does not hold, and a profile this run does not have —
+    // named the way `monitor` takes it.
+    world
+        .run(&["watch", "nosuchrun", "--timeout", "600"])
+        .exited(REFUSED)
+        .err_has("nosuchrun");
+    world
+        .run(&[
+            "watch",
+            &run,
+            "--filter",
+            "nosuchprofile",
+            "--timeout",
+            "600",
+        ])
+        .exited(REFUSED)
+        .err_has("nosuchprofile");
+
+    // A cursor is external input like any other. A token this build cannot read;
+    // one that reads but names a place past the store, which would otherwise
+    // read as a run where nothing was happening; and one that reads, fits, and
+    // points into the middle of a record rather than after one.
+    for token in ["nonsense", "2:0", "1:later", "1:-1"] {
         world
             .run(&["watch", &run, "--cursor", token, "--timeout", "600"])
             .exited(REFUSED)
             .err_has("is not a cursor this build reads");
     }
+    world
+        .run(&["watch", &run, "--cursor", "1:99999999", "--timeout", "600"])
+        .exited(REFUSED)
+        .err_has("whose store holds");
+    world
+        .run(&["watch", &run, "--cursor", "1:3", "--timeout", "600"])
+        .exited(REFUSED)
+        .err_has("inside a record");
+    // And a wait no clock can reach is a value to refuse, not a process to abort.
+    world
+        .run(&["watch", &run, "--timeout", &u64::MAX.to_string()])
+        .exited(REFUSED)
+        .err_has("this host's clock");
+
+    // The two clocks are on two verbs and neither takes the other's flag: this
+    // stream's interval, and the pacemaker cadence a launch sets.
+    world
+        .run(&["watch", &run, "--heartbeat-interval", "5"])
+        .exited(USAGE_ERROR)
+        .err_has("--heartbeat-interval");
+    let path = world.plan(
+        "unstarted",
+        &plan_of("unstarted", vec![agent("build", &[])]),
+    );
+    world
+        .run(&["start", &path, "--tick-interval", "5"])
+        .exited(USAGE_ERROR)
+        .err_has("--tick-interval");
+    // A condition the verb does not offer is refused naming the ones it does.
+    world
+        .run(&["watch", &run, "--until", "whenever", "--timeout", "600"])
+        .exited(USAGE_ERROR)
+        .err_has("surface");
 
     world.release("build.go");
 }
