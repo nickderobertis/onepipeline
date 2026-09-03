@@ -609,6 +609,106 @@ fn a_watch_of_a_run_nothing_is_driving_returns_the_status_this_crate_already_ass
     );
 }
 
+/// What happens **while** the watch is already blocking reaches it as it happens.
+///
+/// This is the verb working rather than the verb reporting: every journey above
+/// asks a run that has already done something, and a watch that only ever read
+/// the past would pass all of them while telling a live supervisor nothing. So
+/// this one starts the watch on a run where nothing has happened, waits for the
+/// heartbeat that proves it is blocking with nothing to say, and only then
+/// raises a surface and lets the node finish.
+#[test]
+fn what_happens_while_the_watch_is_blocking_reaches_it_as_it_happens() {
+    use std::io::{BufRead, BufReader, Read};
+
+    let world = World::new("watch-live");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchlive", vec![agent("build", &[])]);
+
+    let mut watching = world
+        .cmd(&["watch", &run, "--timeout", "600", "--tick-interval", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    let mut records = BufReader::new(
+        watching
+            .stdout
+            .take()
+            .expect("the watch writes its machine form to standard output"),
+    )
+    .lines()
+    .map(|line| {
+        let line = line.expect("the watch's output reads");
+        serde_json::from_str::<Value>(&line)
+            .unwrap_or_else(|e| panic!("the watch wrote a line that is not JSON ({e}): {line}"))
+    });
+
+    // A heartbeat is only written after an interval in which nothing happened,
+    // so reading one is what proves the watch is blocking rather than finished.
+    let mut before = Vec::new();
+    loop {
+        let record = records
+            .next()
+            .expect("the watch keeps writing while it waits");
+        let beat = record["watch"] == json!("heartbeat");
+        before.push(record);
+        if beat {
+            break;
+        }
+    }
+    assert!(
+        before
+            .iter()
+            .all(|record| record["watch"] != json!("event")),
+        "the watch emitted an event before anything had happened: {before:?}"
+    );
+
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "raised while the watch was already blocking",
+        ])
+        .exited(0);
+    world.release("build.go");
+
+    // Everything from here arrived after the watch was already waiting.
+    let after: Vec<Value> = records.collect();
+    let mut said = String::new();
+    watching
+        .stderr
+        .take()
+        .expect("the watch writes its human form to standard error")
+        .read_to_string(&mut said)
+        .expect("the human form reads");
+    let ended = watching.wait().expect("the watch exits");
+
+    let kinds: Vec<&str> = after
+        .iter()
+        .filter(|record| record["watch"] == json!("event"))
+        .filter_map(|record| record["event"]["kind"].as_str())
+        .collect();
+    for kind in ["planner-surface-queued", "node-settled"] {
+        assert!(
+            kinds.contains(&kind),
+            "`{kind}` happened while the watch was blocking and never reached it, \
+             leaving {kinds:?}"
+        );
+    }
+    assert!(
+        said.contains("raised while the watch was already blocking"),
+        "the human form beside it missed what arrived while it waited:\n{said}"
+    );
+    let last = after.last().expect("the watch says why it returned");
+    assert_eq!(last["watch"], json!("return"), "{last}");
+    assert_eq!(last["condition"], json!("settled"), "{last}");
+    assert_eq!(ended.code(), Some(0), "{last}");
+}
+
 /// A watch resumed from a cursor picks up where the one before it stopped, and
 /// repeats nothing.
 #[test]
