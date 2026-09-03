@@ -241,6 +241,35 @@ pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)>
         .collect()
 }
 
+/// Every **finished** record a run's journal has grown by since its first `from`
+/// bytes, and the byte a later read resumes at.
+///
+/// The tailer's counterpart of [`read_after`], and the difference is the last
+/// line. That one accounts for every line the file holds, because a byte count
+/// that skipped one would be short for ever; this one **stops** at a record
+/// whose writer has not finished it and reports the byte that record begins at,
+/// because a tailer that advanced past a half-written line would never come back
+/// for the rest of it — and the record it lost is the one the driver was in the
+/// middle of appending, which on a live run is the newest thing there is to say.
+///
+/// A line this build cannot parse is skipped and still accounted for, exactly as
+/// [`read`] skips it: a record from a schema this build does not know is not a
+/// reason to stop reading the ones after it.
+pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
+    let mut at = from;
+    let mut events = Vec::new();
+    for record in ledger::read_records_from(path, from) {
+        if !record.terminated {
+            break;
+        }
+        at += record.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(&record) {
+            events.push(envelope);
+        }
+    }
+    (events, at)
+}
+
 /// Whether the journal holds a line this build could not read.
 ///
 /// Strict replay needs to know: an unreadable line might have been an

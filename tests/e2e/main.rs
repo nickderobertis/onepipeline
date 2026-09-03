@@ -52,3 +52,4 @@ mod summary;
 mod surface;
 mod turns;
 mod views;
+mod watch;

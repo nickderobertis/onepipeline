@@ -66,6 +66,8 @@ pub enum Command {
     Host,
     /// Stream a run's merged events.
     Monitor(ReadArgs),
+    /// Block until a run needs a supervisor, saying so as it waits.
+    Watch(WatchArgs),
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -261,7 +263,7 @@ pub struct DriveRunArgs {
 /// A read verb that shapes its event view through a filter profile.
 ///
 /// Naming neither reads through the shipped [`DEFAULT_PROFILE`] — the planner's
-/// view, which is what these two verbs are for.
+/// view, which is what these verbs are for.
 ///
 /// [`DEFAULT_PROFILE`]: crate::filter::DEFAULT_PROFILE
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -275,6 +277,81 @@ pub struct ReadArgs {
     /// Read every event in the store, through no profile at all.
     #[arg(long)]
     pub all: bool,
+}
+
+/// How long a `watch` waits before giving up, when it is given none.
+///
+/// One supervisory turn: long enough that a watch is worth making rather than a
+/// poll, short enough that a caller which meant to look and move on is not held
+/// for the length of the run.
+pub const DEFAULT_WATCH_TIMEOUT_SECONDS: u64 = 300;
+
+/// How often a `watch` says it is still there while nothing is happening, when
+/// it is given none.
+pub const DEFAULT_WATCH_TICK_SECONDS: u64 = 30;
+
+/// The cursor-token prefix a `watch` prints and reads back.
+///
+/// Versioned because the token is a promise to a *later* invocation, which may
+/// be a different build: a token this build cannot place is refused by name
+/// rather than resumed from as though it meant a byte count.
+pub const WATCH_CURSOR_VERSION: &str = "1";
+
+/// What ends a `watch` short of the run finishing.
+///
+/// Two of the four terminal conditions are not choices — nothing is driving the
+/// run, and the wait elapsed — so this names the one that is: whether a blocking
+/// surface is something to return on, or something to report and go on waiting
+/// through.
+///
+/// Spelled for the surface rather than for a "decision", which in this crate is
+/// the wider fact `status` reports: a ready human action is a decision point too,
+/// and a value that claimed to cover both while returning on one of them would be
+/// the prose-shaped promise this verb exists to replace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum WatchUntil {
+    /// Return on the first of the two a supervisor answers: a blocking surface
+    /// waiting to be answered, or the run finishing. The default.
+    #[default]
+    Surface,
+    /// Return only when the run finishes. A blocking surface is still emitted
+    /// and still counted on every heartbeat; it does not end the wait.
+    Settled,
+}
+
+/// `onepipeline watch`.
+///
+/// The streaming verb's own run and profile selection, plus the four things a
+/// supervisor needs to write a wake loop without inventing one: a bound on the
+/// wait, a heartbeat so silence and death are tellable apart, a cursor to
+/// resume from, and the condition it returns on.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WatchArgs {
+    /// The run, and the profile its event view is shaped through — exactly as
+    /// `monitor` takes them.
+    #[command(flatten)]
+    pub read: ReadArgs,
+    /// How long to wait before giving up, in seconds. `0` reads once and
+    /// returns.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WATCH_TIMEOUT_SECONDS)]
+    pub timeout: u64,
+    /// How long a silence may last before this stream says it is still there,
+    /// in seconds. `0` turns the heartbeat off.
+    ///
+    /// **The stream's** interval, and deliberately not spelled
+    /// `--heartbeat-interval`: that one is `start`'s, and it sets how often the
+    /// pacemaker agent surfaces a planner update. The two are different clocks
+    /// on different verbs, and neither verb accepts the other's flag.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WATCH_TICK_SECONDS)]
+    pub tick_interval: u64,
+    /// Resume from the cursor an earlier watch printed, emitting nothing it
+    /// already did.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+    /// What ends the wait short of the run finishing.
+    #[arg(long, value_name = "CONDITION", value_enum, default_value_t = WatchUntil::Surface)]
+    pub until: WatchUntil,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.

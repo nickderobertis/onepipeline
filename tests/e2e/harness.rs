@@ -368,6 +368,12 @@ pub const QUEUED: i32 = onepipeline::error::EXIT_QUEUED;
 /// The exit code for a run nothing is driving.
 pub const NOTHING_DRIVING: i32 = onepipeline::error::EXIT_NOTHING_DRIVING;
 
+/// A `watch` returning because a blocking surface is waiting to be answered.
+pub const SURFACE_WAITING: i32 = onepipeline::error::EXIT_SURFACE_WAITING;
+
+/// A `watch` returning because its bounded wait ran out with the run still live.
+pub const WATCH_ELAPSED: i32 = onepipeline::error::EXIT_WATCH_ELAPSED;
+
 /// clap's exit code for a usage error.
 pub const USAGE_ERROR: i32 = 2;
 

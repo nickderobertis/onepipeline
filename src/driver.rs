@@ -95,6 +95,16 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             print!("{}", views::monitor(&view, &filter));
             Ok(EXIT_SUCCESS)
         }
+        Verb::Watch(args) => {
+            // Both refusals are made before anything blocks: a run that is not
+            // there, and a profile this run does not have. A watch that waited
+            // out its whole timeout to report a mistyped profile name would be
+            // worse than the shell loop it replaces.
+            let paths = resolve(&args.read.run)?;
+            let view = RunView::open(&paths)?;
+            let filter = read_filter(&view, &args.read)?;
+            crate::watch::watch(&args, &paths, &filter)
+        }
         Verb::Results(args) => {
             print!("{}", views::results(&RunView::open(&resolve(&args.run)?)?));
             Ok(EXIT_SUCCESS)
