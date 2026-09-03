@@ -1,23 +1,13 @@
 //! `onepipeline watch` — a bounded, resumable wait on one run.
 //!
-//! The verb blocks, emits a line per event a supervisor acts on, says something
-//! on an interval when nothing has happened, and returns a **status** rather
-//! than a sentence, so a caller branches without matching prose:
+//! What the verb promises is entry 58 of `docs/contract-divergences.md`, which is
+//! the proposal it waits on and the record of what this cost before there was a
+//! verb; the README documents it for a caller. Neither is restated here.
 //!
-//! | the run settled `complete` | [`EXIT_SUCCESS`] |
-//! | nothing is driving it | [`EXIT_NOTHING_DRIVING`] |
-//! | a blocking surface is waiting | [`EXIT_SURFACE_WAITING`] |
-//! | the wait elapsed, run still live | [`EXIT_WATCH_ELAPSED`] |
-//!
-//! Every heartbeat states how many planner surfaces are unread and of which
-//! kinds, so a caller matching only on event lines cannot lose the signal that a
-//! question is waiting: it rides the line written *because* nothing is
-//! happening. `docs/contract-divergences.md` entry 58 is the proposal, and the
-//! record of what this cost before there was a verb.
-//!
-//! Everything here **reads**, exactly as [`crate::views`] does. A watch takes no
-//! lock a writer needs, consumes no surface, and records nothing: watching a run
-//! is not supervising it.
+//! The one thing worth saying beside the code: everything in this module
+//! **reads**, exactly as [`crate::views`] does. A watch takes no lock a writer
+//! needs, consumes no surface and records nothing, so any number of them may sit
+//! on a live run at once — watching a run is not supervising it.
 
 use std::io::Write;
 use std::time::{Duration, Instant};

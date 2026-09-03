@@ -4225,6 +4225,59 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
              {what}: it should say '{stated}'"
         );
     }
+
+    // And the other way, which the loops above cannot see. Everything so far
+    // fails on a claim the README is *missing*; a claim it has kept past the code
+    // would pass all of it, and a stale one is the worse failure — a supervisor
+    // reading it writes a script against a flag or a status this binary does not
+    // have, which is the prose-matching the verb exists to end.
+    let offered: BTreeSet<String> = watch
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+        .collect();
+    for mentioned in passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|span| span.split_whitespace().next())
+        .filter_map(|word| word.strip_prefix("--"))
+    {
+        // The one flag the passage names that this verb must not take: it is
+        // `start`'s pacemaker cadence, and the sentence saying the two are
+        // different clocks is the point of naming it.
+        if mentioned == "heartbeat-interval" {
+            assert!(
+                !offered.contains(mentioned),
+                "`watch` took `start`'s pacemaker flag, which the README says it refuses"
+            );
+            continue;
+        }
+        assert!(
+            offered.contains(mentioned),
+            "the README's watch passage names `--{mentioned}`, which the verb does not take"
+        );
+    }
+    let returned: BTreeSet<String> = [
+        EXIT_SUCCESS,
+        EXIT_NOTHING_DRIVING,
+        EXIT_SURFACE_WAITING,
+        EXIT_WATCH_ELAPSED,
+    ]
+    .iter()
+    .map(i32::to_string)
+    .collect();
+    for mentioned in passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.parse::<i32>().is_ok())
+    {
+        assert!(
+            returned.contains(mentioned),
+            "the README's watch passage states exit status `{mentioned}`, which this verb \
+             never returns"
+        );
+    }
 }
 
 /// The note delivery seam this build carries **beyond** the contract is exactly
