@@ -3100,13 +3100,33 @@ state it is.
 It is the planner's alone and is **not** on the monitor's allowlist. An
 observer's whole authority is what the stream shows it; this op is deliberately
 the opposite — a person read a merge, or a wait that can never end, somewhere the
-run cannot see. Four refusals, each a different thing to do next: blank evidence,
-a node the graph does not hold (naming the ids it does), a node that has already
-settled (naming what it settled as, because a settlement is corrected by a
-`retry` that says the work is to be done again, never by overwriting the record
-of the attempt that made it), and a node whose dispatch is still in flight, which
-is refused for the reason `requeue` refuses one — that dispatch will settle the
-node itself, on top of this.
+run cannot see. Four refusals, each a different thing to do next: blank evidence;
+a node the graph does not hold, naming the ids it does; a node whose record
+**already says what the settle states**, naming it, because a settle that changes
+nothing is either a mistake or a duplicate and neither should read as a
+correction; and a node whose dispatch is still in flight, refused for the reason
+`requeue` refuses one — that dispatch will settle the node itself, on top of
+this.
+
+**A node that settled *something else* is deliberately not refused, and one
+reading of the brief says it should be.** The brief asks for a refusal of "a node
+that has already settled, naming what it settled as", and its own headline case
+is a change that "merged but the run recorded it failed" — a node that has
+settled. Read strictly, the op could not serve the case it exists for. So the
+guard is on the *outcome* rather than on settlement itself: a settle that would
+change the record is accepted, and one that would not is refused naming what the
+record already says. The refusal says so outright, because
+one that named only what the record holds would leave the operator exactly where
+the defect leaves them — able to see the truth with no way to write it down.
+`attest` reads it the same way and for the same reason (entry 36, which accepts a
+node that settled `failed`). Nothing is erased either — the earlier `node-settled`
+stays in the journal and the settle writes a second one carrying the evidence —
+so a reader sees a record that was corrected rather than one that was rewritten.
+**This is the one part of this entry that was a reading rather than a mechanism,
+and the manager who owns this workstream ruled on it**: take the narrowed guard,
+say in the refusal that a different outcome is accepted, and drive the
+failed-to-done recovery end to end. It is recorded here because the *contract*
+owner has still not seen it, not because it is unresolved.
 
 An accepted `settle` emits this crate's own `node-settled` for the node, so every
 reader of a run — the views, the status write-back, the telemetry, a consumer

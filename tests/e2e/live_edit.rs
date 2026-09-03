@@ -1807,7 +1807,8 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .exited(REFUSED)
         .err_has("no evidence at all");
 
-    // The planner's settle is applied, and the node is left exactly as it was.
+    // The planner's settle is applied to a node the run recorded **failed** —
+    // the case this op exists for — and the node is left exactly as it was.
     let announce = world
         .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
         .into_iter()
@@ -1821,6 +1822,16 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .store_deps(announce["id"].as_str().expect("a qualified task id"))
         .len();
     assert_eq!(wired, 1, "the fixture's dependent is not wired to anything");
+    // And the node's own identity on the board, which is what replacing it with
+    // a stand-in destroys: the same task, under the same qualified id.
+    let identified = |world: &World| {
+        world
+            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
+            .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
+    };
+    let was = identified(&world).expect("the settled node is on the board");
 
     world
         .run_with_stdin(
@@ -1873,21 +1884,74 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     );
     assert_eq!(settlement["payload"]["detail"], json!(evidence));
 
-    // A second settle is refused, naming what it settled as: a settlement is a
-    // record of an attempt and is corrected by a `retry`, never overwritten.
+    // A settle that would change nothing is refused, naming what the record
+    // already says — a duplicate is a mistake and never a correction.
     world
         .run_with_stdin(
             &["reply", &run],
-            &envelope(
-                json!([{"op": "settle", "id": "publish", "outcome": "failed",
-                              "evidence": "on reflection it did not merge"}]),
-            ),
+            &envelope(json!([settle("publish", "it merged, again")])),
         )
         .exited(REFUSED)
         .err_has("already settled done")
-        .err_has("retry");
+        .err_has("settles nothing")
+        .err_has("different");
 
-    // Its dependent was never rewired, and it starts on the settlement.
+    // A node whose dispatch is still in flight is refused too: that dispatch
+    // will settle it, on top of this. `slow` is the held one.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "settle", "id": "slow", "outcome": "failed",
+                        "evidence": "its worker is wedged on a host that is gone"}])),
+        )
+        .exited(REFUSED)
+        .err_has("dispatch in flight");
+
+    // And the other outcome a settle may state, on a wait that can never clear.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "waits", "persona": "engineer",
+                                       "task": "## What\nwait", "deps": ["slow"]}},
+                {"op": "settle", "id": "waits", "outcome": "failed",
+                 "evidence": "the upstream run was abandoned, so this wait can never clear"},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the failed settlement to reach the journal", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "waits")
+    });
+    let never = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == "waits")
+        .expect("the wait settled");
+    assert_eq!(never["payload"]["status"], "failed");
+    assert_eq!(
+        never["payload"]["outcome"],
+        from_entry_57("settled_outcome_word")
+    );
+    assert!(never["payload"]["detail"]
+        .as_str()
+        .expect("the evidence is the detail")
+        .contains("can never clear"));
+
+    // Its own identity and its dependent's edges both survived, and the
+    // dependent starts on the settlement.
+    world.until_store("the corrected settlement to reach the project", |world| {
+        board_metadata(world, &run, "publish")
+            .is_some_and(|metadata| metadata["onepipeline.id"] == "publish")
+    });
+    assert_eq!(
+        identified(&world),
+        Some(was),
+        "the settled node was renamed or replaced"
+    );
     assert_eq!(
         world
             .store_deps(announce["id"].as_str().expect("a qualified task id"))

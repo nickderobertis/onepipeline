@@ -84,6 +84,14 @@ pub enum Operation {
         /// The dependents whose derived state the replacement resets.
         reset: Vec<String>,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] `reason` is the
+    // `Option<String>` the wire spells it as, and it is a **durable record field**: a
+    // newtype refusing a blank would have to deserialize a record this build did not
+    // write, which is the one place the invariant cannot hold, and refusing to read one
+    // would lose the park itself along with its empty reason. The state is narrowed at both
+    // ends instead — `compile_cancel` refuses a blank reason at the trust boundary, and
+    // `Park::of` is the only way to build the value anything judges a `requeue` against, so
+    // a blank one an older build wrote reads as the park having stated none.
     /// A node was parked by a `cancel`.
     NodeParked {
         /// The node.
@@ -106,6 +114,7 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A parked node returned to the desired frontier.
     NodeRequeued {
         /// The node.
@@ -298,11 +307,31 @@ pub struct Frontier {
 pub struct Park {
     /// The envelope author that issued it.
     pub by: Author,
-    /// Why, when it stated one.
-    pub reason: Option<String>,
+    /// Why, when it stated one and that one says something.
+    ///
+    /// Private, and reachable only through [`Park::of`], because *present and
+    /// blank* is the one state this type must not hold: `compile_cancel` refuses
+    /// a blank reason at the boundary, but the operation this is folded from is a
+    /// durable record that an older build — or a person with an editor — can have
+    /// written one into, and a refusal reading "whose reason was:" with nothing
+    /// after it is worse than one that says the park carried none.
+    reason: Option<String>,
 }
 
 impl Park {
+    /// One park, with a reason that says nothing read as no reason at all.
+    ///
+    /// The single constructor, so the normalization happens once rather than at
+    /// each of the places a park is folded or judged.
+    pub(crate) fn of(by: Author, reason: Option<&str>) -> Self {
+        Self {
+            by,
+            reason: reason
+                .filter(|reason| !reason.trim().is_empty())
+                .map(str::to_string),
+        }
+    }
+
     /// The park as a refusal names it: who made it, and what it said.
     ///
     /// A park that stated no reason says so outright rather than trailing off —
@@ -1410,18 +1439,6 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
     }
 }
 
-/// Whether a recorded status is one a node has already settled at.
-///
-/// The four a run stops at. `parked` is not one — a park is undone by a
-/// `requeue` and the node goes on — and neither are the derived statuses, which
-/// are recomputed from the graph on every pass rather than recorded at all.
-fn has_settled(status: NodeStatus) -> bool {
-    matches!(
-        status,
-        NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
-    )
-}
-
 /// Validate one `settle`: the operator is writing down what this run could not
 /// observe, so what there is to judge is whether the run can still be told.
 ///
@@ -1435,12 +1452,20 @@ fn has_settled(status: NodeStatus) -> bool {
 /// Four refusals, and each one is a different thing to do next. Blank evidence:
 /// the journal would record the reason for a state as nothing. A node the graph
 /// does not hold: the settlement would be about no work at all, so the ids it
-/// does hold are named. A node that has already settled: what it settled as is
-/// named, because a settlement is corrected by a `retry` — which says the work
-/// is to be done again — and never by overwriting the record of the attempt that
-/// made it. And a node whose dispatch is still in flight, for the reason a
+/// does hold are named. A node whose record **already says what the settle
+/// states**: it is named as having settled that way, because a settle that
+/// changes nothing is either a mistake or a duplicate and neither should read as
+/// a correction. And a node whose dispatch is still in flight, for the reason a
 /// `requeue` refuses one: the dispatch will settle the node itself, on top of
 /// this, and a settlement silently overwritten is worse than one refused.
+///
+/// A node that settled **something else** is deliberately not refused, and that
+/// is the whole point of the op: the case it exists for is a change that merged
+/// while the node read `failed`. `attest` already accepts a node that settled
+/// failed for the same reason (open divergence 36). The settlement is not
+/// erased — the earlier `node-settled` stays in the journal, and this writes a
+/// second one carrying the evidence — so what a reader sees is a record that was
+/// corrected rather than one that was rewritten.
 fn compile_settle(
     graph: &Graph,
     frontier: &Frontier,
@@ -1461,16 +1486,12 @@ fn compile_settle(
             graph.ids().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    if let Some(settled) = frontier
-        .recorded
-        .get(id)
-        .copied()
-        .filter(|status| has_settled(*status))
-    {
+    if frontier.recorded.get(id).copied() == Some(settled_status(outcome)) {
         return Err(refuse(format!(
-            "settle: node '{id}' has already settled {}; a settlement is a record of an \
-             attempt and is not rewritten — retry it if the work is to be done again",
-            settled.as_str()
+            "settle: node '{id}' has already settled {0}, so this settles nothing — the \
+             record already says {0}. A settle stating a **different** outcome is accepted: \
+             correcting a record the world has moved past is what this op is for",
+            outcome.as_str()
         )));
     }
     if let Some(live) = frontier.in_flight.get(id) {
@@ -2317,21 +2338,61 @@ mod tests {
         assert_eq!(graph.get("sweep"), Some(&expected));
     }
 
+    /// A park whose recorded reason says nothing reads as one that stated none.
+    ///
+    /// `compile_cancel` refuses a blank reason at the boundary, so the only way
+    /// one reaches this type is a record an older build — or a person with an
+    /// editor — wrote. A refusal quoting it would read "whose reason was:" and
+    /// then stop.
+    #[test]
+    fn a_recorded_reason_that_says_nothing_reads_as_a_park_that_stated_none() {
+        assert_eq!(
+            Park::of(Author::Planner, Some("  \n ")),
+            Park::of(Author::Planner, None),
+            "a blank recorded reason was kept as a reason"
+        );
+        assert_ne!(
+            Park::of(Author::Monitor, Some("it is redundant")),
+            Park::of(Author::Monitor, None),
+            "a reason that says something was dropped"
+        );
+
+        let mut graph = graph_of(vec![{
+            let mut node = agent("build", &[]);
+            node.parked = true;
+            node
+        }]);
+        let message = super::compile(
+            &mut graph,
+            &Frontier {
+                parks: [("build".to_string(), Park::of(Author::Planner, Some("   ")))]
+                    .into_iter()
+                    .collect(),
+                ..Frontier::default()
+            },
+            Author::Monitor,
+            &Command::Requeue {
+                id: "build".into(),
+                amend: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("stated no reason"),
+            "a blank reason was quoted as one: {message}"
+        );
+    }
+
     /// A `requeue` is judged against the park it would undo, not against the
     /// node: the monitor may return its own park and not the planner's.
     #[test]
     fn a_monitor_may_requeue_only_a_park_it_made_itself() {
         let disk = "a third very large build would fill the disk this host has 8G left on";
         let parked = |by: Author, reason: Option<&str>| Frontier {
-            parks: [(
-                "build".to_string(),
-                Park {
-                    by,
-                    reason: reason.map(str::to_string),
-                },
-            )]
-            .into_iter()
-            .collect(),
+            parks: [("build".to_string(), Park::of(by, reason))]
+                .into_iter()
+                .collect(),
             ..Frontier::default()
         };
         let requeue = Command::Requeue {
@@ -2480,17 +2541,30 @@ mod tests {
             "the refusal does not name the nodes the run does have: {message}"
         );
 
+        // A record that already says what the settle states settles nothing, and
+        // is named as having settled that way.
         let message = compile(
             &mut graph,
-            &frontier(&[("publish", NodeStatus::Failed)]),
+            &frontier(&[("publish", NodeStatus::Done)]),
             &settle("publish", "it merged"),
         )
         .unwrap_err()
         .to_string();
         assert!(
-            message.contains("already settled failed") && message.contains("retry"),
-            "{message}"
+            message.contains("already settled done")
+                && message.contains("settles nothing")
+                && message.contains("different"),
+            "the refusal does not say that a different outcome is accepted: {message}"
         );
+
+        // A node that settled **something else** is the case this op exists for:
+        // a change that merged while the node read `failed`.
+        compile(
+            &mut graph,
+            &frontier(&[("publish", NodeStatus::Failed)]),
+            &settle("publish", "it merged at 3f9a1c2 after the dispatch died"),
+        )
+        .expect("a node the run recorded failed is exactly what a settle corrects");
 
         let in_flight = Frontier {
             in_flight: [(

@@ -882,13 +882,9 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                         // Who decided, and why. The park is what a later
                         // `requeue` is judged against, so this is folded rather
                         // than left in the record for a reader to go and find.
-                        state.parks.insert(
-                            node.clone(),
-                            edits::Park {
-                                by: *by,
-                                reason: reason.clone(),
-                            },
-                        );
+                        state
+                            .parks
+                            .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
                         // What the node was *before* the park decides which park
                         // this is: a cancel of a running node asks a dispatch to
                         // stop and leaves it running, and one of a node that
@@ -2948,10 +2944,10 @@ mod tests {
         let state = fold(&[started.clone(), park.clone()]);
         assert_eq!(
             state.frontier().parks.get("build"),
-            Some(&edits::Park {
-                by: crate::channel::Author::Monitor,
-                reason: Some(disk.into()),
-            }),
+            Some(&edits::Park::of(
+                crate::channel::Author::Monitor,
+                Some(disk)
+            )),
             "the park's own account of itself did not reach the frontier"
         );
 
