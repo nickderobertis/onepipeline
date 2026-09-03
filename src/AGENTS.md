@@ -50,12 +50,10 @@ Rules:
   plan was read from is never re-read to decide what the run is doing.
 - `writeback.rs` projects that folded graph back onto the `onetaskgraph` project
   it was launched from, through that binary's own `project copy` out of a shadow
-  `local-md` store under the run. A copy rewrites an edge to the destination's
-  own id only where its far end is a **member of the copied set**, so the shadow
-  names each far task `<project>/<task>`: a bare file name resolves to
-  `<shadow-source>:<file>`, which is a member of nothing, and the destination is
-  then left holding an edge into the run's scratch that no reader of that plan
-  can resolve.
+  `local-md` store under the run. The shadow names each far end of an edge
+  `<project>/<task>`: a copy rewrites an edge to the destination's own id only
+  where its far end is a **member of the copied set**, and a bare file name —
+  which resolves to `<shadow-source>:<file>` — is not one.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
 - `report.rs` is **half public**: `retain` and the constants an accepted
@@ -74,12 +72,10 @@ So **whole-state work belongs on a change, never on a pass**: a per-pass
 `state.statuses()`, `writeback.publish`, `upstreams.resolve` or
 `projection::fold` puts back a CPU sink big enough to make this host unusable.
 
-The other half of that is: a pass that **moved the run's own state re-passes at
-once**. A settlement the pass itself made — an `expects_no_diff` node, a human
-action recorded as waiting — has no dispatch thread to report it and writes
-nothing to the channel, so a wait after one is a wait for a message nobody will
-send. What it readied then sits `ready` for the life of the run while every view
-reports the run healthy and being driven, and an attached launch never returns.
+Its other half: a pass that **moved the run's own state re-passes at once**. A
+settlement the pass itself made — an `expects_no_diff` node, a human action
+recorded as waiting — has no dispatch thread to report it and writes nothing to
+the channel, so what it readied has no wake of its own to be started on.
 
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 

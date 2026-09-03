@@ -945,8 +945,6 @@ fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with()
          preserved one from a rewritten one: {authored:?}"
     );
 
-    // Two runs of the one plan. The second mints a run of its own beside the
-    // first, and projects onto the same destination items.
     for run in ["readback", "readback-2"] {
         world.run(&["start", &project, "--attach"]).exited(0);
         world.until_store(

@@ -1746,9 +1746,6 @@ fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_ad
     attached.exited(0).out_has("\"settlement\":\"complete\"");
     attached.err_has("has stopped watching");
 
-    // The run went on being driven after the observer went, which is what the
-    // driver said it would: the node whose dependency settled while nothing was
-    // watching was dispatched rather than left queued.
     assert!(
         world.was_invoked(
             "oneagentgraph",
