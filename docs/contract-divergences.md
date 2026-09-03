@@ -3054,3 +3054,60 @@ sentence this would change is the Views paragraph's first, which today reads
 `Views (CLI): runs, status, host, monitor …`; the proposal is a second sentence
 beside it naming the structured read and the document behind it.
 
+
+## 59. A settlement projection cannot leave the destination's own `onetaskgraph.origin` alone — OPEN
+
+**Proposal (for `onetaskgraph`, filed as
+[nickderobertis/onetaskgraph#266](https://github.com/nickderobertis/onetaskgraph/issues/266)):
+let a copy update a destination item without rewriting the correspondence that
+item already records. A copy that found its destination through the *source*
+item's declared origin has learnt nothing new about where the destination came
+from, and records one anyway.**
+
+The write-back projects a run's folded graph onto the plan it was launched from
+by writing a shadow `local-md` store under the run and asking `onetaskgraph
+project copy` to carry it across. `copy` is that product's whole write surface —
+`project copy`, `task copy` and `document copy`, with no verb that updates an
+item in place — so there is no second path this crate could take instead.
+
+Every copy records where the copy came from. `onetaskgraph_core::engine::copy`'s
+`carried` inserts `GlobalId::ORIGIN_KEY` — `onetaskgraph.origin` — into the
+outgoing metadata of every item it writes, set to the qualified id of the item
+being copied. It does so whatever the source item declares under that key,
+whatever `--match-by` was given, and whether the destination item was created or
+merely updated; and because the value differs, an item nothing else about the
+projection would change is written anyway. Measured in all three forms — a source
+item declaring the destination's own origin, one declaring none, and `--match-by
+onepipeline.id` — against `onetaskgraph` 0.2.18 and against revision
+`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which is the revision
+`taskgraph::FIRST_REVISION` pins and the one every check here installs.
+
+So a destination item this crate projects onto is left carrying
+`onetaskgraph.origin: onepipeline-writeback:<hex>` — a source that exists only as
+a directory under the run's own root, and goes with it. **What that costs is a
+correspondence, not a read.** A project an operator copied down from a hosted
+board carries that board's id under this key, and it is what the next copy down
+finds; overwritten, the next copy finds nothing and creates a duplicate beside
+the item it should have updated.
+
+**What this crate owns, it has fixed.** The dependency edges between the items a
+projection carries were reaching the destination naming that same scratch source,
+which made a settled plan unreadable outright — `onetaskgraph` returns an unknown
+dependency target and every command that reads a plan is refused. That was this
+crate's own: the shadow named each far task by its file alone, so it was a member
+of no copied set and the copy carried it through rather than mapping it. It now
+names them `<project>/<task>` and the edges arrive as the destination's own ids.
+`store::a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with`
+holds that, over two runs of one plan, against the real binary.
+
+The identity key is what is left, and it cannot be reached from here: the only
+write available stamps it, and no argument, metadata or match rule suppresses the
+stamp. Recorded rather than worked around — a self-copy back over the destination
+would restore an origin naming the item's own source, but that is a second full
+round trip to the operator's store on every projection to write a value that is
+still not the one the destination held.
+
+`docs/contract.md` says nothing about `onetaskgraph.origin`; what it fixes about
+write-back is the status and the settlement metadata, and entry 50 records what
+this projection writes beyond that. This entry is the one thing it writes that
+nobody chose.

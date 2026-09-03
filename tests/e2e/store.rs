@@ -895,6 +895,96 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
     );
 }
 
+/// A plan still reads back after a run of it has settled, and after several.
+///
+/// Asserted as **which record each node is** and the edges that record holds,
+/// both against what the store answered with before the run — not as how many of
+/// either there are, which is what the journeys above ask and what cannot tell a
+/// record that moved from one that stayed. Two ways a projection loses the
+/// destination, and neither shows up as a count: an edge whose far end names the
+/// run's own scratch, which no reader of the plan can resolve, and a record
+/// written beside the operator's rather than onto it.
+///
+/// Twice over, because a projection that damaged the destination once would have
+/// a second run of the same plan to damage further. The destination's own
+/// `onetaskgraph.origin` is out of reach here and divergence 59 says why.
+#[test]
+fn a_settled_plan_reads_back_holding_the_dependency_edges_it_was_authored_with() {
+    let world = World::new("store-settled-readback");
+    let project = world.plan(
+        "readback",
+        &plan_of(
+            "readback",
+            vec![agent("first", &[]), agent("second", &["first"])],
+        ),
+    );
+    // Keyed by node id and never by the record's own id, so a second record for a
+    // node is a changed value here rather than a key nothing compares against.
+    let records = |world: &World| -> BTreeMap<String, (String, Vec<Value>)> {
+        let tasks = world.store_tasks(&project);
+        let held: BTreeMap<String, (String, Vec<Value>)> = tasks
+            .iter()
+            .map(|task| {
+                let id = task["id"]
+                    .as_str()
+                    .expect("a task has a qualified id")
+                    .to_owned();
+                let deps = world.store_deps(&id);
+                (
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()
+                        .expect("a task of this plan names its node")
+                        .to_owned(),
+                    (id, deps),
+                )
+            })
+            .collect();
+        assert_eq!(
+            held.len(),
+            tasks.len(),
+            "the plan holds more than one record for a node of it, so a projection wrote \
+             beside the operator's records rather than onto them: {tasks:?}"
+        );
+        held
+    };
+    let authored = records(&world);
+    assert_eq!(
+        authored.get("second").map(|(_, deps)| deps.len()),
+        Some(1),
+        "the fixture authored no dependency edge, so this journey could not tell a \
+         preserved one from a rewritten one: {authored:?}"
+    );
+
+    for run in ["readback", "readback-2"] {
+        world.run(&["start", &project, "--attach"]).exited(0);
+        world.until_store(
+            "the settlement to reach the plan it was launched from",
+            |world| {
+                world
+                    .store_tasks(&project)
+                    .iter()
+                    .filter(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+                    .count()
+                    == 2
+            },
+        );
+        assert_eq!(
+            world.run_json(run, "result.json")["state"],
+            "complete",
+            "the run this readback is about did not settle"
+        );
+
+        assert_eq!(
+            records(&world),
+            authored,
+            "settlement rewrote the plan's own records or the edges between them after {run}"
+        );
+        // Through the engine's own loader, which is how every command that reads a
+        // plan reaches one and is not what the store queries above go through.
+        world.run(&["plan", "check", &project]).exited(0);
+    }
+}
+
 /// The reserved keys the write-back owns and overwrites on a projected item.
 ///
 /// Everything else is the complement — what a total replacement has to carry

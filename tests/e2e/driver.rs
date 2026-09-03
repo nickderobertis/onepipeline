@@ -1704,6 +1704,56 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
     attached.err_has("has stopped watching");
 }
 
+/// An attached launch whose observer graph has stopped still drives the run to
+/// settlement, and still returns.
+///
+/// The third of the launch's three return conditions, on the run state that
+/// hides a wedge best: every view goes on reporting a run being driven. The plan
+/// has work left when the observer goes, and that work is readied by a
+/// dependency that settled without a dispatch — so the frontier has to keep
+/// moving with nothing left to report it.
+#[test]
+fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_advances() {
+    let world = World::new("driver-observer-outlived");
+    // The observing graph exits as soon as it has announced itself, which is the
+    // second of the two ways an observer stops: it finished, and the run it was
+    // watching had not.
+    let path = world.plan(
+        "outlasted",
+        &plan_of(
+            "outlasted",
+            vec![
+                json!({
+                    "id": "record",
+                    "task": "## What\nRecord that nothing changes.",
+                    "expects_no_diff": true,
+                }),
+                agent("build", &["record"]),
+            ],
+        ),
+    );
+
+    let attached = world.run(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    attached.exited(0).out_has("\"settlement\":\"complete\"");
+    attached.err_has("has stopped watching");
+
+    assert!(
+        world.was_invoked(
+            "oneagentgraph",
+            &["run", "--label", "onepipeline.node=build"]
+        ),
+        "the run stopped dispatching once its observer graph had stopped watching"
+    );
+    let result = world.run_json("outlasted", "result.json");
+    assert_eq!(result["state"], "complete");
+}
+
 /// The `(pid, parent pid)` pairs this host reports.
 ///
 /// The test's own oracle, deliberately not the crate's: asking the teardown to

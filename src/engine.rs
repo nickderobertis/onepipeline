@@ -772,9 +772,17 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
+        // Whether this pass moved the run's own state, which is the one change
+        // the wait below cannot be woken by: what a pass settles or applies itself
+        // has no dispatch left to report it and writes nothing to the channel, so
+        // what it readies is the next pass's to start. Each of the three below
+        // reports `true` only for work it *consumed*, which bounds this at one
+        // extra pass per change and leaves a converged run running none.
+        let mut moved = false;
         if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
@@ -847,6 +855,7 @@ fn converge(
         if adopt_releases(paths, journal, state, &statuses, &mut releases, &in_flight)? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Start what became actionable *before* asking whether the run is over.
@@ -869,6 +878,7 @@ fn converge(
         )? {
             derived = None;
             unpublished = true;
+            moved = true;
         }
 
         // Why every node the loop is not running and has not settled is not
@@ -906,12 +916,13 @@ fn converge(
             }
         }
 
-        // Nothing more to do until something happens. The longest this loop may go
-        // without a pass is stated here rather than inside the wait: the two paced
-        // reads, and the earliest stall threshold. Each is `Duration::MAX` where
-        // this run can never need it — a graph naming no cross-DAG edge, a run
-        // with no release business, nothing in flight — so a converged driver
-        // waits on the channel alone.
+        // Nothing more to do until something happens — unless this pass is what
+        // happened, in which case the next one is due now. The longest this loop
+        // may go without a pass is otherwise stated here rather than inside the
+        // wait: the two paced reads, and the earliest stall threshold. Each is
+        // `Duration::MAX` where this run can never need it — a graph naming no
+        // cross-DAG edge, a run with no release business, nothing in flight — so a
+        // converged driver waits on the channel alone.
         let next = [
             if has_upstreams {
                 until_due(read_upstreams, UPSTREAM_EVERY)
@@ -925,7 +936,11 @@ fn converge(
             },
             next_quiet(&in_flight, stall_after),
         ];
-        let deadline = next.into_iter().min().unwrap_or(Duration::MAX);
+        let deadline = if moved {
+            Duration::ZERO
+        } else {
+            next.into_iter().min().unwrap_or(Duration::MAX)
+        };
         // Scoped, because the two things it reads are things the pass writes:
         // the closure's borrows end with the wait, before the messages it hands
         // back are applied.
