@@ -54,7 +54,6 @@ fn machine(watched: &Run) -> Vec<Value> {
         .collect()
 }
 
-/// The record a watch ends on.
 fn returned(watched: &Run) -> Value {
     let records = machine(watched);
     let last = records
@@ -69,7 +68,6 @@ fn returned(watched: &Run) -> Value {
     last
 }
 
-/// The event kinds a watch emitted, in the order it emitted them.
 fn emitted(watched: &Run) -> Vec<String> {
     machine(watched)
         .into_iter()
@@ -619,17 +617,17 @@ fn a_watch_whose_output_cannot_be_written_refuses_instead_of_going_on() {
                 "the refusal does not say which descriptor failed: {said}"
             );
         } else {
-            // Nothing can be reported when the reporting descriptor is the dead
-            // one, so what this holds is that the watch **stopped**: exactly the
-            // one record it had written before the failed write, and no more.
+            // The refusal itself is unreportable here — the descriptor that
+            // would carry it is the dead one — so what this holds is the
+            // machine form: every record on it declares an outcome, and this
+            // process is not returning one, so there must be no record at all.
+            // A watch that wrote its stdout line first would leave one behind,
+            // and a caller branching on the machine form would read a settled
+            // run off a process that refused.
             let written = String::from_utf8_lossy(&finished.stdout);
-            assert_eq!(
-                written
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .count(),
-                1,
-                "the watch went on emitting past a write it could not make: {written}"
+            assert!(
+                written.trim().is_empty(),
+                "the watch left an outcome on stdout that its exit status contradicts: {written}"
             );
         }
     }

@@ -320,8 +320,6 @@ pub enum WatchUntil {
     Settled,
 }
 
-/// `onepipeline watch`.
-///
 /// The streaming verb's own run and profile selection, plus the four things a
 /// supervisor needs to write a wake loop without inventing one: a bound on the
 /// wait, a heartbeat so silence and death are tellable apart, a cursor to

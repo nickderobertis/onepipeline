@@ -436,20 +436,30 @@ impl Emitter {
     /// A write that fails is the caller's pipe closing, which is not this run's
     /// failure — but it is the end of what this watch can report, so it refuses
     /// rather than going on emitting into a descriptor nobody is reading.
+    ///
+    /// **The machine record goes last**, after its human counterpart is written
+    /// and flushed, because a refusal here becomes [`EXIT_REFUSED`] and the last
+    /// machine record is where a caller reads the exit it should have got. Were
+    /// the order the other way, a stderr that broke after the return record was
+    /// flushed would leave stdout declaring exit `0` on a process that exited
+    /// `2` — a caller branching on the machine form, which is the one thing this
+    /// verb promises, would read a settled run off a watch that refused.
+    ///
+    /// [`EXIT_REFUSED`]: crate::error::EXIT_REFUSED
     fn say(&mut self, human: &str, machine: &Record<'_>) -> Result<()> {
         let broken = |what: &str, error: std::io::Error| {
             Error::Invalid(format!("the watch could not write to {what}: {error}"))
         };
         let machine = serde_json::to_string(machine)
             .map_err(|e| Error::Invalid(format!("the watch could not render a record: {e}")))?;
-        writeln!(self.machine, "{machine}").map_err(|e| broken("standard output", e))?;
-        self.machine
-            .flush()
-            .map_err(|e| broken("standard output", e))?;
         writeln!(self.human, "{human}").map_err(|e| broken("standard error", e))?;
         self.human
             .flush()
             .map_err(|e| broken("standard error", e))?;
+        writeln!(self.machine, "{machine}").map_err(|e| broken("standard output", e))?;
+        self.machine
+            .flush()
+            .map_err(|e| broken("standard output", e))?;
         Ok(())
     }
 }
