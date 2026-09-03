@@ -343,7 +343,20 @@ fn a_quiet_run_gets_heartbeats_that_count_what_is_unread_and_then_the_wait_elaps
             "{beat}"
         );
         assert_eq!(beat["unread"]["kinds"][0]["count"], json!(1), "{beat}");
+        // Which run is beating. A supervisor watching several runs reads these
+        // off one pipe, and a heartbeat that did not say whose it was would be
+        // the silence this verb replaces wearing a different shape.
+        assert_eq!(beat["run_id"], json!(run), "{beat}");
+        // How long the oldest of them has been waiting, as a number rather than
+        // the null an empty queue serves: a count says a question is there, and
+        // this is what says it has been there a while.
+        assert!(
+            beat["unread"]["oldest_seconds"].is_number(),
+            "a heartbeat over a waiting surface does not say how long it has waited: {beat}"
+        );
     }
+    // The return record names the run too, on the same terms.
+    assert_eq!(returned(&watched)["run_id"], json!(run));
     assert!(
         watched
             .stderr
@@ -351,6 +364,48 @@ fn a_quiet_run_gets_heartbeats_that_count_what_is_unread_and_then_the_wait_elaps
         "the human heartbeat does not state what is unread and of which kind:\n{}",
         watched.stderr
     );
+
+    world.release("build.go");
+}
+
+/// A watch told not to tick says nothing while it waits.
+///
+/// The interval is a caller's, and `0` is the value that turns the heartbeat off
+/// — for a caller that wants events and nothing else on the pipe. It has to be
+/// asserted over a watch that is actually *waiting*: every other journey here
+/// pairs a zero tick with a zero timeout, which reads once and returns, and would
+/// report no heartbeats however the flag behaved.
+#[test]
+fn a_watch_told_not_to_tick_stays_silent_for_the_whole_wait() {
+    let world = World::new("watch-no-tick");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchnotick", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "nobody has read this either",
+        ])
+        .exited(0);
+
+    // Long enough that the default interval would have beaten several times.
+    let watched = world.run(&["watch", &run, "--timeout", "4", "--tick-interval", "0"]);
+    agreed(&watched, "elapsed", WATCH_ELAPSED);
+    let beats: Vec<Value> = machine(&watched)
+        .into_iter()
+        .filter(|record| record["watch"] == json!("heartbeat"))
+        .collect();
+    assert!(
+        beats.is_empty(),
+        "a watch given `--tick-interval 0` beat anyway:\n{}",
+        watched.stdout
+    );
+    // The count still reaches the caller on the record that ends the watch, so
+    // turning the heartbeat off never turns the signal off.
+    assert_eq!(returned(&watched)["unread"]["count"], json!(1));
 
     world.release("build.go");
 }
