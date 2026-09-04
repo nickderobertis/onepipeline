@@ -458,6 +458,148 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
     world.release("build.go");
 }
 
+/// A decision whose asker has gone releases the subtree it was holding, gives up
+/// the pending slot, and takes its place behind everything somebody is still
+/// waiting on.
+///
+/// The three halves the other two journeys leave out, and each is only true
+/// through the running loop. A blocking surface a planner has *read* sits in the
+/// pending slot rather than the queue, and it holds `ship` back by way of
+/// `decisions_now`; when its asker goes, the slot has to be given up, the
+/// decision has to clear inside the loop that is already running, and the node it
+/// paused has to dispatch. Afterwards the surface is still there to read — and
+/// still behind a live report queued after it, because nothing is waiting on it
+/// and something is waiting on that.
+#[test]
+fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
+    use std::io::Write;
+
+    let world = World::new("channel-released");
+    world.script("build.wait", "hold");
+    world.script("ship.wait", "hold");
+    let run = running(
+        &world,
+        "released",
+        vec![agent("build", &[]), agent("ship", &["build"])],
+    );
+
+    // The observer's judge side stops to ask about `build`, which is what makes
+    // the question hold everything downstream of it.
+    let mut asking = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut asked = asking.stdin.take().expect("stdin is piped");
+    writeln!(
+        asked,
+        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    asked.flush().expect("the frame flushes");
+    world.until("the decision to begin holding the subtree", |world| {
+        !world.events_of(&run, "decision-pending").is_empty()
+    });
+
+    // Read but not answered, which is the pending slot: the manager has the
+    // text, and the run is still waiting for their ruling.
+    world.run(&["next", &run]).exited(0);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision")
+        .out_lacks("planner update(s) waiting");
+
+    // Its dependency settles, and `ship` is held by the decision rather than
+    // dispatched — which is what a decision point is for.
+    world.release("build.go");
+    world.until("the node behind the decision to be held by it", |world| {
+        world.events_of(&run, "node-held").iter().any(|event| {
+            event["labels"]["node"] == "ship"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|held| held["kind"] == "decision"))
+        })
+    });
+    assert!(
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "ship"),
+        "the held node ran while the decision was still outstanding: {:?}",
+        world.kinds(&run)
+    );
+
+    // The member's conversation ends. Nobody is waiting for that ruling now.
+    drop(asked);
+    ended(asking);
+
+    // The slot is given up, the decision clears inside the loop that is already
+    // running, and the node it paused goes.
+    world.until("the decision to clear", |world| {
+        !world.events_of(&run, "decision-cleared").is_empty()
+    });
+    world.until("the node it was holding to dispatch", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "ship")
+    });
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner")
+        .out_has("1 planner update(s) nobody is waiting on");
+
+    // A live report queued after it goes first, though it is newer and holds
+    // nothing: the older question is blocking and would have led the queue, and
+    // it does not, because nobody is waiting on it.
+    let mut reporting = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut reported = reporting.stdin.take().expect("stdin is piped");
+    writeln!(
+        reported,
+        r#"{{"kind":"monitor","message":"the gate is green","blocking":false}}"#
+    )
+    .expect("the frame is written");
+    reported.flush().expect("the frame flushes");
+    world.until("the report to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+
+    let live = world.run(&["next", &run]);
+    live.exited(0);
+    assert_eq!(live.json()["surface"]["message"], "the gate is green");
+    assert_eq!(live.json()["surface"]["abandoned"], serde_json::Value::Null);
+
+    // And the question is still readable behind it — and claiming it does not
+    // put the run back to waiting for a ruling nobody is owed.
+    let last = world.run(&["next", &run]);
+    last.exited(0);
+    assert_eq!(
+        last.json()["surface"]["message"],
+        "is this base still right?"
+    );
+    assert_eq!(last.json()["surface"]["abandoned"], json!(true));
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner");
+
+    drop(reported);
+    ended(reporting);
+    world.release("ship.go");
+}
+
 /// A blocking surface whose server went while the side that asked stayed is
 /// still there to be claimed and answered.
 ///
