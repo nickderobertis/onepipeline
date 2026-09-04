@@ -3379,3 +3379,68 @@ still not the one the destination held.
 write-back is the status and the settlement metadata, and entry 50 records what
 this projection writes beyond that. This entry is the one thing it writes that
 nobody chose.
+
+## 60. A decision point is cleared by a third thing the contract does not name: its asker going away — OPEN
+
+**Proposal (for the planner who owns the contract): amend the decision-point
+sentence in `docs/contract.md` to name a third clearing. A blocking surface
+stops holding its dependents back when the process that raised it has exited and
+the side that asked has ended with it — because there is then nobody an answer
+could reach, and a subtree paused on one is paused for the rest of the run.**
+
+The contract says, of a decision point:
+
+> A blocking surface — a ready `kind: human` node's attestation, a completion
+> request, any surface declared blocking — holds its dependents back while
+> independent branches proceed, and clearing it (`attest`, `reply`)
+> auto-resumes the paused subtree inside the running loop, with no external
+> driver action.
+
+Two clearings are named and both are somebody answering. There is a third, and
+it is not an answer: the observer member's conversation ends, its graph tears
+down, and the `onepipeline channel serve` that raised the question reaches the
+end of its frame stream and exits. The question is left in the queue with no
+reader for its answer — `serve` is the only process that was waiting on one —
+and every supervisory view goes on reporting it. An operator measured one such
+entry standing for an hour and twenty-five minutes, in every `status` render and
+every `watch` heartbeat, as one unread planner update; it cleared when they
+consumed it by hand.
+
+That is not clutter. The count of unread planner updates is the one line a
+supervising manager is forbidden to filter, because a blocking surface produces
+no other signal until it is read, so an entry nothing can ever answer degrades
+the single indicator that discipline exists to protect — permanently, and in the
+direction that teaches its reader to stop trusting it.
+
+**What the code does.** `ChannelState::abandon` marks every surface a serving
+session raised that is still outstanding when its frame stream ends. A marked
+surface is not a decision point (`engine::decisions_now` skips it), is not
+counted by the unread accounting (`views::Unread`), and does not make the run
+read as awaiting a planner (`views::blocking_surface`). It is **not** deleted:
+the queue holds the only copy of an unread surface's text that any reader can
+reach, so the text stays where a reader already looks for it, `next` still hands
+it over carrying `abandoned: true`, and `status` says how many are there. The
+one thing genuinely withdrawn is the pending slot, whose surface has already
+been delivered to the reader holding it.
+
+**The discriminator is the asker, never the server.** A `serve` that timed out
+and then went while the member holding its stream open is still working leaves a
+question that member is still owed: nothing is marked, the surface stays
+counted, claimable, and answerable. Only the stream ending proves the asker did.
+
+Held end to end by
+`channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread`
+and `channel::a_blocking_surface_outlives_a_server_whose_asker_is_still_there`,
+each against a real `channel serve` the test starts and ends, asserting on what
+`runs` and `status` printed.
+
+**What this entry is waiting on** is whether the contract wants that third
+clearing written into the sentence above, and whether it wants a word for the
+state on the public surface — `next` reports it today as a field on the surface
+it hands back, which the contract's channel paragraph does not describe either
+way. No journal kind was added for it: this library's own kinds are a closed set
+the contract enumerates, and the record of what became of each surface is the
+run's own `channel/surfaces.jsonl`, which carries a further line under the
+surface's own id. The `decision-cleared` the loop already emits when the surface
+stops holding its subtree is unchanged, and says the same thing about the
+dependents it released.

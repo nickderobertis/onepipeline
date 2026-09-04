@@ -587,6 +587,16 @@ pub(crate) struct Surface {
     /// The node that provoked it, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workstream: Option<String>,
+    /// Whether anybody is still waiting for the answer.
+    ///
+    /// Set by [`abandon`](ChannelState::abandon) when the process serving this
+    /// surface exited without an answer and the side that asked ended with it.
+    /// The surface keeps its text and stays claimable; what it gives up is its
+    /// claim on the unread count and on the subtree a blocking surface holds.
+    /// Omitted from the wire while it is false, so a queue nothing has abandoned
+    /// serializes exactly as it always did.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub abandoned: bool,
 }
 
 /// The durable channel state for one run.
@@ -756,7 +766,8 @@ impl ChannelState {
         let next = queue
             .waiting
             .iter()
-            .position(|surface| surface.blocking)
+            .position(|surface| surface.blocking && !surface.abandoned)
+            .or_else(|| queue.waiting.iter().position(|surface| !surface.abandoned))
             .unwrap_or(0);
         let claimed = (!queue.waiting.is_empty()).then(|| queue.waiting.remove(next));
         if let Some(surface) = &claimed {
@@ -766,12 +777,79 @@ impl ChannelState {
             // Narration read afterwards leaves that standing — reading a report
             // is not answering a question, and a decision the planner never made
             // must not release the subtree it is holding.
-            if surface.blocking {
+            //
+            // An abandoned one is the exception, and for the reason the pending
+            // slot exists: nothing is waiting for its answer any more, so
+            // holding it there would report the run as awaiting a planner on
+            // behalf of a reader that has gone. It is still handed over — the
+            // text is what a manager reads it for — and it is handed over last,
+            // behind everything somebody is still waiting on.
+            if surface.blocking && !surface.abandoned {
                 queue.pending = Some(surface.clone());
             }
         }
         self.write_queue(&queue)?;
         Ok(claimed)
+    }
+
+    /// Say of every surface in `raised` that nobody is waiting for its answer,
+    /// and give up the pending slot if one of them is holding it.
+    ///
+    /// Called when a serving process is about to exit with the side that asked
+    /// already gone: its stream ended, so no answer to anything it raised has a
+    /// reader left. Answering the surfaces it raised is not the same question as
+    /// whether they are still *interesting*, which is why this marks rather than
+    /// deletes.
+    ///
+    /// **Marked, not discarded**, and the queue is what decides it. A surface
+    /// still in `waiting` is one no manager has ever seen, and this queue holds
+    /// the only copy of its text any reader can reach — discarding it would
+    /// throw away an observer's finding in order to fix a count, which is a
+    /// worse bargain than the count. So the text stays exactly where a reader
+    /// already looks for it and [`claim`](Self::claim) still hands it out; the
+    /// flag is what the unread accounting and the decision points read.
+    ///
+    /// What is genuinely **withdrawn** is narrower and is the half where nothing
+    /// can be lost: the *pending slot*. Its surface has already been delivered
+    /// to the reader holding it, so putting it back among the readable ones
+    /// costs that reader nothing and stops the run reporting that it awaits a
+    /// planner nobody is waiting on.
+    ///
+    /// Returns what it marked, so the caller can record it.
+    pub fn abandon(&self, raised: &[u64]) -> crate::Result<Vec<Surface>> {
+        let mut queue = self.queue();
+        let mut marked: Vec<Surface> = Vec::new();
+        for surface in &mut queue.waiting {
+            if raised.contains(&surface.id) && !surface.abandoned {
+                surface.abandoned = true;
+                marked.push(surface.clone());
+            }
+        }
+        if let Some(mut pending) = queue
+            .pending
+            .clone()
+            .filter(|surface| raised.contains(&surface.id))
+        {
+            queue.pending = None;
+            pending.abandoned = true;
+            marked.push(pending.clone());
+            queue.waiting.push(pending);
+        }
+        if marked.is_empty() {
+            return Ok(marked);
+        }
+        self.write_queue(&queue)?;
+        // The run's own record of what became of each surface, beside the line
+        // that recorded it being sent: one further line under the same id,
+        // carrying the same text and saying nobody is waiting on it.
+        for surface in &marked {
+            crate::ledger::append_line(
+                &self.paths.channel("surfaces.jsonl"),
+                &serde_json::to_string(surface)
+                    .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
+            )?;
+        }
+        Ok(marked)
     }
 
     /// Whether a surface is waiting for an answer.
@@ -923,6 +1001,7 @@ mod tests {
             source: source::PROPOSAL.to_owned(),
             blocking,
             queued_at: 0,
+            abandoned: false,
             workstream: Some("ship".to_owned()),
         }
     }
@@ -935,7 +1014,7 @@ mod tests {
     /// transition through unseen. A modification time can repeat on a filesystem
     /// with coarse timestamps; a length is decided by the bytes. This holds the
     /// half that does not depend on the clock: push, claim and answer, against the
-    /// decision set the loop actually derives from each.
+    /// decision set the loop actually derives from each, abandonment included.
     #[test]
     fn every_queue_change_the_loop_reads_shows_in_its_length() {
         let root =
@@ -952,7 +1031,7 @@ mod tests {
                 .waiting
                 .iter()
                 .chain(queue.pending.iter())
-                .filter(|surface| surface.blocking)
+                .filter(|surface| surface.blocking && !surface.abandoned)
                 .map(|surface| surface.id)
                 .collect()
         };
@@ -990,6 +1069,117 @@ mod tests {
             "an answered surface did not change the length"
         );
         assert_eq!(outstanding(&channel), Vec::<u64>::new());
+
+        // Abandonment is the fourth transition, and the loop derives its
+        // decision set from it exactly as it does from an answer.
+        let second = channel.push(surface(0, true)).expect("a surface is queued");
+        let waiting = length(&channel);
+        assert_eq!(outstanding(&channel), vec![second.id]);
+        let marked = channel
+            .abandon(&[second.id])
+            .expect("the surface is marked");
+        assert_eq!(marked.len(), 1, "{marked:?}");
+        assert!(marked[0].abandoned);
+        assert_ne!(
+            length(&channel),
+            waiting,
+            "an abandoned surface did not change the length"
+        );
+        assert_eq!(outstanding(&channel), Vec::<u64>::new());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What abandonment does to each of the two places a surface can be, and to
+    /// the text in both.
+    ///
+    /// The two are not the same case and are deliberately not treated the same.
+    /// A surface still `waiting` is one no manager has seen, so the queue holds
+    /// the only copy of its text: it is marked in place and stays claimable. One
+    /// in `pending` has already been delivered to a reader, so the *slot* is
+    /// withdrawn — nothing is waiting for its answer — and the surface goes back
+    /// among the readable ones rather than being dropped.
+    #[test]
+    fn abandoning_keeps_every_surface_readable_and_withdraws_only_the_pending_slot() {
+        let root = std::env::temp_dir().join(format!("onepipeline-abandon-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "gone");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+
+        let read = channel.push(surface(0, true)).expect("the question queues");
+        let unread = channel
+            .push(Surface {
+                message: "nobody has seen this".to_owned(),
+                ..surface(0, false)
+            })
+            .expect("the narration queues");
+        // A blocking surface is claimed first, so this is the one now pending.
+        channel.claim().expect("a claim").expect("a surface");
+        assert_eq!(channel.pending().map(|held| held.id), Some(read.id));
+
+        let marked = channel
+            .abandon(&[read.id, unread.id])
+            .expect("both are marked");
+        assert_eq!(marked.len(), 2, "{marked:?}");
+        assert!(marked.iter().all(|surface| surface.abandoned));
+
+        // The slot is given up, and nothing is reported as awaiting a planner.
+        assert_eq!(channel.pending(), None);
+        let queue = channel.queue();
+        assert_eq!(queue.waiting.len(), 2, "{queue:?}");
+        assert!(queue.waiting.iter().all(|surface| surface.abandoned));
+        // Both texts survive, the delivered one included.
+        let mut messages: Vec<&str> = queue
+            .waiting
+            .iter()
+            .map(|surface| surface.message.as_str())
+            .collect();
+        messages.sort_unstable();
+        assert_eq!(messages, vec!["nobody has seen this", "something happened"]);
+
+        // Both stay claimable, and neither takes the pending slot back.
+        let first = channel.claim().expect("a claim").expect("a surface");
+        assert!(first.abandoned);
+        assert_eq!(channel.pending(), None);
+        assert!(channel.claim().expect("a claim").is_some());
+        assert_eq!(channel.claim().expect("a claim"), None);
+
+        // The run's own record carries what became of each, under its own id.
+        let logged: Vec<Surface> = crate::ledger::read_lines(&paths.channel("surfaces.jsonl"))
+            .iter()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        for id in [read.id, unread.id] {
+            assert!(
+                logged
+                    .iter()
+                    .any(|surface| surface.id == id && surface.abandoned),
+                "no record that surface {id} was abandoned: {logged:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second abandonment of the same surface is not a second record.
+    #[test]
+    fn abandoning_what_is_already_abandoned_records_nothing_further() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-reabandon-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "twice");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+
+        let queued = channel.push(surface(0, true)).expect("the surface queues");
+        assert_eq!(channel.abandon(&[queued.id]).expect("marked").len(), 1);
+        let lines = crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len();
+        assert!(channel.abandon(&[queued.id]).expect("nothing").is_empty());
+        assert!(channel.abandon(&[]).expect("nothing").is_empty());
+        assert_eq!(
+            crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len(),
+            lines,
+            "abandoning the same surface twice wrote a second record"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

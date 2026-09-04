@@ -335,8 +335,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     stdin
         .write_all(frames.as_bytes())
         .expect("the frames write");
-    drop(stdin);
-    ended(serving);
+    stdin.flush().expect("the frames flush");
 
     world.until("every frame to reach the planner", |world| {
         world.events_of(&run, "planner-surface-queued").len() == 10
@@ -356,6 +355,183 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
             )
             .out_lacks("\nposal");
     }
+    // Held open until here on purpose: the server is the reader waiting on every
+    // one of those answers, and a stream closed before the render would have
+    // said nobody was waiting on any of them.
+    drop(stdin);
+    ended(serving);
+    world.release("build.go");
+}
+
+/// A surface whose server exited with the side that asked already gone stops
+/// counting as one the planner is waiting on.
+///
+/// This is the observer member's own surface. Its conversation ends, the graph
+/// tears down, and the `channel serve` that raised the question reaches the end
+/// of its frame stream and exits — with nothing answered and nothing left that
+/// could read an answer. Left standing, that entry sat in every status render
+/// and every watch heartbeat as one unread planner update for an hour and a
+/// half, degrading the one line a supervising manager is forbidden to filter.
+///
+/// Nothing is deleted to fix it: both texts are still there to read, and `next`
+/// still hands them over saying which they are.
+#[test]
+fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() {
+    use std::io::Write;
+
+    let world = World::new("channel-no-reader");
+    world.script("build.wait", "hold");
+    let run = running(&world, "noreader", vec![agent("build", &[])]);
+
+    // The observer's judge side: the one question it stopped to ask, and one
+    // report beside it. A one-second bound makes each wait its own synthesized
+    // `continue`, so nothing here is ever answered.
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    stdin
+        .write_all(
+            concat!(
+                r#"{"kind":"planner-question","message":"Which base should build target?"}"#,
+                "\n",
+                r#"{"kind":"monitor","message":"the worker went quiet","blocking":false}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .expect("the frames write");
+    stdin.flush().expect("the frames flush");
+    world.until("both frames to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+
+    // While the member is still there, both are exactly what they look like:
+    // unread updates, one of them a decision the run is held on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("2 planner update(s) waiting");
+
+    // The member's conversation ends. Its judge side reaches the end of the
+    // frame stream and exits, having been answered nothing.
+    drop(stdin);
+    ended(serving);
+
+    // Neither view counts them any more, and the run no longer says it is
+    // waiting for a planner.
+    for view in [vec!["runs"], vec!["status", &run]] {
+        world
+            .run(&view)
+            .exited(0)
+            .out_lacks("planner update(s) waiting")
+            .out_lacks("waiting for planner");
+    }
+    // Said out loud rather than vanished, so an operator can still find them.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("2 planner update(s) nobody is waiting on");
+
+    // The text is not lost: the queue still hands both over, and a reader can
+    // tell what they are from the surface itself.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should build target?");
+    assert_eq!(read.json()["status"], "surface");
+    assert_eq!(read.json()["surface"]["abandoned"], json!(true));
+
+    // And the run's own record says what became of each, under its own id.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let abandoned: Vec<serde_json::Value> = record
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|surface| surface["abandoned"] == json!(true))
+        .collect();
+    assert_eq!(abandoned.len(), 2, "{record}");
+    assert_eq!(abandoned[0]["id"], json!(0));
+    assert_eq!(abandoned[1]["id"], json!(1));
+
+    world.release("build.go");
+}
+
+/// A blocking surface whose server went while the side that asked stayed is
+/// still there to be claimed and answered.
+///
+/// The discriminator is the *asker*, never the server: a server that timed out
+/// and then went — killed here, because that is what an abrupt exit is — leaves
+/// a member still holding the stream open and still owed the answer. Withdrawing
+/// on the server's exit alone would take the question out from under it.
+#[test]
+fn a_blocking_surface_outlives_a_server_whose_asker_is_still_there() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-server-went");
+    world.script("build.wait", "hold");
+    let run = running(&world, "serverwent", vec![agent("build", &[])]);
+
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"planner-question","message":"Which base should build target?"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("the frame flushes");
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // Its own wait runs out, which it says on stdout, and then it goes — with
+    // the stream it reads still open, because the member is still working.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let timed_out = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("timed out"))
+        .expect("the server reported its own timeout");
+    assert!(timed_out.contains("no planner reply"), "{timed_out}");
+    serving.kill().expect("the server this test started ends");
+    ended(serving);
+
+    // Nothing was withdrawn. It is still counted, still claimable, and the
+    // decision it raised is still the one the run is waiting on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting")
+        .out_lacks("nobody is waiting on");
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should build target?");
+    assert_eq!(read.json()["surface"]["abandoned"], serde_json::Value::Null);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
+
+    // And an answer sent to it afterwards is still accepted, which is what the
+    // member that asked is waiting for.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"target main"}"#,
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner");
+
     world.release("build.go");
 }
 

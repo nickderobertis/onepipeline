@@ -1853,6 +1853,7 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
         // envelope's `finding` op, which carries `blocking`.
         blocking: false,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: None,
     })?;
     let mut journal = Journal::open(&paths);
@@ -2348,6 +2349,9 @@ fn serve(args: &RunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     let channel = ChannelState::new(&paths);
     let stdin = std::io::stdin();
+    // Every surface this session raised, so that what it leaves behind can be
+    // said out loud rather than left standing as a question with no asker.
+    let mut raised: Vec<u64> = Vec::new();
 
     for line in stdin.lock().lines() {
         // End of input and a broken pipe are not the same fact. Read as one,
@@ -2387,6 +2391,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
             source: crate::channel::source::PROPOSAL.to_string(),
             blocking: frame.blocking,
             queued_at: sys::now_millis(),
+            abandoned: false,
             workstream: frame.node,
         })?;
         let mut journal = Journal::open(&paths);
@@ -2400,6 +2405,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
                 ("blocking", json!(queued.blocking)),
             ]),
         )?;
+        raised.push(queued.id);
 
         // Wait for whichever reader claims the planner's verdict first. A reply
         // reaches exactly one reader, and at a boundary this is it — and a live
@@ -2418,6 +2424,16 @@ fn serve(args: &RunArgs) -> Result<i32> {
             break;
         }
     }
+    // The frame stream ended, so the side that was asking has ended with it:
+    // this loop is the only reader an answer to any of these had. Marked rather
+    // than deleted — [`ChannelState::abandon`] says why, and what it withdraws
+    // instead — so the run stops reporting a decision nobody is waiting on while
+    // the text stays where a manager can still read it.
+    //
+    // Deliberately not reached by the `?` paths above: a refused frame is this
+    // server rejecting what the member said, and the member is still there to be
+    // told. Only a stream that ended proves the asker did.
+    channel.abandon(&raised)?;
     Ok(EXIT_SUCCESS)
 }
 
