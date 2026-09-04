@@ -230,7 +230,7 @@ The planner supervises over the channel:
 
 ```bash
 onepipeline next run-1                                   # read the next surface
-onepipeline reply run-1 <<<'{"version":1,"commands":[    # edit the live graph
+onepipeline reply run-1 <<<'{"version":2,"commands":[    # edit the live graph
   {"op":"retry","id":"failed","node":{"id":"retry","task":"..."}}]}'
 onepipeline attest run-1 design-approval                 # complete a human action
 ```
@@ -243,28 +243,47 @@ Two of those ops reach a node that is already running, and they are deliberately
 not the same lever:
 
 ```bash
-onepipeline reply run-1 <<<'{"version":1,"commands":[    # steer the worker
-  {"op":"context","id":"build","note":"the fixture moved to tests/data"}]}'
-onepipeline reply run-1 <<<'{"version":1,"commands":[    # move the bar
+onepipeline reply run-1 <<<'{"version":2,"commands":[    # tell the live dispatch
+  {"op":"note","id":"build","addressee":"worker",
+   "text":"the fixture moved to tests/data"}]}'
+onepipeline reply run-1 <<<'{"version":2,"commands":[    # move the bar
   {"op":"amend","id":"build","text":"The comment lines are out of scope: leave them."}]}'
 ```
 
-A `context` note **steers the worker only**. It is rendered under
-`## Planner context` saying of itself that it reports observed state and adds no
-acceptance criteria, it carries exactly one dispatch, and it does not change what
-the node is judged against. An `amend` **does** change that: its text becomes part
-of the node's effective task, rendered under `## Amendment` above the task's
-operational notes and claiming precedence over them, so the worker and the judge
-reviewing it read the same ruling — on the dispatch that follows it and on every
-later one, until another `amend` replaces it. A turn already in flight is not
-reached: its task was composed before the ruling existed, and so was the one its
-judge reads. A node's current amendment is readable from
-`status` and from `results` before anything replaces it. Without the second lever
-a manager's mid-dispatch ruling reaches the worker and not its judge, and the
-node's own judge can tell it to undo what the manager decided.
+A `note` is delivered into the node's **live conversation**, to whichever party of
+it is speaking, and the other party receives it with that party's response — so a
+correction reaches the worker and its judge alike rather than one of them. It takes
+`id`, a required `addressee` of `worker`, `supervisor` or `both`, `text`, an
+optional `criterion` that enters the bar the judge of that conversation decides
+against, and two independent fields: `deliver`, `live` or `next`, deciding only
+whether the running turn is attempted, and `persist`, deciding only whether a note
+no turn took is composed into the node's next dispatch. Both default to reaching
+the running turn and keeping the note where nothing did — `deliver: live` with
+`persist: true` — and the four combinations, the dispositions a note is answered
+with, and the one rule that a note reaching nobody is refused are declared on
+`onepipeline::channel::Command::Note`. A note carried forward is rendered into
+that dispatch under `## Planner context`, saying of itself that it reports
+observed state and adds no acceptance criteria, and it is consumed when that
+dispatch takes it — so beyond the one conversation it reached, a note does not
+change what the node is judged against.
 
-`amend` is the planner's; an observing monitor may not issue one, because moving a
-bar is a decomposition decision rather than an observation.
+An `amend` **does** change that: its text becomes part of the node's effective
+task, rendered under `## Amendment` above the task's operational notes and claiming
+precedence over them, so the worker and the judge reviewing it read the same ruling
+— on the dispatch that follows it and on every later one, until another `amend`
+replaces it. A turn already in flight is not reached: its task was composed before
+the ruling existed, and so was the one its judge reads. A node's current amendment
+is readable from `status` and from `results` before anything replaces it. That is
+the lever for a correction that has to reach the live turn *and* still bind a
+re-dispatch, which a `note` deliberately does not do: reaching a running turn and
+being carried to the next dispatch are mutually exclusive.
+
+There is **one** manager-note op. The `context` op this crate used to carry was the
+same delivery with fewer fields, and shipping both is what let a manager's approval
+reach a worker and never its judge; an envelope still naming `context` is refused
+by that name. Both `note` and `amend` are the planner's; an observing monitor may
+issue neither, because moving a bar — or binding one against the conversation
+running now — is a decomposition decision rather than an observation.
 
 A launch may also name a **node validator** — a command of the host's own, which
 every op that introduces or changes a node's task (`add`, `retry`, a `requeue`

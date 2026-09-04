@@ -935,6 +935,20 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                         state.pending_context.insert(node.clone(), note.clone());
                     }
                     Operation::ContextAdded { .. } => {}
+                    // The same fact under the op that replaced `context`: a note
+                    // no turn took is owed to the node's next dispatch, and the
+                    // four dispositions beside it are notes a live conversation
+                    // read, which owe nothing forward.
+                    Operation::NoteDelivered {
+                        node,
+                        text,
+                        reached: crate::note::Reached::Carried,
+                        ..
+                    } => {
+                        state
+                            .pending_context
+                            .insert(node.clone(), text.as_str().to_string());
+                    }
                     _ => {}
                 }
             }

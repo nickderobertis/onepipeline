@@ -1,6 +1,6 @@
 //! The planner channel: the wire shapes, and the durable queue behind them.
 //!
-//! A reply is one JSON envelope: a legacy verdict, a version-1 list of graph
+//! A reply is one JSON envelope: a legacy verdict, a versioned list of graph
 //! edits, or both. The edits' required fields and validation semantics are
 //! `ai-orchestrator`'s live-edit protocol exactly, per `docs/contract.md`.
 //!
@@ -19,7 +19,7 @@
 // newtype is a public item `docs/contract.md` does not name, and minting one is interface
 // drift — a published promise the contract never made (see src/AGENTS.md). `version` and
 // `completion` stay independent optionals for a different reason: the contract's envelope
-// is "legacy verdicts *plus* a version-1 command list", so a reply may legally carry
+// is "legacy verdicts *plus* a versioned command list", so a reply may legally carry
 // either, both, or a version this build does not know — and collapsing that into one enum
 // would reject envelopes the protocol accepts. The references are narrowed where they are
 // judged, against the graph `edits` reconciles them into.
@@ -39,7 +39,7 @@ use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
 
 /// The reply envelope version this crate reads and writes.
-pub const REPLY_ENVELOPE_VERSION: u32 = 1;
+pub const REPLY_ENVELOPE_VERSION: u32 = 2;
 
 /// Who wrote a reply, and therefore which ops it may carry.
 ///
@@ -104,7 +104,6 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
         Command::Retry { .. }
         | Command::Requeue { .. }
         | Command::Cancel { .. }
-        | Command::Context { .. }
         | Command::Finding { .. }
         | Command::Add { .. } => return Ok(()),
         Command::Complete { .. } => {
@@ -128,11 +127,13 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
         }
         // A note may carry a criterion, and a delivered one enters the bar the
         // node's judge decides against — the same decision `amend` makes, taken
-        // against the conversation running now. An observer keeps `context`,
-        // which reaches the worker and binds nothing.
+        // against the conversation running now, which the observer's own persona
+        // reserves to the planner. It is the whole of the manager-note surface
+        // since `context` was collapsed into it, so an observer that wants a node
+        // told something surfaces it rather than sending it.
         Command::Note { .. } => {
             "a note may bind a criterion the node's judge decides against, which is the \
-             planner's decision; `context` is the note that binds nothing"
+             planner's decision rather than an observation"
         }
         // The op that writes an outcome the run itself never observed. An
         // observer's whole authority is what the stream shows it, and this one
@@ -160,7 +161,6 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Requeue { .. } => "requeue",
         Command::Attest { .. } => "attest",
         Command::Complete { .. } => "complete",
-        Command::Context { .. } => "context",
         Command::Amend { .. } => "amend",
         Command::Note { .. } => "note",
         Command::Finding { .. } => "finding",
@@ -177,7 +177,6 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Retry { id, .. }
         | Command::Cancel { id, .. }
         | Command::Requeue { id, .. }
-        | Command::Context { id, .. }
         | Command::Note { id, .. }
         | Command::Settle { id, .. }
         | Command::Amend { id, .. } => Some(id.clone()),
@@ -262,10 +261,11 @@ pub enum Dependents {
 
 /// One graph edit.
 ///
-/// The variants and their required fields are the live-edit protocol's table.
-/// `context` carries one field beyond it, [`Deliver`], which is optional and
-/// defaults to what that table's `context` always did — so an edit written
-/// against the table alone is still exactly the edit it was.
+/// The variants and their required fields are the live-edit protocol's table,
+/// with one subtraction and one replacement: the table's `context` is **gone**,
+/// and [`Note`](Self::Note) is the single manager-note op that carries what both
+/// of them did. An envelope still naming `context` is refused by serde, by that
+/// name, because the field set below rejects what it does not declare.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Command {
@@ -336,32 +336,22 @@ pub enum Command {
         /// Why the planner considers the run complete.
         reason: String,
     },
-    /// Carry one planner note to the node, without cancelling or restarting
-    /// anything.
-    Context {
-        /// The node the note is for.
-        id: String,
-        /// The note. It carries exactly one dispatch: it attaches to the node's
-        /// next one and is consumed when that dispatch takes it.
-        note: String,
-        /// When the note reaches the node. Omitted, it is [`Deliver::Auto`],
-        /// which is what every `context` edit written before this field got.
-        #[serde(default, skip_serializing_if = "Deliver::is_auto")]
-        deliver: Deliver,
-    },
     /// Make one binding amendment to what a node is judged against.
     ///
-    /// The lever a manager has that a `context` note is not. A note steers the
-    /// worker, says of itself that it adds no acceptance criteria, and carries
-    /// exactly one dispatch; this becomes part of the node's **effective task**,
-    /// which the worker and the judge reviewing it are handed alike, on the
-    /// dispatch that follows it and on every later one. A turn already running
-    /// is not reached — its task was composed before the ruling existed — which
-    /// is the asymmetry with `context`, whose point is the turn running now.
+    /// The lever a manager has that a [`Note`](Self::Note) is not, and the
+    /// answer to the one thing a note deliberately cannot do. A note reaches the
+    /// conversation running now, or is carried to the node's next dispatch, and
+    /// never both; this becomes part of the node's **effective task**, which the
+    /// worker and the judge reviewing it are handed alike, on the dispatch that
+    /// follows it and on every later one. A turn already running is not reached
+    /// — its task was composed before the ruling existed — which is the
+    /// asymmetry with a note, whose point is the turn running now. A correction
+    /// that has to reach the live turn *and* still bind a re-dispatch is this
+    /// op, not a note.
     Amend {
         /// The node to amend. It must be one the graph holds and can still be
         /// dispatched: a node that has settled `done` is refused for the reason
-        /// `context` refuses one, since nothing will read the amendment.
+        /// a note to one is, since nothing will read the amendment.
         id: String,
         /// The binding text. Blank is refused rather than recorded.
         ///
@@ -371,34 +361,162 @@ pub enum Command {
         text: String,
     },
     /// Deliver one note into the node's live dispatch, to whichever party of it
-    /// is speaking.
+    /// is speaking — and, where it reached no turn, carry it to the node's next
+    /// dispatch.
     ///
-    /// The lever `context` and `amend` are each half of. It goes to the node's
-    /// running conversation through the delivery seam
+    /// **The one manager-note op**, and the authoritative declaration of its
+    /// shape: the field set, each field's type and default, and what the op
+    /// answers are stated here and nowhere else in this repository, so a
+    /// consumer's documentation derives from this rather than restating it.
+    ///
+    /// It goes to the node's running conversation through the delivery seam
     /// [`oneagentgraph`](crate::note) publishes rather than through a bare
     /// interrupt, so the party that is live takes it and the other party
     /// receives it with that party's response; a [`criterion`](Self::Note::criterion)
     /// it carries enters the acceptance criteria that conversation's judge
-    /// decides against. **A note that reaches nobody is refused**, naming that it
-    /// was not delivered and why, so the planner chooses relaunch, tweak, or
-    /// follow-up rather than being told nothing.
+    /// decides against.
     ///
-    /// It does not move the node's stored bar: `amend` is still the op for a
-    /// ruling that has to survive a re-dispatch.
+    /// # `deliver` and `persist` are two axes, not one
+    ///
+    /// [`deliver`](Self::Note::deliver) decides **whether live delivery is
+    /// attempted**; [`persist`](Self::Note::persist) decides **whether the note
+    /// is composed into the node's next dispatch**. Neither decides the other's
+    /// question, and saying so is load-bearing: `deliver: next` and
+    /// `persist: true` both read as "on the next dispatch", and a reader who
+    /// conflates them gets this contract wrong. Their four combinations:
+    ///
+    /// * `live` with `persist: false` — the running turn is attempted; where it
+    ///   took the note that is the whole of the delivery, and where it did not
+    ///   the note is **refused**, because it composes forward into nothing and
+    ///   so reached nobody. This is the combination a caller uses when it needs
+    ///   that refusal.
+    /// * `live` with `persist: true` — the running turn is attempted; where it
+    ///   took the note the note composes forward into nothing, because it
+    ///   reached a running turn; where it did not, the note is composed into the
+    ///   node's next dispatch and is **not** a refusal. **This is the default**,
+    ///   and it is exactly what the removed `context` op's `auto` delivery meant.
+    /// * `next` with `persist: true` — the running turn is not interrupted, so
+    ///   the note never reaches one and is always composed into the node's next
+    ///   dispatch.
+    /// * `next` with `persist: false` — no live delivery is attempted and the
+    ///   note composes forward into nothing, so it reaches nobody whatever the
+    ///   run does. Refused at this envelope, before the run is reached.
+    ///
+    /// The default a caller gets by omitting both is `deliver: live` with
+    /// `persist: true`, because it is the combination that attempts the running
+    /// turn *and* cannot leave the note nowhere. It is not the only one that
+    /// cannot leave it nowhere — `deliver: next` with `persist: true` never
+    /// reaches a running turn and so always composes forward — but that one
+    /// declines the live attempt, which is what disqualifies it as the default.
+    ///
+    /// # One refusal rule
+    ///
+    /// **A note that would reach nobody is refused, naming what left it nowhere
+    /// to go.** One sentence, checked wherever it can be decided: at this
+    /// envelope, where `deliver: next` with `persist: false` reaches nobody by
+    /// construction and never reaches a run at all; and at delivery, where only
+    /// the run can decide it — `deliver: live` with `persist: false` and no turn
+    /// that took it. Neither is a special case beside the other. The op also
+    /// refuses a blank [`text`](Self::Note::text) and an [`id`](Self::Note::id)
+    /// naming a node the graph cannot reach, and each refusal names which of
+    /// those it is.
+    ///
+    /// # What it deliberately cannot do
+    ///
+    /// Reaching the running turn and being carried into the next dispatch are
+    /// mutually exclusive under `persist`'s biconditional, so this op offers **no
+    /// way to do both**. That is deliberate rather than a gap: a correction that
+    /// has to reach the live turn *and* still bind the node's next dispatch is a
+    /// ruling that survives a re-dispatch, and [`Amend`](Self::Amend) is the op
+    /// for that and is unchanged. So this one is not given a second, weaker way
+    /// to say what `amend` already says properly.
+    ///
+    /// # What it answers
+    ///
+    /// Six dispositions, each named in what the caller reads back — the
+    /// `reached` word the run records, and [`Delivered`](crate::note::Delivered)
+    /// for a caller on this crate's own surface:
+    ///
+    /// * `worker` — the worker's live turn took it.
+    /// * `supervisor` — the supervisor's live turn took it.
+    /// * `judged-with` — the supervisor's decision was re-taken with it in hand
+    ///   and completed, carrying that completion reason, so no further worker
+    ///   turn took it.
+    /// * `queued` — no turn was live, so the next turn of that conversation to
+    ///   open takes it.
+    /// * `carried` — the note was carried to the node's next dispatch instead of
+    ///   being taken by a running turn.
+    /// * [`Delivered::Queued`](crate::note::Delivered::Queued) — the run accepted
+    ///   it durably without the reconciler having answered within the reply
+    ///   timeout. Still queued rather than a refusal, and **never** an
+    ///   instruction to send it again.
+    ///
+    /// `worker`, `supervisor`, `judged-with` and `queued` are the note reaching
+    /// the running dispatch's conversation; `carried` is the note reaching no
+    /// turn of it. Under the default those two are the only ways one accepted
+    /// note succeeds, and they are exhaustive and mutually exclusive — which is
+    /// the same biconditional `persist` is defined by. The disposition's shape
+    /// and the field's semantics were chosen together rather than arrived at
+    /// separately: they are materially different to whoever sent the note, and a
+    /// caller that cannot tell them apart is back in the incident this op was
+    /// written from.
     Note {
-        /// The node whose live dispatch it is for.
+        /// The node whose dispatch it is for.
+        ///
+        /// Required; absent, this envelope refuses. It must name a node the
+        /// graph holds and can still be reached — one that will never be
+        /// dispatched again and has no conversation left is refused under the
+        /// reach-nobody rule rather than accepted and dropped.
         id: String,
-        /// Whose task this updates. Required and never guessed: a note whose
-        /// addressee is inferred is one the judge may read as work for itself.
+        /// Whose task this updates. One of `worker`, `supervisor`, `both`, and
+        /// no other value.
+        ///
+        /// Required, with no default, and **never inferred**: a note whose
+        /// addressee is guessed is one the judge may read as work for itself. An
+        /// envelope omitting it is refused rather than defaulted to any of the
+        /// three.
         addressee: Addressee,
-        /// What the addressee reads. Blank is refused at this boundary by the
-        /// seam's own newtype rather than somewhere later.
+        /// What the addressee reads.
+        ///
+        /// Required; a blank or whitespace-only value is refused at this
+        /// boundary by the seam's own newtype, rather than accepted here and
+        /// dropped later.
         text: NoteText,
         /// The property the finished tree must have, when this note changes
-        /// that. Omitted, the note is observational: it reaches whoever is live
-        /// and touches no acceptance criterion.
+        /// that.
+        ///
+        /// Optional, defaulting to absent, and omitted from a serialized note
+        /// that does not carry one. Present, it enters the acceptance criteria
+        /// the judge of the conversation it is delivered into decides against;
+        /// absent, the note is observational and touches no acceptance
+        /// criterion. It binds the conversation it reached and not the node's
+        /// stored bar — [`Amend`](Self::Amend) is the op for that.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         criterion: Option<Criterion>,
+        /// Whether live delivery is attempted, and **only** that.
+        ///
+        /// Optional, defaulting to [`Deliver::Live`], and omitted from a
+        /// serialized note that carries the default. `live` attempts to reach
+        /// the node's running turn; `next` attempts no live delivery at all.
+        /// Whether the note is composed into a later dispatch is
+        /// [`persist`](Self::Note::persist)'s question alone.
+        #[serde(default, skip_serializing_if = "Deliver::is_default")]
+        deliver: Deliver,
+        /// Whether the note is composed into the node's next dispatch, and
+        /// **only** that.
+        ///
+        /// Optional, defaulting to `true`, and omitted from a serialized note
+        /// that carries the default. One sentence states it for both `deliver`
+        /// values: `true` composes the note into the node's next dispatch **if
+        /// and only if the note did not reach a running turn**, where it is
+        /// consumed when that dispatch takes it; `false` composes it into no
+        /// dispatch, whatever `deliver` did. Neither value says anything about
+        /// whether a live attempt was made, which is
+        /// [`deliver`](Self::Note::deliver)'s question alone.
+        ///
+        /// Read it as "do not lose this" rather than as "send it twice".
+        #[serde(default = "persists", skip_serializing_if = "is_true")]
+        persist: bool,
     },
     /// Raise one finding to the planner, changing nothing about the graph.
     ///
@@ -488,30 +606,47 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// When a `context` note reaches the node it is for.
+/// Whether a flag is at its `true` default, so serialization can omit it.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// A note's [`persist`](Command::Note::persist) default.
+fn persists() -> bool {
+    true
+}
+
+/// Whether a [`Note`](Command::Note) attempts live delivery — and nothing else.
 ///
-/// The default is [`Auto`](Self::Auto), so a `context` edit that says nothing
-/// gains live delivery wherever the harness supports one and behaves exactly as
-/// it always did where it does not. A value outside these three is refused by
-/// serde, naming what it read — this is external input like any other field.
+/// Two values, and the third one this crate used to carry is **gone**. `auto`
+/// named a combination of *both* axes — attempt the running turn, and fall
+/// through to the next dispatch when there is none — and that fall-through is
+/// persistence spelled a second way, so a contract carrying both `auto` and
+/// [`persist`](Command::Note::persist) would have two ways to say one thing.
+/// What `auto` meant has an exact spelling in the survivor: `deliver: live` with
+/// `persist: true`, which is also the default, so a caller that says nothing
+/// gets it.
+///
+/// A value outside these two is refused by serde, naming what it read — this is
+/// external input like any other field, and `auto` is refused by that same rule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Deliver {
-    /// Into the node's running turn when it has a controllable one, and onto its
-    /// next dispatch when it does not.
+    /// Attempt the node's running turn.
+    ///
+    /// What happens where there is none is not this field's question: it is
+    /// [`persist`](Command::Note::persist)'s, which either carries the note to
+    /// the node's next dispatch or refuses it for having reached nobody.
     #[default]
-    Auto,
-    /// Into the node's running turn, or refused with the reason it could not be.
-    /// A planner who needs the correction *now* is not silently deferred.
     Live,
-    /// Onto the node's next dispatch, and only there.
+    /// Attempt no live delivery at all, leaving a running turn alone.
     Next,
 }
 
 impl Deliver {
     /// Whether this is the default, so serialization can omit it.
-    fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto)
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Live)
     }
 }
 

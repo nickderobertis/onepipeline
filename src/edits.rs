@@ -17,7 +17,7 @@ use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::channel::{Author, Command, Dependents, SettleOutcome};
+use crate::channel::{Author, Command, Deliver, Dependents, SettleOutcome};
 use crate::error::{Error, Result};
 use crate::graph::{self, Graph, NodeStatus};
 use crate::plan::Node;
@@ -192,7 +192,14 @@ pub enum Operation {
         text: String,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
-    /// A planner note reached a node.
+    /// A planner note reached a node, as the removed `context` op recorded it.
+    ///
+    /// **Nothing writes this any more.** `context` was collapsed into the one
+    /// manager-note op, which records [`NoteDelivered`](Self::NoteDelivered)
+    /// instead — but a run store written before that collapse still carries these,
+    /// and a record this build could not fold is a run whose graph cannot be
+    /// projected at all. So the variant stays exactly as it was, folded exactly as
+    /// it was, and is a reader rather than a writer.
     ContextAdded {
         /// The node.
         node: String,
@@ -209,13 +216,17 @@ pub enum Operation {
     // `compile_note`; the note's own two narrowable values are **not** strings here — the
     // addressee is a closed enum and the text and criterion are the seam's validated
     // newtypes, so a record this build did not write is refused by their own conversions.
-    /// A manager's note was delivered into a node's live conversation.
+    /// A manager's note was delivered into a node's live conversation, or carried
+    /// to that node's next dispatch because no turn of it took the note.
     ///
     /// Recorded for what only this event says: a note is delivered to whichever
-    /// party is live, so *which* party took it is the answer a reader of the run
-    /// has no second source for. It mutates nothing — the note went into a
-    /// conversation rather than onto the graph — so replay reconstructs it by
-    /// changing nothing, exactly as the reconciler did.
+    /// party is live, so *which* party took it — or that none did — is the answer a
+    /// reader of the run has no second source for. Four of the five dispositions
+    /// mutate nothing, because the note went into a conversation rather than onto
+    /// the graph, so replay reconstructs them by changing nothing exactly as the
+    /// reconciler did. [`Reached::Carried`](crate::note::Reached::Carried) is the
+    /// one that does: it is the note still owed to the node's next dispatch, and
+    /// folding it is what makes replay of the edit alone reconstruct that.
     NoteDelivered {
         /// The node whose conversation took it.
         node: String,
@@ -391,8 +402,37 @@ pub fn compile(
     author: Author,
     command: &Command,
 ) -> Result<Vec<Operation>> {
-    compile_with(graph, frontier, author, command, Delivery::Deferred)
+    // Validate against a copy, so a refusal partway through a multi-edge
+    // mutation cannot leave the caller's graph in a state nothing submitted.
+    let mut candidate = graph.clone();
+    let operations = compile_into(&mut candidate, frontier, author, command)?;
+    if !matches!(
+        command,
+        Command::Complete { .. }
+            | Command::Attest { .. }
+            | Command::Finding { .. }
+            | Command::Settle { .. }
+    ) {
+        // The resulting graph must still satisfy the normal plan schema.
+        let plan = candidate.to_plan(&crate::plan::Plan {
+            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: None,
+            concurrency: candidate.concurrency,
+            tasks: Vec::new(),
+        });
+        graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
+    }
+    // Last, and over the node the edit actually produced: the host's own rules
+    // are the expensive check and the specific one, so a node this crate's own
+    // schema would refuse never reaches them.
+    if let Some(node) = node_whose_task_is_new(command, &candidate) {
+        offer_to_validator(frontier.node_validator.as_deref(), command, node)?;
+    }
+    *graph = candidate;
+    Ok(operations)
 }
+
 
 /// Carry one command's compiled operations onto the frontier the **next**
 /// command of the same envelope is judged against.
@@ -429,52 +469,6 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
             _ => {}
         }
     }
-}
-
-/// [`compile`], for a caller that has already delivered the note.
-///
-/// Only a `context` command reads `delivery`, and only the reconciler has an
-/// answer for it: whether a note reached the running turn is the outcome of an
-/// `oneagentgraph interrupt`, not a judgement about the graph. Every other
-/// caller — the submission check most of all — validates the same command
-/// without pulling that lever, which is why the delivery is a parameter rather
-/// than something this module works out.
-pub fn compile_with(
-    graph: &mut Graph,
-    frontier: &Frontier,
-    author: Author,
-    command: &Command,
-    delivery: Delivery,
-) -> Result<Vec<Operation>> {
-    // Validate against a copy, so a refusal partway through a multi-edge
-    // mutation cannot leave the caller's graph in a state nothing submitted.
-    let mut candidate = graph.clone();
-    let operations = compile_into(&mut candidate, frontier, author, command, delivery)?;
-    if !matches!(
-        command,
-        Command::Complete { .. }
-            | Command::Attest { .. }
-            | Command::Finding { .. }
-            | Command::Settle { .. }
-    ) {
-        // The resulting graph must still satisfy the normal plan schema.
-        let plan = candidate.to_plan(&crate::plan::Plan {
-            schema_version: crate::plan::PLAN_SCHEMA_VERSION,
-            goal: None,
-            name: None,
-            concurrency: candidate.concurrency,
-            tasks: Vec::new(),
-        });
-        graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
-    }
-    // Last, and over the node the edit actually produced: the host's own rules
-    // are the expensive check and the specific one, so a node this crate's own
-    // schema would refuse never reaches them.
-    if let Some(node) = node_whose_task_is_new(command, &candidate) {
-        offer_to_validator(frontier.node_validator.as_deref(), command, node)?;
-    }
-    *graph = candidate;
-    Ok(operations)
 }
 
 /// The node whose task one command puts in front of a dispatch, once the command
@@ -983,7 +977,6 @@ fn compile_into(
     frontier: &Frontier,
     author: Author,
     command: &Command,
-    delivery: Delivery,
 ) -> Result<Vec<Operation>> {
     match command {
         Command::Add { node } => compile_add(graph, node),
@@ -1005,14 +998,13 @@ fn compile_into(
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
         }]),
-        Command::Context { id, note, .. } => compile_context(graph, frontier, id, note, delivery),
         Command::Amend { id, text } => compile_amend(graph, frontier, id, text),
         Command::Note {
             id,
-            addressee,
-            text,
-            criterion,
-        } => compile_note(graph, id, *addressee, text, criterion.as_ref()),
+            deliver,
+            persist,
+            ..
+        } => compile_note(graph, frontier, id, *deliver, *persist),
         Command::Finding {
             message,
             blocking,
@@ -1605,67 +1597,58 @@ fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>
     }])
 }
 
-fn compile_context(
-    graph: &mut Graph,
-    frontier: &Frontier,
-    id: &str,
-    note: &str,
-    delivery: Delivery,
-) -> Result<Vec<Operation>> {
-    if !graph.contains(id) {
-        return Err(refuse(format!("context: no node '{id}'")));
-    }
-    if note.trim().is_empty() {
-        return Err(refuse("context: the note cannot be empty"));
-    }
-    // A note is read by the node's running turn or by a *later* dispatch of it.
-    // A node that already settled `done` has neither, so the planner is told
-    // rather than left believing it landed.
-    if frontier.recorded.get(id) == Some(&NodeStatus::Done) {
-        return Err(refuse(format!(
-            "context: node '{id}' has settled done, so nothing will read the note"
-        )));
-    }
-    // A note the running turn took has been read, so it is not also owed to the
-    // next dispatch: attaching it there too would re-state a correction the
-    // worker has already acted on.
-    if delivery == Delivery::Deferred {
-        if let Some(node) = graph.get_mut(id) {
-            node.context = Some(note.to_string());
-        }
-    }
-    Ok(vec![Operation::ContextAdded {
-        node: id.to_string(),
-        note: note.to_string(),
-        delivery,
-    }])
-}
-
 /// Validate one note, and record nothing.
 ///
 /// The two halves of a note are judged in two places, deliberately. **Whether the
 /// ask is one this run can act on** is a question about the graph and is answered
-/// here: a node the graph does not hold has no conversation to reach, and the
-/// note's own text and criterion were already refused by their newtypes at the
-/// envelope's boundary if they were unusable. **Whether it was delivered** is a
-/// question only the conversation can answer, so it is asked where the delivery is
-/// made and recorded there — which is why nothing comes back from here.
+/// here: a node the graph does not hold has no conversation to reach and no
+/// dispatch to carry it to, and the note's own text and criterion were already
+/// refused by their newtypes at the envelope's boundary if they were unusable.
+/// **Whether it was delivered** is a question only the conversation can answer, so
+/// it is asked where the delivery is made and recorded there — which is why
+/// nothing comes back from here.
 ///
-/// Notably *not* refused here: a node that has settled. A `context` note to one is
-/// turned away by this module because it would attach to a dispatch that will never
-/// run; a *note* is not attached to anything, it is handed to a conversation, and
-/// the conversation's own answer — which names how it ended — is a better refusal
-/// than this module could compose. Refusing here would also record nothing, and a
-/// non-delivery the run does not record is the silence this seam exists to end.
+/// The reach-nobody rule is [`crate::note::reaches_nobody`]'s one sentence, and
+/// this is the half of it the *fields* decide: `deliver: next` attempts no live
+/// delivery and `persist: false` composes the note into no dispatch, so together
+/// they reach nobody by construction, whatever the run is doing. It is refused
+/// here, before the run is reached, rather than written as a special case beside
+/// the delivery-time half.
+///
+/// Notably *not* refused here: a node that has settled. A note is not attached to
+/// anything until a delivery has failed to reach a turn — it is handed to a
+/// conversation, and the conversation's own answer, which names how it ended, is a
+/// better refusal than this module could compose. Refusing here would also record
+/// nothing, and a non-delivery the run does not record is the silence this seam
+/// exists to end.
 fn compile_note(
     graph: &mut Graph,
+    frontier: &Frontier,
     id: &str,
-    _addressee: crate::note::Addressee,
-    _text: &crate::note::NoteText,
-    _criterion: Option<&crate::note::Criterion>,
+    deliver: Deliver,
+    persist: bool,
 ) -> Result<Vec<Operation>> {
     if !graph.contains(id) {
         return Err(refuse(format!("note: no node '{id}'")));
+    }
+    if deliver == Deliver::Next && !persist {
+        return Err(crate::note::reaches_nobody(
+            id,
+            "`deliver: next` attempts no live delivery and `persist: false` composes it \
+             into no dispatch, so this note reaches nobody whatever the run does",
+        ));
+    }
+    // A note that can only be carried has to have somewhere to be carried to. A
+    // node that settled `done` will never be dispatched again, so `deliver: next`
+    // to one is the same reach-nobody rule with the run's own record deciding it
+    // rather than the fields. `deliver: live` is not judged here: it has a turn to
+    // try first, and the conversation's own answer is the better refusal.
+    if deliver == Deliver::Next && frontier.recorded.get(id) == Some(&NodeStatus::Done) {
+        return Err(crate::note::reaches_nobody(
+            id,
+            "it has settled done, so no dispatch of it will ever take the note and \
+             `deliver: next` asks for no live delivery",
+        ));
     }
     Ok(Vec::new())
 }
@@ -1799,7 +1782,8 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         }
         // A live delivery went into a turn rather than onto the graph, so
         // replay reconstructs it by changing nothing — exactly as the
-        // reconciler did.
+        // reconciler did. Written by the removed `context` op and read here for
+        // the run stores that still carry it.
         Operation::ContextAdded {
             node,
             note,
@@ -1810,10 +1794,23 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
         }
         Operation::ContextAdded { .. } => {}
+        // The one disposition that moved the graph: no turn took the note, so it
+        // is owed to the node's next dispatch and replay has to put it back
+        // where the reconciler did.
+        Operation::NoteDelivered {
+            node,
+            text,
+            reached: crate::note::Reached::Carried,
+            ..
+        } => {
+            if let Some(node) = graph.get_mut(node) {
+                node.context = Some(text.as_str().to_string());
+            }
+        }
         // None mutates the graph: an attestation settles a node, a completion
         // request is journalled for audit, a finding went to the planner's
-        // queue, and a note went into a conversation — all folded elsewhere, or
-        // nowhere.
+        // queue, and a note a turn took went into a conversation — all folded
+        // elsewhere, or nowhere.
         Operation::NoteDelivered { .. }
         | Operation::HumanAttested { .. }
         | Operation::CompletionRequested { .. }
@@ -1886,12 +1883,21 @@ mod tests {
         })
     }
 
-    /// A `context` edit as a planner who says nothing about delivery writes one.
+    /// A `note` edit as a manager who says nothing about either axis writes one:
+    /// `deliver: live` with `persist` on.
     fn note_for(id: &str, note: &str) -> Command {
-        Command::Context {
+        note_with(id, note, Deliver::Live, true)
+    }
+
+    /// The same, naming both axes.
+    fn note_with(id: &str, note: &str, deliver: Deliver, persist: bool) -> Command {
+        Command::Note {
             id: id.into(),
-            note: note.into(),
-            deliver: crate::channel::Deliver::default(),
+            addressee: crate::note::Addressee::Worker,
+            text: note.parse().expect("a usable note"),
+            criterion: None,
+            deliver,
+            persist,
         }
     }
 
@@ -2912,8 +2918,15 @@ mod tests {
         assert!(message.contains("node that settled failed"), "{message}");
     }
 
+    /// The envelope's half of the one reach-nobody rule, and the node id it is
+    /// judged against.
+    ///
+    /// `compile` records nothing for a note — where it landed is the delivery's
+    /// answer, not the graph's — so what it decides is exactly the two questions
+    /// that need no run: does the graph hold the node, and do the two fields
+    /// between them leave the note anywhere to go.
     #[test]
-    fn context_reaches_a_node_that_can_still_be_dispatched() {
+    fn a_note_is_judged_against_the_graph_and_the_two_fields_that_reach_nobody() {
         let mut graph = graph_of(vec![agent("build", &[])]);
         let operations = compile(
             &mut graph,
@@ -2921,33 +2934,28 @@ mod tests {
             &note_for("build", "the fixture moved"),
         )
         .expect("a live node takes a note");
-        assert_eq!(
-            graph.get("build").expect("build").context.as_deref(),
-            Some("the fixture moved")
-        );
         assert!(
-            matches!(
-                &operations[0],
-                Operation::ContextAdded {
-                    delivery: Delivery::Deferred,
-                    ..
-                }
-            ),
-            "a note nobody delivered is owed to the next dispatch: {operations:?}"
+            operations.is_empty(),
+            "the compile recorded a note the delivery had not answered yet: {operations:?}"
+        );
+        assert_eq!(
+            graph.get("build").expect("build").context,
+            None,
+            "the compile carried a note forward before any delivery had failed"
         );
 
         for (frontier_state, command, expected) in [
-            (
-                frontier(&[("build", NodeStatus::Done)]),
-                note_for("build", "too late"),
-                "settled done",
-            ),
+            (Frontier::default(), note_for("nowhere", "hello"), "no node"),
             (
                 Frontier::default(),
-                note_for("build", "   "),
-                "cannot be empty",
+                note_with("build", "nowhere to go", Deliver::Next, false),
+                "reaches nobody whatever the run does",
             ),
-            (Frontier::default(), note_for("nowhere", "hello"), "no node"),
+            (
+                frontier(&[("build", NodeStatus::Done)]),
+                note_with("build", "too late", Deliver::Next, true),
+                "it has settled done",
+            ),
         ] {
             let message = compile(&mut graph, &frontier_state, &command)
                 .unwrap_err()
@@ -2956,45 +2964,45 @@ mod tests {
         }
     }
 
-    /// A note the running turn took is not also owed to the next dispatch —
-    /// otherwise that dispatch would re-state a correction the worker has
-    /// already acted on.
+    /// A note no turn took is owed to the node's next dispatch, and replay puts
+    /// it back exactly where the reconciler did.
     #[test]
-    fn a_note_delivered_live_leaves_nothing_on_the_node_for_a_later_dispatch() {
+    fn a_carried_note_replays_onto_the_node_and_a_taken_one_leaves_nothing() {
+        let carried = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: crate::note::Addressee::Worker,
+            text: "the fixture moved".parse().expect("a usable note"),
+            criterion: None,
+            reached: crate::note::Reached::Carried,
+        };
         let mut graph = graph_of(vec![agent("build", &[])]);
-        let operations = compile_with(
-            &mut graph,
-            &frontier(&[("build", NodeStatus::Running)]),
-            Author::Planner,
-            &note_for("build", "the fixture moved"),
-            Delivery::Live,
-        )
-        .expect("a running node takes a note into its turn");
+        apply(&mut graph, &carried);
         assert_eq!(
-            graph.get("build").expect("build").context,
-            None,
-            "a live note was also queued for the next dispatch"
-        );
-        assert!(
-            matches!(
-                &operations[0],
-                Operation::ContextAdded {
-                    delivery: Delivery::Live,
-                    note,
-                    ..
-                } if note == "the fixture moved"
-            ),
-            "{operations:?}"
+            graph.get("build").expect("build").context.as_deref(),
+            Some("the fixture moved")
         );
 
-        // And replay reconstructs exactly that: nothing on the graph.
-        let mut replayed = graph_of(vec![agent("build", &[])]);
-        apply(&mut replayed, &operations[0]);
-        assert_eq!(replayed.get("build").expect("build").context, None);
+        // And the other direction, which is what a one-sided implementation
+        // would pass: a note a turn took is owed to no later dispatch.
+        let taken = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: crate::note::Addressee::Worker,
+            text: "the fixture moved".parse().expect("a usable note"),
+            criterion: None,
+            reached: crate::note::Reached::Worker,
+        };
+        let mut untouched = graph_of(vec![agent("build", &[])]);
+        apply(&mut untouched, &taken);
+        assert_eq!(
+            untouched.get("build").expect("build").context,
+            None,
+            "a note a running turn read was also queued for the next dispatch"
+        );
     }
 
-    /// A record written before delivery had modes says nothing about it, and the
-    /// only thing those records ever did is what an absent value must mean.
+    /// A run store written by the removed `context` op still folds: the record
+    /// says nothing about delivery, and the only thing those records ever did is
+    /// what an absent value must mean.
     #[test]
     fn a_context_operation_from_before_this_field_replays_as_deferred() {
         let operation: Operation = serde_json::from_value(serde_json::json!({

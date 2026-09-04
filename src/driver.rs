@@ -2312,11 +2312,25 @@ fn apply_here(
         addressee,
         text,
         criterion,
+        deliver,
+        persist,
     } = command
     else {
         return Ok(operations);
     };
-    match engine::deliver_manager_note(paths, *addressee, id, text, criterion.as_ref(), None) {
+    let offered = engine::Offered {
+        id,
+        addressee: *addressee,
+        text,
+        criterion: criterion.as_ref(),
+        deliver: *deliver,
+        persist: *persist,
+        // Nothing is driving the run, so the frontier this was validated against
+        // is the whole of what says whether the node has a dispatch left to carry
+        // the note to.
+        dispatchable: frontier.recorded.get(id) != Some(&crate::graph::NodeStatus::Done),
+    };
+    match engine::deliver_manager_note(paths, &offered, None) {
         Ok(operations) => Ok(operations),
         Err(error) => {
             // The refusal is the run's record as much as the caller's answer: a

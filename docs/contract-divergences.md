@@ -11,12 +11,15 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–57 are open**. Each states what the code does
-today and the proposal it is waiting on. Most are questions for a *producer*
-rather than for this crate, because `oneagentgraph` and `onevcs` are independent
-tools that expose general integration hooks only and nothing in them may know
-about this one; the rest — 36 to 40, and 46 to 57 — are for the planner who owns
-the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
+Entries **10–22, 33, 35–40 and 46–60 are open**, except **52**, which entry 60
+supersedes: that proposal added a second manager-note op beside `context`, and 60
+collapses the two into one, so the shape lives in 60 and 52 keeps only the
+history that produced it. Each open entry states what the code does today and the
+proposal it is waiting on. Most are questions for a *producer* rather than for
+this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
+general integration hooks only and nothing in them may know about this one; the
+rest — 36 to 40, and 46 to 60 — are for the planner who owns the contract, and
+name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
 repository.
@@ -2574,13 +2577,21 @@ and `patch_pin::the_audit_permits_exactly_the_revisions_the_manifest_patches` is
 what holds them equal — including at zero, so the audit's exemption is deleted in
 the same change the patch is.
 
-## 52. A correction reaches one party of a node's dispatch, and never both — OPEN
+## 52. A correction reaches one party of a node's dispatch, and never both — SUPERSEDED BY 60
 
-**Proposal (for the planner who owns the contract): add a `note` op to the reply
-envelope — and **not** to the `monitor` allowlist — carrying `id`, a required
-`addressee`, `text`, and an optional `criterion`; publish the same delivery on
-this crate's own surface as `onepipeline::note`; and answer a note that reached
-nobody with a refusal rather than with silence.**
+**Superseded by entry 60, which is where the shape now lives.** This entry is the
+proposal that added the `note` op *beside* `context`, and its own
+"`context` and `amend` are unchanged" paragraph is what 60 undoes: the two ops
+were kept apart, and they turned out to be one op with three parameters. The
+history and the measurements below stand as the reason the op exists at all; the
+field set, the dispositions, and the fixtures a test drives moved to 60, so that
+there is exactly one declaration of the shape rather than two that drift.
+
+**The original proposal (for the planner who owns the contract): add a `note` op
+to the reply envelope — and **not** to the `monitor` allowlist — carrying `id`, a
+required `addressee`, `text`, and an optional `criterion`; publish the same
+delivery on this crate's own surface as `onepipeline::note`; and answer a note
+that reached nobody with a refusal rather than with silence.**
 
 The two levers a manager has are each half of one job. `context` is delivered by
 interrupting the live agent turn, so it reaches the *worker* and never the judge,
@@ -2659,54 +2670,12 @@ durable and is not an instruction to send it again.
 `note` arrives with a **minor** version bump, cut by `release-plz` from the `feat`
 commit that introduces it, exactly as entries 39, 40 and 41 did.
 
-**What this crate does today is the block below, and the block is the source.**
-`tests/contract.rs` parses it out of this file and holds it against the types: the
-op named here must be one this build accepts and the contract's own list does not,
-must round-trip as written, and must be allowed for exactly the authors named; a
-blank note and an unusable criterion must be refused at the envelope's boundary;
-and the dispositions must be exactly the ones the seam's own `Accepted` carries.
-`tests/note/` drives the whole seam against the real `oneagentgraph` and a
+**What this crate does today is entry 60's block**, which is the source
+`tests/contract.rs` parses and holds against the types. This entry carries no
+block of its own any more, because a shape written down twice is a shape that
+drifts — the same defect, one level up, that 60 removes from the ops themselves.
+`tests/note/` still drives the whole seam against the real `oneagentgraph` and a
 real two-party conversation.
-
-```json
-{
-  "ops": [
-    {
-      "op": "note",
-      "id": "build",
-      "addressee": "worker",
-      "text": "the reviewer asked for a smaller diff; stop editing src/old.rs",
-      "criterion": "`version.txt` holds `v: 2`"
-    },
-    {
-      "op": "note",
-      "id": "build",
-      "addressee": "supervisor",
-      "text": "the four comment lines are out of scope: do not fail the node for them"
-    }
-  ],
-  "monitor_may_issue": [],
-  "addressees": ["worker", "supervisor", "both"],
-  "reached": ["queued", "worker", "supervisor", "judged-with"],
-  "refused": [
-    {"op": "note", "id": "build", "addressee": "worker", "text": "   "},
-    {"op": "note", "id": "build", "addressee": "sponsor", "text": "ship it"},
-    {"op": "note", "id": "build", "text": "ship it"},
-    {
-      "op": "note",
-      "id": "build",
-      "addressee": "worker",
-      "text": "ship it",
-      "criterion": "the tree pins oneagentgraph 0.3.15"
-    }
-  ],
-  "api": {
-    "module": "onepipeline::note",
-    "call": "deliver",
-    "answers": ["To", "Queued"]
-  }
-}
-```
 
 ## 53. The one sentence that tells a consumer what to do is composed by the consumer, which does not know it — OPEN
 
@@ -3379,3 +3348,223 @@ still not the one the destination held.
 write-back is the status and the settlement metadata, and entry 50 records what
 this projection writes beyond that. This entry is the one thing it writes that
 nobody chose.
+
+## 60. Two manager-note ops overlap on the hard part and differ only in fields — OPEN
+
+**Proposal (for the planner who owns the contract): collapse `context` and `note`
+into one manager-note op named `note`, carrying `id`, a required `addressee`,
+`text`, an optional `criterion`, a `deliver` of `live | next` defaulting to
+`live`, and a `persist` boolean defaulting to `true`; remove `context` from the
+envelope outright rather than aliasing it; drop `deliver`'s third value `auto`,
+which named a combination of both axes; and bump the reply envelope to version
+2, because this is a breaking change to a serialized contract.**
+
+The contract's own sentence this replaces is in `docs/contract.md`: the op list
+`add | drop | reparent | retry | cancel | requeue | attest | complete | context`,
+the monitor allowlist `retry | requeue | cancel | context | add`, the envelope
+`{"version": 1, "commands": [...]}`, and the paragraph beginning *"A `context`
+note carries exactly one dispatch"* with its `deliver: auto|live|next`.
+
+**Why they are one op.** They overlap on the entire hard part and differ only in
+fields: both reach a live turn, both report an outcome. What separated them is
+that `context` persisted to one further dispatch and addressed the worker
+implicitly, while `note` took a required `addressee`, could bind the judge
+through a `criterion`, and refused when it reached nobody. Those are three
+orthogonal parameters rather than two operations, and `context` is exactly the
+note with `addressee: worker`, no `criterion`, and persistence on.
+
+The cost of shipping both is measured. A node of an operator's run was failed by
+its judge for omitting something the manager had explicitly approved; the
+approval had been sent as a `context` note, which renders into the worker's task
+alone, so the judge never saw it. From that the operator diagnosed a phantom root
+cause — that manager rulings do not bind at all — and acted on it repeatedly. The
+reason they reached for the weaker lever is that this crate shipped two and the
+consuming host's manager loop documents one. Removing the weaker one is what
+makes that mistake unavailable rather than merely discouraged.
+
+**Two axes, and `deliver` loses its third value.** `deliver` decides **when live
+delivery is attempted** and `persist` decides **whether the note is also composed
+into the node's next dispatch**; neither decides the other's question. Under that
+split the `auto` this crate's `context` carried is not a point on the delivery
+axis at all — it named a combination of both axes, "attempt the running turn, and
+fall through to the next dispatch when there is none", and that fall-through *is*
+persistence spelled a second way. A contract carrying both `auto` and `persist`
+has two ways to say one thing, which is the defect this entry exists to remove,
+one level down from the two ops it removes. So `auto` goes, and what it meant has
+an exact spelling in the survivor: `deliver: live` with `persist: true`.
+
+**`persist` carries forward only what live delivery did not take.** One sentence
+for both `deliver` values rather than a rule per combination: `persist: true`
+composes the note into the node's next dispatch **if and only if the note did not
+reach a running turn**, and `persist: false` composes it into no dispatch at all.
+Read it as "do not lose this" rather than as "send it twice". The four
+combinations follow from that and from nothing else, and the block below names
+each.
+
+**The default is `deliver: live` with `persist: true`**, because it is the
+combination that attempts the running turn *and* cannot leave the note nowhere.
+It is not the only one that cannot leave it nowhere — `deliver: next` with
+`persist: true` never reaches a running turn and so always composes forward — but
+that one declines the live attempt, so it is not what a caller who says nothing
+should get.
+
+**One refusal rule rather than a table of special cases.** A note that would
+reach nobody is refused, naming what left it nowhere to go. It is checked at the
+envelope, where the two fields decide it between them — `deliver: next` with
+`persist: false` reaches nobody by construction and never reaches a run at all,
+and so does `deliver: next` to a node that has settled `done` — and at delivery,
+where only the run can decide it, which is `deliver: live` with `persist: false`
+and no turn that took it. Neither is written as a special case beside the other.
+A blank `text` and an `id` the graph cannot reach are refused too, each naming
+which it is.
+
+**One consequence stated rather than left to be discovered.** Reaching the
+running turn and being carried into the next dispatch are mutually exclusive
+under that biconditional, so this op gives no way to do both. That is deliberate:
+a correction that has to reach the live turn *and* still bind the node's next
+dispatch is a ruling that survives a re-dispatch, and `amend` is the op for that
+and is unchanged here. So the note is not given a second, weaker way to say what
+`amend` already says properly.
+
+What that makes load-bearing is the **disposition**. A caller sending the default
+learns from it — not from a refusal — which of the two happened, so `carried`
+joins the four the conversation reports, and the five are exhaustive and mutually
+exclusive. That is the same biconditional `persist` is defined by: the
+disposition's shape and the field's semantics were chosen together rather than
+arrived at separately. A caller that needs a refusal when the running turn did
+not take the note asks for `persist: false` instead.
+
+**`context` is removed outright rather than aliased**, which the envelope's
+`deny_unknown_fields` turns into the intended failure: a caller still sending
+`context` is refused by that name at the wire. Two consequences go with it. The
+monitor allowlist loses `context` and gains nothing, so it is
+`retry | requeue | cancel | add`: `note` stays off it for the reason `amend` is
+off it, since a note may bind a criterion the node's judge decides against, and
+an observer that wants a node told something surfaces it. And the journal's
+`context-added` operation stays **readable and unwritten** — a run store written
+before this change still folds, because a record this build could not fold is a
+run whose graph cannot be projected at all.
+
+**Where the shape is declared.** Once, on `onepipeline::channel::Command::Note`,
+which is what a consumer reads and what a consuming repository's documentation
+derives from. Nothing in this repository restates it; this entry's block is the
+machine-readable projection of it that `tests/contract.rs` drives.
+
+`note`'s collapse arrives with a **minor** version bump, cut by `release-plz`
+from the `feat!` commit that introduces it — a breaking change pre-1.0 is not yet
+a major.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+the op named here must be one this build accepts and the contract's own list does
+not, the ops must round-trip as written, the removed op and every malformed note
+must be refused at the envelope, the defaults must be the ones named and must be
+omitted from a re-serialized note, and the dispositions must be exactly the ones
+this build carries. `tests/note/` drives all of it end to end against the real
+`oneagentgraph` and a real two-party conversation, including both directions of
+the `persist` biconditional and both halves of the reach-nobody rule.
+
+```json
+{
+  "envelope_version": 2,
+  "removed": ["context"],
+  "fields": ["id", "addressee", "text", "criterion", "deliver", "persist"],
+  "required": ["id", "addressee", "text"],
+  "addressees": ["worker", "supervisor", "both"],
+  "deliver": {"values": ["live", "next"], "default": "live", "gone": "auto"},
+  "persist": {"default": true},
+  "combinations": [
+    {
+      "deliver": "live",
+      "persist": false,
+      "means": "the running turn is attempted; where it took the note that is the whole of the delivery, and where it did not the note is refused, because it composes forward into nothing and so reached nobody"
+    },
+    {
+      "deliver": "live",
+      "persist": true,
+      "default": true,
+      "means": "the running turn is attempted; where it took the note the note composes forward into nothing, and where it did not the note is composed into the node's next dispatch and is not a refusal"
+    },
+    {
+      "deliver": "next",
+      "persist": true,
+      "means": "the running turn is not interrupted, so the note never reaches one and is always composed into the node's next dispatch"
+    },
+    {
+      "deliver": "next",
+      "persist": false,
+      "means": "no live delivery is attempted and the note composes forward into nothing, so it reaches nobody whatever the run does"
+    }
+  ],
+  "ops": [
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "the reviewer asked for a smaller diff; stop editing src/old.rs",
+      "criterion": "`version.txt` holds `v: 2`"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "supervisor",
+      "text": "the four comment lines are out of scope: do not fail the node for them",
+      "deliver": "next"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "both",
+      "text": "the running turn takes this or nothing does",
+      "persist": false
+    }
+  ],
+  "monitor_may_issue": [],
+  "monitor_allowlist": ["retry", "requeue", "cancel", "add"],
+  "reached": ["queued", "worker", "supervisor", "judged-with", "carried"],
+  "refused": [
+    {"op": "context", "id": "build", "note": "the fixture moved"},
+    {"op": "note", "id": "build", "addressee": "worker", "text": "   "},
+    {"op": "note", "id": "build", "addressee": "sponsor", "text": "ship it"},
+    {"op": "note", "id": "build", "text": "ship it"},
+    {"op": "note", "addressee": "worker", "text": "ship it"},
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "ship it",
+      "criterion": "the tree pins oneagentgraph 0.3.15"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "ship it",
+      "deliver": "auto"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "ship it",
+      "note": "the fixture moved"
+    }
+  ],
+  "reaches_nobody": [
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "nowhere to go",
+      "deliver": "next",
+      "persist": false
+    }
+  ],
+  "api": {
+    "module": "onepipeline::note",
+    "call": "deliver",
+    "with": "deliver_with",
+    "answers": ["To", "Queued"]
+  }
+}
+```
