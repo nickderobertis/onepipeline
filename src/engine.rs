@@ -1944,11 +1944,11 @@ pub(crate) struct Offered<'a> {
 /// ask. Addressing nothing at all is the one case this composes itself, and it says
 /// which case it is.
 ///
-/// What that answer becomes is [`persist`](Offered::persist)'s: a note the
-/// conversation took is delivered and composes forward into nothing; a note it
-/// could not take is carried to the node's next dispatch, or — with `persist` off,
-/// or with no next dispatch to carry it to — refused under the one reach-nobody
-/// rule, naming what left it nowhere to go.
+/// What that answer becomes is [`reach`](Offered::reach)'s: a note the conversation
+/// took is delivered and composes forward into nothing; a note it could not take is
+/// carried to the node's next dispatch, or — where the reach composes nothing
+/// forward, or where there is no next dispatch to carry it to — refused under the
+/// one reach-nobody rule, naming what left it nowhere to go.
 ///
 /// # Errors
 ///

@@ -1514,6 +1514,12 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
 /// author's op allowlist, and the reconciler's own pre-queue validation — each
 /// leave the pending surface standing and the reader still waiting, and the
 /// submitter carries the refusal away alone.
+///
+/// The version is driven **both** ways it can be wrong: an envelope declaring
+/// none, and one declaring the version this envelope used to be. The second is the
+/// observable half of collapsing the two manager-note ops into one — that bump is
+/// what a caller on the old shape meets first — and a check that only refused a
+/// missing version would pass a build that still accepted the old one.
 #[test]
 fn a_reply_refused_before_routing_delivers_neither_half() {
     use std::io::{BufRead, BufReader, Write};
@@ -1554,6 +1560,16 @@ fn a_reply_refused_before_routing_delivers_neither_half() {
                 "commands": [
                     {"op": "note", "id": "build", "addressee": "worker", "text": "a note"}
                 ]
+            }),
+        ),
+        (
+            "an edit envelope requires version",
+            json!({
+                "completion": false, "reason": ruling,
+                // The version this envelope carried before the two manager-note
+                // ops were collapsed into one, with an op that is otherwise
+                // perfectly good: what is refused is the shape it is written in.
+                "version": 1, "commands": [{"op": "cancel", "id": "build"}]
             }),
         ),
         (
