@@ -1912,13 +1912,9 @@ pub(crate) fn record_rejection(
 /// them decides is declared, and [`crate::note::Reach`], which is the pair they
 /// make once the envelope has refused the combination that lands nowhere.
 pub(crate) struct Offered<'a> {
-    /// The node whose dispatch the note is for.
     pub id: &'a str,
-    /// Whose task it says it updates.
     pub addressee: crate::note::Addressee,
-    /// What that party reads.
     pub text: &'a crate::note::NoteText,
-    /// The criterion it binds in the conversation it reaches, when it binds one.
     pub criterion: Option<&'a crate::note::Criterion>,
     /// Where it may land: whether the running turn is attempted, and whether a
     /// note no turn took is composed into the node's next dispatch.
