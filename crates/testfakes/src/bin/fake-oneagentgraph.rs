@@ -1627,7 +1627,15 @@ fn emit(
             // `channel serve` it starts carries, so a journey can assert from
             // the store that a real dispatch is given one and that no two
             // dispatches share it.
-            "asker": std::env::var(ASKER_ENV).ok(),
+            //
+            // Reported rather than checked, and read lossily on purpose. A
+            // double that refused a name it did not like could not show a
+            // journey an engine that handed out a bad one — and dropping a value
+            // this host cannot read as text would report it as *nothing given*,
+            // which is a different failure from the one that happened. Absent
+            // here means the dispatch was handed no asker at all.
+            "asker": std::env::var_os(ASKER_ENV)
+                .map(|given| given.to_string_lossy().into_owned()),
             // What this turn was told to do instead, while it was running.
             "redirected": redirected,
         }),

@@ -3785,8 +3785,11 @@ other, so the session holding it would take over questions belonging to askers i
 has never heard of. One that is **not text** is worse for not announcing itself:
 read lossily, two environments that differ collapse onto one string of
 replacement characters and two askers silently become one. The queue's own record
-is checked the same way on the way back in, so neither state exists inside this
-crate at all.
+is read back through the same check, and a name recorded there that identifies
+nobody is read as **nobody** rather than refused — a queue is read with
+`unwrap_or_default`, so refusing one field would read the whole queue as empty
+and lose every surface in it. Either way no blank or unreadable asker exists
+inside this crate.
 
 **What a consumer writing an asking wrapper may rely on**, without reading any of
 the above:

@@ -61,6 +61,13 @@ fn kept(world: &World, at: &std::path::Path) {
 /// The same evidence as [`given`] and for the same reason: what a journey states
 /// is what the dispatch itself took out of its environment, rather than anything
 /// a double reported back on the side.
+// llmlint: ignore-block[tests_mirror_real_usage] the run's journal is a product
+// surface rather than a shortcut around one — it is what `onepipeline` writes for an
+// operator to read and what this suite states every dispatch-side promise off, `given`
+// three lines above included. What is being asserted is a property of the *dispatch*,
+// so the evidence has to be the value that dispatch itself acted on; the only route
+// through a user-facing command would be a surface the dispatch raised, and the verb
+// that raises one deliberately names no asker.
 fn asked_as(world: &World, run: &str, node: &str) -> Vec<String> {
     world
         .events_of(run, "turn-activity")
@@ -73,7 +80,7 @@ fn asked_as(world: &World, run: &str, node: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));

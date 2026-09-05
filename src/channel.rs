@@ -780,11 +780,19 @@ impl Asker {
     }
 }
 
-impl<'de> Deserialize<'de> for Asker {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        Self::checked(&value).map_err(serde::de::Error::custom)
-    }
+/// Read the asker a queue recorded, reading a name that names nobody as none.
+///
+/// The one lenient boundary in this file, and the leniency is the point. A queue
+/// is read with `read_json_opt(..).unwrap_or_default()`, so a refusal here would
+/// not refuse one field — it would read the **whole queue** as empty and lose
+/// every surface in it, which is a far worse answer to a name this crate never
+/// writes than simply not knowing whose it was. A blank name identifies nobody,
+/// and `None` is what this file already means by that, so it is read as that and
+/// the invariant `Asker` carries survives the round trip.
+fn recorded_asker<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Asker>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.and_then(|name| Asker::checked(&name).ok()))
 }
 
 /// What raised a surface.
@@ -842,7 +850,11 @@ pub(crate) struct Surface {
     /// serving session — and nothing ever adopts one of those. Omitted from the
     /// wire while it is absent, so a queue no asker was named on serializes
     /// exactly as it always did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "recorded_asker",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub asker: Option<Asker>,
 }
 
@@ -1473,6 +1485,31 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A recorded asker comes back as the name it was, and one that names nobody
+    /// comes back as nobody — rather than taking the queue around it down.
+    #[test]
+    fn a_recorded_asker_that_names_nobody_reads_as_nobody() {
+        let raised = Surface {
+            asker: Some(Asker::checked("dispatch-a").expect("a name")),
+            ..surface(7, true)
+        };
+        let written = serde_json::to_string(&raised).expect("the surface writes");
+        assert!(written.contains(r#""asker":"dispatch-a""#), "{written}");
+        let read: Surface = serde_json::from_str(&written).expect("the surface reads back");
+        assert_eq!(read.asker, raised.asker);
+
+        // The two shapes this crate never writes: a name that identifies nobody,
+        // and no name at all. Both are the same fact, and neither costs the
+        // surface around them.
+        for recorded in [r##","asker":"""##, ""] {
+            let line = written.replace(r#","asker":"dispatch-a""#, recorded);
+            let read: Surface = serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("a queue recording {recorded:?} was lost: {e}"));
+            assert_eq!(read.asker, None, "{line}");
+            assert_eq!(read.message, raised.message);
+        }
     }
 
     /// A live question takes the slot from an abandoned one without taking its
