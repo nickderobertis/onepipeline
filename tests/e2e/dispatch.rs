@@ -1856,7 +1856,7 @@ fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
         .exited(0)
         .settled();
 
-    let listed = std::process::Command::new(crate::harness::oneagentgraph_binary())
+    let history = std::process::Command::new(crate::harness::oneagentgraph_binary())
         .arg("history")
         // The one variable under test. Everything else is left alone, so a
         // listing that comes back empty is this directory being empty rather
@@ -1864,7 +1864,19 @@ fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
         .env("ONEAGENTGRAPH_STATE_DIR", &state)
         .output()
         .expect("the real oneagentgraph runs");
-    let listed = String::from_utf8_lossy(&listed.stdout);
+    // A refusal also prints nothing to stdout, so reading only stdout would report
+    // a sibling that *answered* "no runs here" when it never answered at all — the
+    // drift this gate names would be the one thing the failure did not say. Asked
+    // first, and separately, so each failure carries its own cause.
+    assert!(
+        history.status.success(),
+        "the sibling refused to list the directory this crate placed a run in, so this gate \
+         learned nothing about drift — it exited {} saying:\n{}\n{}",
+        history.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&history.stderr).trim(),
+        world.dump()
+    );
+    let listed = String::from_utf8_lossy(&history.stdout);
     // The graph the node dispatch runs, so the line names a run this crate's
     // own launch created rather than any run that happened to be there.
     assert!(
