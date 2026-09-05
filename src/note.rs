@@ -35,7 +35,7 @@
 //!
 //! The field set, each field's default, the four combinations of `deliver` and
 //! `persist`, and the six dispositions are declared **once**, on
-//! [`Command::Note`](crate::channel::Command::Note). Nothing here restates them.
+//! [`Command::Note`]. Nothing here restates them.
 //!
 //! # What a note does *not* do
 //!
@@ -182,7 +182,7 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 /// `deliver` decides whether the running turn is attempted and `persist` whether
 /// the note is composed into the node's next dispatch; what each of their four
 /// combinations means is declared once, on
-/// [`Command::Note`](crate::channel::Command::Note).
+/// [`Command::Note`].
 ///
 /// # Errors
 ///
