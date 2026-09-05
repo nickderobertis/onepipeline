@@ -835,14 +835,11 @@ enum Output {
 /// failures — the caller is polling, and it asks again.
 fn logged_since(path: &Path, from: u64) -> String {
     use std::io::{Read, Seek};
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    if file.seek(std::io::SeekFrom::Start(from)).is_err() {
-        return String::new();
-    }
     let mut said = String::new();
-    let _ = file.read_to_string(&mut said);
+    let _ = std::fs::File::open(path).and_then(|mut file| {
+        file.seek(std::io::SeekFrom::Start(from))?;
+        file.read_to_string(&mut said)
+    });
     said
 }
 

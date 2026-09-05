@@ -1024,16 +1024,7 @@ impl<'a> ObserverWatch<'a> {
                 .map(ToString::to_string)
                 .unwrap_or_default(),
         );
-        // Best effort, and the run is watched either way: a record this driver
-        // could not write leaves a later `next` addressing the pacemaker of the
-        // graph that died, which is worth saying out loud and is not worth
-        // ending a working observer over.
-        if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
-            eprintln!(
-                "onepipeline: started another observer for '{}' but could not record it: {error}",
-                self.paths.run
-            );
-        }
+        self.write_down();
         eprintln!(
             "onepipeline: started another observer graph for '{}' ({} of {} restart(s))",
             self.paths.run, self.restarted, self.limit
@@ -1052,13 +1043,24 @@ impl<'a> ObserverWatch<'a> {
             self.paths.run
         );
         self.record.observer_ending = reason;
+        self.write_down();
+        None
+    }
+
+    /// Put what this watch has just recorded onto the run.
+    ///
+    /// Best effort, and the same answer either way: a record this driver could
+    /// not write leaves a later `next` addressing the pacemaker of a graph that
+    /// is gone, or a view reading a watch that is over as one still going. Both
+    /// are worth saying out loud on the driver's own log, and neither is worth
+    /// ending a working observer over.
+    fn write_down(&self) {
         if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
             eprintln!(
-                "onepipeline: could not record why '{}' is unwatched: {error}",
+                "onepipeline: could not record what is watching '{}': {error}",
                 self.paths.run
             );
         }
-        None
     }
 }
 
@@ -1175,16 +1177,11 @@ impl Settlement {
 /// store holds what *this run's* observer said rather than what its first one
 /// said.
 ///
-/// A `None` sender is an attach that is finished with observers, which is the
-/// one state where there is nothing to relay into.
 fn relay_observer(
     paths: &RunPaths,
     run: &mut agentgraph::GraphRun,
-    relay: &Option<std::sync::mpsc::Sender<crate::event::Envelope>>,
+    tx: std::sync::mpsc::Sender<crate::event::Envelope>,
 ) -> Result<()> {
-    let Some(tx) = relay.as_ref().cloned() else {
-        return Ok(());
-    };
     let events = run.events();
     std::thread::Builder::new()
         .name(format!("attach-{}", paths.run))
@@ -1224,9 +1221,9 @@ fn attach(
     // whichever graph is watching now, not the one this launch happened to open
     // with. It is released the moment nothing will start another, so the drain
     // below still ends on the relay closing rather than on its whole grace.
-    let mut relay = Some(tx);
+    let mut relay = Some(tx.clone());
     if let Some(run) = watched.as_deref_mut() {
-        relay_observer(paths, run, &relay)?;
+        relay_observer(paths, run, tx)?;
     }
     let mut reported = 0usize;
     let mut observer_gone = false;
@@ -1260,7 +1257,15 @@ fn attach(
             if run.has_exited() && !observer_gone {
                 observer_stopped_watching(&paths.run);
                 match watch.restart(run) {
-                    Some(()) => relay_observer(paths, run, &relay)?,
+                    // Whatever the replacement says is still the run's, so it is
+                    // relayed like its predecessor's. The sender is here to be
+                    // cloned: it is released only once the loop has finished, and
+                    // a finished loop starts no observer to relay.
+                    Some(()) => {
+                        if let Some(tx) = relay.as_ref() {
+                            relay_observer(paths, run, tx.clone())?;
+                        }
+                    }
                     None => observer_gone = true,
                 }
             }
