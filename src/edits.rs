@@ -1607,12 +1607,12 @@ fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>
 /// it is asked where the delivery is made and recorded there — which is why
 /// nothing comes back from here.
 ///
-/// The reach-nobody rule is [`crate::note::reaches_nobody`]'s one sentence, and
-/// this is the half of it the *fields* decide: `deliver: next` attempts no live
-/// delivery and `persist: false` composes the note into no dispatch, so together
-/// they reach nobody by construction, whatever the run is doing. It is refused
-/// here, before the run is reached, rather than written as a special case beside
-/// the delivery-time half.
+/// The reach-nobody rule is [`crate::note::reaches_nobody`]'s one sentence, and the
+/// half of it the *fields* decide is [`crate::note::Reach::of`]: `deliver: next`
+/// attempts no live delivery and `persist: false` composes the note into no
+/// dispatch, so together they reach nobody by construction, whatever the run is
+/// doing. Building the pair here is what refuses it, before the run is reached and
+/// without a special case beside the delivery-time half.
 ///
 /// Notably *not* refused here: a node that has settled. A note is not attached to
 /// anything until a delivery has failed to reach a turn — it is handed to a
@@ -1630,19 +1630,13 @@ fn compile_note(
     if !graph.contains(id) {
         return Err(refuse(format!("note: no node '{id}'")));
     }
-    if deliver == Deliver::Next && !persist {
-        return Err(crate::note::reaches_nobody(
-            id,
-            "`deliver: next` attempts no live delivery and `persist: false` composes it \
-             into no dispatch, so this note reaches nobody whatever the run does",
-        ));
-    }
+    let reach = crate::note::Reach::of(id, deliver, persist)?;
     // A note that can only be carried has to have somewhere to be carried to. A
     // node that settled `done` will never be dispatched again, so `deliver: next`
     // to one is the same reach-nobody rule with the run's own record deciding it
     // rather than the fields. `deliver: live` is not judged here: it has a turn to
     // try first, and the conversation's own answer is the better refusal.
-    if deliver == Deliver::Next && frontier.recorded.get(id) == Some(&NodeStatus::Done) {
+    if !reach.attempts_a_live_turn() && frontier.recorded.get(id) == Some(&NodeStatus::Done) {
         return Err(crate::note::reaches_nobody(
             id,
             "it has settled done, so no dispatch of it will ever take the note and \

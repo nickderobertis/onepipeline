@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
-use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
+use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
 use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -1847,8 +1847,7 @@ fn compile_and_deliver(
             addressee: *addressee,
             text,
             criterion: criterion.as_ref(),
-            deliver: *deliver,
-            persist: *persist,
+            reach: crate::note::Reach::of(id, *deliver, *persist)?,
             dispatchable: frontier.recorded.get(id) != Some(&NodeStatus::Done),
         },
         in_flight
@@ -1905,12 +1904,13 @@ pub(crate) fn record_rejection(
     )
 }
 
-/// One note as it is offered: the note itself, and the two axes deciding where it
-/// may land.
+/// One note as it is offered: the note itself, and where it may land.
 ///
-/// A struct rather than six parameters because the two axes are read together and
-/// mean nothing apart — see [`Command::Note`](crate::channel::Command::Note),
-/// which is where what they mean is declared.
+/// A struct rather than five parameters because the note's two axes are read
+/// together and mean nothing apart — see
+/// [`Command::Note`](crate::channel::Command::Note), which is where what each of
+/// them decides is declared, and [`crate::note::Reach`], which is the pair they
+/// make once the envelope has refused the combination that lands nowhere.
 pub(crate) struct Offered<'a> {
     /// The node whose dispatch the note is for.
     pub id: &'a str,
@@ -1920,10 +1920,9 @@ pub(crate) struct Offered<'a> {
     pub text: &'a crate::note::NoteText,
     /// The criterion it binds in the conversation it reaches, when it binds one.
     pub criterion: Option<&'a crate::note::Criterion>,
-    /// Whether live delivery is attempted.
-    pub deliver: Deliver,
-    /// Whether a note no turn took is composed into the node's next dispatch.
-    pub persist: bool,
+    /// Where it may land: whether the running turn is attempted, and whether a
+    /// note no turn took is composed into the node's next dispatch.
+    pub reach: crate::note::Reach,
     /// Whether the node has a next dispatch at all. A node that has settled `done`
     /// does not, which is what turns a carry into the reach-nobody refusal.
     pub dispatchable: bool,
@@ -1967,8 +1966,7 @@ pub(crate) fn deliver_manager_note(
         addressee,
         text,
         criterion,
-        deliver,
-        persist,
+        reach,
         dispatchable,
     } = *offered;
     let note = crate::note::of(addressee, text, criterion)
@@ -1985,7 +1983,7 @@ pub(crate) fn deliver_manager_note(
     // `next` declines the live attempt outright, so there is no turn to ask and
     // the note is the carried one by construction. The combination that carries
     // it nowhere was refused at the envelope.
-    if deliver == Deliver::Next {
+    if !reach.attempts_a_live_turn() {
         return match dispatchable {
             true => recorded(crate::note::Reached::Carried),
             false => Err(nowhere_to_carry(id)),
@@ -2006,8 +2004,10 @@ pub(crate) fn deliver_manager_note(
         // forward: this is the whole of the delivery.
         Ok(accepted) => recorded(crate::note::Reached::from(&accepted)),
         // Nothing took it, which is the only case `persist` has an opinion about.
-        Err(_) if persist && dispatchable => recorded(crate::note::Reached::Carried),
-        Err(why) if persist => Err(crate::note::reaches_nobody(
+        Err(_) if reach.composes_forward() && dispatchable => {
+            recorded(crate::note::Reached::Carried)
+        }
+        Err(why) if reach.composes_forward() => Err(crate::note::reaches_nobody(
             id,
             &format!(
                 "{why}; and it has settled done, so no dispatch of it will take the note \

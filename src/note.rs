@@ -211,6 +211,65 @@ pub fn deliver_with(
     crate::driver::deliver_note_envelope(run, &envelope)
 }
 
+/// Where one note may land: its two axes as a pair, minus the combination that
+/// lands nowhere.
+///
+/// `deliver` and `persist` are two independent fields on the wire and stay two —
+/// [`Command::Note`] is where what each of them decides is declared, and neither
+/// decides the other's question. Past the envelope they are only ever read
+/// together, and one of their four combinations reaches nobody by construction:
+/// this is that pair with the fourth removed, so nothing downstream of the
+/// boundary that refuses it can be handed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// `deliver: live` with `persist: false`: the running turn and nothing else,
+    /// so a note no turn took is refused.
+    LiveOnly,
+    /// `deliver: live` with `persist: true`: the running turn, and the node's next
+    /// dispatch where there was no running turn. The op's default.
+    LiveThenNext,
+    /// `deliver: next` with `persist: true`: no live attempt, so the note never
+    /// reaches a running turn and is always composed forward.
+    NextOnly,
+}
+
+impl Reach {
+    /// The pair as the envelope carries it, or the one refusal the two fields
+    /// decide between them.
+    ///
+    /// This is the envelope-time half of the reach-nobody rule, and it is composed
+    /// here — beside [`reaches_nobody`] and the delivery-time half — so the two
+    /// halves cannot come to word one rule differently.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Refused`] for `deliver: next` with `persist: false`, which
+    /// attempts no live delivery and composes the note into no dispatch.
+    pub(crate) fn of(node: &str, deliver: Deliver, persist: bool) -> Result<Self> {
+        match (deliver, persist) {
+            (Deliver::Live, false) => Ok(Self::LiveOnly),
+            (Deliver::Live, true) => Ok(Self::LiveThenNext),
+            (Deliver::Next, true) => Ok(Self::NextOnly),
+            (Deliver::Next, false) => Err(reaches_nobody(
+                node,
+                "`deliver: next` attempts no live delivery and `persist: false` composes it \
+                 into no dispatch, so this note reaches nobody whatever the run does",
+            )),
+        }
+    }
+
+    /// Whether the node's running turn is attempted at all.
+    pub(crate) fn attempts_a_live_turn(self) -> bool {
+        !matches!(self, Self::NextOnly)
+    }
+
+    /// Whether a note no running turn took is composed into the node's next
+    /// dispatch.
+    pub(crate) fn composes_forward(self) -> bool {
+        !matches!(self, Self::LiveOnly)
+    }
+}
+
 /// The one refusal a note about delivery gets: it would reach nobody, and this
 /// names what left it nowhere to go.
 ///

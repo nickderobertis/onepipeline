@@ -2324,8 +2324,7 @@ fn apply_here(
         addressee: *addressee,
         text,
         criterion: criterion.as_ref(),
-        deliver: *deliver,
-        persist: *persist,
+        reach: crate::note::Reach::of(id, *deliver, *persist)?,
         // Nothing is driving the run, so the frontier this was validated against
         // is the whole of what says whether the node has a dispatch left to carry
         // the note to.
