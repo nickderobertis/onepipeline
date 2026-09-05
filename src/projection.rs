@@ -942,7 +942,6 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                     Operation::NoteDelivered {
                         node,
                         text,
-                        reached: crate::note::Reached::Carried,
                         ..
                     } => {
                         state

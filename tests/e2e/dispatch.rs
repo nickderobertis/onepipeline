@@ -728,7 +728,7 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
         .run_with_stdin(
             &["reply", "adopted-override"],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{
                     "op": "retry",
                     "id": "build",
@@ -1992,26 +1992,24 @@ fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
     );
 }
 
-/// A `context` note reaches the **real** sibling's interrupt, and what it
-/// answers is what the run records.
+/// A note reaches the **real** sibling's two-party note seam, and what that
+/// conversation answers is what the run records.
 ///
-/// The other `context` journeys state their scenario at
+/// The other live-edit journeys state their scenario at
 /// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, which is the override path; this one takes
-/// the default, so the delivery is `oneagentgraph::control::interrupt` called
-/// in this process. The sibling addresses the turn out of the member's own
-/// scratch and answers for itself.
+/// the default, so the delivery is `oneagentgraph::control::note` called in this
+/// process. The sibling addresses the member out of its own state and answers for
+/// itself.
 ///
-/// The answer here is that there is no controllable turn: the member is real
-/// and running, and the harness standing in for its paid turn is not one
-/// oneharness can reach a lever into. That is a genuine case rather than a
-/// contrivance — it is what a harness with no out-of-band control gives — and
-/// it is the one the `auto` fall-through exists for. Both halves are asserted:
-/// the note is deferred onto the next dispatch, and the `turn-interrupted`
-/// envelope saying the lever was pulled and nothing came of it reaches the
-/// merged store, stamped with the node it is about.
+/// The answer here is that there is no conversation to hand it to: the member is
+/// real and running, and the harness standing in for its paid turn is a
+/// single-sided one with no two-party conversation behind it. That is a genuine
+/// case rather than a contrivance, and it is the one `persist` exists for — so
+/// both halves are asserted: the run records `carried` rather than a delivery to
+/// a turn, and the note really rides the node's next dispatch.
 #[test]
-fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
-    let world = World::new("real-context");
+fn a_note_delivered_through_the_real_sibling_records_what_the_conversation_answered() {
+    let world = World::new("real-note");
     world.write_graphs();
     world.script("turn.hold", "hold");
     let path = world.plan("noted", &plan_of("noted", vec![agent("build", &[])]));
@@ -2023,11 +2021,13 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     });
 
     let note = "the fixture moved to tests/data; stop editing src/old.rs";
-    let submitted = world.run_with_stdin(
-        &["reply", "noted"],
+    let submitted = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", "noted"]),
         &json!({
-            "version": 1,
-            "commands": [{"op": "context", "id": "build", "note": note}],
+            "version": 2,
+            "commands": [{
+                "op": "note", "id": "build", "addressee": "worker", "text": note
+            }],
         })
         .to_string(),
     );
@@ -2038,36 +2038,23 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     });
     let committed = world.events_of("noted", "edit-committed");
     assert_eq!(
-        committed[0]["payload"]["operations"][0]["delivery"],
-        json!("deferred"),
-        "a note the sibling could not land live was not deferred onto the next dispatch: {:?}",
-        committed
+        committed[0]["payload"]["operations"][0]["reached"],
+        json!("carried"),
+        "a note no turn of the real conversation took was not carried to the next \
+         dispatch: {committed:?}"
     );
-
-    let interrupted = world.events_of("noted", "turn-interrupted");
     assert_eq!(
-        interrupted.len(),
-        1,
-        "the lever was pulled and the run does not say so: {}",
-        world.dump()
+        committed[0]["payload"]["operations"][0]["text"],
+        json!(note),
+        "the record does not carry what the note said: {committed:?}"
     );
-    assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
-    assert_eq!(interrupted[0]["payload"]["member"], json!("worker"));
-    assert_eq!(
-        interrupted[0]["payload"]["input_bytes"],
-        json!(note.len()),
-        "the envelope does not say how much redirection was offered"
-    );
+    // The note seam pulls no interrupt lever: it is a conversation's own verb,
+    // and a run that published a `turn-interrupted` for it would be reporting a
+    // mechanism nobody used.
     assert!(
-        interrupted[0]["payload"]["reason"].is_string(),
-        "an interrupt that did not land carries no reason: {}",
-        interrupted[0]
-    );
-    assert_eq!(
-        interrupted[0]["labels"]["node"],
-        json!("build"),
-        "the envelope is not stamped with the node it is about — its producer cannot know it, \
-         so this crate has to"
+        world.events_of("noted", "turn-interrupted").is_empty(),
+        "a note reached for the interrupt lever: {:?}",
+        world.kinds("noted")
     );
 
     world.release("turn.go");
@@ -2087,9 +2074,8 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
 ///
 /// The lever answers that there is no controllable turn, which is a genuine
 /// case rather than a contrivance: the harness standing in for the member's paid
-/// turn is not one `oneharness` can reach a lever into, exactly as
-/// `a_note_delivered_through_the_real_sibling_records_what_its_lever_answered`
-/// documents. That is the answer a cancellation must carry on from — and the
+/// turn is not one `oneharness` can reach a lever into, which is why the note
+/// beside it is carried to the next dispatch rather than taken by a turn. That is the answer a cancellation must carry on from — and the
 /// deadline is what actually stops this dispatch, which is the escalation
 /// running end to end against the real sibling.
 #[test]
@@ -2110,7 +2096,7 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
     world
         .run_with_stdin(
             &["reply", "stopped"],
-            &json!({"version": 1, "commands": [{"op": "cancel", "id": "build"}]}).to_string(),
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "build"}]}).to_string(),
         )
         .exited(0);
 

@@ -117,8 +117,9 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "author": "monitor", "commands": [
-                {"op": "context", "id": "build", "note": "the fixture moved", "deliver": "next"}
+            &json!({"version": 2, "author": "monitor", "commands": [
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nsweep"}}
             ]})
             .to_string(),
         )
@@ -262,7 +263,7 @@ fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "complete", "reason": "that is as far as this goes"}
             ]})
             .to_string(),

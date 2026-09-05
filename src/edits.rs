@@ -1800,7 +1800,6 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::NoteDelivered {
             node,
             text,
-            reached: crate::note::Reached::Carried,
             ..
         } => {
             if let Some(node) = graph.get_mut(node) {

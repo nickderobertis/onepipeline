@@ -96,7 +96,7 @@ const RULES: &str =
     "its acceptance criterion contradicts a rule the target repository states in its own suite";
 
 fn envelope(commands: Value) -> String {
-    json!({"version": 1, "commands": commands}).to_string()
+    json!({"version": 2, "commands": commands}).to_string()
 }
 
 /// The two-node edit these journeys submit: a node, and a second one that
@@ -560,14 +560,15 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
         // node it parked exactly as it was.
         json!({"op": "cancel", "id": "spare"}),
         json!({"op": "requeue", "id": "spare"}),
-        json!({"op": "context", "id": "spare", "note": "the fixture moved"}),
+        json!({"op": "note", "id": "spare", "addressee": "worker",
+               "text": "the fixture moved", "deliver": "next"}),
         // Last of the ops about `spare`, because it moves that node onto a
         // dependency that has already settled and so lets it run.
         json!({"op": "reparent", "id": "spare", "deps": ["fresh"]}),
         // A node waiting on the held one, so there is something still droppable
         // once everything else has run.
         json!({"op": "add", "node": agent("extra", &["slow"])}),
-        // Listed as no change at all, like the `cancel` and the `context` above:
+        // Listed as no change at all, like the `cancel` and the `note` above:
         // these move the plan without changing any node's definition, and the
         // plan is where the review sees them.
         json!({"op": "drop", "id": "extra", "dependents": "detach"}),
@@ -592,7 +593,7 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
     assert_eq!(
         driven,
         [
-            "add", "amend", "attest", "cancel", "complete", "context", "drop", "finding",
+            "add", "amend", "attest", "cancel", "complete", "drop", "finding", "note",
             "reparent", "requeue", "retry",
         ]
         .into_iter()

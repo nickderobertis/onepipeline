@@ -402,6 +402,24 @@ fn work(
         // is taken: a readout that only advances as the dispatch ends proves
         // nothing about supervising a live one.
         fake::wait_for(&dir.join("turn.settle"));
+        // A journey that needs the turn *after* this one held too asks for it
+        // with `turn.hold-each`, and the gates are consumed here rather than
+        // re-armed by the journey afterwards. Re-arming from outside is a race
+        // against the next turn, which starts as soon as this one ends — and
+        // the one journey that needs it is about what a note did to a node that
+        // is still in flight, which is exactly the window that race loses.
+        //
+        // The script's own text narrows it to the member whose prompt carries
+        // that text, because the gates are one pair for the whole world: a
+        // second node's turn consuming them would take the gate the first one is
+        // still waiting on, and hang it.
+        if fake::node_script(dir, "turn", "hold-each").is_some_and(|marker| {
+            marker.trim().is_empty() || prompt.contains(marker.trim())
+        }) {
+            for gate in ["turn.go", "turn.settle"] {
+                let _ = std::fs::remove_file(dir.join(gate));
+            }
+        }
     }
 
     stream(&RunStreamEnvelope::Result {

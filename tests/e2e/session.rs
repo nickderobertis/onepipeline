@@ -34,11 +34,6 @@ use oneagentgraph::event::{
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-/// A note written while the worker is working, which is what pulls the lever
-/// that publishes a `turn-interrupted` — one of the kinds that names a
-/// conversation, and the only one no ordinary dispatch produces.
-const NOTE: &str = "the fixture moved to tests/data";
-
 /// Every event kind the linked `oneagentgraph` can produce.
 ///
 /// Read off that library's own deserializer rather than listed here. There is no
@@ -80,10 +75,8 @@ fn every_kind() -> Vec<EventKind> {
 #[test]
 fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
     let world = World::new("session-labels");
-    // A turn open for as long as the dispatch is held, so the run really has one
-    // a `context` note can be delivered into — a `turn-interrupted` is published
-    // by a *second* process on a stream of its own, and a session that was the
-    // dispatch's rather than the interrupt's would be the drift worth catching.
+    // A turn open for as long as the dispatch is held, so every kind a live turn
+    // publishes really reaches the journal while it is still speaking.
     world.script("work.turn-open", "");
     world.script("work.wait", "hold");
     // Alive and saying nothing while it is held: the kind next door to a turn's
@@ -96,22 +89,6 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of("conversation", "turn-started").is_empty()
-    });
-
-    world
-        .run_with_stdin(
-            &["reply", "conversation"],
-            &json!({
-                "version": 1,
-                "commands": [{"op": "context", "id": "work", "note": NOTE}],
-            })
-            .to_string(),
-        )
-        .exited(0);
-    world.until("the interruption to reach the journal", |world| {
-        !world
-            .events_of("conversation", "turn-interrupted")
-            .is_empty()
     });
 
     world.release("work.go");
@@ -178,11 +155,25 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
     // must reach *every* kind the linked sibling names a conversation on. A
     // fifth one added upstream is a kind the double does not emit, so this fails
     // naming it rather than passing over a half-proven contract.
+    //
+    // One kind is excluded, by name and for a reason a comment cannot hide: no
+    // dispatch produces a `turn-interrupted`. The only lever left that publishes
+    // one is the release-arrival note — a manager's own note goes through the
+    // two-party note seam, which reaches both parties and pulls no interrupt —
+    // and that lever needs a released dependency rather than a running turn. The
+    // same label rule is held over the envelope that journey really produces, by
+    // `adoption::a_fast_node_pins_against_git_and_is_told_when_the_release_arrives`.
+    let elsewhere = EventKind::TurnInterrupted.as_str();
     let names_one: BTreeSet<&str> = every_kind()
         .into_iter()
         .filter(|kind| kind.carries_session())
         .map(EventKind::as_str)
+        .filter(|kind| *kind != elsewhere)
         .collect();
+    assert!(
+        EventKind::TurnInterrupted.carries_session(),
+        "the excluded kind stopped naming a conversation, so the exclusion is stale"
+    );
     assert_eq!(
         carried, names_one,
         "this run does not reach every kind the linked oneagentgraph names a conversation on —          teach the double the ones it is missing"

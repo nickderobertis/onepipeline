@@ -2030,8 +2030,9 @@ pub(crate) fn deliver_note_envelope(
         // environment — and this call is a library call, so a journey driving it
         // would have to mutate the test binary's own environment while its other
         // journeys run in parallel threads. The op's own timeout path is driven
-        // end to end by `context_delivery`, through the envelope, where the bound
-        // is a subprocess's to set.
+        // end to end by `live_edit::edits_accepted_but_not_reconciled_in_time_are_
+        // reported_queued`, through the envelope, where the bound is a
+        // subprocess's to set.
         Submitted::Queued { .. } => Ok(crate::note::Delivered::Queued),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         Submitted::Answered { .. } => Err(Error::Refused(

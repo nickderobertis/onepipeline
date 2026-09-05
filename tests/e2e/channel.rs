@@ -414,8 +414,8 @@ fn a_malformed_reply_is_refused_rather_than_half_applied() {
     for envelope in [
         "not json at all",
         r#"{"commands":[{"op":"attest","ref":"approve"}]}"#,
-        r#"{"version":1,"commands":[{"op":"invented","id":"x"}]}"#,
-        r#"{"version":1,"commands":[{"op":"drop","id":"build"}]}"#,
+        r#"{"version":2,"commands":[{"op":"invented","id":"x"}]}"#,
+        r#"{"version":2,"commands":[{"op":"drop","id":"build"}]}"#,
     ] {
         world
             .run_with_stdin(&["reply", &run], envelope)
@@ -746,7 +746,7 @@ fn attest_takes_exactly_the_settlements_the_divergence_record_names() {
     world
         .run_with_stdin(
             &["reply", &run],
-            r#"{"version":1,"commands":[{"op":"cancel","id":"idle"}]}"#,
+            r#"{"version":2,"commands":[{"op":"cancel","id":"idle"}]}"#,
         )
         .exited(0);
 
@@ -951,7 +951,7 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
     world
         .run_with_stdin(
             &["reply", "watched"],
-            &json!({"version": 1, "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "sweep", "persona": "engineer",
                                        "task": "## What\nsweep what build left"}}
             ]})
@@ -1244,8 +1244,9 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "commands": [
-                {"op": "context", "id": "build", "note": "the scope changed", "deliver": "next"}
+            &json!({"version": 2, "commands": [
+                {"op": "note", "id": "build", "addressee": "worker",
+                 "text": "the scope changed", "deliver": "next"}
             ]})
             .to_string(),
         )
@@ -1355,13 +1356,14 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
     world
         .run_with_stdin(
             &["reply", "refused"],
-            &json!({"version": 1, "commands": [
-                {"op": "context", "id": "later", "note": "start from the fixture", "deliver": "live"}
+            &json!({"version": 2, "commands": [
+                {"op": "note", "id": "later", "addressee": "worker",
+                 "text": "start from the fixture", "deliver": "live", "persist": false}
             ]})
             .to_string(),
         )
         .exited(REFUSED)
-        .err_has("no controllable turn in flight");
+        .err_has("composes it into no dispatch");
 
     assert!(
         world.events_of("refused", "edit-committed").is_empty(),
@@ -1461,15 +1463,16 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
             &json!({
                 "completion": false,
                 "reason": "go on; the note was optional",
-                "version": 1,
+                "version": 2,
                 "commands": [
-                    {"op": "context", "id": "later", "note": "start from the fixture", "deliver": "live"}
+                    {"op": "note", "id": "later", "addressee": "worker",
+                     "text": "start from the fixture", "deliver": "live", "persist": false}
                 ]
             })
             .to_string(),
         )
         .exited(REFUSED)
-        .err_has("no controllable turn in flight");
+        .err_has("composes it into no dispatch");
 
     assert!(
         world.events_of("bothrefused", "edit-committed").is_empty(),
@@ -1548,21 +1551,23 @@ fn a_reply_refused_before_routing_delivers_neither_half() {
             "an edit envelope requires version",
             json!({
                 "completion": false, "reason": ruling,
-                "commands": [{"op": "context", "id": "build", "note": "a note"}]
+                "commands": [
+                    {"op": "note", "id": "build", "addressee": "worker", "text": "a note"}
+                ]
             }),
         ),
         (
             "not an op the monitor may issue",
             json!({
                 "completion": false, "reason": ruling, "author": "monitor",
-                "version": 1, "commands": [{"op": "complete", "reason": "looks done from here"}]
+                "version": 2, "commands": [{"op": "complete", "reason": "looks done from here"}]
             }),
         ),
         (
             "nowhere",
             json!({
                 "completion": false, "reason": ruling,
-                "version": 1, "commands": [{"op": "cancel", "id": "nowhere"}]
+                "version": 2, "commands": [{"op": "cancel", "id": "nowhere"}]
             }),
         ),
     ] {
@@ -1654,7 +1659,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
     world
         .run_with_stdin(
             &["reply", "underlock"],
-            &json!({"version": 1, "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "late", "persona": "engineer", "task": "## What\nsweep"}}
             ]})
             .to_string(),
@@ -1687,7 +1692,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
             &json!({
                 "completion": false,
                 "reason": "approve it yourself",
-                "version": 1,
+                "version": 2,
                 "commands": [{"op": "drop", "id": "late", "dependents": "detach"}]
             })
             .to_string(),
@@ -1845,8 +1850,9 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
             &json!({
                 "completion": false,
                 "reason": "carry on while that lands",
-                "version": 1,
-                "commands": [{"op": "context", "id": "build", "note": "a note", "deliver": "next"}]
+                "version": 2,
+                "commands": [{"op": "note", "id": "build", "addressee": "worker",
+                              "text": "a note", "deliver": "next"}]
             })
             .to_string(),
         )
@@ -1903,7 +1909,8 @@ fn a_live_edit_an_older_build_left_on_the_reply_queue_is_passed_over() {
                 "id": 0,
                 "at": 1,
                 "reply": {"version": 1, "commands": [
-                    {"op": "context", "id": "build", "note": "from the old build"}
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "from the old build", "deliver": "next"}
                 ]}
             })
         ),
@@ -2010,9 +2017,10 @@ fn a_reply_carrying_both_halves_reaches_both_readers() {
             &json!({
                 "completion": false,
                 "reason": "noted — carry on with the note in hand",
-                "version": 1,
+                "version": 2,
                 "commands": [
-                    {"op": "context", "id": "build", "note": "the fixture moved", "deliver": "next"}
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "the fixture moved", "deliver": "next"}
                 ]
             })
             .to_string(),
@@ -2088,8 +2096,9 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
             world
                 .run_with_stdin(
                     &["reply", &run],
-                    &json!({"version": 1, "commands": [
-                        {"op": "context", "id": "build", "note": note, "deliver": "next"}
+                    &json!({"version": 2, "commands": [
+                        {"op": "note", "id": "build", "addressee": "worker",
+                         "text": note, "deliver": "next"}
                     ]})
                     .to_string(),
                 )
@@ -2288,7 +2297,7 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
     world
         .run_with_stdin(
             &["reply", "settledgraph"],
-            r#"{"version":1,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t"}}]}"#,
+            r#"{"version":2,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t"}}]}"#,
         )
         .exited(0)
         .out_has("\"applied\"");
@@ -2437,7 +2446,7 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
     ] {
         let refused = world.run_with_stdin(
             &["reply", "watched"],
-            &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+            &json!({"version": 2, "author": "monitor", "commands": [command]}).to_string(),
         );
         refused
             .exited(REFUSED)
@@ -2462,11 +2471,11 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
     );
 
     // And every op it *may* issue is applied. In an order each one is legal in:
-    // a note to the running node, a node added, that node parked and brought
-    // back, and finally the running node superseded — which is the one that
-    // stops it, so it goes last.
+    // a node added, that node parked and brought back, and finally the running
+    // node superseded — which is the one that stops it, so it goes last. There
+    // is no note among them: the one manager-note op may bind a criterion the
+    // node's judge decides against, so an observer surfaces instead of sending.
     for command in [
-        json!({"op": "context", "id": "slow", "note": "the fixture moved", "deliver": "next"}),
         // Behind the held node, so it is still pending when it is parked: a
         // node that had already run is not a node `cancel` can idle.
         json!({"op": "add", "node": {"id": "extra", "persona": "engineer",
@@ -2479,14 +2488,14 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
         world
             .run_with_stdin(
                 &["reply", "watched"],
-                &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+                &json!({"version": 2, "author": "monitor", "commands": [command]}).to_string(),
             )
             .exited(0)
             .out_has("\"applied\"");
     }
 
     let committed = world.events_of("watched", "edit-committed");
-    assert_eq!(committed.len(), 5, "{committed:?}");
+    assert_eq!(committed.len(), 4, "{committed:?}");
     for edit in &committed {
         assert_eq!(edit["payload"]["author"], "monitor", "{edit}");
     }
@@ -2497,7 +2506,7 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
             .iter()
             .filter(|event| event["payload"]["kind"] == "monitor-edit")
             .count()
-            >= 5
+            >= 4
     });
     let surfaced = world
         .events_of("watched", "planner-surface-queued")
@@ -2801,7 +2810,7 @@ fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner(
         .run_with_stdin(
             &["reply", "undrivenmonitor"],
             &json!({
-                "version": 1,
+                "version": 2,
                 "author": "monitor",
                 "commands": [{"op": "add", "node": {"id": "sweep", "persona": "engineer",
                                                     "task": "## What\nsweep"}}],
@@ -2896,7 +2905,7 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
     world
         .run_with_stdin(
             &["reply", &run],
-            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+            r#"{"version":2,"author":"monitor","commands":[{"op":"finding",
                "message":"which base should build target?","blocking":true,"id":"build"}]}"#,
         )
         .exited(0);
@@ -2981,7 +2990,7 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     world
         .run_with_stdin(
             &["reply", &run],
-            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+            r#"{"version":2,"author":"monitor","commands":[{"op":"finding",
                "message":"the base moved","blocking":true,"id":"ghost"}]}"#,
         )
         .exited(REFUSED)
@@ -2990,7 +2999,7 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     world
         .run_with_stdin(
             &["reply", &run],
-            r#"{"version":1,"author":"monitor","commands":[{"op":"finding","message":"   "}]}"#,
+            r#"{"version":2,"author":"monitor","commands":[{"op":"finding","message":"   "}]}"#,
         )
         .exited(REFUSED)
         .err_has("empty message");
@@ -3006,7 +3015,7 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     world
         .run_with_stdin(
             &["reply", &run],
-            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+            r#"{"version":2,"author":"monitor","commands":[{"op":"finding",
                "message":"nothing in this plan covers the migration the goal asks for"}]}"#,
         )
         .exited(0);
@@ -3042,7 +3051,7 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     world
         .run_with_stdin(
             &["reply", "parked"],
-            r#"{"version":1,"commands":[{"op":"finding","message":"the approval has been waiting a while","id":"approve"}]}"#,
+            r#"{"version":2,"commands":[{"op":"finding","message":"the approval has been waiting a while","id":"approve"}]}"#,
         )
         .exited(0)
         .out_has("\"applied\"");
