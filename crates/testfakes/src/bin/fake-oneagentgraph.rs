@@ -1159,6 +1159,16 @@ fn use_the_scratch_dir(key: &str) -> std::path::PathBuf {
 /// the engine through a rename no agent could have followed.
 const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
+/// The variable naming who this dispatch's channel sessions listen for.
+///
+/// A dispatched agent asks its manager through a succession of
+/// `onepipeline channel serve` sessions, and this is what tells them they are
+/// one side that is still waiting rather than a series of sides that have each
+/// gone. Spelled here rather than read from the crate under test, for the same
+/// reason every other variable a double reads is: a spelling that drifted must
+/// fail a journey, not be followed into agreement.
+const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
+
 /// What a dispatch writes into the directory it was given, under its own key.
 ///
 /// The name is this program's own and no journey spells it: what a journey reads
@@ -1613,6 +1623,11 @@ fn emit(
             // environment, on the run's own record: a journey asserts the
             // promise from the store rather than from this program's files.
             "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+            // And who this dispatch asks its manager as: the word every
+            // `channel serve` it starts carries, so a journey can assert from
+            // the store that a real dispatch is given one and that no two
+            // dispatches share it.
+            "asker": std::env::var(ASKER_ENV).ok(),
             // What this turn was told to do instead, while it was running.
             "redirected": redirected,
         }),

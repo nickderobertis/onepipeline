@@ -2620,20 +2620,10 @@ fn serve_session_deadline() -> Result<Option<Instant>> {
 /// would take over questions belonging to askers it has never heard of. The
 /// refusal is made before the first frame is read, so a session that cannot say
 /// who it listens for never raises a question under the wrong name.
-fn serve_asker() -> Result<Option<String>> {
-    let key = crate::channel::ASKER_ENV;
-    let Some(value) = std::env::var_os(key) else {
-        return Ok(None);
-    };
-    let value = value.to_string_lossy().into_owned();
-    if value.trim().is_empty() {
-        return Err(Error::Refused(format!(
-            "{key} is set to a blank value, which names no asker; leave it unset for a session \
-             that listens on its own, or set it to the one value every session of this asker \
-             carries"
-        )));
-    }
-    Ok(Some(value))
+fn serve_asker() -> Result<Option<crate::channel::Asker>> {
+    std::env::var_os(crate::channel::ASKER_ENV)
+        .map(|value| crate::channel::Asker::named(&value))
+        .transpose()
 }
 
 /// Why a serving session stopped, which is the whole of what decides whether
@@ -2643,16 +2633,18 @@ fn serve_asker() -> Result<Option<String>> {
 /// own exit instead, a question would be taken out from under a member that is
 /// still working and still waiting for it.
 enum Served {
-    /// The frame stream ended, so the side that was asking ended with it: this
-    /// loop was the only reader an answer to any of these had.
-    AskerGone,
+    /// The frame stream ended, so this loop is done reading: nothing is listening
+    /// for an answer to anything it raised *now*. Named for what it observed and
+    /// not for what that used to be read as — an asker that rents its listeners
+    /// is still there after one of them ends, and takes back what this one leaves
+    /// the moment it arms another.
+    StreamEnded,
     /// The member declared its work complete in a verdict this session carried
-    /// back to it. Its conversation is over too, so nothing is left to read an
-    /// answer to whatever it left outstanding — the same fact as the stream
-    /// ending, reached by the member saying so rather than by its stream closing.
+    /// back to it. Its conversation is over, so this loop is done reading too,
+    /// reached by the member saying so rather than by its stream closing.
     Completed,
     /// This session reached its own bound with the stream still open. The member
-    /// is still there, so nothing it raised is withdrawn.
+    /// is still there and still sending, so nothing it raised is marked.
     SessionOver,
 }
 
@@ -2679,7 +2671,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
     if let Some(asker) = &asker {
         raised.extend(channel.attend(asker)?.into_iter().map(|surface| surface.id));
     }
-    let mut ending = Served::AskerGone;
+    let mut ending = Served::StreamEnded;
     // Frames arrive on a thread of their own, so the bound above is a real
     // deadline and not merely a thing noticed between exchanges: a member that
     // has gone quiet must not hold a session past the moment it said it would
@@ -2818,20 +2810,23 @@ fn serve(args: &RunArgs) -> Result<i32> {
         );
     }
     // Which ending this was decides it, and the question each is answering is
-    // whether the side that asked is still there. A stream that ended and a
-    // member that declared itself complete both say it is not: this loop was the
-    // only reader an answer to anything it raised had, so what it leaves behind
-    // is marked — rather than deleted, which [`ChannelState::abandon`] says why —
-    // so the run stops reporting a decision nobody is waiting on while the text
-    // stays where a manager can still read it. A session that reached its own
-    // bound says nothing of the kind: the member is still holding the stream open
-    // and still owed every answer, so nothing is withdrawn and everything stays
-    // counted.
+    // whether anything is listening for these answers as this process leaves. A
+    // stream that ended and a member that declared itself complete both say
+    // nothing is: what this session leaves behind is marked — rather than
+    // deleted, which [`ChannelState::abandon`] says why — so the run stops
+    // reporting a decision nobody is waiting on while the text stays where a
+    // manager can still read it. A session that reached its own bound says the
+    // opposite: the member is still holding the stream open and still owed every
+    // answer, so nothing is marked and everything stays counted.
+    //
+    // The mark is a statement about now and not a verdict about the asker, which
+    // is why it is [`ChannelState::attend`]'s to lift: an asker whose whole way
+    // of waiting is a succession of listeners reaches here on every one of them.
     //
     // Deliberately not reached by the `?` paths above either: a refused frame is
     // this server rejecting what the member said, and the member is still there
-    // to be told. Only a stream that ended proves the asker did.
-    if matches!(ending, Served::AskerGone | Served::Completed) {
+    // to be told.
+    if matches!(ending, Served::StreamEnded | Served::Completed) {
         channel.abandon(&raised)?;
     }
     Ok(EXIT_SUCCESS)

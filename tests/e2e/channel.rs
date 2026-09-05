@@ -605,17 +605,13 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
     let after = world.run(&["next", &run]);
     after.exited(0);
     assert_eq!(after.json()["surface"], serde_json::Value::Null);
-    let queue: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(world.run_file(&run, "channel/queue.json"))
-            .expect("the run has a queue"),
-    )
-    .expect("the queue is JSON");
-    assert_eq!(queue["pending"]["message"], "is this base still right?");
-    assert_eq!(queue["pending"]["abandoned"], json!(true));
     world
         .run(&["status", &run])
         .exited(0)
-        .out_lacks("waiting for planner");
+        .out_lacks("waiting for planner")
+        .out_has(
+            "a planner update nobody is waiting on any more: blocker — is this base still right?",
+        );
 
     drop(reported);
     ended(reporting);
@@ -812,10 +808,14 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     world.until("the question to reach the planner", |world| {
         !world.events_of(&run, "planner-surface-queued").is_empty()
     });
-    world
-        .run(&["next", &run])
-        .exited(0)
-        .out_has("who owns this decision?");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("who owns this decision?");
+    // The surface says whose it is, which is the whole of what the scoping below
+    // is decided on.
+    assert_eq!(
+        read.json()["surface"]["asker"],
+        json!("the-asker-that-ended")
+    );
     ended(asked);
     world
         .run(&["status", &run])
@@ -843,6 +843,43 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
             "a planner update nobody is waiting on any more: blocker — who owns this decision?",
         );
     ended(stranger);
+
+    // And a question the stranger *is* waiting on takes the slot the abandoned
+    // one was sitting in — a live question outranks one nobody is waiting on —
+    // without taking its text down with it. The queue is the only place a reader
+    // can still reach that text, so the displaced question is still handed over.
+    let pressing = serving(
+        "some-other-dispatch",
+        r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
+    );
+    world.until("the stranger's question to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 3
+    });
+    let live = world.run(&["next", &run]);
+    live.exited(0);
+    assert_eq!(live.json()["surface"]["message"], "whose call is the base?");
+    assert_eq!(live.json()["surface"]["abandoned"], serde_json::Value::Null);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — whose call is the base?");
+    // Then what nobody is waiting on, in arrival order: the stranger's own
+    // report, which was queued first, and behind it the question the live one
+    // displaced out of the slot — still there, still saying what it is.
+    let report = world.run(&["next", &run]);
+    report.exited(0);
+    assert_eq!(
+        report.json()["surface"]["message"],
+        "unrelated work is green"
+    );
+    let displaced = world.run(&["next", &run]);
+    displaced.exited(0);
+    assert_eq!(
+        displaced.json()["surface"]["message"],
+        "who owns this decision?"
+    );
+    assert_eq!(displaced.json()["surface"]["abandoned"], json!(true));
+    ended(pressing);
     world.release("build.go");
 }
 
@@ -1128,6 +1165,26 @@ fn an_asker_this_session_cannot_name_is_refused_before_it_serves() {
             .run_on(command, "channel serve with a blank asker")
             .exited(2)
             .err_has("ONEPIPELINE_CHANNEL_ASKER is set to a blank value");
+    }
+
+    // And a value that is not text at all, which is the worse of the two because
+    // it does not announce itself: read lossily, two environments that differ
+    // collapse onto one string of replacement characters and two askers become
+    // one. Unix-only, because that is where an environment value can hold bytes
+    // no encoding claims.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command.env(
+            onepipeline::channel::ASKER_ENV,
+            std::ffi::OsStr::from_bytes(b"asker-\xff\xfe"),
+        );
+        world
+            .run_on(command, "channel serve with an asker that is not text")
+            .exited(2)
+            .err_has("cannot read as text");
     }
 
     // Nothing was carried and nothing is waiting: the refusal happened before a

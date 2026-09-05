@@ -3661,13 +3661,15 @@ the readable ones; **62** is why it is not, and what that cost.)
 
 **The discriminator is the asker, never the server**, and `serve` now names which
 ending it reached rather than inferring one from the fact that its loop stopped.
-`driver::Served` is that set, and it has exactly three members. `AskerGone` — the
-frame stream ended — and `Completed` — the member declared its work done in a
+`driver::Served` is that set, and it has exactly three members. `StreamEnded` —
+the frame stream ended — and `Completed` — the member declared its work done in a
 verdict this session carried back to it — both mark what the session leaves
 behind. `SessionOver` proves only that *this process* is done: the member is
 still holding the stream open and still working, so a question it is still owed
 is not marked, and the surface stays counted, claimable, readable, and
-answerable. The stream is therefore not what tells the endings apart — a
+answerable. (The first was originally called `AskerGone`, which is the name of
+the mistake **62** repairs: the stream ending is the listener's ending, and it
+was never the asker's.) The stream is therefore not what tells the endings apart — a
 completed member's is still open too — and whether anybody is left to read an
 answer is. **What no ending settles for good** is whether the *asker* has gone:
 a listener that ends is one listener, and **62** is the other half — a later
@@ -3771,9 +3773,20 @@ directory in `executor::prepare_dispatch_env` and valued as that directory's
 path: what has to be true of the value is that every session one dispatch serves
 through carries it and no other dispatch does, which is exactly what that
 directory already is. So the wrapper above is named without changing a line of
-it. A value that is present but blank is **refused** before the first frame is
-read: an asker every session matches equally is not an identity, and the session
-holding it would take over questions belonging to askers it has never heard of.
+it, and
+`scratch::every_dispatch_is_given_an_asker_of_its_own_that_no_other_dispatch_carries`
+is that half stated on its own, off the run's store rather than off anything a
+double reported.
+
+Two values are **refused** where the variable is read, before the first frame is,
+and `channel::Asker` is the type that makes neither representable afterwards. A
+**blank** one is not an identity: every session carrying one would match every
+other, so the session holding it would take over questions belonging to askers it
+has never heard of. One that is **not text** is worse for not announcing itself:
+read lossily, two environments that differ collapse onto one string of
+replacement characters and two askers silently become one. The queue's own record
+is checked the same way on the way back in, so neither state exists inside this
+crate at all.
 
 **What a consumer writing an asking wrapper may rely on**, without reading any of
 the above:

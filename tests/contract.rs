@@ -4360,19 +4360,28 @@ fn the_divergence_record_matches_the_code_it_describes() {
     assert!(
         surface
             .lines()
-            .any(|line| line.trim() == "pub asker: Option<String>,"),
+            .any(|line| line.trim() == "pub asker: Option<Asker>,"),
         "divergence 62 describes an `asker` a surface does not carry"
     );
     assert!(
-        channel.contains("pub fn attend(&self, asker: &str)"),
+        channel.contains("pub fn attend(&self, asker: &Asker)"),
         "divergence 62 describes an `attend` the channel does not declare"
     );
     let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
         .expect("the channel journeys ship");
+    // The journeys, and not the types the entry also names under that path: a
+    // test's name is snake case and a type's is not, which is the whole of the
+    // difference and is why it is read off the shape rather than off a list here
+    // that would go stale.
     let named: Vec<&str> = entry
         .split("`channel::")
         .skip(1)
         .filter_map(|rest| rest.split_once('`').map(|(name, _)| name))
+        .filter(|name| {
+            name.chars().all(|letter| {
+                letter.is_ascii_lowercase() || letter.is_ascii_digit() || letter == '_'
+            })
+        })
         .collect();
     assert_eq!(
         named.len(),

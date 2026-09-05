@@ -701,11 +701,13 @@ pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 /// is, so a verdict a member is waiting on is never cut off half-written.
 ///
 /// The endings are not the same fact and are deliberately not treated the same.
-/// A stream that ended proves the side that was asking has gone, so nothing is
-/// left that could read an answer and what it raised is abandoned. A session that
-/// reached this bound proves only that *this process* is done: the stream is
-/// still open, the member is still there, and every question it raised is still
-/// owed an answer — so nothing is withdrawn.
+/// A stream that ended leaves what this session raised marked: nothing is
+/// listening for those answers *now*, which is what the mark says and all it says
+/// — an asker that rents its listeners takes them back through
+/// [`ChannelState::attend`] the moment it arms another. A session that reached
+/// this bound does not even say that much: the stream is still open, the member
+/// is still there, and every question it raised is still owed an answer, so
+/// nothing is marked at all.
 pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
 
 /// The environment variable naming who a `channel serve` session listens on
@@ -728,6 +730,62 @@ pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
 /// on its own behalf: it adopts nothing, nothing adopts what it raised, and what
 /// it leaves behind when its stream ends is abandoned exactly as before.
 pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
+
+/// One asker's name: the word by which two serving sessions are one side.
+///
+/// A type rather than a `String`, because the value is checked once — where it
+/// arrives, which is [`ASKER_ENV`] — and everything past that point is a name
+/// that **is** somebody. Two states are what make that worth a type. A **blank**
+/// name is not an identity: every session carrying one would match every other,
+/// so the session holding it would take over questions belonging to askers it
+/// has never heard of. A name that is **not Unicode** is worse, because it does
+/// not announce itself: read lossily, two different environments collapse onto
+/// one string of replacement characters, and two askers become one silently. Both
+/// are refused here, so neither is representable in anything that takes an
+/// `Asker` — the durable queue included, which is checked on the way back in for
+/// the same reason.
+///
+/// The value is otherwise **opaque**: it is compared for equality and never
+/// parsed, and the wire form is the word itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct Asker(String);
+
+impl Asker {
+    /// The asker one environment value names, or a refusal saying why it names
+    /// none.
+    pub(crate) fn named(value: &std::ffi::OsStr) -> crate::Result<Self> {
+        let value = value.to_str().ok_or_else(|| {
+            crate::Error::Refused(format!(
+                "{ASKER_ENV} is set to a value this host cannot read as text; an asker is \
+                 compared to other askers as one word, and two values that are not text read \
+                 as the same word — set it to a name in Unicode, or leave it unset for a \
+                 session that listens on its own"
+            ))
+        })?;
+        Self::checked(value)
+    }
+
+    /// The same check, over a name that is already text: the queue's own record
+    /// comes back this way.
+    fn checked(value: &str) -> crate::Result<Self> {
+        if value.trim().is_empty() {
+            return Err(crate::Error::Refused(format!(
+                "{ASKER_ENV} is set to a blank value, which names no asker; leave it unset for \
+                 a session that listens on its own, or set it to the one value every session \
+                 of this asker carries"
+            )));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl<'de> Deserialize<'de> for Asker {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::checked(&value).map_err(serde::de::Error::custom)
+    }
+}
 
 /// What raised a surface.
 ///
@@ -785,7 +843,7 @@ pub(crate) struct Surface {
     /// wire while it is absent, so a queue no asker was named on serializes
     /// exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asker: Option<String>,
+    pub asker: Option<Asker>,
 }
 
 /// The durable channel state for one run.
@@ -1064,11 +1122,11 @@ impl ChannelState {
     /// Nothing moves and nothing is re-queued: this only clears a flag, so a
     /// surface a manager has already been handed is not handed to them twice by
     /// its asker coming back.
-    pub fn attend(&self, asker: &str) -> crate::Result<Vec<Surface>> {
+    pub fn attend(&self, asker: &Asker) -> crate::Result<Vec<Surface>> {
         let mut queue = self.queue();
         let mut taken: Vec<Surface> = Vec::new();
         for surface in queue.waiting.iter_mut().chain(queue.pending.iter_mut()) {
-            if surface.abandoned && surface.asker.as_deref() == Some(asker) {
+            if surface.abandoned && surface.asker.as_ref() == Some(asker) {
                 surface.abandoned = false;
                 taken.push(surface.clone());
             }
@@ -1477,7 +1535,7 @@ mod tests {
 
         let asked = |asker: Option<&str>, blocking: bool, message: &str| Surface {
             message: message.to_owned(),
-            asker: asker.map(str::to_owned),
+            asker: asker.map(|name| Asker::checked(name).expect("a name")),
             ..surface(0, blocking)
         };
         let mine = channel
@@ -1497,7 +1555,10 @@ mod tests {
             .expect("all three are marked");
         assert_eq!(channel.pending(), None);
 
-        let taken = channel.attend("dispatch-a").expect("mine comes back");
+        let named = |name: &str| Asker::checked(name).expect("a name");
+        let taken = channel
+            .attend(&named("dispatch-a"))
+            .expect("mine comes back");
         assert_eq!(
             taken.iter().map(|surface| surface.id).collect::<Vec<_>>(),
             vec![mine.id]
@@ -1515,8 +1576,14 @@ mod tests {
         // A second listener of the same asker finds nothing left to take, and
         // says so without writing a further record.
         let lines = crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len();
-        assert!(channel.attend("dispatch-a").expect("nothing").is_empty());
-        assert!(channel.attend("dispatch-c").expect("nothing").is_empty());
+        assert!(channel
+            .attend(&named("dispatch-a"))
+            .expect("nothing")
+            .is_empty());
+        assert!(channel
+            .attend(&named("dispatch-c"))
+            .expect("nothing")
+            .is_empty());
         assert_eq!(
             crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len(),
             lines,
