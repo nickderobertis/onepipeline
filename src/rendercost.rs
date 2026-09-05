@@ -77,7 +77,7 @@ enum Act {
     Began,
     Reported,
     LandingRead,
-    RepositoryOpen,
+    RepositoryResolved,
     StoreRead,
     ProcessSpawn,
 }
@@ -88,7 +88,7 @@ impl Act {
             Act::Began => "render",
             Act::Reported => "reported",
             Act::LandingRead => "landing-read",
-            Act::RepositoryOpen => "repository-open",
+            Act::RepositoryResolved => "repository-resolved",
             Act::StoreRead => "store-read",
             Act::ProcessSpawn => "process-spawn",
         }
@@ -238,19 +238,19 @@ impl Drop for Deciding {
     }
 }
 
-/// Record that one repository was opened to decide a landing.
+/// Record that one landing decision made the sibling resolve its repository.
 ///
-/// Recorded from [`crate::vcs::landing_now`] because that is where the open
-/// happens: the read this crate calls loads the registry and resolves the
-/// repository itself, once per call, inside the sibling. Counting it here is what
-/// makes the residual cost a **measurement** rather than a claim — and what lets
-/// `tests/e2e/landing.rs` hold a second open for one node to be a failure.
+/// Named for what is certainly true rather than for what a caller hopes: the read
+/// this crate calls loads the registry and resolves `repo` **before it reads
+/// anything**, on every call, so one resolution per read is by construction. What
+/// it goes on to open depends on the answer, and this does not claim to know.
 ///
-/// It is deliberately not recorded from a repository handle of this crate's own:
-/// there is no such handle, because there is nothing on the sibling's public
-/// surface to build one out of. See that module's own note, and divergence 33.
-pub(crate) fn repository_opened(repo: Option<&str>) {
-    record(Act::RepositoryOpen, json!({ "repo": repo }));
+/// Recorded *after* the read returns, so it records something that happened. It
+/// is the quantity the render bound is about: a repository resolved once for each
+/// node rather than once for the render, which is the sibling's limit and not this
+/// crate's choice — see [`crate::vcs::landing_now`] and divergence 33.
+pub(crate) fn repository_resolved(repo: Option<&str>) {
+    record(Act::RepositoryResolved, json!({ "repo": repo }));
 }
 
 /// Record that the one read a landing decision is allowed to make was taken.
@@ -292,6 +292,50 @@ fn inside_a_decision() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire this module writes, pinned against the reader that parses it.
+    ///
+    /// `tests/e2e/landing.rs` and `tests/e2e/harness.rs` name these words as
+    /// string literals — a test binary cannot see a private module's constants —
+    /// so this is the gate that keeps the two copies one vocabulary. The matches
+    /// are **exhaustive on purpose**: a variant added without a word here fails to
+    /// compile, and a word changed without the journey fails below.
+    #[test]
+    fn every_word_this_record_is_read_by_is_the_word_it_writes() {
+        assert_eq!(
+            RENDER_COST_ENV, "ONEPIPELINE_RENDER_COST",
+            "the variable `tests/e2e/harness.rs` sets was renamed"
+        );
+        for (view, word) in [
+            (Rendered::Results, "results"),
+            (Rendered::Summary, "summary"),
+            (Rendered::Status, "status"),
+        ] {
+            // Exhaustive, so a fourth view cannot be added without a word.
+            match view {
+                Rendered::Results | Rendered::Summary | Rendered::Status => {}
+            }
+            assert_eq!(view.as_str(), word, "{view:?} is read by another name");
+        }
+        for (act, word) in [
+            (Act::Began, "render"),
+            (Act::Reported, "reported"),
+            (Act::LandingRead, "landing-read"),
+            (Act::RepositoryResolved, "repository-resolved"),
+            (Act::StoreRead, "store-read"),
+            (Act::ProcessSpawn, "process-spawn"),
+        ] {
+            match act {
+                Act::Began
+                | Act::Reported
+                | Act::LandingRead
+                | Act::RepositoryResolved
+                | Act::StoreRead
+                | Act::ProcessSpawn => {}
+            }
+            assert_eq!(act.as_str(), word, "{act:?} is read by another name");
+        }
+    }
 
     /// One lock over the two tests below, because the variable they set and
     /// clear is process-wide: each would otherwise turn the other's recording

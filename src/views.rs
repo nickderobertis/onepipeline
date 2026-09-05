@@ -425,9 +425,18 @@ impl Reported {
         match self {
             Reported::TheRunObserved => Stands::Landed,
             Reported::ReadNow { read, .. } => match read.as_ref() {
-                LandingRead::Landed { .. } => Stands::Landed,
-                LandingRead::NotLanded { .. } => Stands::NotLanded,
-                LandingRead::Undecided { .. } => Stands::Undecided,
+                LandingRead::Answered(landed) => match landed {
+                    // A landing the branch has since gone past is not this
+                    // node's work finished: the sibling's own `is_landed` says
+                    // so, and the commits above it are work still to publish.
+                    onevcs::Landed::Yes { .. } => Stands::Landed,
+                    onevcs::Landed::InPart { .. } | onevcs::Landed::No => Stands::NotLanded,
+                    // Deliberately not a `no`: the base carries the change and
+                    // nothing records why, which is equally what somebody else
+                    // making the same change leaves behind.
+                    onevcs::Landed::Unknown => Stands::Undecided,
+                },
+                LandingRead::Refused { .. } => Stands::Undecided,
             },
             Reported::UnlandedAtSettlement => Stands::NotLanded,
             Reported::NoChangeToLand => Stands::NoChangeToLand,
@@ -2322,22 +2331,20 @@ fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String>
             Some("landed on its base — the run observed the change reach it".to_string())
         }
         Reported::ReadNow { settled, read } => Some(match read.as_ref() {
-            LandingRead::Landed { tier } => format!("landed on its base — read now: {tier}"),
-            LandingRead::NotLanded { tier } => {
-                format!("NOT landed: read now, {tier} — open the change for where it is")
-            }
+            LandingRead::Answered(landed) => match landed {
+                onevcs::Landed::Yes { .. } => {
+                    format!("landed on its base — read now: {}", evidence(landed))
+                }
+                onevcs::Landed::InPart { .. } | onevcs::Landed::No => format!(
+                    "NOT landed: read now, {} — open the change for where it is",
+                    evidence(landed)
+                ),
+                onevcs::Landed::Unknown => undecided(&evidence(landed), settled, &ago),
+            },
             // The one answer nothing gave, said in its own words rather than in
             // either of the other two — with the settlement's own dated claim
             // behind it, which is what it always was.
-            LandingRead::Undecided { because } => match settled {
-                Settled::Unlanded => format!(
-                    "landing UNDECIDED: read now, {because}; it had not reached its base when \
-                     this settled{ago} — open the change for where it is now"
-                ),
-                Settled::Nothing => format!(
-                    "landing UNDECIDED: read now, {because} — open the change for where it is"
-                ),
-            },
+            LandingRead::Refused { because } => undecided(because, settled, &ago),
         }),
         // No branch to ask about, so the settlement's own claim is all there has
         // ever been: dated, and saying that nothing has moved it.
@@ -2346,6 +2353,48 @@ fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String>
              no later read has said otherwise — open the change for where it is now"
         )),
         Reported::NoChangeToLand => None,
+    }
+}
+
+/// How a landing nothing could decide reads, with the settlement's own dated
+/// claim behind it where there was one.
+///
+/// One phrasing for the two ways a read fails to decide — the sibling answering
+/// that it cannot tell, and the read refusing outright — because what a reader
+/// does about either is the same: open the change and look.
+fn undecided(because: &str, settled: &Settled, ago: &str) -> String {
+    match settled {
+        Settled::Unlanded => format!(
+            "landing UNDECIDED: read now, {because}; it had not reached its base when this \
+             settled{ago} — open the change for where it is now"
+        ),
+        Settled::Nothing => {
+            format!("landing UNDECIDED: read now, {because} — open the change for where it is")
+        }
+    }
+}
+
+/// What decided one of the sibling's answers, in the words a line prints.
+///
+/// Composed here rather than in `crate::vcs`, because it is prose for a rendered
+/// line: the tier is that library's own word for it, and the commit and the count
+/// beside it are what a reader deciding what to do next needs.
+fn evidence(landed: &onevcs::Landed) -> String {
+    match landed {
+        onevcs::Landed::Yes { evidence } => format!("{} at {}", landed.tier(), evidence.commit()),
+        onevcs::Landed::InPart { evidence, unlanded } => format!(
+            "{} at {}, with {unlanded} commit(s) above it the landing did not carry",
+            landed.tier(),
+            evidence.commit()
+        ),
+        onevcs::Landed::No => format!(
+            "{}: the base does not carry what this branch changed",
+            landed.tier()
+        ),
+        onevcs::Landed::Unknown => format!(
+            "{}: the base already carries what this branch changed, and nothing records why",
+            landed.tier()
+        ),
     }
 }
 
@@ -2798,6 +2847,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// Each of the four answers `onevcs` gives reads back as one of the three
+    /// things a line can say, with the evidence that decided it.
+    ///
+    /// Two of the four are exactly the readings that must not be collapsed: a
+    /// landing the branch has gone past is **not** finished work — the sibling's
+    /// own `is_landed` says so, and the commits above it are work still to
+    /// publish — and a base that carries the change with nothing recording why is
+    /// **undecided** rather than landed. Driven through the answer rather than
+    /// through a repository, because what is decided here is which answer is
+    /// which; `tests/e2e/landing.rs` drives the repository.
+    #[test]
+    fn each_answer_the_sibling_gives_reads_back_as_one_of_the_three_with_its_evidence() {
+        use crate::vcs::LandingRead;
+        use onevcs::{Landed, LandingEvidence, Sha};
+        let read = |landed: Landed| Reported::ReadNow {
+            settled: Settled::Unlanded,
+            read: std::rc::Rc::new(LandingRead::Answered(landed)),
+        };
+        let recorded = LandingEvidence::RecordedLanding {
+            commit: Sha("abc1234".into()),
+        };
+
+        let yes = Landed::Yes {
+            evidence: recorded.clone(),
+        };
+        assert_eq!(read(yes.clone()).stands(), Stands::Landed);
+        assert_eq!(evidence(&yes), "a recorded landing at abc1234");
+
+        let part = Landed::InPart {
+            evidence: recorded,
+            unlanded: std::num::NonZeroUsize::new(2).expect("two"),
+        };
+        assert_eq!(read(part.clone()).stands(), Stands::NotLanded);
+        assert_eq!(
+            evidence(&part),
+            "a recorded landing at abc1234, with 2 commit(s) above it the landing did not carry"
+        );
+
+        assert_eq!(read(Landed::No).stands(), Stands::NotLanded);
+        assert!(evidence(&Landed::No).contains("the base does not carry"));
+
+        assert_eq!(
+            read(Landed::Unknown).stands(),
+            Stands::Undecided,
+            "a base that carries the change with nothing recording why was read as an answer"
+        );
+        assert!(evidence(&Landed::Unknown).contains("nothing records why"));
+
+        // And a read that got no answer at all is undecided too.
+        assert_eq!(
+            Reported::ReadNow {
+                settled: Settled::Nothing,
+                read: std::rc::Rc::new(LandingRead::Refused {
+                    because: "this host could not decide it".into()
+                }),
+            }
+            .stands(),
+            Stands::Undecided
+        );
     }
 
     fn plan() -> Plan {

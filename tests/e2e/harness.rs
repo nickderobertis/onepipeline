@@ -4682,6 +4682,12 @@ pub const LOOP_STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
 /// one command points it at a path of that command's own — see
 /// `tests/e2e/landing.rs`, which holds a render's cost as work rather than as
 /// elapsed time.
+///
+/// Spelled here because a test binary cannot see a private module's constants.
+/// The gate that keeps this copy and the crate's one vocabulary is
+/// `rendercost`'s own `every_word_this_record_is_read_by_is_the_word_it_writes`,
+/// which pins the variable and every act and view word this file and that journey
+/// read by.
 pub const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
 
 /// What one driver's reconcile loop did, as it reports it.
