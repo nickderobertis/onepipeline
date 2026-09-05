@@ -2630,7 +2630,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
     // had already decided not to write. A session blocked on a stream that has
     // gone quiet therefore stays until the next frame or the stream's end, which
     // is the same wait it would be in with no bound at all.
-    let session = serve_session_deadline()?;
+    let session_deadline = serve_session_deadline()?;
     let mut ending = Served::AskerGone;
 
     for line in stdin.lock().lines() {
@@ -2704,7 +2704,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
             ending = Served::Completed;
             break;
         }
-        if session.is_some_and(|deadline| Instant::now() >= deadline) {
+        if session_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             // This process is done; the member that spawned it is not. Said on
             // stderr because an operator reading a run whose server went needs
             // to know the questions are still standing rather than lost — and

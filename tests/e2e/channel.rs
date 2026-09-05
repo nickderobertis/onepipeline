@@ -827,7 +827,9 @@ fn a_member_that_declared_itself_complete_leaves_nothing_counted_as_unread() {
 /// the queue raised by a session that then refused to stay for its answer.
 ///
 /// Both spellings the fallback would have swallowed are here — a word, and the
-/// zero that would have ended the session before it served anything.
+/// zero that would have ended the session before it served anything — and beside
+/// them the one that parses and still cannot be held: a bound further ahead than
+/// this host's clock can name.
 #[test]
 fn a_session_bound_this_server_cannot_honour_is_refused_before_it_serves() {
     let world = World::new("channel-bad-bound");
@@ -846,6 +848,17 @@ fn a_session_bound_this_server_cannot_honour_is_refused_before_it_serves() {
             .err_has("ONEPIPELINE_SERVE_SESSION_SECONDS is a whole number of seconds")
             .err_has(&format!("given '{given}'"));
     }
+
+    // And the bound that is a whole number of seconds greater than zero and still
+    // not one this host can hold: the sum is what every later comparison reads,
+    // and `Instant` addition panics on an overflow rather than saturating, so the
+    // arithmetic is refused where it is done instead of at the moment it is read.
+    let mut furthest = world.cmd(&["channel", "serve", &run]);
+    furthest.env("ONEPIPELINE_SERVE_SESSION_SECONDS", u64::MAX.to_string());
+    world
+        .run_on(furthest, "channel serve with a bound past this clock")
+        .exited(2)
+        .err_has("further ahead than this host's clock can name");
 
     // Nothing was carried and nothing is waiting: the refusals happened before
     // the server read a frame, so no surface was raised and then stranded.

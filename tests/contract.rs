@@ -4156,6 +4156,69 @@ fn the_divergence_record_matches_the_code_it_describes() {
         doc.contains("`abandoned: true`"),
         "divergence 60 no longer says what a reader sees on a surface nobody is waiting on"
     );
+
+    // The same entry's second half restates two more things it does not own: the
+    // name of the environment variable that bounds a serving session, and the
+    // set of endings that session distinguishes. Renaming either, or adding a
+    // fourth ending, fails here rather than leaving the entry describing a
+    // discriminator the code has moved past.
+    let bound = std::fs::read_to_string(repo_root().join("src/channel.rs"))
+        .expect("the channel ships")
+        .split_once("pub const SERVE_SESSION_ENV: &str = \"")
+        .expect("the channel names the serving session's bound")
+        .1
+        .split_once('"')
+        .expect("that name is a string literal")
+        .0
+        .to_string();
+    assert!(
+        entry.contains(&bound),
+        "divergence 60 names a session bound the channel does not declare: {bound}"
+    );
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let endings: Vec<String> = driver
+        .split_once("enum Served {")
+        .expect("the driver names why a serving session stopped")
+        .1
+        .split_once("\n}")
+        .expect("that enum is closed")
+        .0
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(',') && !line.starts_with("///"))
+        .map(|line| line.trim_end_matches(',').to_string())
+        .collect();
+    assert_eq!(
+        endings.len(),
+        3,
+        "divergence 60 says a serving session has three endings; the driver declares {endings:?}"
+    );
+    for ending in &endings {
+        assert!(
+            entry.contains(ending.as_str()),
+            "the driver declares an ending divergence 60 does not name: {ending}"
+        );
+    }
+    // And which of them mark: the entry says exactly one ending withdraws
+    // nothing, so exactly one has to sit outside the guard that marks.
+    let guard = driver
+        .split_once("if matches!(ending, ")
+        .expect("the driver decides from the ending whether to mark anything")
+        .1
+        .split_once(')')
+        .expect("that guard is closed")
+        .0;
+    let marking: Vec<&String> = endings
+        .iter()
+        .filter(|ending| guard.contains(&format!("Served::{ending}")))
+        .collect();
+    assert_eq!(
+        marking.len(),
+        endings.len() - 1,
+        "divergence 60 says exactly one ending withdraws nothing; the guard marks {marking:?} of \
+         {endings:?}"
+    );
 }
 
 #[test]

@@ -3423,15 +3423,19 @@ it over carrying `abandoned: true`, and `status` says how many are there. The
 one thing genuinely withdrawn is the pending slot, whose surface has already
 been delivered to the reader holding it.
 
-**The discriminator is the asker, never the server**, and `serve` now says which
-of the two endings it reached rather than inferring one from the fact that its
-loop stopped. A frame stream that ended proves the side that was asking has gone
-and is the only ending that marks anything. A session that stopped for its own
-reasons — the member is still holding the stream open and still working — leaves
-a question that member is still owed: nothing is marked, and the surface stays
-counted, claimable, readable, and answerable.
+**The discriminator is the asker, never the server**, and `serve` now names which
+ending it reached rather than inferring one from the fact that its loop stopped.
+`driver::Served` is that set, and it has exactly three members. `AskerGone` — the
+frame stream ended — and `Completed` — the member declared its work done in a
+verdict this session carried back to it — both prove the side that was asking has
+gone, and both mark. `SessionOver` proves only that *this process* is done: the
+member is still holding the stream open and still working, so a question it is
+still owed is not marked, and the surface stays counted, claimable, readable, and
+answerable. The stream is therefore not what tells the endings apart — a
+completed member's is still open too — and whether anybody is left to read an
+answer is.
 
-Making that second ending reachable is what `ONEPIPELINE_SERVE_SESSION_SECONDS`
+Making `SessionOver` reachable at all is what `ONEPIPELINE_SERVE_SESSION_SECONDS`
 is for. Unset — the default, and every existing caller — is unbounded: the
 session ends when its member's stream does, exactly as before. A host that spawns
 the judge side **per turn**, as this library's own dag-scope graph does, bounds it
@@ -3440,11 +3444,11 @@ ends the process with exit 0 and a line on stderr naming the bound, saying the
 stream is still open and how many surfaces stay in the queue waiting for an
 answer. The bound is checked between exchanges rather than during one, so a
 verdict a member is waiting on is never cut off half-written, and a value that is
-present but not a whole number of seconds greater than zero is **refused** before
-the first frame is read — read as the unset it is not, a mistyped bound would
-silently give the session the one behaviour the operator was trying to change,
-and a session that cannot honour its bound must not raise a question it will not
-stay for.
+present but not a whole number of seconds greater than zero — or that is one this
+host's clock cannot name — is **refused** before the first frame is read. Read as
+the unset it is not, a mistyped bound would silently give the session the one
+behaviour the operator was trying to change, and a session that cannot honour its
+bound must not raise a question it will not stay for.
 
 Held end to end by
 `channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread`
