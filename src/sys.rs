@@ -495,6 +495,7 @@ fn descended_from(table: &[(u32, u32)], pid: u32) -> Vec<u32> {
 /// one.
 #[cfg(unix)]
 fn process_table() -> Option<Vec<(u32, u32)>> {
+    crate::rendercost::process_spawned("ps");
     let listed = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .stderr(std::process::Stdio::null())
@@ -648,6 +649,7 @@ fn taskkill(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     // that carries it — a signal whose default action is to terminate, which
     // nothing in this crate installs a handler for. So the grace this drops is
     // grace no process here was taking.
+    crate::rendercost::process_spawned("taskkill");
     std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
@@ -1107,6 +1109,7 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 
 #[cfg(unix)]
 fn ps_process_start_token(pid: u32) -> Option<String> {
+    crate::rendercost::process_spawned("ps");
     let listed = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides

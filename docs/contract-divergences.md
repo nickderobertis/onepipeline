@@ -989,7 +989,7 @@ key nothing can satisfy.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
-## 33. Nothing on `onevcs`'s surface says whether a published change has landed *since* — OPEN
+## 33. Nothing on `onevcs`'s surface says whether a published change has landed *since* — RESOLVED
 
 **Proposal (for `onevcs`): a read that answers "has this branch reached its
 base?" for a branch that was pushed — the change request's state, or the
@@ -1019,33 +1019,48 @@ Re-reading it needs one of two answers, and this crate can reach neither:
   not, and its absence from that list says nothing. The comparison is there; it
   is not reachable for the branches that need it.
 
-Until one exists, **no view claims to know where a change is now.** Every line
-that carries an unlanded node dates its answer to the settlement, says no later
-read has said otherwise, and names the change to open —
-`views::landed_phrase`, `RunView::summary`, and the `status` line, all held by
-`a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now`.
-That is the honest half of what the change asked for: the stale fact is no longer
-asserted, and it still cannot be corrected from here.
+While neither existed, **no view claimed to know where a change was now.** Every
+line carrying an unlanded node dated its answer to the settlement, said no later
+read had said otherwise, and named the change to open — `views::landed_phrase`,
+`RunView::summary`, and the `status` line. That was the honest half of what the
+change asked for: the stale fact was no longer asserted, and it could not be
+corrected from here. It is the fallback still, for a node the run recorded
+`unlanded` that left no branch to ask about.
 
-**Since: one read of it is reachable, and only one.** `onevcs::release_status`
-takes the four-spelling reference this crate already resolves work by and answers
-`not landed` before it looks at any release at all — so it carries that library's
-own four-tier landing decision, made against the publication checkout's own
-history, across the seam. A driver asks it once, as the run closes out, of every
-change the run recorded unlanded: `vcs::proved_landed`, `engine`'s
-`landings_after_asking_again`, and `views::landings_the_run_re_read`, which is
-what puts the answer on the views beside the report.
-`a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed`
-drives it end to end over a real origin.
+**Ruling: `onevcs::landing_status`, asked when a view renders.** That library now
+publishes the landing decision on its own — `landing_status(reference, repo)`,
+answering the `Landed` enum with the tier that decided it inside the answer. It
+takes the four-spelling reference this crate already resolves work by, takes no
+release target, reads no release configuration, and answers every repository the
+same way. `vcs::landing_now` is the one call site; `vcs::proved_landed` is that
+call read as a boolean, which is what the driver's close-out
+(`engine::landings_after_asking_again`) still asks.
 
-What that does **not** reach, and why this stays open: the answer is only
-available where this host has release configuration for the repository, because
-that call selects a release target before it returns the landing it already
-decided — a repository nobody has declared targets for is refused, and a refusal
-is *undecided* rather than "not landed". It is asked once, at close-out, so it is
-still not "where is this now" for a run in flight or for one that finished an
-hour ago. Both halves are what a landing read of its own — the proposal above —
-would settle.
+The half that could not be reached is now reached. `release_status` selected a
+release target before it returned the landing it had already decided, so a
+repository declaring no targets was **refused** — and the consuming host's own
+repository declares none, which meant nothing there ever corrected a settlement's
+answer. `landing_status` decides nothing about a release, so that host gets a real
+answer.
+
+And it is asked **when a view renders** rather than once at close-out. The three
+places a landing is reported — `views::landed_phrase` on the node line,
+`RunView::summary`'s count, and the `status` line — read through
+`views::reported_landing`, which asks for each node whose line the render prints
+and for no other. Two rules keep that bounded and honest:
+
+* **Never for a node the run recorded as landed.** A base does not stop carrying
+  work it has taken, so that is the one answer a later read cannot overturn.
+* **On every render for the other two.** A node recorded `unlanded`, and a node
+  whose landing an earlier read could not decide, are exactly the two answers a
+  later merge changes.
+
+A read that cannot decide is reported as **undecided**, distinctly from landed and
+from not landed, with the settlement's own dated claim behind it — the property
+the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it
+over real repositories it creates on disk, and holds what a render costs as *work*
+rather than as elapsed time: at most one landing read per node it reports on, none
+for a node already recorded landed, and no other per-node work at all.
 
 ## 34. A drafting dispatch that produced no body was reported nowhere — RESOLVED
 

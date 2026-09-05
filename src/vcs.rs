@@ -363,6 +363,113 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     }
 }
 
+/// What a landing read taken **now** says about one branch, and what said it.
+///
+/// Three answers rather than a boolean, because the third is the one a caller
+/// must not collapse into either of the others: a repository this host cannot
+/// resolve, a branch no checkout holds, or a base whose history is behind the
+/// one the base stands at all leave the question *open*, and a reader told
+/// "not landed" would act on a claim nothing made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LandingVerdict {
+    /// The base carries the work.
+    Landed,
+    /// There is work on this branch the base does not carry.
+    NotLanded,
+    /// Nothing here could decide it.
+    Undecided,
+}
+
+/// One landing read, with the evidence that decided it.
+///
+/// The evidence travels with the answer rather than beside it, because "it
+/// landed" is exactly the claim that used to be an inference and was wrong: a
+/// reader acting on this can say what it acted on.
+#[derive(Debug, Clone)]
+pub(crate) struct LandingRead {
+    /// What the read decided.
+    pub(crate) verdict: LandingVerdict,
+    /// Which tier decided it, in the words a rendered line names it by — or,
+    /// where the read refused, what it refused with.
+    pub(crate) evidence: String,
+}
+
+/// Ask `onevcs` whether one branch's work has reached its base, as of now.
+///
+/// [`onevcs::landing_status`] is the landing decision on that library's public
+/// surface **on its own**: it takes no release target, reads no release
+/// configuration, and answers every repository the same way — which is what
+/// makes it askable of a run whose repository declares no release target at all.
+/// The four tiers behind it are that library's, decided in one place there, so
+/// this crate holds no second account of what a landing is.
+///
+/// The **branch** is the reference, because that is the spelling the sibling
+/// resolves work by — see [`crate::release::Dependency::reference`], which asks
+/// the same library the same way — and `repo` is the node's own repository,
+/// which narrows a branch name two identities could both hold to the one this
+/// run's work is in.
+///
+/// Divergence 33 in `docs/contract-divergences.md` records what this reaches.
+//
+// llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
+// reference in this crate is, for the reason `crate::projection`'s `landing_commits`
+// records: it is what the journal payload carries and what the sibling's own reference
+// grammar takes. What could go wrong with an unchecked one is checked where it enters,
+// by `usable`, which is what wrote every value that reaches this.
+pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
+    crate::rendercost::landing_read(branch, repo);
+    read_of(onevcs::landing_status(branch, repo))
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// How the sibling's answer reads as a verdict and its evidence.
+///
+/// Split out so every case is provable without a repository: what is being
+/// decided here is which of the sibling's five answers is a landing, and the
+/// two that are not `yes` are the ones a wrong reading costs most.
+fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
+    use onevcs::Landed;
+    let (verdict, evidence) = match &answered {
+        // A landing the branch has since gone past is **not** this node's work
+        // finished — the sibling's own `is_landed` says so, and the commits above
+        // the landing are work still to publish. It is reported as what it is.
+        Ok(landed @ Landed::Yes { evidence }) => (
+            LandingVerdict::Landed,
+            format!("{} at {}", landed.tier(), evidence.commit()),
+        ),
+        Ok(landed @ Landed::InPart { evidence, unlanded }) => (
+            LandingVerdict::NotLanded,
+            format!(
+                "{} at {}, with {unlanded} commit(s) above it the landing did not carry",
+                landed.tier(),
+                evidence.commit()
+            ),
+        ),
+        Ok(landed @ Landed::No) => (
+            LandingVerdict::NotLanded,
+            format!(
+                "{}: the base does not carry what this branch changed",
+                landed.tier()
+            ),
+        ),
+        // Deliberately not a `no`: the base carries the change and nothing
+        // records why, which is equally what somebody else making the same
+        // change leaves behind.
+        Ok(landed @ Landed::Unknown) => (
+            LandingVerdict::Undecided,
+            format!(
+                "{}: the base already carries what this branch changed, and nothing records why",
+                landed.tier()
+            ),
+        ),
+        Err(refused) => (
+            LandingVerdict::Undecided,
+            crate::views::one_line(&format!("this host could not decide it: {refused}")),
+        ),
+    };
+    LandingRead { verdict, evidence }
+}
+
 /// Whether `onevcs` can **show** that one branch's work reached its base.
 ///
 /// Named for the proof rather than for the question: `false` is "no landing was
@@ -370,34 +477,9 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
 /// sibling declining to answer at all. A caller acts on `true` alone — it
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
-///
-/// `onevcs::release_status` is the one read on that library's public surface
-/// that carries its four-tier landing decision, made against the publication
-/// checkout's own history, across the seam: it answers `not landed` before it
-/// looks at any release at all, and each of the three release answers is it
-/// having found the landing commit first. The **branch** is the reference,
-/// because that is the spelling the sibling resolves work by — see
-/// `crate::release::Dependency::reference`, which asks the same library the same
-/// way.
-///
-/// Divergence 33 in `docs/contract-divergences.md` records what this reaches and
-/// what it still does not.
-//
-// llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
-// reference in this crate is, for the reason `crate::projection`'s `landing_commits`
-// records: it is what the journal payload carries and what the sibling's own reference
-// grammar takes. What could go wrong with an unchecked one is checked where it enters,
-// by `usable`, which is what wrote every value that reaches this.
-pub fn proved_landed(branch: &str) -> bool {
-    use onevcs::ReleaseStatus;
-    matches!(
-        onevcs::release_status(branch, None),
-        Ok(ReleaseStatus::Released { .. }
-            | ReleaseStatus::NotReleased { .. }
-            | ReleaseStatus::AwaitingHumanStep { .. })
-    )
+pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
+    landing_now(branch, repo).verdict == LandingVerdict::Landed
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Where a human reads the change a publication produced, when there is one.
 ///

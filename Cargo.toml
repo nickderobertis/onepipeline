@@ -347,7 +347,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.19.0"
+onevcs = "0.19.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -388,7 +388,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.5.3"
+onevcs-testing = "0.5.4"
 
 [package]
 name = "onepipeline"

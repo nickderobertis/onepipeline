@@ -3862,7 +3862,11 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
         let Some(branch) = state.branches.get(&node) else {
             continue;
         };
-        if crate::vcs::proved_landed(branch) {
+        // The node's own repository, so a branch name two identities both hold
+        // is asked about the one this run's work is in rather than refused as
+        // an ambiguity the run has already resolved.
+        let repo = state.graph.get(&node).and_then(|node| node.repo.as_deref());
+        if crate::vcs::proved_landed(branch, repo) {
             landings.insert(node, Landing::Landed);
         }
     }

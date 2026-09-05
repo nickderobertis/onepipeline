@@ -99,6 +99,11 @@ pub(crate) fn bytes_read() -> u64 {
 /// Count what a read just cost.
 fn counted<T>(bytes: usize, read: T) -> T {
     crate::loopstats::store_read(bytes as u64);
+    // And, where a view is deciding one node's landing while this happens, the
+    // same read again under that node's name: a store read that is per-node
+    // work is exactly what the render bound forbids, and only the scope it
+    // happened inside can tell the two apart.
+    crate::rendercost::store_read(bytes as u64);
     read
 }
 

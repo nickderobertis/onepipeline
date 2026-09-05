@@ -1,0 +1,326 @@
+//! What one render of a view did **per node**, counted while it does it.
+//!
+//! A view that decides a node's landing when it renders pays for that decision
+//! on every supervisory look, and what it costs a host is work rather than
+//! seconds: a loaded machine hands out time as it likes, so a bound stated in
+//! elapsed time fails correct work and passes a slow regression on an idle box.
+//! So a render records its own work when it is asked to, and
+//! `tests/e2e/landing.rs` reads the record back and holds the bound.
+//!
+//! The unit is one node's landing decision. [`deciding`] opens that scope, and
+//! everything counted here — the sibling's published landing read, a read out of
+//! the run store, a process this crate started — is attributed to the node whose
+//! landing was being decided when it happened. An act outside such a scope is
+//! not per-node work and is recorded by nothing: the journal read that
+//! [`crate::views::RunView::open`] makes is one read for the whole render, and
+//! counting it against a node would report it growing with the graph.
+//!
+//! Counted **always** — appending nothing costs nothing measurable — and
+//! **written** only where [`RENDER_COST_ENV`] names a file, which is every run
+//! of this repository's own journeys and no other run of this binary.
+
+use std::cell::RefCell;
+use std::io::Write;
+
+use serde_json::json;
+
+/// The environment variable asking a process to record what its renders did.
+///
+/// It names a **file**, which every render in the process appends a line to, so
+/// a caller measuring one command points it at a path of that command's own.
+/// Absent, nothing is opened and nothing is written.
+pub(crate) const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
+
+thread_local! {
+    /// The render this thread is inside, and the node whose landing it is
+    /// currently deciding.
+    ///
+    /// A thread-local rather than a parameter threaded through every view: the
+    /// two acts counted below happen in `crate::ledger` and `crate::sys`, which
+    /// no render calls directly and which must not learn what a view is.
+    static INSIDE: RefCell<Option<Inside>> = const { RefCell::new(None) };
+}
+
+/// What a render is, while it renders.
+struct Inside {
+    /// Which view — `results`, `summary`, `status` — so a reader of the record
+    /// can tell three renders apart in one file.
+    view: &'static str,
+    /// The run being rendered.
+    run: String,
+    /// The node whose landing is being decided right now, if any.
+    node: Option<String>,
+}
+
+/// Record one act, where this process was asked to record them.
+///
+/// A line per act, appended: a reader takes the file after the command exits, so
+/// there is nothing to flush and a crashed render still says what it had done.
+fn record(act: &str, detail: serde_json::Value) {
+    let Some(path) = std::env::var_os(RENDER_COST_ENV).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let line = INSIDE.with_borrow(|inside| {
+        let inside = inside.as_ref()?;
+        let mut line = json!({
+            "act": act,
+            "view": inside.view,
+            "run": inside.run,
+        });
+        if let Some(node) = &inside.node {
+            line["node"] = json!(node);
+        }
+        if let (Some(line), Some(detail)) = (line.as_object_mut(), detail.as_object()) {
+            for (key, value) in detail {
+                line.insert(key.clone(), value.clone());
+            }
+        }
+        Some(line)
+    });
+    let Some(line) = line else {
+        return;
+    };
+    // Best effort, and deliberately so: this is a measurement of a read-only
+    // view, and a view that failed because a measurement file would not open
+    // would be a worse thing than a measurement nobody got.
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// One render of one view, held for as long as it renders.
+///
+/// **Not re-entrant**: `status` renders the run summary inside itself, and two
+/// nested scopes would attribute the summary's reads to a render nobody ran. The
+/// outermost scope is the render, and an inner one records nothing and restores
+/// nothing.
+pub(crate) struct Render {
+    /// Whether this scope is the one that opened the render — an inner scope
+    /// leaves the outer one exactly as it found it.
+    outermost: bool,
+}
+
+/// Begin a render of `view` over `run`.
+pub(crate) fn rendering(view: &'static str, run: &str) -> Render {
+    let outermost = INSIDE.with_borrow_mut(|inside| {
+        if inside.is_some() {
+            return false;
+        }
+        *inside = Some(Inside {
+            view,
+            run: run.to_owned(),
+            node: None,
+        });
+        true
+    });
+    if outermost {
+        record("render", json!({}));
+    }
+    Render { outermost }
+}
+
+impl Render {
+    /// Whether this scope is the render, rather than one nested inside it.
+    ///
+    /// Read by [`crate::views`], which empties its per-render memo of landing
+    /// reads when a render opens: emptying it on a nested scope would ask every
+    /// node a second time half-way through one render.
+    pub(crate) fn outermost(&self) -> bool {
+        self.outermost
+    }
+
+    /// Record that this render reported on one node's landing.
+    ///
+    /// The set every landing read is held against: a read for a node this render
+    /// never reported on is a read nobody is shown, which is the one shape of
+    /// waste the bound rules out by name.
+    pub(crate) fn reported(&self, node: &str) {
+        record("reported", json!({ "node": node }));
+    }
+}
+
+impl Drop for Render {
+    fn drop(&mut self) {
+        if self.outermost {
+            INSIDE.with_borrow_mut(|inside| *inside = None);
+        }
+    }
+}
+
+/// The scope in which one node's landing is decided.
+pub(crate) struct Deciding {
+    /// Whether this scope set the node, so an inner one cannot clear it.
+    outermost: bool,
+}
+
+/// Begin deciding one node's landing.
+pub(crate) fn deciding(node: &str) -> Deciding {
+    let outermost = INSIDE.with_borrow_mut(|inside| match inside.as_mut() {
+        Some(inside) if inside.node.is_none() => {
+            inside.node = Some(node.to_owned());
+            true
+        }
+        _ => false,
+    });
+    Deciding { outermost }
+}
+
+impl Drop for Deciding {
+    fn drop(&mut self) {
+        if self.outermost {
+            INSIDE.with_borrow_mut(|inside| {
+                if let Some(inside) = inside.as_mut() {
+                    inside.node = None;
+                }
+            });
+        }
+    }
+}
+
+/// Record the one read a landing decision is allowed to make.
+pub(crate) fn landing_read(reference: &str, repo: Option<&str>) {
+    record(
+        "landing-read",
+        json!({ "reference": reference, "repo": repo }),
+    );
+}
+
+/// Record a read out of a run's store, where one happened while a landing was
+/// being decided.
+///
+/// Nothing is recorded outside such a scope: reading the journal once for the
+/// whole render is what a view has always done, and the bound is about a read
+/// that happens once *per node*.
+pub(crate) fn store_read(bytes: u64) {
+    if inside_a_decision() {
+        record("store-read", json!({ "bytes": bytes }));
+    }
+}
+
+/// Record a process this crate started while a landing was being decided.
+///
+/// The seam every process this crate starts outside a dispatch goes through, so
+/// a landing decided by walking a base's history — or by asking a host over the
+/// network, which from here is a `gh` — is counted rather than merely forbidden
+/// in prose.
+pub(crate) fn process_spawned(program: &str) {
+    if inside_a_decision() {
+        record("process-spawn", json!({ "program": program }));
+    }
+}
+
+fn inside_a_decision() -> bool {
+    INSIDE.with_borrow(|inside| inside.as_ref().is_some_and(|inside| inside.node.is_some()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One lock over the two tests below, because the variable they set and
+    /// clear is process-wide: each would otherwise turn the other's recording
+    /// off half-way through it.
+    static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "onepipeline-rendercost-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    /// Nothing is written by a process nobody asked to measure.
+    ///
+    /// Asserted over the whole guard, because every act goes through
+    /// [`record`]: a build that opened the file before it read the variable
+    /// would write into whatever path an operator's environment carried.
+    #[test]
+    fn a_process_nobody_asked_to_measure_writes_nothing() {
+        let _held = MEASURING.lock().unwrap_or_else(|held| held.into_inner());
+        let path = scratch("unmeasured");
+        let _ = std::fs::remove_file(&path);
+        std::env::remove_var(RENDER_COST_ENV);
+        {
+            let render = rendering("results", "unmeasured");
+            render.reported("node");
+            let _deciding = deciding("node");
+            landing_read("branch", Some("repo"));
+            store_read(7);
+            process_spawned("git");
+        }
+        assert!(
+            !path.exists(),
+            "an unmeasured render opened {}",
+            path.display()
+        );
+    }
+
+    /// Every act a render performs is attributed to the node it was performed
+    /// for, and an act outside a decision is not per-node work at all.
+    #[test]
+    fn each_act_is_attributed_to_the_node_whose_landing_was_being_decided() {
+        let _held = MEASURING.lock().unwrap_or_else(|held| held.into_inner());
+        let path = scratch("acts");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var(RENDER_COST_ENV, &path);
+        {
+            let render = rendering("status", "measured");
+            render.reported("alpha");
+            // Outside any decision: one read the whole render made once.
+            store_read(11);
+            {
+                let _deciding = deciding("alpha");
+                landing_read("alpha-branch", None);
+                store_read(3);
+                process_spawned("git");
+                // An inner scope names no second node.
+                let _nested = deciding("beta");
+                landing_read("beta-branch", None);
+            }
+            // A nested render records nothing of its own.
+            let _inner = rendering("summary", "measured");
+        }
+        std::env::remove_var(RENDER_COST_ENV);
+        let written = std::fs::read_to_string(&path).expect("the record is written");
+        let acts: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a JSON line"))
+            .filter(|act: &serde_json::Value| act["run"] == "measured")
+            .collect();
+        let kinds: Vec<&str> = acts
+            .iter()
+            .map(|act| act["act"].as_str().expect("every act is named"))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "render",
+                "reported",
+                "landing-read",
+                "store-read",
+                "process-spawn",
+                "landing-read"
+            ],
+            "{written}"
+        );
+        assert!(
+            acts.iter().all(|act| act["view"] == "status"),
+            "a nested render renamed the one already open: {written}"
+        );
+        // The read taken outside a decision is not per-node work and is
+        // recorded by nothing.
+        assert_eq!(
+            acts.iter().filter(|act| act["act"] == "store-read").count(),
+            1,
+            "{written}"
+        );
+        for act in acts.iter().skip(1) {
+            assert_eq!(act["node"], "alpha", "{act}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
