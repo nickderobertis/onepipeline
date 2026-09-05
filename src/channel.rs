@@ -817,14 +817,17 @@ pub(crate) struct Surface {
     /// The node that provoked it, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workstream: Option<String>,
-    /// Whether anybody is still waiting for the answer.
+    /// Whether anybody is listening for the answer.
     ///
     /// Set by [`abandon`](ChannelState::abandon) when the process serving this
-    /// surface exited without an answer and the side that asked ended with it.
-    /// The surface keeps its text and stays claimable; what it gives up is its
-    /// claim on the unread count and on the subtree a blocking surface holds.
-    /// Omitted from the wire while it is false, so a queue nothing has abandoned
-    /// serializes exactly as it always did.
+    /// surface exited without an answer, and lifted by
+    /// [`attend`](ChannelState::attend) when a later listener of the same asker
+    /// takes it back over — a listener ending is not the asker going. While it
+    /// stands, the surface keeps its text and its place: what it gives up is its
+    /// claim on the unread count, on the subtree a blocking surface holds, and on
+    /// being reported as a question the run awaits a verdict on. Omitted from the
+    /// wire while it is false, so a queue nothing has abandoned serializes
+    /// exactly as it always did.
     #[serde(default, skip_serializing_if = "is_false")]
     pub abandoned: bool,
     /// Who raised it, when the session that did named an asker.

@@ -666,6 +666,25 @@ fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_a
         serving
     };
 
+    // One re-arm: another listener of the same asker, saying only that somebody
+    // is listening again. `nth` is how many have been sent, so the wait below is
+    // for *this* one rather than for any of them.
+    let rearm = |nth: usize| {
+        let rearmed = listening(
+            r#"{"kind":"planner-question","message":"a listener re-armed","blocking":false}"#,
+            "1",
+        );
+        world.until(&format!("re-arm {nth} to reach the planner"), |world| {
+            world
+                .events_of(&run, "planner-surface-queued")
+                .iter()
+                .filter(|event| event["payload"]["message"] == "a listener re-armed")
+                .count()
+                >= nth
+        });
+        rearmed
+    };
+
     // The question, and the listener that raised it going away without an
     // answer: a one-second window makes the wait its own synthesized `continue`,
     // so the listener ends exactly as the wrapper's does — having relayed
@@ -679,43 +698,46 @@ fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_a
     });
     ended(asked);
 
+    // One re-arm, and this one is the question **nobody has read yet**: it is in
+    // the queue rather than in the slot, so what has to come back is its place in
+    // the count a supervisor may not filter.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_has("1 planner update(s) nobody is waiting on");
+    let rearmed = rearm(1);
+    // Two, and the kinds say which: the re-arm's own note, and the question it
+    // came back for — which is counted again, and is no longer one nobody is
+    // waiting on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("nobody is waiting on")
+        .out_has("2 planner update(s) waiting (1 blocker, 1 planner-question)");
+    ended(rearmed);
+
     // The manager reads it, which is what puts a question where a verdict can
-    // name it. Read here — after that listener has gone — because that is the
+    // name it. Read here — after a listener has gone — because that is the
     // window the wrapper's re-arm falls in, and reading in it is what used to
     // consume the question into nothing.
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("is this base still right?");
     assert_eq!(read.json()["surface"]["abandoned"], json!(true));
 
-    // Two re-arms, and after each one the run is waiting on that question
-    // again: the asker is still there, so the question it asked is still owed an
-    // answer, and a verdict has a question to bind to.
-    for attempt in ["first", "second"] {
-        world
-            .run(&["status", &run])
-            .exited(0)
-            .out_lacks("waiting for planner");
-        let rearmed = listening(
-            r#"{"kind":"planner-question","message":"a listener re-armed","blocking":false}"#,
-            "1",
-        );
-        world.until(
-            &format!("the {attempt} re-arm to reach the planner"),
-            |world| {
-                world
-                    .events_of(&run, "planner-surface-queued")
-                    .iter()
-                    .filter(|event| event["payload"]["message"] == "a listener re-armed")
-                    .count()
-                    >= if attempt == "first" { 1 } else { 2 }
-            },
-        );
-        world
-            .run(&["status", &run])
-            .exited(0)
-            .out_has("waiting for planner decision: blocker — is this base still right?");
-        ended(rearmed);
-    }
+    // And a re-arm against the question in the slot, which is the other half:
+    // the asker is still there, so the question is still owed an answer, and a
+    // verdict has a question to bind to again.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner");
+    let rearmed = rearm(2);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+    ended(rearmed);
 
     // The third listener is the one holding the wait when the manager finally
     // answers. The verdict names the question — and it reaches the asker, which
