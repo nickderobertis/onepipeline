@@ -382,27 +382,40 @@ enum Stands {
     NoChangeToLand,
 }
 
+/// What the settlement recorded, for the answers a later read can still move.
+///
+/// `landed` is deliberately not one of them: that answer is
+/// [`Reported::TheRunObserved`] and is never read again, so a settlement value
+/// carried alongside a read cannot be it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The publication answered `unlanded`: there was a change, and it had not
+    /// reached the base when the node settled.
+    Unlanded,
+    /// The publication answered no landing at all — a node that failed, or one
+    /// whose base already carried its content.
+    Nothing,
+}
+
 /// What a render reports about one node's landing.
 ///
 /// Four cases rather than two records beside each other, because the pairs that
 /// would be contradictory are the ones a reader acts on: a landing the run
-/// observed is never re-read, so it never has a later read to disagree with, and
-/// a read that was taken is the answer whatever the settlement said.
+/// observed is never re-read, so it can carry no later read to disagree with and
+/// no settlement value to contradict.
 enum Reported {
     /// The run itself observed the change reach its base. **Never re-read**: a
     /// base does not stop carrying work it has taken, so the one read that could
     /// move this could only agree with it, at a cost.
     TheRunObserved,
-    /// A read taken while this view rendered, over whatever the settlement had
-    /// recorded — which is `unlanded`, or nothing at all for a node that failed
-    /// or changed nothing.
+    /// A read taken while this view rendered, over what the settlement recorded.
     ReadNow {
-        settled: Option<Landing>,
+        settled: Settled,
         read: std::rc::Rc<LandingRead>,
     },
-    /// No branch to ask about, so the settlement's own claim is all there has
-    /// ever been, and it stands, dated.
-    AsSettled(Landing),
+    /// The settlement said `unlanded` and there is no branch to ask about, so
+    /// its own claim is all there has ever been and it stands, dated.
+    UnlandedAtSettlement,
     /// The node never had a change to land.
     NoChangeToLand,
 }
@@ -416,8 +429,7 @@ impl Reported {
                 LandingRead::NotLanded { .. } => Stands::NotLanded,
                 LandingRead::Undecided { .. } => Stands::Undecided,
             },
-            Reported::AsSettled(Landing::Unlanded) => Stands::NotLanded,
-            Reported::AsSettled(Landing::Landed) => Stands::Landed,
+            Reported::UnlandedAtSettlement => Stands::NotLanded,
             Reported::NoChangeToLand => Stands::NoChangeToLand,
         }
     }
@@ -448,13 +460,19 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
             .get(node)
             .and_then(|node| node.repo.as_deref()),
     );
+    let settled = match settled {
+        Some(Landing::Unlanded) => Settled::Unlanded,
+        // `landed` is unreachable here: it returned above, which is what makes
+        // [`Settled`] the two answers a read can still move.
+        Some(Landing::Landed) | None => Settled::Nothing,
+    };
     match (asked, settled) {
         (Some((branch, repo)), settled) => Reported::ReadNow {
             settled,
             read: read_now(view, node, branch, repo),
         },
-        (None, Some(landing)) => Reported::AsSettled(landing),
-        (None, None) => Reported::NoChangeToLand,
+        (None, Settled::Unlanded) => Reported::UnlandedAtSettlement,
+        (None, Settled::Nothing) => Reported::NoChangeToLand,
     }
 }
 
@@ -2312,24 +2330,21 @@ fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String>
             // either of the other two — with the settlement's own dated claim
             // behind it, which is what it always was.
             LandingRead::Undecided { because } => match settled {
-                Some(Landing::Unlanded) => format!(
+                Settled::Unlanded => format!(
                     "landing UNDECIDED: read now, {because}; it had not reached its base when \
                      this settled{ago} — open the change for where it is now"
                 ),
-                _ => format!(
+                Settled::Nothing => format!(
                     "landing UNDECIDED: read now, {because} — open the change for where it is"
                 ),
             },
         }),
         // No branch to ask about, so the settlement's own claim is all there has
         // ever been: dated, and saying that nothing has moved it.
-        Reported::AsSettled(Landing::Unlanded) => Some(format!(
+        Reported::UnlandedAtSettlement => Some(format!(
             "NOT landed: the change had not reached its base when this settled{ago}, and \
              no later read has said otherwise — open the change for where it is now"
         )),
-        Reported::AsSettled(Landing::Landed) => {
-            Some("landed on its base — the run observed the change reach it".to_string())
-        }
         Reported::NoChangeToLand => None,
     }
 }
