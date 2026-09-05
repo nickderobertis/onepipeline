@@ -647,6 +647,14 @@ fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
     );
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the claim under test is *what a render
+// did*, and no rendering says that on stdout: a supervisor cannot see a landing read from
+// the terminal, which is exactly why it needed measuring. So the render records its own
+// acts when a caller asks it to — the same seam and the same reason as
+// `ONEPIPELINE_LOOP_STATS` and `loopcost.rs` beside it, which count a driver's own work
+// over real run stores. Everything here is still the compiled binary over the fixture
+// above: the commands are the ones a user types, their exit codes are asserted, and the
+// record is read after they exit rather than substituted for anything they do.
 /// What a render costs is bounded as **work**, over the fixture above.
 ///
 /// Every claim here counts acts and times nothing, so it gives the same verdict
@@ -773,3 +781,4 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
          each:\n{measured_cost}"
     );
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
