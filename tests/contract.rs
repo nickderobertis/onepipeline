@@ -4202,9 +4202,15 @@ fn the_divergence_record_matches_the_code_it_describes() {
     }
     // And which of them mark: the entry says exactly one ending withdraws
     // nothing, so exactly one has to sit outside the guard that marks.
+    // Anchored on the mark itself rather than on the first `matches!` in the
+    // file: the ending decides more than one thing, so a guard picked by shape
+    // alone is whichever one happens to come first.
     let guard = driver
-        .split_once("if matches!(ending, ")
-        .expect("the driver decides from the ending whether to mark anything")
+        .split_once("channel.abandon(&raised)?;")
+        .expect("the driver marks what a session left behind")
+        .0
+        .rsplit_once("if matches!(ending, ")
+        .expect("that mark is guarded by which ending the session reached")
         .1
         .split_once(')')
         .expect("that guard is closed")

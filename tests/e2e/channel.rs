@@ -817,6 +817,60 @@ fn a_member_that_declared_itself_complete_leaves_nothing_counted_as_unread() {
     world.release("build.go");
 }
 
+/// A member that has gone quiet does not hold a session past its bound.
+///
+/// The bound is a deadline, not something noticed between exchanges: a server
+/// blocked on a stream nobody is writing to reaches it and stops anyway. That is
+/// the difference between what the variable is named for and what a blocking
+/// read on stdin would have made of it — an idle session outliving its own
+/// bound for as long as the member stayed silent.
+///
+/// The stream stays open the whole time, so nothing is withdrawn; there is
+/// simply nothing to withdraw, and the server says that rather than reporting a
+/// count of none.
+#[test]
+fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
+    let world = World::new("channel-quiet");
+    world.script("build.wait", "hold");
+    let run = running(&world, "quiet", vec![agent("build", &[])]);
+
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    // Taken and held, and never written to: the member is there and has nothing
+    // to say, which is the whole premise.
+    let silent = serving.stdin.take().expect("stdin is piped");
+
+    let went = serving
+        .wait_with_output()
+        .expect("the server ends on its own bound");
+    assert!(
+        went.status.success(),
+        "the server did not end of its own accord: {went:?}"
+    );
+    let why = String::from_utf8_lossy(&went.stderr);
+    assert!(
+        why.contains("ONEPIPELINE_SERVE_SESSION_SECONDS")
+            && why.contains("stream still open")
+            && why.contains("it had raised nothing"),
+        "the server did not say why it stopped on a quiet stream: {why}"
+    );
+
+    // Nothing was raised, so nothing is waiting and nothing was withdrawn.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_lacks("nobody is waiting on");
+
+    drop(silent);
+    world.release("build.go");
+}
+
 /// A session bound this host was given but cannot honour is refused before the
 /// server carries anything.
 ///

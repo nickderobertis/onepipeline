@@ -2621,19 +2621,57 @@ enum Served {
 fn serve(args: &RunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     let channel = ChannelState::new(&paths);
-    let stdin = std::io::stdin();
     // Every surface this session raised, so that what it leaves behind can be
     // said out loud rather than left standing as a question with no asker.
     let mut raised: Vec<u64> = Vec::new();
-    // Checked between exchanges rather than during one: a bound that cut a frame
-    // off mid-answer would leave the member waiting on a verdict this process
-    // had already decided not to write. A session blocked on a stream that has
-    // gone quiet therefore stays until the next frame or the stream's end, which
-    // is the same wait it would be in with no bound at all.
     let session_deadline = serve_session_deadline()?;
     let mut ending = Served::AskerGone;
+    // Frames arrive on a thread of their own, so the bound above is a real
+    // deadline and not merely a thing noticed between exchanges: a member that
+    // has gone quiet must not hold a session past the moment it said it would
+    // stop, and a blocking read on this stream is exactly what would. Nothing
+    // joins it — the process ending is what ends it, and what it may still be
+    // holding is a line nobody asked for.
+    let (frames, arriving) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            if frames.send(line).is_err() {
+                break;
+            }
+        }
+    });
 
-    for line in stdin.lock().lines() {
+    loop {
+        // Asked before a frame is read and never during an exchange: a bound
+        // that cut one off mid-answer would leave the member waiting on a
+        // verdict this process had already decided not to write.
+        let waiting_for = match session_deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    ending = Served::SessionOver;
+                    break;
+                }
+                Some(left)
+            }
+            None => None,
+        };
+        let line = match waiting_for {
+            Some(left) => match arriving.recv_timeout(left) {
+                Ok(line) => line,
+                // The bound came due with the stream still open and quiet.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    ending = Served::SessionOver;
+                    break;
+                }
+                // The reader is gone, which is the frame stream ending.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match arriving.recv() {
+                Ok(line) => line,
+                Err(_) => break,
+            },
+        };
         // End of input and a broken pipe are not the same fact. Read as one,
         // the observer's judge side exits 0 on a stream that failed mid-frame,
         // so the question it was carrying never reaches the planner and nothing
@@ -2704,21 +2742,25 @@ fn serve(args: &RunArgs) -> Result<i32> {
             ending = Served::Completed;
             break;
         }
-        if session_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            // This process is done; the member that spawned it is not. Said on
-            // stderr because an operator reading a run whose server went needs
-            // to know the questions are still standing rather than lost — and
-            // because it is the one visible difference between the two endings.
-            eprintln!(
-                "onepipeline: this channel session reached its {} bound with the observer's \
-                 stream still open; the {} surface(s) it raised stay in the queue, still \
-                 waiting for an answer",
-                crate::channel::SERVE_SESSION_ENV,
-                raised.len()
-            );
-            ending = Served::SessionOver;
-            break;
-        }
+    }
+    if matches!(ending, Served::SessionOver) {
+        // This process is done; the member that spawned it is not. Said on
+        // stderr because an operator reading a run whose server went needs to
+        // know the questions are still standing rather than lost — and because
+        // it is the one visible difference between this ending and the two that
+        // withdraw.
+        eprintln!(
+            "onepipeline: this channel session reached its {} bound with the observer's stream \
+             still open; {}",
+            crate::channel::SERVE_SESSION_ENV,
+            match raised.len() {
+                0 => "it had raised nothing".to_owned(),
+                left => format!(
+                    "the {left} surface(s) it raised stay in the queue, still waiting for an \
+                     answer"
+                ),
+            }
+        );
     }
     // Which ending this was decides it, and the question each is answering is
     // whether the side that asked is still there. A stream that ended and a

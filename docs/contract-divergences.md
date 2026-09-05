@@ -3442,8 +3442,10 @@ the judge side **per turn**, as this library's own dag-scope graph does, bounds 
 so the server does not outlive the turn it was spawned for; reaching that bound
 ends the process with exit 0 and a line on stderr naming the bound, saying the
 stream is still open and how many surfaces stay in the queue waiting for an
-answer. The bound is checked between exchanges rather than during one, so a
-verdict a member is waiting on is never cut off half-written, and a value that is
+answer. The bound is a deadline rather than a hint — a member that has gone quiet
+holds the session no longer than one still sending — and it is read before a
+frame is, never during an exchange, so a verdict a member is waiting on is never
+cut off half-written. A value that is
 present but not a whole number of seconds greater than zero — or that is one this
 host's clock cannot name — is **refused** before the first frame is read. Read as
 the unset it is not, a mistyped bound would silently give the session the one
