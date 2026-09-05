@@ -1161,12 +1161,8 @@ const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
 /// The variable naming who this dispatch's channel sessions listen for.
 ///
-/// A dispatched agent asks its manager through a succession of
-/// `onepipeline channel serve` sessions, and this is what tells them they are
-/// one side that is still waiting rather than a series of sides that have each
-/// gone. Spelled here rather than read from the crate under test, for the same
-/// reason every other variable a double reads is: a spelling that drifted must
-/// fail a journey, not be followed into agreement.
+/// Spelled here rather than taken from the crate under test, for the reason
+/// [`SCRATCH_DIR_ENV`] records.
 const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 
 /// What a dispatch writes into the directory it was given, under its own key.
@@ -1623,17 +1619,17 @@ fn emit(
             // environment, on the run's own record: a journey asserts the
             // promise from the store rather than from this program's files.
             "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
-            // And who this dispatch asks its manager as: the word every
-            // `channel serve` it starts carries, so a journey can assert from
-            // the store that a real dispatch is given one and that no two
-            // dispatches share it.
+            // And who this dispatch asks its manager as, so a journey can assert
+            // from the store that a real dispatch is given one and that no two
+            // share it.
             //
-            // Reported rather than checked, and read lossily on purpose. A
-            // double that refused a name it did not like could not show a
-            // journey an engine that handed out a bad one — and dropping a value
-            // this host cannot read as text would report it as *nothing given*,
-            // which is a different failure from the one that happened. Absent
-            // here means the dispatch was handed no asker at all.
+            // llmlint: ignore[boundary_inputs_validated] reported rather than
+            // checked, deliberately: a double that refused a name it did not
+            // like could not show a journey an engine that handed out a bad one,
+            // which is what this value exists to be asserted against. Lossy for
+            // the same reason — dropping a value this host cannot read as text
+            // would report it as *nothing given*, a different failure from the
+            // one that happened — so absent here means no asker was given at all.
             "asker": std::env::var_os(ASKER_ENV)
                 .map(|given| given.to_string_lossy().into_owned()),
             // What this turn was told to do instead, while it was running.

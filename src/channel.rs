@@ -713,40 +713,26 @@ pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
 /// The environment variable naming who a `channel serve` session listens on
 /// behalf of.
 ///
-/// A serving process is a **listener a side rents**, and never that side itself.
-/// The wrapper a dispatched agent asks its manager through raises one question
-/// through one session and then waits for the verdict through a succession of
-/// them: a listener exits, the asker starts another, and the question stays open
-/// across every one of those exits. So a frame stream that ended says only that
-/// *this listener* is done, and nothing at all about whether the side that asked
-/// is still waiting — and this variable is what does say it. Two sessions
-/// carrying the same value are one asker, and the later one takes back over what
-/// the earlier one left outstanding: see [`ChannelState::attend`].
+/// A serving process is a listener a side rents, and never that side itself: an
+/// asker may raise one question through one session and wait for the verdict
+/// through a succession of them. Two sessions carrying the same value are one
+/// asker, and the later takes back over what the earlier left outstanding — see
+/// [`ChannelState::attend`], which is where that is spelled out.
 ///
 /// The value is **opaque and compared for equality only**. Every dispatch this
-/// crate makes carries one of its own, composed beside the scratch directory in
-/// `executor::prepare_dispatch_env`, so an agent asking through the documented
-/// wrapper is named without doing anything for it. A session carrying none asks
-/// on its own behalf: it adopts nothing, nothing adopts what it raised, and what
-/// it leaves behind when its stream ends is abandoned exactly as before.
+/// crate makes carries one of its own, composed in
+/// `executor::prepare_dispatch_env`. A session carrying none listens on its own:
+/// it adopts nothing and nothing adopts what it raised.
 pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 
 /// One asker's name: the word by which two serving sessions are one side.
 ///
-/// A type rather than a `String`, because the value is checked once — where it
-/// arrives, which is [`ASKER_ENV`] — and everything past that point is a name
-/// that **is** somebody. Two states are what make that worth a type. A **blank**
-/// name is not an identity: every session carrying one would match every other,
-/// so the session holding it would take over questions belonging to askers it
-/// has never heard of. A name that is **not Unicode** is worse, because it does
-/// not announce itself: read lossily, two different environments collapse onto
-/// one string of replacement characters, and two askers become one silently. Both
-/// are refused here, so neither is representable in anything that takes an
-/// `Asker` — the durable queue included, which is checked on the way back in for
-/// the same reason.
-///
-/// The value is otherwise **opaque**: it is compared for equality and never
-/// parsed, and the wire form is the word itself.
+/// A type rather than a `String`, so that the two names which are not identities
+/// are unrepresentable in everything that takes one — a **blank** one, which
+/// every session carrying it would match, and one that is **not Unicode**, which
+/// collapses onto every other such value when it is read. The refusals below say
+/// what each would cost. The value is otherwise opaque: compared for equality,
+/// never parsed, and written as the word itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct Asker(String);

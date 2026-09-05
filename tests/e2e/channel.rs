@@ -1162,6 +1162,13 @@ fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces
     world.script("build.wait", "hold");
     let run = running(&world, "blankrecord", vec![agent("build", &[])]);
 
+    // llmlint: ignore[tests_mirror_real_usage] there is no user-facing route to
+    // this state and that is the property under test: every path that writes an
+    // asker checks it first, so a record naming nobody is one only another build,
+    // a hand edit, or a partial write can leave. What the journey drives through
+    // the CLI is what matters — whether a live run still answers for the queue
+    // holding it — and the record it answers about has to be placed.
+    //
     // Renamed into place rather than written over: the run's own loop is reading
     // this file while this happens, and a half-written one would read as the
     // empty queue this journey exists to prove it is not.
