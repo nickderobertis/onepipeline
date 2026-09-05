@@ -188,6 +188,15 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 ///
 /// [`deliver`]'s, plus the combination that reaches nobody by construction —
 /// [`Deliver::Next`] with `persist` off is refused before the run is reached.
+// llmlint: ignore[invalid_states_unrepresentable] the two axes stay two bare wire
+// values here on purpose: this call *is* the envelope's `note` op on this crate's
+// own surface, so a Rust caller and a JSON caller must be able to say the same
+// four combinations and get the same answer to each. Narrowing the pair to
+// [`Reach`] at this boundary would make the combination that reaches nobody
+// inexpressible in Rust and expressible in JSON, which is the two spellings
+// meaning different things — the one thing publishing this call exists to
+// prevent. The narrowing happens one step in, where [`Reach::of`] refuses that
+// combination for both spellings alike.
 pub fn deliver_with(
     run: &RunPaths,
     node: &str,
@@ -234,6 +243,11 @@ pub(crate) enum Reach {
 }
 
 impl Reach {
+    // llmlint: ignore[invalid_states_unrepresentable] this constructor is what
+    // makes the invalid state unrepresentable: it takes the envelope's two bare
+    // fields exactly as the wire carries them and returns the three-variant enum
+    // the rule asks for, refusing the fourth. A parser of external input has to
+    // accept the shape that input can have, or there is nothing left to refuse.
     /// The pair as the envelope carries it, or the one refusal the two fields
     /// decide between them.
     ///

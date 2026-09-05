@@ -1921,6 +1921,11 @@ pub(crate) struct Offered<'a> {
     pub reach: crate::note::Reach,
     /// Whether the node has a next dispatch at all. A node that has settled `done`
     /// does not, which is what turns a carry into the reach-nobody refusal.
+    // llmlint: ignore[invalid_states_unrepresentable] this is a predicate about
+    // the run rather than domain state with named alternatives: it is read off
+    // the frontier as `recorded != Done` and has no third value and no invalid
+    // combination with anything beside it. An enum here would name the two
+    // halves of one boolean question and buy nothing back.
     pub dispatchable: bool,
 }
 
