@@ -387,7 +387,6 @@ pub(crate) enum LandingVerdict {
 /// reader acting on this can say what it acted on.
 #[derive(Debug, Clone)]
 pub(crate) struct LandingRead {
-    /// What the read decided.
     pub(crate) verdict: LandingVerdict,
     /// Which tier decided it, in the words a rendered line names it by — or,
     /// where the read refused, what it refused with.

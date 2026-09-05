@@ -56,6 +56,7 @@ use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
+use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
 use crate::vcs::{LandingRead, LandingVerdict};
@@ -359,7 +360,7 @@ thread_local! {
 }
 
 /// Begin rendering `view` over `run`.
-fn rendering(view: &'static str, run: &str) -> Rendering {
+fn rendering(view: Rendered, run: &str) -> Rendering {
     let render = crate::rendercost::rendering(view, run);
     if render.outermost() {
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
@@ -387,9 +388,11 @@ enum Stands {
 /// what the run observed at the moment it published, and the read is what the
 /// base carries now.
 struct Reported {
-    /// What the run's own settlement recorded, where it recorded anything.
+    /// Absent where the publication answered no landing at all — a node that
+    /// failed, or one whose base already carried its content.
     recorded: Option<Landing>,
-    /// The read this render took, where there was a branch to take one about.
+    /// Absent where there was nothing to ask about, and where the record already
+    /// says landed.
     read: Option<std::rc::Rc<LandingRead>>,
 }
 
@@ -560,7 +563,7 @@ impl RunView {
     /// either of the other two, because "not landed" is a claim and an undecided
     /// read makes none.
     pub fn summary(&self) -> String {
-        let render = rendering("summary", &self.paths.run);
+        let render = rendering(Rendered::Summary, &self.paths.run);
         let statuses = self.state.statuses();
         let done = statuses
             .values()
@@ -1221,7 +1224,7 @@ pub fn status(survey: &Survey) -> String {
         // Opened before anything under it renders, so the summary this line
         // carries and the outstanding-landing lines below it are one render and
         // ask each node once between them.
-        let render = rendering("status", &view.paths.run);
+        let render = rendering(Rendered::Status, &view.paths.run);
         let standing = Standing::of(view);
         out.push_str(&format!(
             "{}  {}{}  {}\n",
@@ -2350,7 +2353,7 @@ fn journal_loss_line(view: &RunView) -> String {
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
-    let render = rendering("results", &view.paths.run);
+    let render = rendering(Rendered::Results, &view.paths.run);
     // The run and how its graph stands — deliberately not the node tally the
     // other views carry, because every line under this one is a node's own
     // status and a header that also said `done` would read as one of them.

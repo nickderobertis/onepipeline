@@ -41,12 +41,68 @@ thread_local! {
     static INSIDE: RefCell<Option<Inside>> = const { RefCell::new(None) };
 }
 
+/// Which view is rendering.
+///
+/// A closed set rather than a string: these are the three places a landing is
+/// reported, and a fourth is a decision somebody makes here rather than a name
+/// a caller can spell. `tests/e2e/landing.rs` reads them off the record by these
+/// words, so they are the wire as well as the vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rendered {
+    /// `onepipeline results` — the per-node lines.
+    Results,
+    /// The run summary's count of what has not landed.
+    Summary,
+    /// `onepipeline status`.
+    Status,
+}
+
+impl Rendered {
+    fn as_str(self) -> &'static str {
+        match self {
+            Rendered::Results => "results",
+            Rendered::Summary => "summary",
+            Rendered::Status => "status",
+        }
+    }
+}
+
+/// What a render did, one act at a time.
+///
+/// Closed for the reason [`Rendered`] is, and load-bearing in the same way: the
+/// bound is "nothing per node but the landing read", which is a claim about this
+/// set — an act nobody can spell is an act nobody can leave out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Act {
+    /// A render began.
+    Began,
+    /// The render reported on one node's landing.
+    Reported,
+    /// The sibling's published landing read.
+    LandingRead,
+    /// A read out of a run's store.
+    StoreRead,
+    /// A process this crate started.
+    ProcessSpawn,
+}
+
+impl Act {
+    fn as_str(self) -> &'static str {
+        match self {
+            Act::Began => "render",
+            Act::Reported => "reported",
+            Act::LandingRead => "landing-read",
+            Act::StoreRead => "store-read",
+            Act::ProcessSpawn => "process-spawn",
+        }
+    }
+}
+
 /// What a render is, while it renders.
 struct Inside {
-    /// Which view — `results`, `summary`, `status` — so a reader of the record
-    /// can tell three renders apart in one file.
-    view: &'static str,
-    /// The run being rendered.
+    /// Which view, so a reader of a file three renders appended to can tell them
+    /// apart.
+    view: Rendered,
     run: String,
     /// The node whose landing is being decided right now, if any.
     node: Option<String>,
@@ -56,15 +112,15 @@ struct Inside {
 ///
 /// A line per act, appended: a reader takes the file after the command exits, so
 /// there is nothing to flush and a crashed render still says what it had done.
-fn record(act: &str, detail: serde_json::Value) {
+fn record(act: Act, detail: serde_json::Value) {
     let Some(path) = std::env::var_os(RENDER_COST_ENV).filter(|value| !value.is_empty()) else {
         return;
     };
     let line = INSIDE.with_borrow(|inside| {
         let inside = inside.as_ref()?;
         let mut line = json!({
-            "act": act,
-            "view": inside.view,
+            "act": act.as_str(),
+            "view": inside.view.as_str(),
             "run": inside.run,
         });
         if let Some(node) = &inside.node {
@@ -105,7 +161,7 @@ pub(crate) struct Render {
 }
 
 /// Begin a render of `view` over `run`.
-pub(crate) fn rendering(view: &'static str, run: &str) -> Render {
+pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
     let outermost = INSIDE.with_borrow_mut(|inside| {
         if inside.is_some() {
             return false;
@@ -118,7 +174,7 @@ pub(crate) fn rendering(view: &'static str, run: &str) -> Render {
         true
     });
     if outermost {
-        record("render", json!({}));
+        record(Act::Began, json!({}));
     }
     Render { outermost }
 }
@@ -139,7 +195,7 @@ impl Render {
     /// never reported on is a read nobody is shown, which is the one shape of
     /// waste the bound rules out by name.
     pub(crate) fn reported(&self, node: &str) {
-        record("reported", json!({ "node": node }));
+        record(Act::Reported, json!({ "node": node }));
     }
 }
 
@@ -157,7 +213,11 @@ pub(crate) struct Deciding {
     outermost: bool,
 }
 
-/// Begin deciding one node's landing.
+/// Attribute what happens next to one node's landing decision.
+///
+/// Not re-entrant, like [`rendering`]: the innermost decision is the one whose
+/// acts would be miscounted, and a nested scope naming a second node would move
+/// the first one's remaining acts onto it.
 pub(crate) fn deciding(node: &str) -> Deciding {
     let outermost = INSIDE.with_borrow_mut(|inside| match inside.as_mut() {
         Some(inside) if inside.node.is_none() => {
@@ -184,7 +244,7 @@ impl Drop for Deciding {
 /// Record the one read a landing decision is allowed to make.
 pub(crate) fn landing_read(reference: &str, repo: Option<&str>) {
     record(
-        "landing-read",
+        Act::LandingRead,
         json!({ "reference": reference, "repo": repo }),
     );
 }
@@ -197,7 +257,7 @@ pub(crate) fn landing_read(reference: &str, repo: Option<&str>) {
 /// that happens once *per node*.
 pub(crate) fn store_read(bytes: u64) {
     if inside_a_decision() {
-        record("store-read", json!({ "bytes": bytes }));
+        record(Act::StoreRead, json!({ "bytes": bytes }));
     }
 }
 
@@ -209,7 +269,7 @@ pub(crate) fn store_read(bytes: u64) {
 /// in prose.
 pub(crate) fn process_spawned(program: &str) {
     if inside_a_decision() {
-        record("process-spawn", json!({ "program": program }));
+        record(Act::ProcessSpawn, json!({ "program": program }));
     }
 }
 
@@ -245,7 +305,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         std::env::remove_var(RENDER_COST_ENV);
         {
-            let render = rendering("results", "unmeasured");
+            let render = rendering(Rendered::Results, "unmeasured");
             render.reported("node");
             let _deciding = deciding("node");
             landing_read("branch", Some("repo"));
@@ -268,7 +328,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         std::env::set_var(RENDER_COST_ENV, &path);
         {
-            let render = rendering("status", "measured");
+            let render = rendering(Rendered::Status, "measured");
             render.reported("alpha");
             // Outside any decision: one read the whole render made once.
             store_read(11);
@@ -282,7 +342,7 @@ mod tests {
                 landing_read("beta-branch", None);
             }
             // A nested render records nothing of its own.
-            let _inner = rendering("summary", "measured");
+            let _inner = rendering(Rendered::Summary, "measured");
         }
         std::env::remove_var(RENDER_COST_ENV);
         let written = std::fs::read_to_string(&path).expect("the record is written");

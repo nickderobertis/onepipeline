@@ -728,7 +728,7 @@ impl World {
     pub fn run_recording_renders(&self, path: &Path, args: &[&str]) -> Run {
         Run::of(
             self.cmd(args)
-                .env(LANDING_READS_ENV, path)
+                .env(RENDER_COST_ENV, path)
                 .output()
                 .expect("the binary runs"),
             args,
@@ -4676,13 +4676,13 @@ fn yaml_scalar(text: &str) -> String {
 pub const LOOP_STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
 
 /// The environment variable asking a process to record what each render of a
-/// view did **per node**.
+/// view did **per node** — every act, not the landing reads alone.
 ///
 /// It names a file the process appends a line to per act, so a journey measuring
 /// one command points it at a path of that command's own — see
 /// `tests/e2e/landing.rs`, which holds a render's cost as work rather than as
 /// elapsed time.
-pub const LANDING_READS_ENV: &str = "ONEPIPELINE_RENDER_COST";
+pub const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
 
 /// What one driver's reconcile loop did, as it reports it.
 ///
