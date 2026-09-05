@@ -194,6 +194,20 @@ fn every_dispatch_is_given_an_asker_of_its_own_that_no_other_dispatch_carries() 
             !named[0].trim().is_empty(),
             "{node} was dispatched with an asker that names nobody: {named:?}"
         );
+        // What the value *is*, gated rather than restated: the divergence record
+        // says a dispatch's asker is the scratch directory it was given, because
+        // that directory is already the one handle minted per dispatch. Composing
+        // a second one, or naming it after something two dispatches can share,
+        // fails here.
+        let dirs = given(&world, &run, node);
+        assert_eq!(
+            named,
+            dirs.iter()
+                .map(|at| at.display().to_string())
+                .collect::<Vec<_>>(),
+            "{node}'s asker is no longer the scratch directory the same dispatch was given\n{}",
+            world.dump()
+        );
         every.extend(named);
     }
     let distinct: std::collections::BTreeSet<&String> = every.iter().collect();

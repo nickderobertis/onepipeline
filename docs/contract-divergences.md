@@ -3776,7 +3776,9 @@ directory already is. So the wrapper above is named without changing a line of
 it, and
 `scratch::every_dispatch_is_given_an_asker_of_its_own_that_no_other_dispatch_carries`
 is that half stated on its own, off the run's store rather than off anything a
-double reported.
+double reported: that a dispatch is given one, that no two dispatches share one,
+and that it is the scratch directory that same dispatch was given — the sentence
+above is gated there rather than only written here.
 
 Two values are **refused** where the variable is read, before the first frame is,
 and `channel::Asker` is the type that makes neither representable afterwards. A
