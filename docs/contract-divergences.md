@@ -3423,16 +3423,30 @@ it over carrying `abandoned: true`, and `status` says how many are there. The
 one thing genuinely withdrawn is the pending slot, whose surface has already
 been delivered to the reader holding it.
 
-**The discriminator is the asker, never the server.** A `serve` that timed out
-and then went while the member holding its stream open is still working leaves a
-question that member is still owed: nothing is marked, the surface stays
-counted, claimable, and answerable. Only the stream ending proves the asker did.
+**The discriminator is the asker, never the server**, and `serve` now says which
+of the two endings it reached rather than inferring one from the fact that its
+loop stopped. A frame stream that ended proves the side that was asking has gone
+and is the only ending that marks anything. A session that stopped for its own
+reasons — the member is still holding the stream open and still working — leaves
+a question that member is still owed: nothing is marked, and the surface stays
+counted, claimable, readable, and answerable.
+
+Making that second ending reachable is what `ONEPIPELINE_SERVE_SESSION_SECONDS`
+is for. Unset — the default, and every existing caller — is unbounded: the
+session ends when its member's stream does, exactly as before. A host that spawns
+the judge side **per turn**, as this library's own dag-scope graph does, bounds it
+so the server does not outlive the turn it was spawned for; reaching that bound
+ends the process with exit 0 and a line on stderr naming the bound, saying the
+stream is still open and how many surfaces stay in the queue waiting for an
+answer. The bound is checked between exchanges rather than during one, so a
+verdict a member is waiting on is never cut off half-written.
 
 Held end to end by
 `channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread`
-and `channel::a_blocking_surface_outlives_a_server_whose_asker_is_still_there`,
-each against a real `channel serve` the test starts and ends, asserting on what
-`runs` and `status` printed.
+and `channel::a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed`,
+each against a real `channel serve` the test starts and lets end on its own —
+neither signals one — asserting on what `runs` and `status` printed, on what
+`next` handed back, and on `reply` still being accepted afterwards.
 
 **What this entry is waiting on** is whether the contract wants that third
 clearing written into the sentence above, and whether it wants a word for the

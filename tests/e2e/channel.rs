@@ -617,61 +617,95 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
     world.release("ship.go");
 }
 
-/// A blocking surface whose server went while the side that asked stayed is
+/// A blocking surface whose server stopped while the side that asked stayed is
 /// still there to be claimed and answered.
 ///
-/// The discriminator is the *asker*, never the server: a server that timed out
-/// and then went — killed here, because that is what an abrupt exit is — leaves
-/// a member still holding the stream open and still owed the answer. Withdrawing
-/// on the server's exit alone would take the question out from under it.
+/// The discriminator is the *asker*, never the server. This is the ending that
+/// separates the two: the server times out waiting for a verdict, reaches its
+/// own `ONEPIPELINE_SERVE_SESSION_SECONDS` bound, and **exits by itself, exit
+/// 0**, down the same path a stream that ended exits down — with the member's
+/// frame stream still open in this journey's hand, because the member is still
+/// working and still owed the answer.
+///
+/// Nothing here is killed, and that is the point: a server this journey killed
+/// would never reach the decision under test at all, so the journey would pass
+/// against a `serve` that withdrew on every exit. Reaching that decision and
+/// having it come out the other way is the proof.
 #[test]
-fn a_blocking_surface_outlives_a_server_whose_asker_is_still_there() {
-    use std::io::{BufRead, BufReader, Write};
+fn a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed() {
+    use std::io::Write;
 
     let world = World::new("channel-server-went");
     world.script("build.wait", "hold");
     let run = running(&world, "serverwent", vec![agent("build", &[])]);
 
+    // One second for the verdict it will not get, and one second for the session
+    // itself: the wait runs out first, and the bound is what ends the process
+    // afterwards rather than anything this journey does to it.
     let mut command = world.cmd(&["channel", "serve", &run]);
     command
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut serving = command.spawn().expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    // Taken out of the child and held for the whole journey. It is the member's
+    // end of the conversation: while this is alive the stream is open and the
+    // asker has not gone, which is the entire premise being tested.
+    let mut asking = serving.stdin.take().expect("stdin is piped");
     writeln!(
-        stdin,
+        asking,
         r#"{{"kind":"planner-question","message":"Which base should build target?"}}"#
     )
     .expect("the frame is written");
-    stdin.flush().expect("the frame flushes");
+    asking.flush().expect("the frame flushes");
     world.until("the question to reach the planner", |world| {
         !world.events_of(&run, "planner-surface-queued").is_empty()
     });
 
-    // Its own wait runs out, which it says on stdout, and then it goes — with
-    // the stream it reads still open, because the member is still working.
-    let stdout = serving.stdout.take().expect("stdout is piped");
-    let timed_out = BufReader::new(stdout)
-        .lines()
-        // Not `map_while(Result::ok)`: a stdout that failed mid-read is not the
-        // same fact as a server that said nothing, and read as one this journey
-        // would report the wrong half of what went wrong.
-        .map(|line| line.expect("the server's stdout reads"))
-        .find(|line| line.contains("timed out"))
-        .expect("the server reported its own timeout");
-    assert!(timed_out.contains("no planner reply"), "{timed_out}");
-    serving.kill().expect("the server this test started ends");
-    ended(serving);
+    // Its own wait runs out, and then its own bound does, and it goes — cleanly,
+    // and while still holding a stream nobody has closed.
+    let went = serving
+        .wait_with_output()
+        .expect("the server ends on its own");
+    assert!(
+        went.status.success(),
+        "the server did not end of its own accord: {went:?}"
+    );
+    let said = String::from_utf8_lossy(&went.stdout);
+    assert!(
+        said.contains("no planner reply") && said.contains("timed out"),
+        "the server did not report its own timeout: {said}"
+    );
+    let why = String::from_utf8_lossy(&went.stderr);
+    assert!(
+        why.contains("ONEPIPELINE_SERVE_SESSION_SECONDS")
+            && why.contains("stream still open")
+            && why.contains("still waiting for an answer"),
+        "the server did not say which of the two endings this was: {why}"
+    );
 
-    // Nothing was withdrawn. It is still counted, still claimable, and the
-    // decision it raised is still the one the run is waiting on.
-    world
-        .run(&["status", &run])
-        .exited(0)
-        .out_has("1 planner update(s) waiting")
-        .out_lacks("nobody is waiting on");
+    // Nothing was withdrawn. Both supervisory views still count it, and neither
+    // reports it as one nobody is waiting on.
+    for view in [vec!["runs"], vec!["status", &run]] {
+        world
+            .run(&view)
+            .exited(0)
+            .out_has("1 planner update(s) waiting")
+            .out_lacks("nobody is waiting on");
+    }
+    // And the run's own record says nothing became of it, which is the direct
+    // negative of the mark the other ending writes.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    assert!(
+        !record.contains("\"abandoned\""),
+        "the run recorded an abandonment nobody asked for: {record}"
+    );
 
+    // Still claimable, still readable, and reading it puts the run back to
+    // waiting for the ruling the member is still owed.
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("Which base should build target?");
     assert_eq!(read.json()["surface"]["abandoned"], serde_json::Value::Null);
@@ -694,6 +728,8 @@ fn a_blocking_surface_outlives_a_server_whose_asker_is_still_there() {
         .exited(0)
         .out_lacks("waiting for planner");
 
+    // The member's end, closed only now that the journey is done with it.
+    drop(asking);
     world.release("build.go");
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

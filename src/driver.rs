@@ -2549,6 +2549,37 @@ fn reply_timeout_seconds() -> u64 {
         .unwrap_or(crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS)
 }
 
+/// When this serving session stops of its own accord, or `None` for a session
+/// that runs until its member's stream ends.
+///
+/// Unbounded is the default and is what
+/// [`SERVE_SESSION_ENV`](crate::channel::SERVE_SESSION_ENV) documents; a value
+/// that is not a positive number of seconds reads as unset rather than as zero,
+/// because a bound of zero would end the session before it carried anything and
+/// a typo must not silently do that.
+fn serve_session_deadline() -> Option<Instant> {
+    std::env::var(crate::channel::SERVE_SESSION_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds))
+}
+
+/// Why a serving session stopped, which is the whole of what decides whether
+/// what it raised is still owed an answer.
+///
+/// The discriminator is the **asker**, never the server. Read off the server's
+/// own exit instead, a question would be taken out from under a member that is
+/// still working and still waiting for it.
+enum Served {
+    /// The frame stream ended, so the side that was asking ended with it: this
+    /// loop was the only reader an answer to any of these had.
+    AskerGone,
+    /// This session reached its own bound with the stream still open. The member
+    /// is still there, so nothing it raised is withdrawn.
+    SessionOver,
+}
+
 /// `onepipeline channel serve` — an observer member's judge side.
 ///
 /// The observer emits one JSON frame on stdout whenever it has something to
@@ -2563,6 +2594,13 @@ fn serve(args: &RunArgs) -> Result<i32> {
     // Every surface this session raised, so that what it leaves behind can be
     // said out loud rather than left standing as a question with no asker.
     let mut raised: Vec<u64> = Vec::new();
+    // Checked between exchanges rather than during one: a bound that cut a frame
+    // off mid-answer would leave the member waiting on a verdict this process
+    // had already decided not to write. A session blocked on a stream that has
+    // gone quiet therefore stays until the next frame or the stream's end, which
+    // is the same wait it would be in with no bound at all.
+    let session = serve_session_deadline();
+    let mut ending = Served::AskerGone;
 
     for line in stdin.lock().lines() {
         // End of input and a broken pipe are not the same fact. Read as one,
@@ -2634,17 +2672,37 @@ fn serve(args: &RunArgs) -> Result<i32> {
         if answer.completion == Some(true) {
             break;
         }
+        if session.is_some_and(|deadline| Instant::now() >= deadline) {
+            // This process is done; the member that spawned it is not. Said on
+            // stderr because an operator reading a run whose server went needs
+            // to know the questions are still standing rather than lost — and
+            // because it is the one visible difference between the two endings.
+            eprintln!(
+                "onepipeline: this channel session reached its {} bound with the observer's \
+                 stream still open; the {} surface(s) it raised stay in the queue, still \
+                 waiting for an answer",
+                crate::channel::SERVE_SESSION_ENV,
+                raised.len()
+            );
+            ending = Served::SessionOver;
+            break;
+        }
     }
-    // The frame stream ended, so the side that was asking has ended with it:
-    // this loop is the only reader an answer to any of these had. Marked rather
-    // than deleted — [`ChannelState::abandon`] says why, and what it withdraws
-    // instead — so the run stops reporting a decision nobody is waiting on while
-    // the text stays where a manager can still read it.
+    // Which of the two endings this was decides it, and only one of them is the
+    // asker going away. A stream that ended is that one: this loop was the only
+    // reader an answer to anything it raised had, so what it leaves behind is
+    // marked — rather than deleted, which [`ChannelState::abandon`] says why —
+    // so the run stops reporting a decision nobody is waiting on while the text
+    // stays where a manager can still read it. A session that reached its own
+    // bound is the other: the member is still holding the stream open and still
+    // owed every answer, so nothing is withdrawn and everything stays counted.
     //
-    // Deliberately not reached by the `?` paths above: a refused frame is this
-    // server rejecting what the member said, and the member is still there to be
-    // told. Only a stream that ended proves the asker did.
-    channel.abandon(&raised)?;
+    // Deliberately not reached by the `?` paths above either: a refused frame is
+    // this server rejecting what the member said, and the member is still there
+    // to be told. Only a stream that ended proves the asker did.
+    if matches!(ending, Served::AskerGone) {
+        channel.abandon(&raised)?;
+    }
     Ok(EXIT_SUCCESS)
 }
 

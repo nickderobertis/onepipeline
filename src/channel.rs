@@ -551,6 +551,23 @@ pub const REPLY_TIMEOUT_ENV: &str = "ONEPIPELINE_REPLY_TIMEOUT_SECONDS";
 /// it.
 pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 
+/// The environment variable bounding how long one `channel serve` session
+/// serves before it stops of its own accord.
+///
+/// Unset — the default — is unbounded, which is what a member whose whole
+/// conversation this channel carries wants: the session ends when that member's
+/// frame stream does. A host that spawns the judge side **per turn** bounds it
+/// instead, so the server does not outlive the turn it was spawned for while the
+/// member that spawned it goes on working.
+///
+/// The two endings are not the same fact and are deliberately not treated the
+/// same. A stream that ended proves the side that was asking has gone, so
+/// nothing is left that could read an answer and what it raised is abandoned. A
+/// session that reached this bound proves only that *this process* is done: the
+/// stream is still open, the member is still there, and every question it raised
+/// is still owed an answer — so nothing is withdrawn.
+pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
+
 /// What raised a surface.
 ///
 /// A pacemaker update and a worker's proposal are the same wire shape and
