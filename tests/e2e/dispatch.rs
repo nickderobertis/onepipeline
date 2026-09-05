@@ -1882,9 +1882,46 @@ fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
     assert!(
         listed.lines().any(|line| line.contains("node-scope")),
         "the sibling found no run where this crate placed one — the state-directory variable, \
-         or the fallback around it, has drifted on one side:\n{listed}\n{}",
+         or the fallback around it, has drifted on one side. It listed:\n{listed}\nand the \
+         directory it was asked about holds:\n{}\n{}",
+        placed(&state),
         world.dump()
     );
+}
+
+/// What the sibling's own store holds, as its listing reads it.
+///
+/// `history` skips a run directory whose record it cannot read and still exits
+/// zero, so an empty listing is *either* no run directory at all *or* one whose
+/// record it would not take — and those two want opposite repairs. Read the same
+/// file it reads, per entry, so the gate above says which of the two it met
+/// rather than leaving the next reader to infer it from an absence.
+fn placed(state: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(state) else {
+        return "  (no state directory at all)".into();
+    };
+    let mut held: Vec<String> = entries
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let record = entry.path().join(oneagentgraph::run::RECORD_FILE);
+            match std::fs::read_to_string(&record) {
+                Ok(text) => format!(
+                    "  {name}: {}",
+                    text.split_whitespace().collect::<Vec<_>>().join(" ")
+                ),
+                Err(error) => format!(
+                    "  {name}: no readable {}: {error}",
+                    oneagentgraph::run::RECORD_FILE
+                ),
+            }
+        })
+        .collect();
+    held.sort();
+    if held.is_empty() {
+        return "  (the state directory is empty)".into();
+    }
+    held.join("\n")
 }
 
 /// The exit codes this crate maps the sibling's `Error` onto are still the ones
