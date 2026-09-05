@@ -2552,17 +2552,43 @@ fn reply_timeout_seconds() -> u64 {
 /// When this serving session stops of its own accord, or `None` for a session
 /// that runs until its member's stream ends.
 ///
-/// Unbounded is the default and is what
-/// [`SERVE_SESSION_ENV`](crate::channel::SERVE_SESSION_ENV) documents; a value
-/// that is not a positive number of seconds reads as unset rather than as zero,
-/// because a bound of zero would end the session before it carried anything and
-/// a typo must not silently do that.
-fn serve_session_deadline() -> Option<Instant> {
-    std::env::var(crate::channel::SERVE_SESSION_ENV)
+/// Absent is the default and is what
+/// [`SERVE_SESSION_ENV`](crate::channel::SERVE_SESSION_ENV) documents. Anything
+/// *present* is external input at a trust boundary and is **refused** unless it
+/// is a whole number of seconds greater than zero: read as unset instead, a
+/// mistyped bound would silently give the session the one behaviour the operator
+/// was trying to change, and a zero one would end it before it carried anything.
+/// The refusal is made before the first frame is read, so a session that cannot
+/// honour its bound never raises a surface it will not stay for.
+fn serve_session_deadline() -> Result<Option<Instant>> {
+    let key = crate::channel::SERVE_SESSION_ENV;
+    let Some(value) = std::env::var_os(key) else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy().into_owned();
+    let seconds = value
+        .trim()
+        .parse::<u64>()
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
-        .map(|seconds| Instant::now() + Duration::from_secs(seconds))
+        .ok_or_else(|| {
+            Error::Refused(format!(
+                "{key} is a whole number of seconds greater than zero, and this session was \
+                 given '{value}'; leave it unset for a session that serves until its member's \
+                 frame stream ends"
+            ))
+        })?;
+    // A bound this host's clock cannot name is refused rather than added: the
+    // sum is what every later comparison reads, and `Instant` addition panics on
+    // an overflow rather than saturating.
+    Instant::now()
+        .checked_add(Duration::from_secs(seconds))
+        .map(Some)
+        .ok_or_else(|| {
+            Error::Refused(format!(
+                "{key} of {seconds} seconds is further ahead than this host's clock can name"
+            ))
+        })
 }
 
 /// Why a serving session stopped, which is the whole of what decides whether
@@ -2599,7 +2625,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
     // had already decided not to write. A session blocked on a stream that has
     // gone quiet therefore stays until the next frame or the stream's end, which
     // is the same wait it would be in with no bound at all.
-    let session = serve_session_deadline();
+    let session = serve_session_deadline()?;
     let mut ending = Served::AskerGone;
 
     for line in stdin.lock().lines() {

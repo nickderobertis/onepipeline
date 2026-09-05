@@ -3439,7 +3439,12 @@ so the server does not outlive the turn it was spawned for; reaching that bound
 ends the process with exit 0 and a line on stderr naming the bound, saying the
 stream is still open and how many surfaces stay in the queue waiting for an
 answer. The bound is checked between exchanges rather than during one, so a
-verdict a member is waiting on is never cut off half-written.
+verdict a member is waiting on is never cut off half-written, and a value that is
+present but not a whole number of seconds greater than zero is **refused** before
+the first frame is read — read as the unset it is not, a mistyped bound would
+silently give the session the one behaviour the operator was trying to change,
+and a session that cannot honour its bound must not raise a question it will not
+stay for.
 
 Held end to end by
 `channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread`

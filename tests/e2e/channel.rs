@@ -734,6 +734,47 @@ fn a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A session bound this host was given but cannot honour is refused before the
+/// server carries anything.
+///
+/// `ONEPIPELINE_SERVE_SESSION_SECONDS` is external input at a trust boundary, so
+/// a value that is not a whole number of seconds greater than zero fails loudly
+/// rather than reading as the unset it is not. The moment matters as much as the
+/// refusal: made after a frame had been carried, it would leave a question in
+/// the queue raised by a session that then refused to stay for its answer.
+///
+/// Both spellings the fallback would have swallowed are here — a word, and the
+/// zero that would have ended the session before it served anything.
+#[test]
+fn a_session_bound_this_server_cannot_honour_is_refused_before_it_serves() {
+    let world = World::new("channel-bad-bound");
+    world.script("build.wait", "hold");
+    let run = running(&world, "badbound", vec![agent("build", &[])]);
+
+    for given in ["soon", "0"] {
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command.env("ONEPIPELINE_SERVE_SESSION_SECONDS", given);
+        // Its stdin is closed, which is the frame stream ending — the one
+        // ending that exits 0. So an exit 2 here is the refusal and cannot be
+        // the server simply running out of input.
+        world
+            .run_on(command, &format!("channel serve with a bound of {given}"))
+            .exited(2)
+            .err_has("ONEPIPELINE_SERVE_SESSION_SECONDS is a whole number of seconds")
+            .err_has(&format!("given '{given}'"));
+    }
+
+    // Nothing was carried and nothing is waiting: the refusals happened before
+    // the server read a frame, so no surface was raised and then stranded.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_lacks("nobody is waiting on");
+
+    world.release("build.go");
+}
+
 #[test]
 fn a_legacy_verdict_is_accepted_and_recorded() {
     let world = World::new("channel-verdict");
