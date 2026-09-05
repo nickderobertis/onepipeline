@@ -28,11 +28,14 @@
 //!
 //! | render | landing reads | lines printed | wall clock |
 //! | --- | --- | --- | --- |
-//! | `results` | 5 | 8 | 664 ms |
-//! | `goals` (the run summary) | 4 | 4 | 500 ms |
-//! | `status` | 4 | 4 | 497 ms |
+//! | `results` | 5 | 8 | 608 ms |
+//! | `goals` (the run summary) | 4 | 4 | 536 ms |
+//! | `status` | 4 | 4 | 488 ms |
 //!
-//! **No assertion below is a threshold on that time**: what a render costs is
+//! The reads and the lines are the same on every run; the clock is not. Four
+//! readings taken while this was written put each render between about 0.12 s and
+//! 0.79 s, and the difference was what else the host was doing — which is why
+//! **no assertion below is a threshold on that time**: what a render costs is
 //! held as *work* — see
 //! [`a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_per_node`]
 //! — because the work a render performs is a fact about this code while the
@@ -127,32 +130,35 @@ fn fixture(name: &str) -> Fixture {
     let run = name.to_owned();
     let plan = world.plan(
         &run,
-        &plan_of(
-            &run,
-            NODES.iter().map(|node| lifecycle(node, &[])).collect(),
-        ),
+        &serde_json::json!({
+            "schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+            "name": run,
+            "goal": {"text": format!("Deliver {run}")},
+            // One session at a time. Six lifecycle nodes over one repository
+            // otherwise have `onevcs` sweeping a spent run root while a live
+            // session is still working in one — and a node whose worktree is
+            // taken out from under it settles `publication-failed`, which is a
+            // fixture that did not happen rather than a landing anybody can read.
+            "concurrency": 1,
+            "tasks": NODES.iter().map(|node| lifecycle(node, &[])).collect::<Vec<Value>>(),
+        }),
     );
     world.run(&["start", &plan, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
     let branches = branches_of(&world, &run);
-    // Waited for, because a run's result is written when its last node settles
-    // while a session's publishing push reaches this checkout on the session's
-    // own clock: one of the six was reliably still on its way. Then kept under a
-    // ref of this test's own, so a sweep that reaps a spent session's branch
-    // afterwards cannot take the work away mid-journey. Both are about the
-    // fixture being there; neither is anything these journeys assert.
-    world.until(
-        "every branch the run published to reach the checkout",
-        |world| {
-            branches.values().all(|branch| {
-                !git(world, &checkout, &["branch", "--list", branch])
-                    .trim()
-                    .is_empty()
-            })
-        },
-    );
+    // Brought here, because a branch is wherever the session that cut it left it:
+    // a publication pushes it to this checkout, and a dispatch that failed before
+    // publishing leaves it in the run clone `onevcs` opened. This test lands work
+    // with git, so it needs the commits here whichever of those happened — and a
+    // journey that raced the push would fail as a flake rather than say anything
+    // about a landing.
+    for branch in branches.values() {
+        bring_the_branch_here(&world, &checkout, branch);
+    }
+    // Then kept under a ref of this test's own, so a sweep that reaps a spent
+    // session's branch afterwards cannot take the work away mid-journey.
     for (node, branch) in &branches {
         git(&world, &checkout, &["branch", "-f", &kept(node), branch]);
     }
@@ -204,6 +210,17 @@ fn fixture(name: &str) -> Fixture {
     Fixture { world, run }
 }
 
+/// The branch one node's dispatch left behind.
+fn branches_of_one(world: &World, run: &str, node: &str) -> String {
+    let result = world.run_json(run, "result.json");
+    result["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .and_then(|entry| entry["branch"].as_str())
+        .unwrap_or_else(|| panic!("{node} settled without naming its branch: {result}"))
+        .to_owned()
+}
+
 /// The branch each node's dispatch left behind, off the run's own result.
 fn branches_of(world: &World, run: &str) -> BTreeMap<String, String> {
     let result = world.run_json(run, "result.json");
@@ -225,6 +242,24 @@ fn branches_of(world: &World, run: &str) -> BTreeMap<String, String> {
             "{node} settled without naming the branch its work is on: {result}"
         );
     }
+    // The fixture the journeys are written against, asserted rather than
+    // assumed: a node that settled some other way is a run that did not happen,
+    // and every assertion after it would be about the wrong thing.
+    for node in nodes {
+        let id = node["id"].as_str().unwrap_or_default();
+        let (status, landing) = match id {
+            "failed-but-landed" => ("failed", Value::Null),
+            _ => ("done", Value::String("unlanded".into())),
+        };
+        assert_eq!(
+            node["status"], status,
+            "{id} settled unexpectedly: {result}"
+        );
+        assert_eq!(
+            node["landing"], landing,
+            "{id} settled unexpectedly: {result}"
+        );
+    }
     branches
 }
 
@@ -232,6 +267,69 @@ fn branches_of(world: &World, run: &str) -> BTreeMap<String, String> {
 /// settled, so a later sweep cannot take the work away mid-journey.
 fn kept(node: &str) -> String {
     format!("kept/{node}")
+}
+
+/// Give this checkout the commits one branch carries, wherever they are.
+///
+/// A publication pushes the branch here, so most of the time it is already a ref
+/// of this checkout. A dispatch that failed before publishing pushed nothing, and
+/// a publication still on its way has not pushed yet — and in both cases the work
+/// is in the run clone `onevcs` cut for the session, under this world's own state
+/// root. Searched rather than derived, because the path a session's clone sits at
+/// is that library's to decide and this test has no business restating it.
+fn bring_the_branch_here(world: &World, checkout: &Path, branch: &str) {
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    // Waited on rather than asked once: a session's publishing push arrives on
+    // its own clock, and `onevcs` moves a spent clone out from under the search
+    // while it reaps it — so a single miss is as likely to be a copy in motion as
+    // a copy that is gone.
+    world.until(
+        &format!("a copy of {branch} to reach this world"),
+        |world| {
+            !git(world, checkout, &["branch", "--list", branch])
+            .trim()
+            .is_empty()
+            // The origin, where a publishing push put it.
+            || fetched(world, checkout, "origin", &refspec)
+            // Otherwise the run clone the session worked in, which is where a
+            // dispatch that failed before publishing left its work. Searched
+            // rather than derived, because the path a session's clone sits at is
+            // that library's to decide and this test has no business restating it.
+            || clone_holding(&world.onevcs_home(), branch)
+                .is_some_and(|holder| fetched(world, checkout, &holder.to_string_lossy(), &refspec))
+        },
+    );
+}
+
+/// Fetch one refspec, answering whether the remote had it.
+///
+/// Not through [`git`](fn@git), which asserts: "the branch is not there" is one
+/// of the answers this asks for.
+fn fetched(world: &World, checkout: &Path, remote: &str, refspec: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["fetch", "--force", remote, refspec])
+        .current_dir(checkout)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .output()
+        .is_ok_and(|fetched| fetched.status.success())
+}
+
+/// The first repository under `dir` that holds `branch` as a ref of its own.
+fn clone_holding(dir: &Path, branch: &str) -> Option<std::path::PathBuf> {
+    if dir.join(".git").exists() {
+        let held = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+            .current_dir(dir)
+            .output();
+        if held.is_ok_and(|held| held.status.success()) {
+            return Some(dir.to_path_buf());
+        }
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .find_map(|entry| clone_holding(&entry.path(), branch))
 }
 
 /// Take one branch onto the base, the way a landing does.
@@ -460,6 +558,93 @@ fn a_landing_this_host_cannot_read_is_reported_as_undecided_saying_what_refused(
         .exited(0)
         .out_has("1 node(s) whose landing this host could not decide: service")
         .out_lacks("node(s) have not landed");
+}
+
+/// A branch name two repositories both hold is answered about the one this run's
+/// work is in, rather than refused as an ambiguity nobody has.
+///
+/// The reason the read is narrowed to the node's own repository at all. Branch
+/// names are minted per session and collide across identities the moment two
+/// runs of one host name work the same way — and `onevcs` will not guess: asked
+/// about a name two of its identities hold, it refuses. A view that inherited
+/// that refusal would report every such node as undecided, which is the same
+/// silence the settlement's dated claim used to be.
+///
+/// The **driver's own close-out** read is narrowed the same way, and it is the
+/// one asserted on here: `landing` in the run's result is what a consumer parses,
+/// and it is written by the driver rather than by a render.
+#[test]
+fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
+    let world = World::new("landing-ambiguous");
+    let service = world.repository("change-open", &[]);
+    let other = world.extra_repository("engine");
+    world.script("service.work", "the work of the node under test\n");
+
+    let run = "ambiguous".to_owned();
+    let plan = world.plan(&run, &plan_of(&run, vec![lifecycle("service", &[])]));
+    world.run(&["start", &plan, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let branch = branches_of_one(&world, &run, "service");
+
+    // The other repository is given a branch of the same name, carrying work of
+    // its own. Nothing about it says anything about this run's node, and asking
+    // without naming a repository can no longer answer at all.
+    git(
+        &world,
+        &other.checkout,
+        &["checkout", "-b", &branch, "main"],
+    );
+    std::fs::write(other.checkout.join("elsewhere.txt"), "another repository\n")
+        .expect("the other repository's work is written");
+    git(&world, &other.checkout, &["add", "-A"]);
+    git(
+        &world,
+        &other.checkout,
+        &["commit", "-m", "feat: elsewhere"],
+    );
+    git(&world, &other.checkout, &["checkout", "main"]);
+
+    // And this run's own branch lands, under the trailer a landing leaves.
+    world.until(
+        "the branch the run published to reach the checkout",
+        |world| {
+            !git(world, &service.checkout, &["branch", "--list", &branch])
+                .trim()
+                .is_empty()
+        },
+    );
+    let tip = git(&world, &service.checkout, &["rev-parse", &branch])
+        .trim()
+        .to_owned();
+    git(
+        &world,
+        &service.checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land it\n\nOnevcs-Landed-Commit: {tip}\n"),
+            &branch,
+        ],
+    );
+    git(&world, &service.checkout, &["push", "origin", "main"]);
+
+    // The view answers about this node's repository rather than refusing.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("landed on its base — read now: a landing trailer on the base at ")
+        .out_lacks("could not decide it");
+
+    // And so does the driver's own close-out, which is what a consumer parses.
+    world.run(&["adopt", &run]).settled();
+    let settled = world.run_json(&run, "result.json");
+    assert_eq!(
+        settled["nodes"][0]["landing"], "landed",
+        "the run's close-out was refused an answer a repository name resolves: {settled}"
+    );
 }
 
 /// What a render costs is bounded as **work**, over the fixture above.

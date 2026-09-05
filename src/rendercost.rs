@@ -74,15 +74,10 @@ impl Rendered {
 /// set — an act nobody can spell is an act nobody can leave out of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Act {
-    /// A render began.
     Began,
-    /// The render reported on one node's landing.
     Reported,
-    /// The sibling's published landing read.
     LandingRead,
-    /// A read out of a run's store.
     StoreRead,
-    /// A process this crate started.
     ProcessSpawn,
 }
 
@@ -241,8 +236,8 @@ impl Drop for Deciding {
     }
 }
 
-/// Record the one read a landing decision is allowed to make.
-pub(crate) fn landing_read(reference: &str, repo: Option<&str>) {
+/// Record that the one read a landing decision is allowed to make was taken.
+pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
     record(
         Act::LandingRead,
         json!({ "reference": reference, "repo": repo }),
@@ -308,7 +303,7 @@ mod tests {
             let render = rendering(Rendered::Results, "unmeasured");
             render.reported("node");
             let _deciding = deciding("node");
-            landing_read("branch", Some("repo"));
+            landing_read_taken("branch", Some("repo"));
             store_read(7);
             process_spawned("git");
         }
@@ -334,12 +329,12 @@ mod tests {
             store_read(11);
             {
                 let _deciding = deciding("alpha");
-                landing_read("alpha-branch", None);
+                landing_read_taken("alpha-branch", None);
                 store_read(3);
                 process_spawned("git");
                 // An inner scope names no second node.
                 let _nested = deciding("beta");
-                landing_read("beta-branch", None);
+                landing_read_taken("beta-branch", None);
             }
             // A nested render records nothing of its own.
             let _inner = rendering(Rendered::Summary, "measured");

@@ -365,32 +365,34 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
 
 /// What a landing read taken **now** says about one branch, and what said it.
 ///
+/// The evidence travels *inside* the answer rather than beside it, so an answer
+/// with the wrong evidence on it is unrepresentable: a tier only ever decides a
+/// landing, and only a read that refused has a refusal to name. That matters
+/// because "it landed" is exactly the claim that used to be an inference and was
+/// wrong — a reader acting on one of these can say what it acted on.
+///
 /// Three answers rather than a boolean, because the third is the one a caller
 /// must not collapse into either of the others: a repository this host cannot
-/// resolve, a branch no checkout holds, or a base whose history is behind the
-/// one the base stands at all leave the question *open*, and a reader told
-/// "not landed" would act on a claim nothing made.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LandingVerdict {
-    /// The base carries the work.
-    Landed,
+/// resolve, a branch no checkout holds, or a base whose history is behind the one
+/// the base stands at all leave the question *open*, and a reader told "not
+/// landed" would act on a claim nothing made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LandingRead {
+    /// The base carries the work, decided by the tier named here.
+    Landed {
+        /// The tier, in the words a rendered line names it by.
+        tier: String,
+    },
     /// There is work on this branch the base does not carry.
-    NotLanded,
+    NotLanded {
+        /// What decided it — a comparison, or a landing the branch has gone past.
+        tier: String,
+    },
     /// Nothing here could decide it.
-    Undecided,
-}
-
-/// One landing read, with the evidence that decided it.
-///
-/// The evidence travels with the answer rather than beside it, because "it
-/// landed" is exactly the claim that used to be an inference and was wrong: a
-/// reader acting on this can say what it acted on.
-#[derive(Debug, Clone)]
-pub(crate) struct LandingRead {
-    pub(crate) verdict: LandingVerdict,
-    /// Which tier decided it, in the words a rendered line names it by — or,
-    /// where the read refused, what it refused with.
-    pub(crate) evidence: String,
+    Undecided {
+        /// What could not decide it, or what refused to try.
+        because: String,
+    },
 }
 
 /// Ask `onevcs` whether one branch's work has reached its base, as of now.
@@ -416,57 +418,53 @@ pub(crate) struct LandingRead {
 // grammar takes. What could go wrong with an unchecked one is checked where it enters,
 // by `usable`, which is what wrote every value that reaches this.
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
-    crate::rendercost::landing_read(branch, repo);
+    crate::rendercost::landing_read_taken(branch, repo);
     read_of(onevcs::landing_status(branch, repo))
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// How the sibling's answer reads as a verdict and its evidence.
+/// How the sibling's answer reads as one of the three.
 ///
 /// Split out so every case is provable without a repository: what is being
-/// decided here is which of the sibling's five answers is a landing, and the
-/// two that are not `yes` are the ones a wrong reading costs most.
+/// decided here is which of the sibling's five answers is a landing, and the two
+/// that are not `yes` are the ones a wrong reading costs most.
 fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
     use onevcs::Landed;
-    let (verdict, evidence) = match &answered {
+    match &answered {
+        Ok(landed @ Landed::Yes { evidence }) => LandingRead::Landed {
+            tier: format!("{} at {}", landed.tier(), evidence.commit()),
+        },
         // A landing the branch has since gone past is **not** this node's work
         // finished — the sibling's own `is_landed` says so, and the commits above
-        // the landing are work still to publish. It is reported as what it is.
-        Ok(landed @ Landed::Yes { evidence }) => (
-            LandingVerdict::Landed,
-            format!("{} at {}", landed.tier(), evidence.commit()),
-        ),
-        Ok(landed @ Landed::InPart { evidence, unlanded }) => (
-            LandingVerdict::NotLanded,
-            format!(
+        // the landing are work still to publish. Reported as what it is, naming
+        // the landing anyway, because a reader deciding what to do next needs
+        // both halves.
+        Ok(landed @ Landed::InPart { evidence, unlanded }) => LandingRead::NotLanded {
+            tier: format!(
                 "{} at {}, with {unlanded} commit(s) above it the landing did not carry",
                 landed.tier(),
                 evidence.commit()
             ),
-        ),
-        Ok(landed @ Landed::No) => (
-            LandingVerdict::NotLanded,
-            format!(
+        },
+        Ok(landed @ Landed::No) => LandingRead::NotLanded {
+            tier: format!(
                 "{}: the base does not carry what this branch changed",
                 landed.tier()
             ),
-        ),
+        },
         // Deliberately not a `no`: the base carries the change and nothing
-        // records why, which is equally what somebody else making the same
-        // change leaves behind.
-        Ok(landed @ Landed::Unknown) => (
-            LandingVerdict::Undecided,
-            format!(
+        // records why, which is equally what somebody else making the same change
+        // leaves behind.
+        Ok(landed @ Landed::Unknown) => LandingRead::Undecided {
+            because: format!(
                 "{}: the base already carries what this branch changed, and nothing records why",
                 landed.tier()
             ),
-        ),
-        Err(refused) => (
-            LandingVerdict::Undecided,
-            crate::views::one_line(&format!("this host could not decide it: {refused}")),
-        ),
-    };
-    LandingRead { verdict, evidence }
+        },
+        Err(refused) => LandingRead::Undecided {
+            because: crate::views::one_line(&format!("this host could not decide it: {refused}")),
+        },
+    }
 }
 
 /// Whether `onevcs` can **show** that one branch's work reached its base.
@@ -477,7 +475,7 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
 pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
-    landing_now(branch, repo).verdict == LandingVerdict::Landed
+    matches!(landing_now(branch, repo), LandingRead::Landed { .. })
 }
 
 /// Where a human reads the change a publication produced, when there is one.
@@ -2000,8 +1998,12 @@ mod tests {
         let yes = read_of(Ok(Landed::Yes {
             evidence: landing("abc1234"),
         }));
-        assert_eq!(yes.verdict, LandingVerdict::Landed);
-        assert_eq!(yes.evidence, "a recorded landing at abc1234");
+        assert_eq!(
+            yes,
+            LandingRead::Landed {
+                tier: "a recorded landing at abc1234".into()
+            }
+        );
 
         // A landing that accounts for part of the branch: there is work left to
         // publish, so it is not a landing — and the commit that *did* land is
@@ -2010,25 +2012,26 @@ mod tests {
             evidence: landing("abc1234"),
             unlanded: std::num::NonZeroUsize::new(2).expect("two"),
         }));
-        assert_eq!(part.verdict, LandingVerdict::NotLanded);
         assert_eq!(
-            part.evidence,
-            "a recorded landing at abc1234, with 2 commit(s) above it the landing did not carry"
+            part,
+            LandingRead::NotLanded {
+                tier: "a recorded landing at abc1234, with 2 commit(s) above it the landing \
+                       did not carry"
+                    .into()
+            }
         );
 
         let no = read_of(Ok(Landed::No));
-        assert_eq!(no.verdict, LandingVerdict::NotLanded);
-        assert!(no.evidence.contains("the base does not carry"), "{no:?}");
+        assert!(
+            matches!(&no, LandingRead::NotLanded { tier } if tier.contains("the base does not carry")),
+            "{no:?}"
+        );
 
         let unknown = read_of(Ok(Landed::Unknown));
-        assert_eq!(
-            unknown.verdict,
-            LandingVerdict::Undecided,
-            "a base that carries the change with nothing recording why was read as an answer"
-        );
         assert!(
-            unknown.evidence.contains("nothing records why"),
-            "{unknown:?}"
+            matches!(&unknown, LandingRead::Undecided { because } if because.contains("nothing records why")),
+            "a base that carries the change with nothing recording why was read as an answer: \
+             {unknown:?}"
         );
 
         // A refusal is undecided too, and it says what refused — a supervisor
@@ -2037,10 +2040,13 @@ mod tests {
         let refused = read_of(Err(onevcs::Error::Invalid {
             reason: "no such repository\nand a second line".into(),
         }));
-        assert_eq!(refused.verdict, LandingVerdict::Undecided);
         assert_eq!(
-            refused.evidence,
-            "this host could not decide it: invalid input: no such repository and a second line",
+            refused,
+            LandingRead::Undecided {
+                because: "this host could not decide it: invalid input: no such repository and \
+                          a second line"
+                    .into()
+            },
             "a refusal reaches a rendered line unstripped"
         );
     }

@@ -59,7 +59,7 @@ use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
 use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
-use crate::vcs::{LandingRead, LandingVerdict};
+use crate::vcs::LandingRead;
 
 /// A run root a view refused, and the reason it gave.
 ///
@@ -384,35 +384,41 @@ enum Stands {
 
 /// What a render reports about one node's landing.
 ///
-/// Both records, because each answers where the other cannot: the settlement is
-/// what the run observed at the moment it published, and the read is what the
-/// base carries now.
-struct Reported {
-    /// Absent where the publication answered no landing at all — a node that
-    /// failed, or one whose base already carried its content.
-    recorded: Option<Landing>,
-    /// Absent where there was nothing to ask about, and where the record already
-    /// says landed.
-    read: Option<std::rc::Rc<LandingRead>>,
+/// Four cases rather than two records beside each other, because the pairs that
+/// would be contradictory are the ones a reader acts on: a landing the run
+/// observed is never re-read, so it never has a later read to disagree with, and
+/// a read that was taken is the answer whatever the settlement said.
+enum Reported {
+    /// The run itself observed the change reach its base. **Never re-read**: a
+    /// base does not stop carrying work it has taken, so the one read that could
+    /// move this could only agree with it, at a cost.
+    TheRunObserved,
+    /// A read taken while this view rendered, over whatever the settlement had
+    /// recorded — which is `unlanded`, or nothing at all for a node that failed
+    /// or changed nothing.
+    ReadNow {
+        settled: Option<Landing>,
+        read: std::rc::Rc<LandingRead>,
+    },
+    /// No branch to ask about, so the settlement's own claim is all there has
+    /// ever been, and it stands, dated.
+    AsSettled(Landing),
+    /// The node never had a change to land.
+    NoChangeToLand,
 }
 
 impl Reported {
     fn stands(&self) -> Stands {
-        // A landing the run itself observed is the one answer a later read
-        // cannot overturn, so it is never re-read and never re-decided here.
-        if self.recorded == Some(Landing::Landed) {
-            return Stands::Landed;
-        }
-        match self.read.as_deref().map(|read| read.verdict) {
-            Some(LandingVerdict::Landed) => Stands::Landed,
-            Some(LandingVerdict::NotLanded) => Stands::NotLanded,
-            Some(LandingVerdict::Undecided) => Stands::Undecided,
-            // No branch to ask about: the settlement's own claim is all there
-            // has ever been, and it stands, dated.
-            None => match self.recorded {
-                Some(Landing::Unlanded) => Stands::NotLanded,
-                _ => Stands::NoChangeToLand,
+        match self {
+            Reported::TheRunObserved => Stands::Landed,
+            Reported::ReadNow { read, .. } => match read.as_ref() {
+                LandingRead::Landed { .. } => Stands::Landed,
+                LandingRead::NotLanded { .. } => Stands::NotLanded,
+                LandingRead::Undecided { .. } => Stands::Undecided,
             },
+            Reported::AsSettled(Landing::Unlanded) => Stands::NotLanded,
+            Reported::AsSettled(Landing::Landed) => Stands::Landed,
+            Reported::NoChangeToLand => Stands::NoChangeToLand,
         }
     }
 }
@@ -425,14 +431,9 @@ impl Reported {
 /// nobody is shown fails the bound `tests/e2e/landing.rs` holds.
 fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported {
     render.reported(node);
-    let recorded = view.state.landings.get(node).copied();
-    // Never asked: a base does not stop carrying work it has taken, so the one
-    // read that could move this could only agree with it.
-    if recorded == Some(Landing::Landed) {
-        return Reported {
-            recorded,
-            read: None,
-        };
+    let settled = view.state.landings.get(node).copied();
+    if settled == Some(Landing::Landed) {
+        return Reported::TheRunObserved;
     }
     // The branch the dispatch reported, which is the only spelling of this work
     // the sibling can resolve, and the repository the question is narrowed to. A
@@ -441,20 +442,19 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
     // no repository publishes nothing at all, so it has no change to land and
     // asking after one would search every identity this host knows for a branch
     // no repository of theirs was ever asked to carry.
-    let Some((branch, repo)) = view.state.branches.get(node).zip(
+    let asked = view.state.branches.get(node).zip(
         view.state
             .graph
             .get(node)
             .and_then(|node| node.repo.as_deref()),
-    ) else {
-        return Reported {
-            recorded,
-            read: None,
-        };
-    };
-    Reported {
-        recorded,
-        read: Some(read_now(view, node, branch, repo)),
+    );
+    match (asked, settled) {
+        (Some((branch, repo)), settled) => Reported::ReadNow {
+            settled,
+            read: read_now(view, node, branch, repo),
+        },
+        (None, Some(landing)) => Reported::AsSettled(landing),
+        (None, None) => Reported::NoChangeToLand,
     }
 }
 
@@ -562,6 +562,7 @@ impl RunView {
     /// cannot decide is counted under its own word rather than folded into
     /// either of the other two, because "not landed" is a claim and an undecided
     /// read makes none.
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
     pub fn summary(&self) -> String {
         let render = rendering(Rendered::Summary, &self.paths.run);
         let statuses = self.state.statuses();
@@ -1218,6 +1219,7 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
 }
 
 /// `onepipeline status`.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn status(survey: &Survey) -> String {
     let mut out = String::new();
     for view in &survey.views {
@@ -2296,38 +2298,39 @@ fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String>
         // still the settlement's, and saying *when* would be inventing one.
         None => String::new(),
     };
-    let evidence = reported
-        .read
-        .as_deref()
-        .map(|read| read.evidence.clone())
-        .unwrap_or_default();
-    match reported.stands() {
-        // The run's own observation, which is why no read was taken: matched on
-        // the record rather than on the read's absence, so a build that asked
-        // anyway cannot end up printing this claim beside that read's evidence.
-        Stands::Landed if reported.recorded == Some(Landing::Landed) => {
+    match reported {
+        // The run's own observation, and the reason no read was taken.
+        Reported::TheRunObserved => {
             Some("landed on its base — the run observed the change reach it".to_string())
         }
-        Stands::Landed => Some(format!("landed on its base — read now: {evidence}")),
+        Reported::ReadNow { settled, read } => Some(match read.as_ref() {
+            LandingRead::Landed { tier } => format!("landed on its base — read now: {tier}"),
+            LandingRead::NotLanded { tier } => {
+                format!("NOT landed: read now, {tier} — open the change for where it is")
+            }
+            // The one answer nothing gave, said in its own words rather than in
+            // either of the other two — with the settlement's own dated claim
+            // behind it, which is what it always was.
+            LandingRead::Undecided { because } => match settled {
+                Some(Landing::Unlanded) => format!(
+                    "landing UNDECIDED: read now, {because}; it had not reached its base when \
+                     this settled{ago} — open the change for where it is now"
+                ),
+                _ => format!(
+                    "landing UNDECIDED: read now, {because} — open the change for where it is"
+                ),
+            },
+        }),
         // No branch to ask about, so the settlement's own claim is all there has
         // ever been: dated, and saying that nothing has moved it.
-        Stands::NotLanded if reported.read.is_none() => Some(format!(
+        Reported::AsSettled(Landing::Unlanded) => Some(format!(
             "NOT landed: the change had not reached its base when this settled{ago}, and \
              no later read has said otherwise — open the change for where it is now"
         )),
-        Stands::NotLanded => Some(format!(
-            "NOT landed: read now, {evidence} — open the change for where it is"
-        )),
-        Stands::Undecided => Some(match reported.recorded {
-            Some(Landing::Unlanded) => format!(
-                "landing UNDECIDED: read now, {evidence}; it had not reached its base when \
-                 this settled{ago} — open the change for where it is now"
-            ),
-            _ => {
-                format!("landing UNDECIDED: read now, {evidence} — open the change for where it is")
-            }
-        }),
-        Stands::NoChangeToLand => None,
+        Reported::AsSettled(Landing::Landed) => {
+            Some("landed on its base — the run observed the change reach it".to_string())
+        }
+        Reported::NoChangeToLand => None,
     }
 }
 
@@ -2352,6 +2355,7 @@ fn journal_loss_line(view: &RunView) -> String {
 }
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn results(view: &RunView) -> String {
     let render = rendering(Rendered::Results, &view.paths.run);
     // The run and how its graph stands — deliberately not the node tally the
