@@ -96,6 +96,7 @@ impl Act {
 }
 
 /// What a render is, while it renders.
+// llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
 struct Inside {
     /// Which view, so a reader of a file three renders appended to can tell them
     /// apart.

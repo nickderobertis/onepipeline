@@ -355,6 +355,8 @@ thread_local! {
     /// prints**: `status` reports the same node on its own line and inside the
     /// summary it prints above it, and two reads of one node would double what a
     /// supervisory look costs to say one thing.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
     static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
         const { std::cell::RefCell::new(BTreeMap::new()) };
 }
