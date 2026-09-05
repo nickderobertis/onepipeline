@@ -1235,7 +1235,16 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 // one to make the assertion product-shaped would be a surface nobody asked for.
 #[test]
 fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
-    let world = World::new("driver-no-graph-run");
+    // What this asserts is a *read* of a record with `graph_run` taken out of it,
+    // and the record is one the live driver also writes: every observer restart
+    // calls `Launch::watched_by` and puts the whole record back, `graph_run`
+    // included. A restart landing between the rewrite below and the `next` that
+    // reads it restores the field, and the read then finds a graph run to address
+    // and says nothing — which is this journey failing for the one reason it is
+    // not about. Restarts off is the only mid-run writer of this record gone, so
+    // the state this sets up is the state `next` reads; the launch still records
+    // what is watching, which is the behaviour restarts were added for.
+    let world = World::new("driver-no-graph-run").with_env(OBSERVER_RESTARTS_ENV, "0");
     world.script("build.wait", "hold");
     let run = start_detached_observed(&world, "unaddressed", vec![agent("build", &[])]);
     world.until("the run to dispatch its node", |world| {
