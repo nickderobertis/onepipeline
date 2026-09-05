@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::dispatch::OBSERVER_RESTARTS_ENV;
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
@@ -1774,13 +1775,6 @@ fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_ad
 /// An observer that stops watching a run that is still being driven is started
 /// again, and the restarting is **bounded**.
 ///
-/// The defect this closes: the driver noticed its observer had gone, wrote one
-/// line to its own log, and returned — so the run went on executing with nothing
-/// comparing what it was doing against what it was asked to do, while every view
-/// reported a plain `ACTIVE`. The only remedy an operator had was `adopt`, which
-/// ends every dispatch running beside it, and one such gap on a real run ran for
-/// about three and a half hours because taking that trade was worse.
-///
 /// The observer here is one that will not stay up: it records what it saw and
 /// exits at once, every time. That is the case the bound exists for — a relaunch
 /// loop against a graph that cannot run spends a whole agent-graph launch per
@@ -1791,8 +1785,7 @@ fn an_observer_that_stops_watching_a_driven_run_is_started_again_within_a_bound(
     // Two rather than the shipped eight, so the bound is reached inside a
     // journey: what is under test is that the count is a bound and that the run
     // says what it did, neither of which is a fact about the default.
-    let world =
-        World::new("driver-observer-restarted").with_env("ONEPIPELINE_OBSERVER_RESTARTS", "2");
+    let world = World::new("driver-observer-restarted").with_env(OBSERVER_RESTARTS_ENV, "2");
     // The node's dispatch is held for the whole journey, so the run is being
     // driven throughout: an observer is restarted for a run that is still
     // working, and a run whose loop had finished would need none.
@@ -1946,6 +1939,109 @@ fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
         rendered.stdout
     );
 
+    world.release("build.go");
+}
+
+/// The shipped bound, unset and unreadable, is eight restarts.
+///
+/// The number an operator gets without choosing one, and the number they get
+/// when what they chose cannot be read: an unreadable value is a value nobody
+/// stated, so it falls back rather than becoming the `0` that would leave a run
+/// unwatched on a typo. Both are driven to exhaustion, because the count is only
+/// a bound if a ninth restart does not happen.
+#[test]
+fn the_shipped_bound_is_eight_restarts_and_an_unreadable_one_falls_back_to_it() {
+    for stated in [None, Some("eight please")] {
+        let mut world = World::new(match stated {
+            None => "driver-observer-shipped-bound",
+            Some(_) => "driver-observer-unreadable-bound",
+        });
+        if let Some(value) = stated {
+            world = world.with_env(OBSERVER_RESTARTS_ENV, value);
+        }
+        // The node's dispatch is held for the whole journey, so the run is being
+        // driven throughout; the observer is not held at all, so it records what
+        // it saw and stops, which is what makes the driver spend its bound.
+        world.script("build.wait", "hold");
+        let run = start_detached_observed(&world, "bounded", vec![agent("build", &[])]);
+
+        world.until("the driver to spend its bound", |world| {
+            world.run_json(&run, "launch.json")["observer_ending"].is_string()
+        });
+        let record = world.run_json(&run, "launch.json");
+        let ending = record["observer_ending"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the record says why nothing is watching: {record}"));
+        assert!(
+            ending.contains("bound of 8 restart(s) is spent"),
+            "the shipped bound was not the one this driver spent ({stated:?}): {ending}"
+        );
+        // Nine graphs watched: the one the driver opened with, and the eight
+        // restarts. Read after the bound was recorded, so a ninth would have had
+        // to happen before this and would be counted here.
+        assert_eq!(
+            world.observer_saw().len(),
+            9,
+            "the driver did not restart its observer exactly eight times ({stated:?})\n{}",
+            world.dump()
+        );
+        assert_eq!(record["observer_runs"].as_array().map(Vec::len), Some(9));
+
+        world.release("build.go");
+        world.until("the run to settle", |world| {
+            world.run_file(&run, "result.json").is_file()
+        });
+    }
+}
+
+/// A launch record the driver cannot write does not end a working observer.
+///
+/// The record is best effort on this path and the observer is not: a run whose
+/// directory has gone read-only — a full disk, a permission that changed under
+/// it — still has an observer started for it, and the driver says on its own log
+/// that what it started is not on the record. The alternative is a run that
+/// stops being watched because a file could not be written.
+#[cfg(unix)]
+#[test]
+fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("driver-observer-record-unwritable");
+    // The node's dispatch is held throughout, so the run is being driven; the
+    // observer is not held, so it stops and the driver starts another.
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "unwritable", vec![agent("build", &[])]);
+    world.until(
+        "the observer to be watching and the node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty()
+                && world.was_invoked(
+                    "oneagentgraph",
+                    &["run", "--label", "onepipeline.node=build"],
+                )
+        },
+    );
+
+    // The run's own directory, closed to new files: `ledger::write_atomic` writes
+    // its temporary beside the target, so this is the write failing at the
+    // syscall rather than anything intercepted. The files already in it stay
+    // readable and appendable, which is what the rest of the run needs.
+    let dir = world.run_file(&run, "");
+    let opened = std::fs::metadata(&dir)
+        .expect("the run directory")
+        .permissions();
+    let mut closed = opened.clone();
+    closed.set_mode(0o555);
+    std::fs::set_permissions(&dir, closed).expect("the run directory closes");
+
+    let watching = world.observer_saw().len();
+    world.until("another observer to be watching", |world| {
+        world.observer_saw().len() > watching
+    });
+    world.until_run_file_holds(&run, "driver.log", "could not record what is watching");
+    world.until_run_file_holds(&run, "driver.log", "started another observer graph");
+
+    std::fs::set_permissions(&dir, opened).expect("the run directory opens again");
     world.release("build.go");
 }
 

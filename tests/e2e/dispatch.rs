@@ -30,7 +30,7 @@ use crate::harness::end_process;
 /// Spelled rather than imported: the crate under test keeps it in a private
 /// module, and it is reached here exactly as an operator reaches it, through the
 /// environment of the process being driven.
-const OBSERVER_RESTARTS_ENV: &str = "ONEPIPELINE_OBSERVER_RESTARTS";
+pub const OBSERVER_RESTARTS_ENV: &str = "ONEPIPELINE_OBSERVER_RESTARTS";
 
 /// The effective oneharness configuration one member's dispatch was prepared
 /// with, read off the run's own merged store.
@@ -3290,12 +3290,10 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
 
 /// A killed observer is replaced, and the run goes on being watched.
 ///
-/// The whole of the defect, against the real sibling: a driver used to notice
-/// its observer had gone, write one line to its own log, and carry on driving an
-/// unwatched run — reporting a plain `ACTIVE` while nothing compared what the run
-/// was doing against what it had been asked to do. The only remedy was `adopt`,
-/// which ends every dispatch running beside it, so one operator left a run
-/// unwatched for about three and a half hours rather than pay that.
+/// Against the real sibling, because the claim is that a graph run this host can
+/// prove is over has another in its place: a run whose observer has gone
+/// executes with nothing comparing what it is doing against what it was asked to
+/// do, while every view reports a plain `ACTIVE`.
 ///
 /// The observer here really ends — its owning process is killed outright, mid
 /// turn — while the run is still being driven, and what is asserted is that the
@@ -3403,12 +3401,11 @@ fn a_killed_observer_is_replaced_and_the_run_goes_on_being_watched() {
 /// A supervisory read can say **which graph** a settlement record belongs to,
 /// after the run has moved past that graph.
 ///
-/// The diagnosability half of the same defect, and the reason it took four runs
-/// to find: a `graph-settled` names no member, so the only thing on it that says
-/// whose it is is the graph run `oneagentgraph` stamped it with — and until the
-/// run recorded every graph that had watched it, the moment `graph_run` moved on
-/// there was nothing left to hold that id against. A reader meeting the dead
-/// observer's records in the store could not tell them from a node dispatch's.
+/// A `graph-settled` names no member, so the graph run `oneagentgraph` stamped it
+/// with is the only thing on it that says whose it is. Unless the run names every
+/// graph that has watched it, that id has nothing to be held against once
+/// `graph_run` has moved on, and the dead observer's records in the store are
+/// indistinguishable from a node dispatch's.
 ///
 /// Read the way a supervisor reads: the run's own merged store, joined to the
 /// run's own launch record. Nothing here knows a graph run id in advance.

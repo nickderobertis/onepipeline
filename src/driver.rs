@@ -852,7 +852,7 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
         // graph it started beside the driver that started it.
         let mut watch = ObserverWatch::of(&paths, record, goal, output);
         std::thread::scope(|scope| {
-            scope.spawn(|| watch_and_reap_observer(watched, &mut watch, &driving));
+            scope.spawn(|| keep_the_run_watched(watched, &mut watch, &driving));
             let settled = engine::drive_holding(&paths, lock);
             driving.store(false, Ordering::Release);
             settled
@@ -881,7 +881,7 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
 /// start: a relaunch loop against a graph that cannot run is worse than no
 /// relaunch, because it spends a whole agent-graph launch per turn of this loop
 /// and reports nothing for any of them.
-fn watch_and_reap_observer(
+fn keep_the_run_watched(
     observer: Option<&mut agentgraph::GraphRun>,
     watch: &mut ObserverWatch<'_>,
     driving: &AtomicBool,
@@ -927,14 +927,14 @@ const DEFAULT_OBSERVER_RESTARTS: u32 = 8;
 /// The environment variable that moves that bound.
 const OBSERVER_RESTARTS_ENV: &str = "ONEPIPELINE_OBSERVER_RESTARTS";
 
-/// How many restarts this driver has.
+/// The bound this driver restarts under.
 ///
 /// `0` is a **value** here rather than an unusable one, which is why it is not
 /// filtered away as the other bounds in this crate filter theirs: it says never
 /// restart, which is exactly what every run did before this existed and is the
 /// off switch for an operator who would rather be told and intervene. Only an
 /// absent or unreadable value falls back to the default.
-fn observer_restarts() -> u32 {
+fn observer_restart_limit() -> u32 {
     std::env::var(OBSERVER_RESTARTS_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -979,7 +979,7 @@ impl<'a> ObserverWatch<'a> {
             record,
             goal,
             output,
-            limit: observer_restarts(),
+            limit: observer_restart_limit(),
             restarted: 0,
         }
     }
