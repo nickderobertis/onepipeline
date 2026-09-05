@@ -242,13 +242,18 @@ pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
 /// waiting on, and a verdict that ignored it would report the run as abandoned —
 /// sending an operator to intervene in a run whose next move is already sitting
 /// in their own queue.
+///
+/// A surface nobody is waiting on does not count, and it is the one case where
+/// the reasoning above runs out: the reader that asked the question has gone, so
+/// there is no next move sitting in anybody's queue, and a run reported as
+/// waiting for a planner would wait for ever.
 pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
     let queue = crate::channel::ChannelState::new(paths).queue();
     queue
         .waiting
         .iter()
         .chain(queue.pending.iter())
-        .any(|surface| surface.blocking)
+        .any(|surface| surface.blocking && !surface.abandoned)
 }
 
 /// Whether a run is being driven, and if not, why not.
@@ -448,6 +453,12 @@ pub(crate) struct Unread {
     /// first, since a rare kind behind a common one is the burial this repairs;
     /// then by name, so the line is stable to read.
     pub(crate) kinds: Vec<(String, usize)>,
+    /// How many surfaces are in the queue that nobody is waiting on: their
+    /// reader exited without an answer. Counted apart from [`count`](Self::count)
+    /// rather than inside it — the count above is the one line a supervisor may
+    /// not filter, and an entry nothing will ever answer degrades it — and
+    /// reported all the same, because their text is still there to read.
+    pub(crate) abandoned: usize,
 }
 
 /// How many kinds a line names before it summarises the rest.
@@ -459,7 +470,8 @@ const MAX_NAMED_KINDS: usize = 4;
 impl Unread {
     pub(crate) fn of(queue: &crate::channel::Queue) -> Self {
         let mut counts: BTreeMap<String, (bool, usize)> = BTreeMap::new();
-        for surface in &queue.waiting {
+        let unread = || queue.waiting.iter().filter(|surface| !surface.abandoned);
+        for surface in unread() {
             // The kind is a stranger's: an observer's frame names it in that
             // persona's own vocabulary, so it goes through the same strip every
             // other borrowed value on these views does.
@@ -477,16 +489,19 @@ impl Unread {
                 .then_with(|| a.2.cmp(&b.2))
         });
         Self {
-            count: queue.waiting.len(),
-            oldest_seconds: queue
-                .waiting
-                .iter()
+            count: unread().count(),
+            oldest_seconds: unread()
                 .map(|surface| sys::now_millis().saturating_sub(surface.queued_at) / 1_000)
                 .max(),
             kinds: ordered
                 .into_iter()
                 .map(|(_, count, kind)| (kind, count))
                 .collect(),
+            abandoned: queue
+                .waiting
+                .iter()
+                .filter(|surface| surface.abandoned)
+                .count(),
         }
     }
 
@@ -1102,6 +1117,18 @@ pub fn status(survey: &Survey) -> String {
                 unread.count,
                 unread.phrase(),
                 crate::telemetry::duration(unread.oldest_seconds.unwrap_or(0) * 1_000)
+            ));
+        }
+        // Off the count above and said out loud anyway. Nothing is waiting for
+        // an answer to these, so counting them would inflate the one line a
+        // supervisor may not filter — but their text is still in the queue and
+        // still worth reading, and a surface that vanished without a word would
+        // be the same silence from the other direction.
+        if unread.abandoned > 0 {
+            out.push_str(&format!(
+                "  {} planner update(s) nobody is waiting on: whatever raised them ended \
+                 without an answer; read them with: onepipeline next {}\n",
+                unread.abandoned, view.paths.run
             ));
         }
         let statuses = view.state.statuses();
@@ -2712,6 +2739,7 @@ mod tests {
                     source: "proposal".into(),
                     blocking,
                     queued_at: sys::now_millis(),
+                    abandoned: false,
                     workstream: None,
                 })
                 .expect("the surface queues");
@@ -2832,6 +2860,7 @@ mod tests {
                 source: "monitor".into(),
                 blocking: true,
                 queued_at: sys::now_millis(),
+                abandoned: false,
                 workstream: Some("build".into()),
             })
             .expect("the surface queues");

@@ -67,7 +67,11 @@ fn raise_blocker(world: &World, run: &str) -> std::process::Child {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    // Written through the child's own handle rather than taken out of it: the
+    // server is the reader waiting on this question, and a stream closed here
+    // would say nobody was waiting on it before the caller has read it. Each
+    // caller closes it when it is done — `drop(serving.stdin.take())`.
+    let stdin = serving.stdin.as_mut().expect("stdin is piped");
     writeln!(
         stdin,
         r#"{{"kind":"blocker","message":"the plan looks wrong; what now?"}}"#

@@ -993,6 +993,7 @@ impl Watch {
             source: crate::channel::source::PROPOSAL.to_owned(),
             blocking: false,
             queued_at: now,
+            abandoned: false,
             workstream: Some(node.to_owned()),
         }
     }

@@ -4215,6 +4215,121 @@ fn the_divergence_record_matches_the_code_it_describes() {
         onepipeline::rules::bytes_of("2GB").is_none(),
         "the record says `2GB` is treated as no limit; the parser accepted it"
     );
+
+    // Divergence 61 restates two things it does not own: the contract's
+    // decision-point sentence, quoted so the proposal names what it would amend,
+    // and the `abandoned` field the surfaces the channel hands out now carry.
+    // Both are gated against their own source, so a change to either fails here
+    // rather than leaving the proposal arguing about text that has moved on.
+    let rest = raw
+        .split_once("\n## 61. ")
+        .expect("the record carries divergence 61")
+        .1;
+    let entry = rest.split_once("\n## ").map_or(rest, |(entry, _)| entry);
+    let quoted = entry
+        .lines()
+        .skip_while(|line| !line.starts_with("> "))
+        .take_while(|line| line.starts_with('>'))
+        .map(|line| line.trim_start_matches('>').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !quoted.is_empty(),
+        "divergence 61 quotes no contract sentence for its proposal to amend"
+    );
+    assert!(
+        contract.contains(&quoted),
+        "divergence 61 quotes a decision-point sentence the contract no longer carries: {quoted}"
+    );
+    let surface = std::fs::read_to_string(repo_root().join("src/channel.rs"))
+        .expect("the channel ships")
+        .split_once("pub(crate) struct Surface {")
+        .expect("the surface is declared")
+        .1
+        .split_once("\n}")
+        .expect("the surface is closed")
+        .0
+        .to_string();
+    assert!(
+        surface
+            .lines()
+            .any(|line| line.trim() == "pub abandoned: bool,"),
+        "divergence 61 describes an `abandoned` field the surface a reader is handed does not \
+         declare"
+    );
+    assert!(
+        doc.contains("`abandoned: true`"),
+        "divergence 61 no longer says what a reader sees on a surface nobody is waiting on"
+    );
+
+    // The same entry's second half restates two more things it does not own: the
+    // name of the environment variable that bounds a serving session, and the
+    // set of endings that session distinguishes. Renaming either, or adding a
+    // fourth ending, fails here rather than leaving the entry describing a
+    // discriminator the code has moved past.
+    let bound = std::fs::read_to_string(repo_root().join("src/channel.rs"))
+        .expect("the channel ships")
+        .split_once("pub const SERVE_SESSION_ENV: &str = \"")
+        .expect("the channel names the serving session's bound")
+        .1
+        .split_once('"')
+        .expect("that name is a string literal")
+        .0
+        .to_string();
+    assert!(
+        entry.contains(&bound),
+        "divergence 61 names a session bound the channel does not declare: {bound}"
+    );
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    let endings: Vec<String> = driver
+        .split_once("enum Served {")
+        .expect("the driver names why a serving session stopped")
+        .1
+        .split_once("\n}")
+        .expect("that enum is closed")
+        .0
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(',') && !line.starts_with("///"))
+        .map(|line| line.trim_end_matches(',').to_string())
+        .collect();
+    assert_eq!(
+        endings.len(),
+        3,
+        "divergence 60 says a serving session has three endings; the driver declares {endings:?}"
+    );
+    for ending in &endings {
+        assert!(
+            entry.contains(ending.as_str()),
+            "the driver declares an ending divergence 60 does not name: {ending}"
+        );
+    }
+    // And which of them mark: the entry says exactly one ending withdraws
+    // nothing, so exactly one has to sit outside the guard that marks.
+    // Anchored on the mark itself rather than on the first `matches!` in the
+    // file: the ending decides more than one thing, so a guard picked by shape
+    // alone is whichever one happens to come first.
+    let guard = driver
+        .split_once("channel.abandon(&raised)?;")
+        .expect("the driver marks what a session left behind")
+        .0
+        .rsplit_once("if matches!(ending, ")
+        .expect("that mark is guarded by which ending the session reached")
+        .1
+        .split_once(')')
+        .expect("that guard is closed")
+        .0;
+    let marking: Vec<&String> = endings
+        .iter()
+        .filter(|ending| guard.contains(&format!("Served::{ending}")))
+        .collect();
+    assert_eq!(
+        marking.len(),
+        endings.len() - 1,
+        "divergence 60 says exactly one ending withdraws nothing; the guard marks {marking:?} of \
+         {endings:?}"
+    );
 }
 
 #[test]

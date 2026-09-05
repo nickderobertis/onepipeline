@@ -1566,7 +1566,11 @@ fn decisions_now(
     }
     let queue = channel.queue();
     for surface in queue.waiting.iter().chain(queue.pending.iter()) {
-        if !surface.blocking {
+        // A surface nobody is waiting on holds nothing back. It was a decision
+        // point while its asker was there to act on the answer; with that asker
+        // gone there is no answer coming, and a subtree paused on one would be
+        // paused for the rest of the run.
+        if !surface.blocking || surface.abandoned {
             continue;
         }
         let reference = DecisionRef::Surface(surface.id);
@@ -1899,6 +1903,7 @@ pub(crate) fn record_rejection(
             source: crate::channel::source::RECONCILER.into(),
             blocking: false,
             queued_at: sys::now_millis(),
+            abandoned: false,
             workstream: None,
         },
     )
@@ -2779,6 +2784,7 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
         source: crate::channel::source::RECONCILER.into(),
         blocking: false,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: Some(step.node.clone()),
     }
 }
@@ -3594,6 +3600,7 @@ pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
         source: crate::channel::source::MONITOR.into(),
         blocking: false,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: crate::channel::target_of(command),
     })
 }
@@ -3622,6 +3629,7 @@ pub(crate) fn finding_surface(
         .into(),
         blocking,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: node,
     }
 }
@@ -3684,6 +3692,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: Some(checked.node.as_str().to_owned()),
     }
 }
@@ -3740,6 +3749,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
         queued_at: sys::now_millis(),
+        abandoned: false,
         workstream: None,
     }
 }
@@ -3817,6 +3827,7 @@ fn watch_for_quiet(
                 source: crate::channel::source::PROPOSAL.into(),
                 blocking: false,
                 queued_at: sys::now_millis(),
+                abandoned: false,
                 workstream: Some(node.clone()),
             },
         )?;
