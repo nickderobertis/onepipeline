@@ -1184,7 +1184,7 @@ fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces
     world.script("build.wait", "hold");
     let run = running(&world, "blankrecord", vec![agent("build", &[])]);
 
-    // llmlint: ignore[tests_mirror_real_usage] there is no user-facing route to
+    // llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing route to
     // this state and that is the property under test: every path that writes an
     // asker checks it first, so a record naming nobody is one only another build,
     // a hand edit, or a partial write can leave. What the journey drives through
@@ -1206,6 +1206,7 @@ fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces
     )
     .expect("the record is staged");
     std::fs::rename(&staged, &queue).expect("the record is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The run answers for it exactly as it does for any question nobody has read.
     world
