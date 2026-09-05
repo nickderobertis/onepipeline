@@ -2065,6 +2065,10 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        // Raised by a command that has already answered its caller and exited,
+        // so there is no listener to name and none to come back: nothing
+        // abandons this and nothing adopts it.
+        asker: None,
         workstream: None,
     })?;
     let mut journal = Journal::open(&paths);
@@ -2605,6 +2609,33 @@ fn serve_session_deadline() -> Result<Option<Instant>> {
         })
 }
 
+/// Who this session listens on behalf of, or `None` for one that listens on its
+/// own.
+///
+/// Absent is the default and is what [`ASKER_ENV`](crate::channel::ASKER_ENV)
+/// documents: a session that names no asker adopts nothing and is adopted by
+/// nobody. Anything *present* is external input at a trust boundary, and a blank
+/// value is **refused** rather than read as the absence it is not — an asker
+/// every session matches equally is not an identity, and the session that had it
+/// would take over questions belonging to askers it has never heard of. The
+/// refusal is made before the first frame is read, so a session that cannot say
+/// who it listens for never raises a question under the wrong name.
+fn serve_asker() -> Result<Option<String>> {
+    let key = crate::channel::ASKER_ENV;
+    let Some(value) = std::env::var_os(key) else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy().into_owned();
+    if value.trim().is_empty() {
+        return Err(Error::Refused(format!(
+            "{key} is set to a blank value, which names no asker; leave it unset for a session \
+             that listens on its own, or set it to the one value every session of this asker \
+             carries"
+        )));
+    }
+    Ok(Some(value))
+}
+
 /// Why a serving session stopped, which is the whole of what decides whether
 /// what it raised is still owed an answer.
 ///
@@ -2638,7 +2669,16 @@ fn serve(args: &RunArgs) -> Result<i32> {
     // Every surface this session raised, so that what it leaves behind can be
     // said out loud rather than left standing as a question with no asker.
     let mut raised: Vec<u64> = Vec::new();
+    let asker = serve_asker()?;
     let session_deadline = serve_session_deadline()?;
+    // Before a frame is read, and before anything this session raises: an asker
+    // that re-armed is waiting on a question an earlier listener of its own gave
+    // up, and the manager it is waiting on may look at the queue at any moment.
+    // Taken into `raised` as well, because this session is now the listener that
+    // will leave them behind if its own asker goes.
+    if let Some(asker) = &asker {
+        raised.extend(channel.attend(asker)?.into_iter().map(|surface| surface.id));
+    }
     let mut ending = Served::AskerGone;
     // Frames arrive on a thread of their own, so the bound above is a real
     // deadline and not merely a thing noticed between exchanges: a member that
@@ -2724,6 +2764,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
             blocking: frame.blocking,
             queued_at: sys::now_millis(),
             abandoned: false,
+            asker: asker.clone(),
             workstream: frame.node,
         })?;
         let mut journal = Journal::open(&paths);

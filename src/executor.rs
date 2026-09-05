@@ -315,7 +315,10 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// registers nothing. The **scratch directory** is this dispatch's alone, which
 /// is why the launch below declares [`Environment::PerLaunch`]: the pair has to
 /// live somewhere no sibling dispatch can read or overwrite, and that is a
-/// process rather than a map.
+/// process rather than a map. The **asker** is that same uniqueness read as an
+/// identity: the wrapper above asks through a succession of `channel serve`
+/// listeners, and this is what tells them they are serving one side that is
+/// still waiting rather than a series of sides that have each gone.
 ///
 /// # Errors
 ///
@@ -328,10 +331,14 @@ fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
         .iter()
         .map(|run| (crate::agentgraph::RUN_ID_ENV.to_string(), run.clone()))
         .collect();
-    env.push((
-        NODE_SCRATCH_DIR_ENV.to_string(),
-        make_node_scratch_dir(labels)?.display().to_string(),
-    ));
+    let scratch = make_node_scratch_dir(labels)?.display().to_string();
+    // The asker's name is the scratch directory's own path rather than a second
+    // thing minted beside it: what has to be true of it is that every session
+    // this dispatch serves through carries the same value and no other dispatch
+    // carries it, and that is exactly what the directory above already is. It is
+    // read as an opaque word and never as a path — see `channel::ASKER_ENV`.
+    env.push((crate::channel::ASKER_ENV.to_string(), scratch.clone()));
+    env.push((NODE_SCRATCH_DIR_ENV.to_string(), scratch));
     Ok(env)
 }
 

@@ -1297,16 +1297,22 @@ pub fn status(survey: &Survey) -> String {
                 ),
             });
         }
-        if let Some(pending) = crate::channel::ChannelState::new(&view.paths).pending() {
+        // Whatever is in the slot, said either way — but not the same way. A
+        // surface nobody is waiting on any more is not a decision this run is
+        // held on, and reporting it as one is the defect this line used to have;
+        // saying nothing about it instead would lose the last place its text is
+        // shown, since it has been delivered and `next` does not hand it out
+        // twice.
+        if let Some(held) = crate::channel::ChannelState::new(&view.paths).held() {
             out.push_str(&format!(
-                "  waiting for planner {}: {} — {}\n",
-                if pending.blocking {
-                    "decision"
-                } else {
-                    "reply"
+                "  {}: {} — {}\n",
+                match (held.abandoned, held.blocking) {
+                    (true, _) => "a planner update nobody is waiting on any more",
+                    (false, true) => "waiting for planner decision",
+                    (false, false) => "waiting for planner reply",
                 },
-                pending.kind,
-                pending.message
+                held.kind,
+                held.message
             ));
         }
         let unread = view.unread();
@@ -3091,6 +3097,7 @@ mod tests {
                     blocking,
                     queued_at: sys::now_millis(),
                     abandoned: false,
+                    asker: None,
                     workstream: None,
                 })
                 .expect("the surface queues");
@@ -3212,6 +3219,7 @@ mod tests {
                 blocking: true,
                 queued_at: sys::now_millis(),
                 abandoned: false,
+                asker: None,
                 workstream: Some("build".into()),
             })
             .expect("the surface queues");

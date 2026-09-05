@@ -1904,6 +1904,7 @@ pub(crate) fn record_rejection(
             blocking: false,
             queued_at: sys::now_millis(),
             abandoned: false,
+            asker: None,
             workstream: None,
         },
     )
@@ -2785,6 +2786,7 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        asker: None,
         workstream: Some(step.node.clone()),
     }
 }
@@ -3601,6 +3603,7 @@ pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        asker: None,
         workstream: crate::channel::target_of(command),
     })
 }
@@ -3630,6 +3633,7 @@ pub(crate) fn finding_surface(
         blocking,
         queued_at: sys::now_millis(),
         abandoned: false,
+        asker: None,
         workstream: node,
     }
 }
@@ -3693,6 +3697,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        asker: None,
         workstream: Some(checked.node.as_str().to_owned()),
     }
 }
@@ -3750,6 +3755,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        asker: None,
         workstream: None,
     }
 }
@@ -3828,6 +3834,7 @@ fn watch_for_quiet(
                 blocking: false,
                 queued_at: sys::now_millis(),
                 abandoned: false,
+                asker: None,
                 workstream: Some(node.clone()),
             },
         )?;

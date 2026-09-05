@@ -3651,21 +3651,27 @@ counted by the unread accounting (`views::Unread`), and does not make the run
 read as awaiting a planner (`views::blocking_surface`). It is **not** deleted:
 the queue holds the only copy of an unread surface's text that any reader can
 reach, so the text stays where a reader already looks for it, `next` still hands
-it over carrying `abandoned: true`, and `status` says how many are there. The
-one thing genuinely withdrawn is the pending slot, whose surface has already
-been delivered to the reader holding it.
+it over carrying `abandoned: true`, and `status` says how many are there. A
+surface already in the pending slot is marked **where it is**: it has been
+delivered, so it is not handed over again, and the slot is what a verdict binds
+to and where a listener coming back for it looks. `status` says that one out
+loud on its own line rather than as a decision the run is held on. (This
+paragraph originally said the slot was withdrawn and its surface put back among
+the readable ones; **62** is why it is not, and what that cost.)
 
 **The discriminator is the asker, never the server**, and `serve` now names which
 ending it reached rather than inferring one from the fact that its loop stopped.
 `driver::Served` is that set, and it has exactly three members. `AskerGone` — the
 frame stream ended — and `Completed` — the member declared its work done in a
-verdict this session carried back to it — both prove the side that was asking has
-gone, and both mark. `SessionOver` proves only that *this process* is done: the
-member is still holding the stream open and still working, so a question it is
-still owed is not marked, and the surface stays counted, claimable, readable, and
+verdict this session carried back to it — both mark what the session leaves
+behind. `SessionOver` proves only that *this process* is done: the member is
+still holding the stream open and still working, so a question it is still owed
+is not marked, and the surface stays counted, claimable, readable, and
 answerable. The stream is therefore not what tells the endings apart — a
 completed member's is still open too — and whether anybody is left to read an
-answer is.
+answer is. **What no ending settles for good** is whether the *asker* has gone:
+a listener that ends is one listener, and **62** is the other half — a later
+listener of the same asker takes back what this one gave up.
 
 Making `SessionOver` reachable at all is what `ONEPIPELINE_SERVE_SESSION_SECONDS`
 is for. Unset — the default, and every existing caller — is unbounded: the
@@ -3701,3 +3707,112 @@ run's own `channel/surfaces.jsonl`, which carries a further line under the
 surface's own id. The `decision-cleared` the loop already emits when the surface
 stops holding its subtree is unchanged, and says the same thing about the
 dependents it released.
+
+## 62. A question is taken back over by the next listener of the same asker, which the contract does not name — OPEN
+
+**Proposal (for the planner who owns the contract): amend the decision-point
+sentence 61 quotes so that the third clearing is the *asker* going and never the
+listener it spoke through. A blocking surface stops holding its dependents back
+when nobody is left waiting for its answer; a serving process exiting is not that
+fact, and while a later session of the same asker is still waiting on what an
+earlier one raised, the question is a decision point again.**
+
+61 named a third clearing and then read it off the wrong thing. It said that a
+frame stream ending proves the side that was asking has gone — true of a member
+whose whole conversation the stream is, and **false of every asker that rents a
+listener**. The one supported way a dispatched agent puts a blocking question to
+its manager is such an asker: `ask-manager.sh` raises the question through one
+`onepipeline channel serve`, whose stdin is a pipe a `printf` closes at once, and
+then waits for a verdict through a *succession* of those sessions — re-arming
+each time one exits with the same question still open and the same agent still
+blocked. Every one of those exits was read as the agent going away.
+
+**What it cost.** Measured on one host, one journey of the consuming repository
+run alone against three published engines with nothing else changed: 7.10s
+passing one release back, 9.19s passing at the release before this behaviour,
+and a **728.06s failure** at the release that added it. The queue at the moment
+of failure held `{"waiting": [], "pending": null, "next_id": 3}` — the question
+in neither slot — because two halves compounded: the exiting listener withdrew
+the pending slot and put the question back among the readable ones, and the next
+`next` then consumed it out of the queue entirely. A manager's verdict naming it
+was refused, correctly, for naming a question the run had not handed out. Nothing
+raised a surface, nothing failed a node, and the agent blocked for its whole
+reply window and was killed with nothing on either pipe: the failure is invisible
+from a manager's seat, because a question that never arrives looks exactly like
+an agent that never had one.
+
+**What the code does.** A serving session says **who it listens for** before it
+reads a frame — `ONEPIPELINE_CHANNEL_ASKER`, an opaque word compared only for
+equality — and every surface it raises carries that asker. `ChannelState::attend`
+is `abandon`'s other half: at the start of a session, every surface of that same
+asker that an earlier session marked has its mark cleared, in place, and the
+session takes them into what it will itself leave behind. So a question a manager
+has read is in the pending slot again for a verdict to name; one nobody has read
+counts as unread again and holds its subtree again; and neither is moved,
+re-queued, or handed to a manager a second time. The run's own
+`channel/surfaces.jsonl` carries the correction under the surface's own id,
+beside the line that said nobody was waiting on it. Nothing was added to the
+journal: this library's kinds are a closed set the contract enumerates, and the
+`decision-pending` the loop already emits when the question holds its subtree
+again says what happened.
+
+**Adoption is scoped to the asker, and that is what keeps the repair from
+undoing 61.** Run-wide adoption would have been simpler and is wrong: replies on
+this channel are claimed by whichever reader reaches one next, so *any* live
+session is arguably a reader — and a dead member's question would then be
+resurrected, holding its subtree and inflating the one count a supervising
+manager may not filter, for as long as any unrelated session happened to be
+serving that run. That is 61's own defect arriving through another door. A
+session of another asker adopts nothing, and a session naming no asker adopts
+nothing and is adopted by nothing, which is every caller that predates this.
+
+**Every dispatch already carries an asker**, composed beside its scratch
+directory in `executor::prepare_dispatch_env` and valued as that directory's
+path: what has to be true of the value is that every session one dispatch serves
+through carries it and no other dispatch does, which is exactly what that
+directory already is. So the wrapper above is named without changing a line of
+it. A value that is present but blank is **refused** before the first frame is
+read: an asker every session matches equally is not an identity, and the session
+holding it would take over questions belonging to askers it has never heard of.
+
+**What a consumer writing an asking wrapper may rely on**, without reading any of
+the above:
+
+1. A question is raised by writing one compact JSON frame to one `channel serve`
+   session, which queues it and waits for the verdict.
+2. That session carries an asker if `ONEPIPELINE_CHANNEL_ASKER` is set in its
+   environment. A dispatch this engine makes sets it; a wrapper may set it
+   itself, to any non-blank word that is the same for every session of one asker
+   and different for every other asker.
+3. **Re-arming is starting another session carrying the same asker and sending it
+   any frame.** Before that session reads the frame, everything the asker left
+   outstanding is owed an answer again: a question a manager had read is back in
+   the slot a verdict binds to, and `status` reports the run as waiting for that
+   decision. This holds however many times a listener is replaced.
+4. Between one session ending and the next beginning, the question reads as one
+   nobody is waiting on: it holds nothing, is not counted unread, and the run
+   does not report awaiting a planner. Nothing is lost in that window, and the
+   next session closes it.
+5. A question a manager has already been handed is **not handed out again**.
+   `next` will not return it; it stays in the pending slot, and `status` prints
+   its text on a line of its own while nobody is waiting on it.
+6. When no further session of that asker starts, the mark stands: the subtree is
+   released, the unread count stays clean, and the text stays readable — through
+   `next` if it was never read, and through `status` if it was.
+7. A session of a different asker changes none of this, and neither does one
+   naming no asker.
+
+Held end to end by
+`channel::a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_asker`,
+which drives three real `channel serve` processes it starts and lets end on their
+own — none is signalled — leaves one question open across **two** replacements of
+the listener, and asserts on the verdict a manager sent afterwards arriving on
+the third listener's own stdout rather than on any stand-in for it; and by
+`channel::a_listener_of_another_asker_leaves_an_ended_askers_question_alone`,
+which is the same seam from the other side. 61's own two journeys are unchanged
+and still hold the direction it was written for.
+
+**What this entry is waiting on** is whether the contract wants the asker named
+on its public surface at all — the environment variable, and the `asker` a
+surface `next` hands back now carries — or whether the third clearing should be
+stated in the sentence 61 quotes and the mechanism left unspecified.

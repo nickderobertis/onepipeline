@@ -994,6 +994,7 @@ impl Watch {
             blocking: false,
             queued_at: now,
             abandoned: false,
+            asker: None,
             workstream: Some(node.to_owned()),
         }
     }

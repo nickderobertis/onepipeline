@@ -705,6 +705,16 @@ impl World {
             // so a rendezvous nobody releases fails as the timeout it is, with
             // the evidence `until` prints.
             .env(RENDEZVOUS_SECONDS_ENV, "180")
+            // The asker *this* suite's own dispatch was given. This suite runs
+            // inside a dispatch of the very system it is a library for, and a
+            // leaked value would make every `channel serve` a journey starts one
+            // listener of one asker — so two sessions a journey means as
+            // strangers would take each other's questions back over, and the
+            // scoping under test would be true of nothing the journey ran. A
+            // journey that means them as one asker says so with `.env` of its
+            // own; what a genuine dispatch carries is composed per dispatch by
+            // `executor` and is untouched by this.
+            .env_remove(onepipeline::channel::ASKER_ENV)
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
