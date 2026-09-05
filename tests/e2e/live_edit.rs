@@ -36,7 +36,7 @@ fn live(world: &World, name: &str, nodes: Vec<Value>, hold: &[&str]) -> String {
 }
 
 fn envelope(commands: Value) -> String {
-    json!({"version": 1, "commands": commands}).to_string()
+    json!({"version": 2, "commands": commands}).to_string()
 }
 
 /// The commands the reconciler committed, in order.
@@ -129,7 +129,7 @@ fn consumes_on_the_board(world: &World, run: &str, node: &str) -> Option<Value> 
 }
 
 #[test]
-fn add_reparent_and_context_are_applied_and_reported_applied() {
+fn add_reparent_and_note_are_applied_and_reported_applied() {
     let world = World::new("edit-apply");
     let run = live(&world, "applied", vec![agent("slow", &[])], &["slow"]);
 
@@ -139,23 +139,23 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
             &envelope(json!([
                 {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra"}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
-                {"op": "context", "id": "extra", "note": "the fixture moved"},
+                {"op": "note", "id": "extra", "addressee": "worker",
+                 "text": "the fixture moved", "deliver": "next"},
             ])),
         )
         .exited(0)
         .out_has("\"applied\"");
 
-    assert_eq!(committed(&world, &run), vec!["add", "reparent", "context"]);
-    // The note names a node that has never been dispatched, so there is no turn
-    // to deliver it into — which is what every `context` edit written before
-    // delivery had modes relied on. It rides the next dispatch, as it always
-    // did, and the record says so.
-    let context = world
+    assert_eq!(committed(&world, &run), vec!["add", "reparent", "note"]);
+    // `deliver: next` reaches for no turn at all, and `persist` defaults on, so
+    // the note is carried to the node's next dispatch — which is the disposition
+    // the record has to name rather than leave to inference.
+    let note = world
         .events_of(&run, "edit-committed")
         .into_iter()
-        .find(|event| event["payload"]["command"]["op"] == "context")
+        .find(|event| event["payload"]["command"]["op"] == "note")
         .expect("the note was committed");
-    assert_eq!(context["payload"]["operations"][0]["delivery"], "deferred");
+    assert_eq!(note["payload"]["operations"][0]["reached"], "carried");
     assert!(
         world.events_of(&run, "turn-interrupted").is_empty(),
         "a node with no dispatch had its turn reached for"
@@ -1495,14 +1495,15 @@ fn every_ops_refusal_case_is_answered_with_its_reason_and_exit_two() {
             "not a ready, waiting human action",
         ),
         (
-            "context on an unknown node",
-            json!([{"op": "context", "id": "ghost", "note": "hello"}]),
+            "a note to an unknown node",
+            json!([{"op": "note", "id": "ghost", "addressee": "worker", "text": "hello"}]),
             "no node 'ghost'",
         ),
         (
-            "context with an empty note",
-            json!([{"op": "context", "id": "pending", "note": "   "}]),
-            "cannot be empty",
+            "a note whose two fields leave it nowhere to go",
+            json!([{"op": "note", "id": "pending", "addressee": "worker", "text": "hello",
+                    "deliver": "next", "persist": false}]),
+            "reaches nobody whatever the run does",
         ),
         (
             "drop the node an edit would leave in a cycle",
@@ -1623,7 +1624,10 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
     // llmlint: ignore-end[tests_mirror_real_usage]
     let reply = world.run_with_stdin_on(
         command,
-        &envelope(json!([{"op": "context", "id": "slow", "note": "a note"}])),
+        &envelope(json!([
+            {"op": "note", "id": "slow", "addressee": "worker", "text": "a note",
+             "deliver": "next"}
+        ])),
     );
     reply.exited(crate::harness::QUEUED).out_has("\"queued\"");
 
@@ -1711,7 +1715,7 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "author": "monitor",
+            &json!({"version": 2, "author": "monitor",
                     "commands": [{"op": "requeue", "id": "sweep"}]})
             .to_string(),
         )
@@ -1737,7 +1741,7 @@ fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners(
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "author": "monitor", "commands": [
+            &json!({"version": 2, "author": "monitor", "commands": [
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
                                        "task": "## What\nsweep up", "deps": ["slow"]}},
                 {"op": "cancel", "id": "extra", "reason": "it is plainly redundant"},
@@ -1827,7 +1831,7 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "author": "monitor", "commands": [settle("publish", evidence)]})
+            &json!({"version": 2, "author": "monitor", "commands": [settle("publish", evidence)]})
                 .to_string(),
         )
         .exited(REFUSED)
@@ -2299,7 +2303,7 @@ fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
     world
         .run_with_stdin(
             &["reply", "legacypark"],
-            &json!({"version": 1, "author": "monitor",
+            &json!({"version": 2, "author": "monitor",
                     "commands": [{"op": "requeue", "id": "sweep"}]})
             .to_string(),
         )

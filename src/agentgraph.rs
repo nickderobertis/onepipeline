@@ -2120,9 +2120,9 @@ fn interrupt_by_process(address: &TurnAddress, input: &str) -> Interrupt {
         // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
         // reaches this arm. The executable is resolved from one variable the whole run
         // inherits, and a run whose `oneagentgraph` is missing fails at its launch — the
-        // journey would be over before a `context` edit could be submitted to it. The unit
+        // journey would be over before an arrival note could be delivered to it. The unit
         // test below drives this function directly, which is the only entry point that
-        // exists for it; `tests/e2e/context_delivery.rs` drives every arm a run can reach,
+        // exists for it; `tests/e2e/adoption.rs` drives every arm a run can reach,
         // including a delivery the sibling attempted and failed.
         Err(error) => {
             return Interrupt {

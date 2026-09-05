@@ -765,7 +765,7 @@ fn a_cancelled_dispatch_still_leaves_a_branch_and_it_is_read_like_any_other() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
         )
         .exited(0);
     world.until("the cancelled node to settle", |world| {

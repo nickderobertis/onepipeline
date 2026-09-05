@@ -199,7 +199,7 @@ fn the_monitor_persona_observes_and_never_drives() {
     }
     // The ops it may issue, and the three it is refused, named so the persona
     // and the allowlist cannot drift apart.
-    for op in ["retry", "requeue", "cancel", "context", "add"] {
+    for op in ["retry", "requeue", "cancel", "add"] {
         assert!(
             text.contains(&format!("`{op}`")),
             "the monitor persona does not name the `{op}` op it may issue"

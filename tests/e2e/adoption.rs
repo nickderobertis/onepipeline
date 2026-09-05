@@ -33,6 +33,7 @@ use crate::harness::{
     agent, counts, lifecycle, plan_of, project_id, reporting, Counts, Repository, World,
     LOOP_STATS_ENV, REFUSED,
 };
+use oneagentgraph::event::{session_label, SESSION_LABEL};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
 
@@ -1590,19 +1591,28 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     // The lever really was pulled, and the sibling's own record of it reached the
     // merged store stamped with the node it was about.
     let interrupted = world.events_of(&run, "turn-interrupted");
-    eprintln!("DIAG kinds={:?}", world.kinds(&run));
-    eprintln!(
-        "DIAG invocations={:?}",
-        world
-            .invocations()
-            .iter()
-            .filter(|c| c["tool"] == "oneagentgraph")
-            .map(|c| c["args"][0].clone())
-            .collect::<Vec<_>>()
-    );
     assert_eq!(interrupted.len(), 1, "{interrupted:?}");
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(true));
     assert_eq!(interrupted[0]["labels"]["node"], json!("consumer"));
+    // And it names the conversation its own producer stamped rather than the
+    // dispatch's. This is the one kind that names a conversation and that no
+    // dispatch produces, so `session.rs`'s drift gate excludes it and this is
+    // where the label rule is held over an envelope that really exists: the
+    // value is `"<stream>.<member>"`, computed by the producing library rather
+    // than by a join that happens to agree on these ids.
+    let stream = interrupted[0]["stream"]
+        .as_str()
+        .expect("an envelope names its stream");
+    let member = interrupted[0]["labels"]["member"]
+        .as_str()
+        .expect("an interruption names the member it reached for");
+    assert_eq!(
+        interrupted[0]["labels"][SESSION_LABEL],
+        json!(session_label(stream, member).expect("a stream and a member name one")),
+        "the interruption reached the journal without the conversation its producer \
+         stamped: {}",
+        interrupted[0]
+    );
 
     world.release("consumer.go");
     world.until("the run to settle", |world| {
@@ -1923,7 +1933,7 @@ fn a_deferred_arrival_note_rides_the_next_dispatch_and_is_consumed_by_it() {
     // note was owed to. `cancel` takes a node that is pending or running, so it
     // comes while the turn is still held; `requeue` refuses while the dispatch it
     // asked to stop is still in flight, so it is retried until that one has gone.
-    let envelope = |commands: Value| json!({"version": 1, "commands": commands}).to_string();
+    let envelope = |commands: Value| json!({"version": 2, "commands": commands}).to_string();
     world
         .run_with_stdin(
             &["reply", &run],

@@ -170,7 +170,7 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
         .run_with_stdin(
             &["reply", "record"],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{
                     "op": "retry",
                     "id": "flaky",
