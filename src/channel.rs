@@ -704,7 +704,7 @@ pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 /// A stream that ended leaves what this session raised marked: nothing is
 /// listening for those answers *now*, which is what the mark says and all it says
 /// — an asker that rents its listeners takes them back through
-/// [`ChannelState::attend`] the moment it arms another. A session that reached
+/// `ChannelState::attend` the moment it arms another. A session that reached
 /// this bound does not even say that much: the stream is still open, the member
 /// is still there, and every question it raised is still owed an answer, so
 /// nothing is marked at all.
@@ -717,7 +717,7 @@ pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
 /// asker may raise one question through one session and wait for the verdict
 /// through a succession of them. Two sessions carrying the same value are one
 /// asker, and the later takes back over what the earlier left outstanding — see
-/// [`ChannelState::attend`], which is where that is spelled out.
+/// `ChannelState::attend`, which is where that is spelled out.
 ///
 /// The value is **opaque and compared for equality only**. Every dispatch this
 /// crate makes carries one of its own, composed in
