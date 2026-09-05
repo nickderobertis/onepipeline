@@ -252,20 +252,20 @@ onepipeline reply run-1 <<<'{"version":2,"commands":[    # move the bar
 
 A `note` is delivered into the node's **live conversation**, to whichever party of
 it is speaking, and the other party receives it with that party's response — so a
-correction reaches the worker and its judge alike rather than one of them. It takes
-`id`, a required `addressee` of `worker`, `supervisor` or `both`, `text`, an
-optional `criterion` that enters the bar the judge of that conversation decides
-against, and two independent fields: `deliver`, `live` or `next`, deciding only
-whether the running turn is attempted, and `persist`, deciding only whether a note
-no turn took is composed into the node's next dispatch. Both default to reaching
-the running turn and keeping the note where nothing did — `deliver: live` with
-`persist: true` — and the four combinations, the dispositions a note is answered
-with, and the one rule that a note reaching nobody is refused are declared on
-`onepipeline::channel::Command::Note`. A note carried forward is rendered into
-that dispatch under `## Planner context`, saying of itself that it reports
-observed state and adds no acceptance criteria, and it is consumed when that
-dispatch takes it — so beyond the one conversation it reached, a note does not
+correction reaches the worker and its judge alike rather than one of them. Whose
+task it updates is named rather than inferred, it may bind a criterion the judge of
+that conversation then decides against, and a note that would reach nobody is
+refused rather than accepted quietly. A note no running turn took is carried to the
+node's next dispatch, rendered there under `## Planner context`, saying of itself
+that it reports observed state and adds no acceptance criteria, and consumed when
+that dispatch takes it — so beyond the one conversation it reached, a note does not
 change what the node is judged against.
+
+**Its field set, each field's default, the four combinations of its two delivery
+axes, and the dispositions it answers with are declared on
+`onepipeline::channel::Command::Note`**, and nowhere else in this repository — one
+declaration a consumer reads rather than a second copy here that could drift from
+it.
 
 An `amend` **does** change that: its text becomes part of the node's effective
 task, rendered under `## Amendment` above the task's operational notes and claiming

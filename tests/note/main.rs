@@ -775,6 +775,52 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
     }
 }
 
+/// A note whose live delivery is really **attempted and refused** is carried,
+/// rather than refused with it.
+///
+/// The other way a note reaches no running turn, and the one only the conversation
+/// can answer: `a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carried`
+/// drives a node that has never reported a member, so nothing is asked at all.
+/// Here a member was reported and *is* asked, and the ask fails. `persist` treats
+/// the two the same on purpose — what it promises is about the note reaching a
+/// running turn, not about why it did not — and a journey against an absent
+/// conversation cannot show that half.
+///
+/// The failure is the one this suite can produce on demand: a run composing the
+/// `oneagentgraph` **executable**, whose command line has no verb for the note
+/// seam, which is what `world.cmd` rather than `world.agentgraph_cmd` selects.
+/// `a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable` drives
+/// the same failed ask against a node that has settled `done` and reads the
+/// refusal; this one drives it against a node that has **not**, so there is a
+/// dispatch ahead of it for `persist` to carry the note to, and the same failure
+/// is an answer rather than a refusal.
+#[test]
+fn a_note_a_failed_delivery_attempt_is_carried_rather_than_refused_with_it() {
+    let world = World::new("note-attempted");
+    let run = "attempted";
+    // The node's turn fails, so its dispatch settles and the node settles
+    // `failed` — which, unlike `done`, still has a dispatch ahead of it.
+    world.script("harness.fail", "");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the run's driver to release it", |world| {
+        !world.run_file(run, "owner.lock").exists()
+    });
+
+    world
+        .run_with_stdin_on(
+            world.cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let operation = recorded(&world, run);
+    assert_eq!(
+        operation["reached"],
+        json!("carried"),
+        "a note whose delivery was attempted and failed was not carried: {operation}"
+    );
+}
+
 /// A note offered while the **judge** is the party taking a turn re-takes that
 /// decision with the note in hand, and rides the response back to the worker.
 ///
