@@ -363,16 +363,10 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     world.release("build.go");
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the three journeys
-// below cost 9.7s, 10.7s and 10.8s and run concurrently in 10.8s together — the same tier,
-// the same binary, and the same real `onepipeline` subprocess every other journey in this
-// file drives, and cheaper than journeys already beside them. Their one-second reply bounds
-// are what makes them that fast: each is a failure bound the server leaves the moment it is
-// answered, not a sleep. The separately-edged project this repository does have,
-// `onepipeline-note-journeys`, is edged on *conversational* cost — each of its journeys
-// holds a two-party turn open — which none of these has; moving them behind that edge would
-// put them where a change to `src/channel.rs` does not run them, which is the one change
-// that must.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the three journeys below
+// cost 10.8s together and hold no two-party turn open, so the one separately-edged project
+// here — `onepipeline-note-journeys`, edged on conversational cost — would put them where a
+// change to `src/channel.rs` does not run them, which is the one change that must.
 /// A surface whose server exited with the side that asked already gone stops
 /// counting as one the planner is waiting on.
 ///
@@ -733,6 +727,95 @@ fn a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed() {
     world.release("build.go");
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A member that declares its work complete leaves nothing behind waiting on it
+/// either, though its stream never ends.
+///
+/// The third way a session stops, and the one that reaches the same ending as a
+/// stream that ended without looking anything like it: the member says
+/// `completion: true` in a verdict this session carries back, its conversation
+/// is over, and the server exits — with the frame stream still open in this
+/// journey's hand, exactly as the bounded session leaves it. The stream is
+/// therefore not what tells the two apart; whether the side that asked is still
+/// there is, and here it is not.
+///
+/// A report it raised earlier and nobody read is the thing at stake: it would
+/// otherwise sit in the unread count for the rest of the run with no reader for
+/// its answer.
+#[test]
+fn a_member_that_declared_itself_complete_leaves_nothing_counted_as_unread() {
+    use std::io::Write;
+
+    let world = World::new("channel-completed");
+    world.script("build.wait", "hold");
+    let run = running(&world, "completed", vec![agent("build", &[])]);
+
+    // Long enough that every wait below ends on the answer this journey sends
+    // rather than on a bound: what stops this session is the member, not a clock.
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    let mut asking = serving.stdin.take().expect("stdin is piped");
+
+    // One report, answered but never read: replying clears the wait, not the
+    // queue, so it is still sitting there unread when the member finishes.
+    writeln!(
+        asking,
+        r#"{{"kind":"monitor","message":"the worker went quiet","blocking":false}}"#
+    )
+    .expect("the report is written");
+    asking.flush().expect("the report flushes");
+    world.until("the report to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 1
+    });
+    world
+        .run_with_stdin(&["reply", &run], r#"{"completion":false,"reason":"noted"}"#)
+        .exited(0);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+
+    // And now the member says it is done, which is what ends the session.
+    writeln!(
+        asking,
+        r#"{{"kind":"monitor","message":"the worker is finished","blocking":false}}"#
+    )
+    .expect("the last frame is written");
+    asking.flush().expect("the last frame flushes");
+    world.until("the last frame to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+    world
+        .run_with_stdin(&["reply", &run], r#"{"completion":true,"reason":"done"}"#)
+        .exited(0);
+
+    let went = serving
+        .wait_with_output()
+        .expect("the server ends on the member's own verdict");
+    assert!(
+        went.status.success(),
+        "the server did not end on the completion it carried: {went:?}"
+    );
+
+    // Both are off the count nobody may filter, and both are still readable.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_has("2 planner update(s) nobody is waiting on");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("the worker went quiet");
+    assert_eq!(read.json()["surface"]["abandoned"], json!(true));
+
+    // The stream is what the bounded session also leaves open, so it cannot be
+    // what told the two endings apart — closed only now that this is done.
+    drop(asking);
+    world.release("build.go");
+}
 
 /// A session bound this host was given but cannot honour is refused before the
 /// server carries anything.

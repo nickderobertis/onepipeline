@@ -2601,6 +2601,11 @@ enum Served {
     /// The frame stream ended, so the side that was asking ended with it: this
     /// loop was the only reader an answer to any of these had.
     AskerGone,
+    /// The member declared its work complete in a verdict this session carried
+    /// back to it. Its conversation is over too, so nothing is left to read an
+    /// answer to whatever it left outstanding — the same fact as the stream
+    /// ending, reached by the member saying so rather than by its stream closing.
+    Completed,
     /// This session reached its own bound with the stream still open. The member
     /// is still there, so nothing it raised is withdrawn.
     SessionOver,
@@ -2696,6 +2701,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
             .flush()
             .map_err(|e| Error::Refused(format!("cannot write the verdict: {e}")))?;
         if answer.completion == Some(true) {
+            ending = Served::Completed;
             break;
         }
         if session.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -2714,19 +2720,21 @@ fn serve(args: &RunArgs) -> Result<i32> {
             break;
         }
     }
-    // Which of the two endings this was decides it, and only one of them is the
-    // asker going away. A stream that ended is that one: this loop was the only
-    // reader an answer to anything it raised had, so what it leaves behind is
-    // marked — rather than deleted, which [`ChannelState::abandon`] says why —
+    // Which ending this was decides it, and the question each is answering is
+    // whether the side that asked is still there. A stream that ended and a
+    // member that declared itself complete both say it is not: this loop was the
+    // only reader an answer to anything it raised had, so what it leaves behind
+    // is marked — rather than deleted, which [`ChannelState::abandon`] says why —
     // so the run stops reporting a decision nobody is waiting on while the text
     // stays where a manager can still read it. A session that reached its own
-    // bound is the other: the member is still holding the stream open and still
-    // owed every answer, so nothing is withdrawn and everything stays counted.
+    // bound says nothing of the kind: the member is still holding the stream open
+    // and still owed every answer, so nothing is withdrawn and everything stays
+    // counted.
     //
     // Deliberately not reached by the `?` paths above either: a refused frame is
     // this server rejecting what the member said, and the member is still there
     // to be told. Only a stream that ended proves the asker did.
-    if matches!(ending, Served::AskerGone) {
+    if matches!(ending, Served::AskerGone | Served::Completed) {
         channel.abandon(&raised)?;
     }
     Ok(EXIT_SUCCESS)
