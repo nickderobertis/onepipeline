@@ -1102,8 +1102,9 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
         .run_with_stdin(
             &["reply", "writeback-retry"],
             &json!({
-                "version": 1,
-                "commands": [{"op": "context", "id": "later", "note": "retry this projection"}]
+                "version": 2,
+                "commands": [{"op": "note", "id": "later", "addressee": "worker",
+                              "text": "retry this projection", "deliver": "next"}]
             })
             .to_string(),
         )
@@ -1397,8 +1398,9 @@ fn starts_refusing(world: &World, run: &str, note: &str) -> Outage {
         .spawn()
         .expect("the reply starts");
     let envelope = json!({
-        "version": 1,
-        "commands": [{"op": "context", "id": "later", "note": note}]
+        "version": 2,
+        "commands": [{"op": "note", "id": "later", "addressee": "worker",
+                      "text": note, "deliver": "next"}]
     })
     .to_string();
     let mut stdin = reply.stdin.take().expect("the reply's stdin is piped");
@@ -1888,8 +1890,9 @@ fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
         .run_with_stdin(
             &["reply", "writeback-capture-retry"],
             &json!({
-                "version": 1,
-                "commands": [{"op": "context", "id": "later", "note": "capture recovered"}]
+                "version": 2,
+                "commands": [{"op": "note", "id": "later", "addressee": "worker",
+                              "text": "capture recovered", "deliver": "next"}]
             })
             .to_string(),
         )
@@ -1985,7 +1988,7 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
             .run_with_stdin(
                 &["reply", "writeback-reverted-edit"],
                 &json!({
-                    "version": 1,
+                    "version": 2,
                     "commands": [{"op": "reparent", "id": "later", "deps": deps}]
                 })
                 .to_string(),
@@ -2964,7 +2967,7 @@ fn every_settlement_reaches_the_board_under_its_own_word() {
         .run_with_stdin(
             &["reply", name],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{"op": "retry", "id": "superseded", "node": {
                     "id": "replacement", "persona": "engineer", "task": "## What\nRetry it."
                 }}],

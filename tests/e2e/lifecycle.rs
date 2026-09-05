@@ -1483,7 +1483,7 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
         .run_with_stdin(
             &["reply", &run],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{
                     "op": "retry",
                     "id": "service",
@@ -2116,7 +2116,7 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
         )
         .exited(0);
     world.until("the cancel to be committed", |world| {
@@ -2353,7 +2353,7 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
         )
         .exited(0);
     world.until("the cancel to be committed", |world| {
@@ -3247,7 +3247,7 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
         .run_with_stdin(
             &["reply", &run],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{
                     "op": "retry",
                     "id": "service",
@@ -3554,7 +3554,7 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
         .run_with_stdin(
             &["reply", &run],
             &json!({
-                "version": 1,
+                "version": 2,
                 "commands": [{
                     "op": "retry",
                     "id": "service",

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
-use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
+use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
 use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -1743,7 +1743,7 @@ fn reconcile_edits(
         let mut reason = None;
         for command in &envelope.commands {
             let compiled = crate::channel::allows(author, command).and_then(|()| {
-                compile_and_deliver(paths, journal, state, author, command, launch, in_flight)
+                compile_and_deliver(paths, state, author, command, launch, in_flight)
             });
             match compiled {
                 Ok(operations) => {
@@ -1793,17 +1793,16 @@ fn reconcile_edits(
     Ok(changed)
 }
 
-/// Validate one command, carry a `context` note into the running turn where its
-/// mode asks for that, and compile what actually happened.
+/// Validate one command, hand a note to the node's conversation where its
+/// `deliver` asks for that, and compile what actually happened.
 ///
 /// The order matters both ways. Validation first, because a note must not be
-/// pushed into a live turn on behalf of an edit the reconciler is about to
+/// offered to a live conversation on behalf of an edit the reconciler is about to
 /// refuse; delivery before the compile that is recorded, because *how* the note
-/// reached the node is part of the mutation — a note the turn took is not also
-/// owed to the next dispatch.
+/// reached the node is part of the mutation — a note a turn took is not also owed
+/// to the next dispatch.
 fn compile_and_deliver(
     paths: &RunPaths,
-    journal: &mut Journal,
     state: &RunState,
     author: crate::channel::Author,
     command: &Command,
@@ -1827,37 +1826,35 @@ fn compile_and_deliver(
     };
     let mut candidate = state.graph.clone();
     let operations = edits::compile(&mut candidate, &frontier, author, command)?;
-    if let Command::Note {
+    let Command::Note {
         id,
         addressee,
         text,
         criterion,
+        deliver,
+        persist,
     } = command
-    {
-        // The note's own record is the delivery's, so the structural compile
-        // above contributed none: it established that the ask is one this run
-        // can act on, and this is the answer the conversation gave.
-        return deliver_manager_note(
-            paths,
-            *addressee,
-            id,
-            text,
-            criterion.as_ref(),
-            in_flight
-                .get(id)
-                .and_then(|dispatch| dispatch.control.clone())
-                .as_ref(),
-        );
-    }
-    let Command::Context { id, note, deliver } = command else {
+    else {
         return Ok(operations);
     };
-    let delivery = deliver_note(journal, *deliver, id, note, in_flight)?;
-    if delivery == edits::Delivery::Deferred {
-        return Ok(operations);
-    }
-    let mut candidate = state.graph.clone();
-    edits::compile_with(&mut candidate, &frontier, author, command, delivery)
+    // The note's own record is the delivery's, so the structural compile above
+    // contributed none: it established that the ask is one this run can act on,
+    // and this is the answer the conversation gave.
+    deliver_manager_note(
+        paths,
+        &Offered {
+            id,
+            addressee: *addressee,
+            text,
+            criterion: criterion.as_ref(),
+            reach: crate::note::Reach::of(id, *deliver, *persist)?,
+            dispatchable: frontier.recorded.get(id) != Some(&NodeStatus::Done),
+        },
+        in_flight
+            .get(id)
+            .and_then(|dispatch| dispatch.control.clone())
+            .as_ref(),
+    )
 }
 
 /// Put one refused edit into the run's record: the rejection, and the surface that
@@ -1907,7 +1904,34 @@ pub(crate) fn record_rejection(
     )
 }
 
-/// Hand one manager note to a node's conversation, and compile what became of it.
+/// One note as it is offered: the note itself, and where it may land.
+///
+/// A struct rather than five parameters because the note's two axes are read
+/// together and mean nothing apart — see
+/// [`Command::Note`](crate::channel::Command::Note), which is where what each of
+/// them decides is declared, and [`crate::note::Reach`], which is the pair they
+/// make once the envelope has refused the combination that lands nowhere.
+pub(crate) struct Offered<'a> {
+    pub id: &'a str,
+    pub addressee: crate::note::Addressee,
+    pub text: &'a crate::note::NoteText,
+    pub criterion: Option<&'a crate::note::Criterion>,
+    /// Where it may land: whether the running turn is attempted, and whether a
+    /// note no turn took is composed into the node's next dispatch.
+    pub reach: crate::note::Reach,
+    /// Whether the node has a next dispatch at all. A node that has settled `done`
+    /// does not, which is what turns a carry into the reach-nobody refusal.
+    // llmlint: ignore[invalid_states_unrepresentable] this is a predicate about
+    // the run rather than domain state with named alternatives: it is read off
+    // the frontier as `recorded != Done` and has no third value and no invalid
+    // combination with anything beside it. An enum here would name the two
+    // halves of one boolean question and buy nothing back.
+    pub dispatchable: bool,
+}
+
+/// Hand one manager note to a node's conversation where `deliver` asks for that,
+/// carry it to the node's next dispatch where no turn took it and `persist` asks
+/// for that, and compile what became of it.
 ///
 /// The delivery is `oneagentgraph`'s and the routing `onejudge`'s: the note goes to
 /// whichever party of the two-party member is live, and the other party receives it
@@ -1916,48 +1940,95 @@ pub(crate) fn record_rejection(
 ///
 /// **Not only the live one**, and that is the point of the second address below: a
 /// note arriving after the node's dispatch has completed is still asked of the
-/// member it was for, so the refusal that comes back is the conversation's own —
+/// member it was for, so the answer that comes back is the conversation's own —
 /// naming how it ended — rather than this crate's guess that there was nothing to
 /// ask. Addressing nothing at all is the one case this composes itself, and it says
 /// which case it is.
 ///
+/// What that answer becomes is [`reach`](Offered::reach)'s: a note the conversation
+/// took is delivered and composes forward into nothing; a note it could not take is
+/// carried to the node's next dispatch, or — where the reach composes nothing
+/// forward, or where there is no next dispatch to carry it to — refused under the
+/// one reach-nobody rule, naming what left it nowhere to go.
+///
 /// # Errors
 ///
-/// [`Error::Refused`] carrying the conversation's own sentence, for a note it will
-/// never read. The reconciler journals that refusal and surfaces it, so a
-/// non-delivery is in the run's record and not only in the caller's exit code.
+/// [`Error::Refused`] for a note that reached nobody, carrying the conversation's
+/// own sentence where the conversation is what answered. The reconciler journals
+/// that refusal and surfaces it, so a non-delivery is in the run's record and not
+/// only in the caller's exit code.
 pub(crate) fn deliver_manager_note(
     paths: &RunPaths,
-    addressee: crate::note::Addressee,
-    id: &str,
-    text: &crate::note::NoteText,
-    criterion: Option<&crate::note::Criterion>,
+    offered: &Offered<'_>,
     live: Option<&TurnAddress>,
 ) -> Result<Vec<edits::Operation>> {
+    let Offered {
+        id,
+        addressee,
+        text,
+        criterion,
+        reach,
+        dispatchable,
+    } = *offered;
     let note = crate::note::of(addressee, text, criterion)
         .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
-    let address = match live.cloned().or_else(|| last_turn_address(paths, id)) {
-        Some(address) => address,
-        None => {
-            return Err(crate::note::undelivered(
-                id,
-                &crate::note::Undelivered::NoConversation {
-                    reason: "no dispatch of this node has reported a member yet, so there is \
-                             no conversation to hand it to"
-                        .to_string(),
-                },
-            ))
-        }
+    let recorded = |reached| {
+        Ok(vec![edits::Operation::NoteDelivered {
+            node: id.to_string(),
+            addressee,
+            text: text.clone(),
+            criterion: criterion.cloned(),
+            reached,
+        }])
     };
-    let accepted =
-        agentgraph::note(&address, &note).map_err(|why| crate::note::undelivered(id, &why))?;
-    Ok(vec![edits::Operation::NoteDelivered {
-        node: id.to_string(),
-        addressee,
-        text: text.clone(),
-        criterion: criterion.cloned(),
-        reached: crate::note::Reached::from(&accepted),
-    }])
+    // `next` declines the live attempt outright, so there is no turn to ask and
+    // the note is the carried one by construction. The combination that carries
+    // it nowhere was refused at the envelope.
+    if !reach.attempts_a_live_turn() {
+        return match dispatchable {
+            true => recorded(crate::note::Reached::Carried),
+            false => Err(nowhere_to_carry(id)),
+        };
+    }
+    let attempted = match live.cloned().or_else(|| last_turn_address(paths, id)) {
+        Some(address) => agentgraph::note(&address, &note).map_err(|why| why.to_string()),
+        None => Err(
+            "no dispatch of this node has reported a member yet, so there is no \
+                     conversation to hand it to"
+                .to_string(),
+        ),
+    };
+    match attempted {
+        // A turn of the running dispatch's conversation took it — including the
+        // one that queues it for the next turn *of that conversation* to open,
+        // which is the running dispatch and not a later one. So nothing is owed
+        // forward: this is the whole of the delivery.
+        Ok(accepted) => recorded(crate::note::Reached::from(&accepted)),
+        // Nothing took it, which is the only case `persist` has an opinion about.
+        Err(_) if reach.composes_forward() && dispatchable => {
+            recorded(crate::note::Reached::Carried)
+        }
+        Err(why) if reach.composes_forward() => Err(crate::note::reaches_nobody(
+            id,
+            &format!(
+                "{why}; and it has settled done, so no dispatch of it will take the note \
+                 either"
+            ),
+        )),
+        Err(why) => Err(crate::note::reaches_nobody(
+            id,
+            &format!("{why}; and `persist: false` composes it into no dispatch"),
+        )),
+    }
+}
+
+/// The reach-nobody refusal for a note with nowhere left to be carried to.
+fn nowhere_to_carry(id: &str) -> Error {
+    crate::note::reaches_nobody(
+        id,
+        "it has settled done, so no dispatch of it will ever take the note and \
+         `deliver: next` asks for no live delivery",
+    )
 }
 
 /// Where the last dispatch of `node` was addressed, read back out of the run's own
@@ -1975,34 +2046,29 @@ fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
         .find_map(|envelope| addressed_by(&envelope))
 }
 
-/// Carry one note into a node's running turn, as far as its mode asks.
+/// Carry one arrival note into a node's running turn, falling through to that
+/// node's next dispatch where there is none.
+///
+/// The lever a *release arrival* is delivered by, and the only caller left of the
+/// sibling's `interrupt`: a manager's own note goes through the two-party note
+/// seam instead, which is a different verb and reaches both parties.
 ///
 /// `oneagentgraph interrupt`'s exit 3 — no controllable turn in flight — is the
 /// answer this is built around, and it is a **fact** rather than a failure: it
-/// is what `auto` falls through on and what `live` refuses on. A delivery that
-/// was attempted and *broke* is neither, and is refused under both modes: a
-/// planner told `deferred` when the truth is that the lever failed has been told
-/// something that is not so.
+/// is what the fall-through to the next dispatch is decided on. A delivery that
+/// was attempted and *broke* is neither, and is refused: a caller told `deferred`
+/// when the truth is that the lever failed has been told something that is not so.
 fn deliver_note(
     journal: &mut Journal,
-    deliver: Deliver,
     id: &str,
     note: &str,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<edits::Delivery> {
-    if deliver == Deliver::Next {
-        return Ok(edits::Delivery::Deferred);
-    }
     let Some(address) = in_flight
         .get(id)
         .and_then(|dispatch| dispatch.control.clone())
     else {
-        return not_live(
-            deliver,
-            id,
-            "it has no turn this run can address: nothing of its dispatch has \
-             reported a member yet, or it has no dispatch at all",
-        );
+        return Ok(edits::Delivery::Deferred);
     };
     let interrupt = agentgraph::interrupt(&address, note);
     // Whatever it answered, the sibling published an envelope saying the lever
@@ -2018,32 +2084,19 @@ fn deliver_note(
     }
     match interrupt.outcome {
         Interrupted::Delivered => Ok(edits::Delivery::Live),
-        Interrupted::NoTurn(reason) => not_live(deliver, id, &reason),
+        Interrupted::NoTurn(_) => Ok(edits::Delivery::Deferred),
         Interrupted::Failed(reason) => Err(Error::Refused(format!(
-            "context: delivering the note to node '{id}' failed: {reason}"
+            "delivering the arrival note to node '{id}' failed: {reason}"
         ))),
-    }
-}
-
-/// What a mode makes of a note that could not go into a running turn.
-fn not_live(deliver: Deliver, id: &str, reason: &str) -> Result<edits::Delivery> {
-    match deliver {
-        Deliver::Live => Err(Error::Refused(format!(
-            "context: node '{id}' has no controllable turn in flight, so the note \
-             cannot be delivered live: {reason}"
-        ))),
-        // `auto` and `next` both mean the note rides the next dispatch, which is
-        // exactly what a `context` edit has always done.
-        Deliver::Auto | Deliver::Next => Ok(edits::Delivery::Deferred),
     }
 }
 
 /// Tell every fast-adoption node whose awaited releases have all arrived, exactly
 /// once — and by telling a **draft-complete** one, lift its draft.
 ///
-/// Delivery is the `context` mechanism a planner's own note uses, at `auto`, and
-/// `release-adopted` is the durable record that makes it deliver once across a
-/// driver's death.
+/// Delivery is [`deliver_note`] — the running turn where the node has one, and
+/// that node's next dispatch where it does not — and `release-adopted` is the
+/// durable record that makes it deliver once across a driver's death.
 ///
 /// A draft-complete node has no turn to reach, so that record is also what
 /// returns it to the frontier — on the branch its own settlement pinned it to.
@@ -2081,11 +2134,11 @@ fn adopt_releases(
     }
     for (node, released) in ready {
         let note = crate::release::arrival_note(&released);
-        // Whatever the lever answered, the node has been told: `auto` falls
+        // Whatever the lever answered, the node has been told: the delivery falls
         // through to the next dispatch where there is no controllable turn, and
         // a delivery that was *attempted and broke* is the one case that leaves
         // the note owed — so that one is not recorded and is tried again.
-        let delivery = match deliver_note(journal, Deliver::Auto, &node, &note, in_flight) {
+        let delivery = match deliver_note(journal, &node, &note, in_flight) {
             Ok(delivery) => delivery,
             Err(error) => {
                 eprintln!(

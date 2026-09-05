@@ -957,7 +957,7 @@ fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
     world
         .run_with_stdin(
             &["reply", "cancelled"],
-            &json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]}).to_string(),
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "slow"}]}).to_string(),
         )
         .exited(0);
     world.release("slow.go");

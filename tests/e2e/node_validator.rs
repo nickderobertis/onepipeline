@@ -103,7 +103,7 @@ fn offered(world: &World) -> Vec<(String, Value)> {
 const RULES: &str = "this node's criteria name a procedure rather than a property";
 
 fn envelope(commands: Value) -> String {
-    json!({"version": 1, "commands": commands}).to_string()
+    json!({"version": 2, "commands": commands}).to_string()
 }
 
 /// Start a run whose one node is held open, so the graph is live while edits
@@ -250,7 +250,8 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
         // Not offered: this one raises a turn budget, which changes nothing a
         // dispatch is asked to do — and neither does a cancel or a note.
         json!({"op": "requeue", "id": "spare", "amend": {"max_turns": 9}}),
-        json!({"op": "context", "id": "spare", "note": "the fixture moved"}),
+        json!({"op": "note", "id": "spare", "addressee": "worker",
+               "text": "the fixture moved", "deliver": "next"}),
     ] {
         world
             .run_with_stdin(&["reply", &run], &envelope(json!([command])))

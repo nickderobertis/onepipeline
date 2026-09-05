@@ -1272,7 +1272,6 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Requeue { .. } => "requeue",
         Edit::Attest { .. } => "attest",
         Edit::Complete { .. } => "complete",
-        Edit::Context { .. } => "context",
         Edit::Amend { .. } => "amend",
         Edit::Note { .. } => "note",
         Edit::Finding { .. } => "finding",
@@ -1303,6 +1302,25 @@ fn every_surface_kind() -> BTreeSet<String> {
 const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
 ];
+
+/// The ops the contract lists that this build **no longer accepts**, per
+/// divergence entry 60.
+///
+/// The only *subtraction* from the contract's own list, and it is a subtraction
+/// rather than a divergence beyond it: `context` was collapsed into `note`, so an
+/// envelope naming it is refused at the wire. Held here so that every place [`OPS`]
+/// is used says which of the two it means, and so that a second removal cannot
+/// arrive without a line in the record.
+const REMOVED_OPS: &[&str] = &["context"];
+
+/// The contract's op list, less what entry 60 removed: exactly what this build
+/// accepts of it.
+fn contract_ops_this_build_accepts() -> Vec<&'static str> {
+    OPS.iter()
+        .copied()
+        .filter(|op| !REMOVED_OPS.contains(op))
+        .collect()
+}
 
 /// The per-author allowlist the contract fixes, both directions.
 ///
@@ -1376,18 +1394,17 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
                 reason: "done".into(),
             },
         ),
-        (
-            "context",
-            Edit::Context {
-                id: "x".into(),
-                note: "look here".into(),
-                deliver: onepipeline::channel::Deliver::Auto,
-            },
-        ),
     ];
-    assert_eq!(every.len(), OPS.len(), "an op is missing from this table");
+    assert_eq!(
+        every.len(),
+        contract_ops_this_build_accepts().len(),
+        "an op is missing from this table"
+    );
 
-    let allowed = ["retry", "requeue", "cancel", "context", "add"];
+    // The contract's list, less the op entry 60 removed — which took the
+    // monitor's own note lever with it, since `note` is off this list for
+    // `amend`'s reason.
+    let allowed = ["retry", "requeue", "cancel", "add"];
     for (op, command) in &every {
         // The planner owns the graph, so nothing is refused for it.
         allows(Author::Planner, command)
@@ -1430,6 +1447,12 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
     assert_eq!(Author::Planner.as_str(), "planner");
 }
 
+/// The contract's op list, less the one entry 60 removed, is exactly what this
+/// crate accepts of it.
+///
+/// The contract is committed as approved and still names `context`, so the
+/// subtraction lives in the divergence record and is asserted from there rather
+/// than by editing the document to match the code.
 #[test]
 fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
     let listed = "`add | drop | reparent | retry | cancel | requeue | attest | complete | context`";
@@ -1438,6 +1461,25 @@ fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
         "the contract's op list moved; update OPS with it"
     );
     assert_eq!(OPS.len(), 9);
+
+    let removed: Vec<String> = serde_json::from_value(divergence_block("60.")["removed"].clone())
+        .expect("entry 60 names what it removes");
+    assert_eq!(
+        removed,
+        REMOVED_OPS
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "the record and this suite disagree about which of the contract's ops are gone"
+    );
+    for op in REMOVED_OPS {
+        let err = serde_json::from_value::<Edit>(json!({"op": op, "id": "x", "note": "hello"}))
+            .expect_err("an op the contract lists and this build removed is refused");
+        assert!(
+            err.to_string().contains(op),
+            "the refusal does not name `{op}`: {err}"
+        );
+    }
 
     assert_eq!(
         op_of(&Edit::Cancel {
@@ -1949,10 +1991,7 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
         "the README names the three spellings in an order entry 41 does not propose: \
          {precedence:?} at {at:?}"
     );
-    for op in offered
-        .iter()
-        .chain(std::iter::once(&"context".to_string()))
-    {
+    for op in offered.iter().chain(std::iter::once(&"note".to_string())) {
         assert!(
             prose.contains(&format!("`{op}`")),
             "the README's live-edit guidance does not name `{op}`"
@@ -2236,15 +2275,12 @@ fn every_op_deserializes_with_the_fields_the_protocol_requires() {
             "complete",
             json!({"op": "complete", "reason": "closeout verified"}),
         ),
-        (
-            "context",
-            json!({"op": "context", "id": "slow", "note": "the fix landed"}),
-        ),
     ];
     let seen: Vec<&str> = envelopes.iter().map(|(op, _)| *op).collect();
     assert_eq!(
-        seen, OPS,
-        "every op the contract lists is exercised, in order"
+        seen,
+        contract_ops_this_build_accepts(),
+        "every op the contract lists and this build still accepts is exercised, in order"
     );
 
     for (op, value) in &envelopes {
@@ -2260,62 +2296,102 @@ fn every_op_deserializes_with_the_fields_the_protocol_requires() {
     }
 }
 
+/// The two axes the survivor carries, the defaults it omits, and the third
+/// delivery value that is gone — as divergence entry 60 declares them.
+///
+/// The contract is committed as approved and still describes `context` with
+/// `deliver: auto|live|next`; entry 60 is the proposal that replaces that
+/// paragraph, so what this build does is asserted from the entry rather than by
+/// editing the document to match the code. Both directions: a build that grows a
+/// field or a value the entry does not name fails here as loudly as one that
+/// drops one it does.
 #[test]
-fn context_carries_the_three_delivery_modes_and_defaults_to_auto() {
+fn a_note_carries_two_axes_and_the_defaults_entry_60_declares() {
     let prose = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         prose.contains("`deliver: auto|live|next`, defaulting to `auto`"),
-        "the contract no longer states the delivery modes or which one is the default"
-    );
-    assert!(
-        prose.contains("`edit-committed` records which happened as `delivery: live | deferred`"),
-        "the contract no longer says where the delivery that happened is recorded"
-    );
-    assert!(
-        prose.contains("`oneagentgraph interrupt RUN MEMBER --input`"),
-        "the contract no longer names the verb live delivery goes through"
+        "the contract's `context` paragraph moved; entry 60 names the sentence it replaces"
     );
 
-    // Every mode the contract lists is one the wire accepts, and each is a
-    // different command than the others.
-    let of = |value: Value| serde_json::from_value::<Edit>(value).expect("the mode parses");
-    let bare = of(json!({"op": "context", "id": "slow", "note": "the fix landed"}));
-    let auto =
-        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "auto"}));
-    let live =
-        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "live"}));
-    let next =
-        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "next"}));
+    let block = divergence_block("60.");
+    let deliver = &block["deliver"];
+    let values: Vec<String> =
+        serde_json::from_value(deliver["values"].clone()).expect("entry 60 names them");
+    let default = deliver["default"]
+        .as_str()
+        .expect("entry 60 names the default");
+    let gone = deliver["gone"]
+        .as_str()
+        .expect("entry 60 names what is gone");
+    let persists = block["persist"]["default"]
+        .as_bool()
+        .expect("entry 60 names `persist`'s default");
+
+    let note = |extra: Value| {
+        let mut value =
+            json!({"op": "note", "id": "slow", "addressee": "worker", "text": "the fix landed"});
+        for (key, field) in extra.as_object().expect("an object") {
+            value[key] = field.clone();
+        }
+        serde_json::from_value::<Edit>(value).expect("the note parses")
+    };
+
+    // Every value the entry names is one the wire accepts, and each is a
+    // different command from the others.
+    let spelled: Vec<Edit> = values
+        .iter()
+        .map(|value| note(json!({"deliver": value})))
+        .collect();
+    assert_eq!(spelled.len(), 2, "entry 60 names two delivery values");
+    assert_ne!(spelled[0], spelled[1]);
+
+    // The defaults a caller gets by omitting both fields are the ones the entry
+    // names, and they are omitted again when the note is re-serialized.
+    let bare = note(json!({}));
     assert_eq!(
-        bare, auto,
-        "a `context` edit that says nothing about delivery is not `auto`"
+        bare,
+        note(json!({"deliver": default, "persist": persists})),
+        "a note that says nothing about either axis is not the declared default"
     );
-    assert_ne!(auto, live);
-    assert_ne!(live, next);
-    assert_ne!(auto, next);
-
-    // The default is omitted again, so an old consumer reading a re-serialized
-    // envelope sees no field it did not have before — which is the same reason
-    // every `context` edit already written keeps working.
     assert_eq!(
         serde_json::to_value(&bare).expect("serializes"),
-        json!({"op": "context", "id": "slow", "note": "the fix landed"})
+        json!({"op": "note", "id": "slow", "addressee": "worker", "text": "the fix landed"}),
+        "a note carrying the defaults writes them out"
     );
+    // And the non-defaults are written, so a re-serialized note says what it is.
+    let other = values
+        .iter()
+        .find(|value| value.as_str() != default)
+        .expect("entry 60 names a second value");
     assert_eq!(
-        serde_json::to_value(&live).expect("serializes"),
-        json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "live"})
+        serde_json::to_value(note(json!({"deliver": other, "persist": !persists})))
+            .expect("serializes"),
+        json!({
+            "op": "note", "id": "slow", "addressee": "worker", "text": "the fix landed",
+            "deliver": other, "persist": !persists
+        })
     );
 
-    // A fourth mode is not one the protocol has, and the refusal names what it
-    // read rather than dropping the field.
+    // The value that named a combination of both axes is gone, refused by the
+    // same rule any other unknown value is — and its meaning has an exact
+    // spelling in the two fields.
     let err = serde_json::from_value::<Edit>(
-        json!({"op": "context", "id": "slow", "note": "n", "deliver": "eventually"}),
+        json!({"op": "note", "id": "slow", "addressee": "worker", "text": "n", "deliver": gone}),
     )
-    .expect_err("a mode outside the three is refused");
-    assert!(
-        err.to_string().contains("eventually"),
-        "the error names it: {err}"
+    .expect_err("the removed delivery value is refused");
+    assert!(err.to_string().contains(gone), "the error names it: {err}");
+    let was_auto = block["combinations"]
+        .as_array()
+        .expect("entry 60 names the four combinations")
+        .iter()
+        .find(|one| one["default"] == json!(true))
+        .expect("one of them is the default");
+    assert_eq!(
+        note(json!({"deliver": was_auto["deliver"], "persist": was_auto["persist"]})),
+        bare,
+        "the combination entry 60 calls the default is not what a bare note carries"
     );
+    assert_eq!(block["combinations"].as_array().expect("an array").len(), 4);
 }
 
 #[test]
@@ -2383,7 +2459,9 @@ fn a_reply_declares_the_halves_the_contract_routes_it_by() {
 
     let commands_only = read(json!({
         "version": 1,
-        "commands": [{"op": "context", "id": "plan", "note": "the scope changed"}]
+        "commands": [
+            {"op": "note", "id": "plan", "addressee": "worker", "text": "the scope changed"}
+        ]
     }));
     assert_eq!(commands_only.completion, None);
     assert_eq!(commands_only.message, None);
@@ -3364,10 +3442,13 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
         Edit::Complete {
             reason: "done".into(),
         },
-        Edit::Context {
+        Edit::Note {
             id: "x".into(),
-            note: "look here".into(),
-            deliver: onepipeline::channel::Deliver::Auto,
+            addressee: Addressee::Worker,
+            text: "look here".parse().expect("a usable note"),
+            criterion: None,
+            deliver: onepipeline::channel::Deliver::Live,
+            persist: true,
         },
         Edit::Finding {
             message: "it drifted".into(),
@@ -3386,7 +3467,7 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
     ];
     assert_eq!(
         every.len(),
-        OPS.len() + 3,
+        contract_ops_this_build_accepts().len() + 4,
         "an op is missing from this table; `op_of` above is what says so"
     );
 
@@ -3494,6 +3575,30 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
             .iter()
             .any(|(number, _)| heading.starts_with(number))
         {
+            continue;
+        }
+        // Or superseded by a later entry, which is the third state an unruled
+        // divergence can be in: the proposal was answered by a *better* proposal
+        // from this repository, not by a ruling. It stays for its history and
+        // says where its shape went, and the entry it names has to be one the
+        // record still carries and still open — a pointer at a resolved or
+        // missing entry is a shape nobody is holding.
+        if let Some((_, superseder)) = heading.split_once("— SUPERSEDED BY ") {
+            let superseder = format!("{}.", superseder.trim());
+            let later = sections
+                .iter()
+                .find(|section| section.starts_with(&superseder))
+                .unwrap_or_else(|| {
+                    panic!("`{heading}` names entry {superseder}, which the record does not have")
+                });
+            assert!(
+                later.lines().next().expect("a heading").ends_with("— OPEN"),
+                "`{heading}` is superseded by an entry that is not itself open"
+            );
+            assert!(
+                section.contains("Superseded by entry"),
+                "divergence `{heading}` is marked superseded and its prose does not say so"
+            );
             continue;
         }
         assert!(
@@ -4280,22 +4385,40 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     }
 }
 
-/// The note delivery seam this build carries **beyond** the contract is exactly
-/// what the divergence record proposes.
+/// The one manager-note op this build carries where the contract names two is
+/// exactly what the divergence record proposes.
 ///
-/// The contract is committed as approved and names none of it, so entry 52 is the
-/// only place it is written down — and a divergence nothing gates quietly stops
-/// being true. The entry's own block is the source: what parses here is what a
-/// planner would type, and the refusals are what a planner would be told.
+/// The contract is committed as approved: it lists `context` and names no `note`,
+/// so entry 60 is the only place the survivor's shape is written down — and a
+/// divergence nothing gates quietly stops being true. The entry's own block is the
+/// source: what parses here is what a manager would type, and the refusals are what
+/// a manager would be told.
 #[test]
 fn the_note_delivery_surface_is_what_the_divergence_record_names() {
-    let block = divergence_block("52.");
+    let block = divergence_block("60.");
+
+    // The envelope this op travels in declares the version the entry names, and
+    // the contract's own sentence still names the one it was cut from — which is
+    // what makes this a recorded divergence rather than a document edited to
+    // match the code.
+    let version = block["envelope_version"]
+        .as_u64()
+        .expect("entry 60 names the envelope version") as u32;
+    assert_eq!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSION,
+        version,
+        "the build's envelope version is not the one entry 60 declares"
+    );
+    assert!(
+        CONTRACT.contains(r#"{"version": 1, "commands": [...]}"#),
+        "the contract's envelope sentence moved; entry 60 names the version it replaces"
+    );
 
     // The op, as the wire carries it, and the authors it is for.
     let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 52 names the op it adds");
+        serde_json::from_value(block["ops"].clone()).expect("entry 60 names the op it adds");
     let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 52 says which of them the monitor may issue");
+        .expect("entry 60 says which of them the monitor may issue");
     assert!(!fixtures.is_empty(), "{block}");
     for fixture in &fixtures {
         let op = fixture["op"].as_str().expect("the fixture names its op");
@@ -4329,17 +4452,55 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         );
     }
 
-    // The whole envelope a planner sends, parsed as one: a `note` is an edit like
+    // The whole envelope a manager sends, parsed as one: a `note` is an edit like
     // any other and travels the same way.
     let envelope: Reply =
-        serde_json::from_value(json!({"version": 1, "commands": block["ops"].clone()}))
-            .expect("entry 52's ops travel in a reply envelope");
+        serde_json::from_value(json!({"version": version, "commands": block["ops"].clone()}))
+            .expect("entry 60's ops travel in a reply envelope");
     assert_eq!(envelope.commands.len(), fixtures.len());
+
+    // The whole field set, and nothing outside it. Every field the entry names is
+    // carried by one of its fixtures and every key a fixture carries is one it
+    // names, so the set is proven from both ends — a field added to the op
+    // without a line in the record fails here. No single fixture can carry all
+    // six, because the two defaults are omitted from what a note serializes and
+    // the one combination that writes both out is the one the run refuses.
+    let fields: BTreeSet<String> =
+        serde_json::from_value(block["fields"].clone()).expect("entry 60 names the field set");
+    let carried_keys: BTreeSet<String> = fixtures
+        .iter()
+        .flat_map(|fixture| fixture.as_object().expect("an object").keys().cloned())
+        .filter(|key| key != "op")
+        .collect();
+    assert_eq!(
+        carried_keys, fields,
+        "entry 60's fixtures and its own field set disagree about what a note carries"
+    );
+
+    // The fields an envelope refuses to do without, each dropped on its own so
+    // the refusal is about that field rather than about the note being empty.
+    let required: Vec<String> =
+        serde_json::from_value(block["required"].clone()).expect("entry 60 names them");
+    for field in &required {
+        for fixture in &fixtures {
+            let mut without = fixture.clone();
+            without
+                .as_object_mut()
+                .expect("an object")
+                .remove(field.as_str());
+            let err = serde_json::from_value::<Edit>(without)
+                .expect_err(&format!("a note without `{field}` is refused"));
+            assert!(
+                err.to_string().contains(field),
+                "the refusal does not name `{field}`: {err}"
+            );
+        }
+    }
 
     // Every addressee the seam has, spelled as the entry writes them — and the
     // spelling is the seam's own rather than a second one this crate keeps.
     let addressees: Vec<String> =
-        serde_json::from_value(block["addressees"].clone()).expect("entry 52 names the addressees");
+        serde_json::from_value(block["addressees"].clone()).expect("entry 60 names the addressees");
     for named in &addressees {
         let parsed: Addressee = serde_json::from_value(json!(named))
             .unwrap_or_else(|e| panic!("`{named}` is an addressee: {e}"));
@@ -4348,9 +4509,10 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     assert!(addressees.contains(&"worker".to_string()));
 
     // And every disposition, likewise: what a delivery can answer is the set the
-    // record carries, so a party added upstream cannot land here unnamed.
+    // record carries, so a party added upstream — or a disposition this crate
+    // composes itself — cannot land here unnamed.
     let reached: Vec<String> =
-        serde_json::from_value(block["reached"].clone()).expect("entry 52 names the dispositions");
+        serde_json::from_value(block["reached"].clone()).expect("entry 60 names the dispositions");
     let carried = [
         Reached::Queued,
         Reached::Worker,
@@ -4358,6 +4520,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         Reached::JudgedWith {
             completion_reason: "the work is done".into(),
         },
+        Reached::Carried,
     ];
     assert_eq!(
         carried
@@ -4365,7 +4528,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
             .map(|one| one.as_str().to_string())
             .collect::<Vec<_>>(),
         reached,
-        "entry 52 names dispositions this build does not carry, or the other way round"
+        "entry 60 names dispositions this build does not carry, or the other way round"
     );
     for one in &carried {
         let written = serde_json::to_value(one).expect("a disposition serializes");
@@ -4374,16 +4537,35 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     }
 
     // The boundary: an envelope this seam cannot act on is refused where it
-    // arrives, by the seam's own newtypes, rather than somewhere later.
+    // arrives, by serde and by the seam's own newtypes, rather than somewhere
+    // later. The removed op is in this list, so its refusal is proven by the
+    // same rule that proves a malformed note's.
     let refused: Vec<Value> =
-        serde_json::from_value(block["refused"].clone()).expect("entry 52 names what is refused");
+        serde_json::from_value(block["refused"].clone()).expect("entry 60 names what is refused");
+    let removed: Vec<String> =
+        serde_json::from_value(block["removed"].clone()).expect("entry 60 names what it removes");
     for fixture in &refused {
         let read = serde_json::from_value::<Edit>(fixture.clone());
-        assert!(
-            read.is_err(),
-            "the envelope's boundary accepted a note it cannot deliver: {fixture}"
-        );
+        let err = read
+            .err()
+            .unwrap_or_else(|| {
+                panic!("the envelope's boundary accepted a note it cannot deliver: {fixture}")
+            })
+            .to_string();
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        if removed.contains(&op.to_string()) {
+            assert!(
+                err.contains(op),
+                "the removed op was refused without being named: {err}"
+            );
+        }
     }
+    assert!(
+        refused.iter().any(
+            |fixture| removed.contains(&fixture["op"].as_str().unwrap_or_default().to_string())
+        ),
+        "entry 60 removes an op and drives no envelope carrying it"
+    );
 
     // The same delivery on this crate's own surface, named as the entry names it.
     // A note carrying an unusable criterion is unrepresentable here too, so the
@@ -4404,7 +4586,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     );
     // The two answers, by the names the entry proposes.
     let answers: Vec<String> =
-        serde_json::from_value(api["answers"].clone()).expect("entry 52 names what it answers");
+        serde_json::from_value(api["answers"].clone()).expect("entry 60 names what it answers");
     let spelled = [
         format!("{:?}", Delivered::To(Reached::Worker)),
         format!("{:?}", Delivered::Queued),
@@ -4412,13 +4594,22 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     for (answer, spelled) in answers.iter().zip(spelled.iter()) {
         assert!(
             spelled.starts_with(answer),
-            "entry 52 names `{answer}`, which this build spells `{spelled}`"
+            "entry 60 names `{answer}`, which this build spells `{spelled}`"
         );
     }
     assert_eq!(answers.len(), spelled.len());
-    // The call itself is the one the entry names, asked of the compiler rather
-    // than of a list beside it.
+    // The calls themselves are the ones the entry names, asked of the compiler
+    // rather than of a list beside it: the one that takes the defaults, and the
+    // one that names both axes.
     assert_eq!(api["call"].as_str(), Some("deliver"));
+    assert_eq!(api["with"].as_str(), Some("deliver_with"));
     let _: fn(&RunPaths, &str, &Note) -> onepipeline::Result<Delivered> =
         onepipeline::note::deliver;
+    let _: fn(
+        &RunPaths,
+        &str,
+        &Note,
+        onepipeline::channel::Deliver,
+        bool,
+    ) -> onepipeline::Result<Delivered> = onepipeline::note::deliver_with;
 }
