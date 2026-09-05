@@ -424,6 +424,15 @@ pub fn adopt_labels(labels: &mut Labels) {
 /// schema the sibling owns, and would silently drop the first field it added.
 /// `a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line`
 /// holds the two to each other.
+///
+/// **What a member settled with is the sibling's, all of it.** A
+/// `member-settled` payload — `completed`, `verdict`, `completion_reason`,
+/// `report_path` — is composed by `oneagentgraph`'s own `member::settle_report`
+/// and crosses here untouched. So a member that ended incomplete carrying an
+/// empty `reason` and a null `completion_reason` is that library saying nothing
+/// about why, and the fix belongs there: filling one in on this side would be
+/// this crate inventing a verdict it did not reach. `journal::Journal::relay`
+/// says the same thing about the whole envelope.
 fn relayed(envelope: oneagentgraph::event::Envelope) -> Result<Envelope> {
     serde_json::to_value(envelope)
         .map_err(|error| sibling(format!("serializing graph event: {error}")))

@@ -158,8 +158,9 @@ enum ObserverLiveness {
 }
 
 impl ObserverLiveness {
-    /// The word a view prints beside the driver tier, or nothing when the
-    /// observer is doing its job.
+    /// The word a view prints beside the driver tier. Nothing for an observer
+    /// doing its job — which is the verdict [`observer_suffix`] renders as no
+    /// suffix at all rather than by printing this.
     fn as_str(self) -> &'static str {
         match self {
             Self::Watching => "",
@@ -963,11 +964,8 @@ pub(crate) fn has_settled(view: &RunView) -> bool {
 /// and a run nothing is driving has bigger news on the same line — reporting
 /// either as unwatched would send an operator after a graph whose absence is not
 /// the problem.
-fn observer_word(view: &RunView, standing: &Standing) -> &'static str {
-    if standing.word() != DriverLiveness::Driving.as_str() {
-        return "";
-    }
-    observer_liveness(&view.launch).as_str()
+fn observer_verdict(view: &RunView, standing: &Standing) -> Option<ObserverLiveness> {
+    (standing.word() == DriverLiveness::Driving.as_str()).then(|| observer_liveness(&view.launch))
 }
 
 /// That word, and — where the driver recorded one — why nothing is watching.
@@ -977,12 +975,12 @@ fn observer_word(view: &RunView, standing: &Standing) -> &'static str {
 /// reason it is: a bound that is spent is a run to take over, and a graph that
 /// would not start is a graph to fix first.
 fn observer_suffix(view: &RunView, standing: &Standing) -> String {
-    match observer_word(view, standing) {
-        "" => String::new(),
-        word if word == ObserverLiveness::ObserverNotRestarted.as_str() => {
-            format!("  {word}: {}", view.launch.observer_ending)
+    match observer_verdict(view, standing) {
+        None | Some(ObserverLiveness::Watching) => String::new(),
+        Some(verdict @ ObserverLiveness::ObserverNotRestarted) => {
+            format!("  {}: {}", verdict.as_str(), view.launch.observer_ending)
         }
-        word => format!("  {word}"),
+        Some(verdict) => format!("  {}", verdict.as_str()),
     }
 }
 
