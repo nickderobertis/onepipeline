@@ -38,11 +38,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use onepipeline::channel::Command;
-use onepipeline::note::{deliver, Addressee, Delivered, Note, Reached};
+use onepipeline::channel::Deliver;
+use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
-use harness::{agent, plan_of, World, REFUSED};
+use harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
 
 /// The correction a manager sends at the moment it matters: while the worker is
 /// still working, and before its judge has ruled on anything.
@@ -62,7 +63,7 @@ const CRITERION: &str = "`version.txt` holds `v: 2`";
 const SUPERVISOR_OPENING: &str = "You are the simulated USER and completion supervisor";
 
 fn envelope(command: Value) -> String {
-    json!({"version": 1, "commands": [command]}).to_string()
+    json!({"version": 2, "commands": [command]}).to_string()
 }
 
 fn note_op(node: &str, addressee: &str, text: &str, criterion: Option<&str>) -> Value {
@@ -71,6 +72,44 @@ fn note_op(node: &str, addressee: &str, text: &str, criterion: Option<&str>) -> 
         op["criterion"] = json!(criterion);
     }
     op
+}
+
+/// The same, naming both axes rather than taking their defaults.
+fn note_op_with(node: &str, text: &str, deliver: &str, persist: bool) -> Value {
+    let mut op = note_op(node, "worker", text, None);
+    op["deliver"] = json!(deliver);
+    op["persist"] = json!(persist);
+    op
+}
+
+/// The instruction each turn of one node opened on, grouped by **dispatch**.
+///
+/// Read out of the run's own merged store rather than out of the doubles: a
+/// `node-dispatched` opens a group and every `turn-started` under that node joins
+/// the one it is in, so `[0]` is what the node's first dispatch was given and
+/// `[1]` what the dispatch after it was. That grouping is what a claim about "the
+/// node's *next* dispatch" needs and a flat list of prompts cannot give, and it
+/// races nothing: the journal is ordered.
+fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
+    let mut dispatched: Vec<Vec<String>> = Vec::new();
+    for event in world.journal(run) {
+        if event["labels"]["node"] != node {
+            continue;
+        }
+        match event["kind"].as_str() {
+            Some("node-dispatched") => dispatched.push(Vec::new()),
+            Some("turn-started") => {
+                if let (Some(turns), Some(instruction)) = (
+                    dispatched.last_mut(),
+                    event["payload"]["instruction"].as_str(),
+                ) {
+                    turns.push(instruction.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    dispatched
 }
 
 /// Start a run whose nodes are two-party members, against the real sibling.
@@ -369,6 +408,14 @@ fn a_binding_note_enters_the_bar_its_judge_decides_against_as_the_workers_own() 
 /// worker did another forty minutes of correct work, and the node was failed for a
 /// completion report that preceded its own subsequent commits. A refusal would have
 /// let the manager relaunch instead.
+///
+/// **Both places the one reach-nobody rule can be decided about a settled node are
+/// driven here**, because a node that will never be dispatched again is what makes
+/// them one rule rather than two. Under the default the conversation answers
+/// first, and `persist` then has nowhere to carry what it could not deliver; under
+/// `deliver: next` no conversation is asked at all, so the run's own record decides
+/// it a step earlier. Neither is a special case beside the other, and each refusal
+/// names what left the note nowhere to go.
 #[test]
 fn a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded() {
     let world = World::new("note-late");
@@ -393,7 +440,24 @@ fn a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded() {
     refused
         .exited(2)
         .err_has("was not delivered")
-        .err_has("build");
+        .err_has("build")
+        // The half of the rule only the run can decide: the live attempt found no
+        // turn, and the `persist` this default carries had nowhere to carry it,
+        // because a node that has settled `done` has no next dispatch.
+        .err_has("no dispatch of it will take the note either");
+
+    // The same note to the same node, asked for no live delivery at all. Nothing
+    // asks the conversation this time — there is nothing a note could be carried
+    // to — so the same rule is decided off the run's own record, before the run is
+    // reached, and says which of the two fields left it nowhere.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(REFUSED)
+        .err_has("it has settled done")
+        .err_has("`deliver: next` asks for no live delivery");
 
     // Nothing was silently accepted: no note is on the run's committed record.
     let committed: Vec<Value> = world
@@ -467,14 +531,27 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     );
 
     // Then the delivery that could not be made: `later` has not been dispatched,
-    // so there is no conversation of its own for a note to be handed to, and
-    // saying so is the whole point.
-    let refused = deliver(&paths, "later", &Note::to(Addressee::Worker, NOTE))
-        .expect_err("a node with no conversation takes no note");
+    // so there is no conversation of its own for a note to be handed to. Under
+    // the defaults that is not a refusal — the note would be carried to `later`'s
+    // next dispatch — so this asks for the combination that has nowhere to carry
+    // it to, which is the delivery-time half of the one reach-nobody rule and the
+    // only half a run can decide.
+    let refused = deliver_with(
+        &paths,
+        "later",
+        &Note::to(Addressee::Worker, NOTE),
+        Deliver::Live,
+        false,
+    )
+    .expect_err("a note with no turn to take it and no dispatch to carry it to reaches nobody");
     let said = refused.to_string();
     assert!(
         said.contains("later") && said.contains("no conversation"),
         "the refusal does not name the node or say what was missing: {said}"
+    );
+    assert!(
+        said.contains("`persist: false` composes it into no dispatch"),
+        "the refusal does not say what left the note nowhere to go: {said}"
     );
 
     // Then the delivery, into the conversation that is live — answered with which
@@ -496,6 +573,252 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     world.until("the run's driver to release it", |world| {
         !world.run_file(run, "owner.lock").exists()
     });
+}
+
+/// A note that reached no running turn is carried to the node's **next** dispatch,
+/// and the run says that is what happened rather than leaving it to inference.
+///
+/// One direction of the biconditional `persist` is defined by, and the journey the
+/// default exists for: `deliver: live` attempts the running turn, `persist: true`
+/// keeps the note where nothing took it, and a caller sending neither field gets
+/// both. What is read back is the dispatch's **own prompt** — the node's task was
+/// composed after the note was carried, so the note being in it is the carry and
+/// nothing else.
+///
+/// The same node takes the delivery-time half of the reach-nobody rule first, which
+/// is the only half a run can decide: with `persist: false` there is nowhere for the
+/// note to go, so it is refused rather than accepted and lost.
+#[test]
+fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carried() {
+    let world = World::new("note-carried");
+    let run = "carried";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+
+    // `later` has no dispatch yet, so nothing of it can take a note. With
+    // `persist: false` that is a note with nowhere to go, and it is refused
+    // naming both halves of why.
+    let refused = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op_with("later", NOTE, "live", false)),
+    );
+    refused
+        .exited(REFUSED)
+        .err_has("later")
+        .err_has("`persist: false` composes it into no dispatch");
+
+    // The same note under the defaults is not a refusal: it is carried.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("later", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+
+    let operation = recorded(&world, run);
+    assert_eq!(operation["node"], json!("later"), "{operation}");
+    assert_eq!(
+        operation["reached"],
+        json!("carried"),
+        "a note no turn took was not named as carried: {operation}"
+    );
+
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+
+    // And the dispatch really was given it. Its task was composed when the
+    // dispatch started, which was after the note was carried, so there is no
+    // other way the note could be in the instruction this turn opened on.
+    let dispatched = dispatches_of(&world, run, "later");
+    let [first] = &dispatched[..] else {
+        panic!(
+            "`later` was dispatched {} times, not once",
+            dispatched.len()
+        );
+    };
+    assert!(
+        first.iter().any(|instruction| instruction.contains(NOTE)),
+        "the carried note did not reach the dispatch it was carried to:\n{first:#?}"
+    );
+}
+
+/// The other direction: a note a running turn **did** take is not also carried to
+/// that node's next dispatch.
+///
+/// One direction alone would pass an implementation that always composes forward,
+/// which is why this one exists: `persist` carries forward only what no running
+/// turn took, so a note the worker has already acted on must not be re-stated to
+/// the dispatch after it. The node is parked mid-flight and brought back, which is
+/// the only way one node here is dispatched twice, and what is read is the prompt
+/// that second dispatch was really handed.
+///
+/// The second node is what keeps a driver on the run while this one is parked: a
+/// graph whose every node has settled has no reconciler left to pick a requeue up,
+/// and a `kind: human` action does not answer for it — an unattested one settles
+/// `waiting`, which the loop counts as finished with. So `keep` is an agent node
+/// whose **judge** is held, which is a turn nothing in this journey releases.
+#[test]
+fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
+    let world = World::new("note-not-carried");
+    let run = "notcarried";
+    // Every worker turn of *this node* is held and released on its own: the note
+    // reopens the worker's turn, so the turn after the one it was offered into
+    // has to be held too for the node to still be in flight when the park below
+    // asks it to stop. Releasing and re-arming from here would be a race against
+    // a turn that starts as soon as the last one ends.
+    world.script("turn.hold-each", "Do build.");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("turn.hold", "hold");
+    // `keep`'s judge, held and never released, so that node is still *running*
+    // when the requeue arrives however its worker turn raced `build`'s for the
+    // gates above — the two share one pair, and a second node that settled would
+    // take the reconciler down with it. `build` never reaches a judge at all: its
+    // worker turn is held from the moment the note reopens it until the deadline
+    // below reaps it.
+    world.script("judge.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("keep", &[])]),
+    );
+    // A deadline this journey waits *out* rather than one it waits on. The note
+    // reopens the worker's turn and every turn of this node is held, so nothing
+    // of the dispatch answers the cancellation's ask — the loop's own clock is
+    // what ends it, and being reaped rather than judged is what leaves the node
+    // parked for the requeue below instead of settled `done`.
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+
+    let operation = recorded(&world, run);
+    assert_eq!(
+        operation["reached"],
+        json!("worker"),
+        "the note this journey is about did not reach a running turn: {operation}"
+    );
+
+    // Parked mid-flight and brought back, which is the only way one node here is
+    // dispatched twice — and where a note that was still owed would show up. The
+    // park goes out while the reopened turn is still held, so it really is a park
+    // of a running node; the requeue waits until that dispatch has settled,
+    // because a node still in flight is one a requeue is refused for.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "cancel", "id": "build", "reason": "re-dispatch it"})),
+        )
+        .exited(0);
+
+    world.until("the held dispatch to be reaped at its deadline", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "requeue", "id": "build"})),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    // The second dispatch's own turn is held by the gates the first one consumed,
+    // which is what makes the instruction below readable while it is still open
+    // rather than a race against a turn that ends as soon as it starts.
+    world.until("the requeued node to be dispatched again", |world| {
+        dispatches_of(world, run, "build")
+            .get(1)
+            .is_some_and(|turns| !turns.is_empty())
+    });
+
+    let dispatched = dispatches_of(&world, run, "build");
+    assert!(
+        dispatched[0].iter().any(|turn| turn.contains(NOTE)),
+        "the note never reached a turn of the dispatch it was delivered into:\n{:#?}",
+        dispatched[0]
+    );
+    assert!(
+        dispatched[1].iter().all(|turn| !turn.contains(NOTE)),
+        "a note a running turn had already read was carried into the dispatch after \
+         it:\n{:#?}",
+        dispatched[1]
+    );
+
+    // Released so the held turns end with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle", "judge.go"] {
+        release(&world.fakes, gate);
+    }
+}
+
+/// A note whose live delivery is really **attempted and refused** is carried,
+/// rather than refused with it.
+///
+/// The other way a note reaches no running turn, and the one only the conversation
+/// can answer: `a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carried`
+/// drives a node that has never reported a member, so nothing is asked at all.
+/// Here a member was reported and *is* asked, and the ask fails. `persist` treats
+/// the two the same on purpose — what it promises is about the note reaching a
+/// running turn, not about why it did not — and a journey against an absent
+/// conversation cannot show that half.
+///
+/// The failure is the one this suite can produce on demand: a run composing the
+/// `oneagentgraph` **executable**, whose command line has no verb for the note
+/// seam, which is what `world.cmd` rather than `world.agentgraph_cmd` selects.
+/// `a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable` drives
+/// the same failed ask against a node that has settled `done` and reads the
+/// refusal; this one drives it against a node that has **not**, so there is a
+/// dispatch ahead of it for `persist` to carry the note to, and the same failure
+/// is an answer rather than a refusal.
+#[test]
+fn a_note_a_failed_delivery_attempt_is_carried_rather_than_refused_with_it() {
+    let world = World::new("note-attempted");
+    let run = "attempted";
+    // The node's turn fails, so its dispatch settles and the node settles
+    // `failed` — which, unlike `done`, still has a dispatch ahead of it.
+    world.script("harness.fail", "");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the run's driver to release it", |world| {
+        !world.run_file(run, "owner.lock").exists()
+    });
+
+    world
+        .run_with_stdin_on(
+            world.cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let operation = recorded(&world, run);
+    assert_eq!(
+        operation["reached"],
+        json!("carried"),
+        "a note whose delivery was attempted and failed was not carried: {operation}"
+    );
 }
 
 /// A note offered while the **judge** is the party taking a turn re-takes that
@@ -671,7 +994,7 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
     let refused = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &json!({
-            "version": 1,
+            "version": 2,
             "author": "monitor",
             "commands": [note_op("build", "worker", NOTE, Some(CRITERION))],
         })
@@ -680,7 +1003,7 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
     refused
         .exited(REFUSED)
         .err_has("'note' is not an op the monitor may issue")
-        .err_has("`context` is the note that binds nothing")
+        .err_has("the planner's decision rather than an observation")
         .err_has("Surface it to the planner instead");
 
     // Nothing of it is durable: the queue the reconciler reads carries no note, so
@@ -717,8 +1040,8 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
     assert_eq!(recorded(&world, run)["reached"], json!("worker"));
 }
 
-/// The four shapes of note the envelope cannot carry, each refused where it
-/// arrives, and nothing of any of them left durable.
+/// The shapes of note the envelope cannot carry, each refused where it arrives,
+/// and nothing of any of them left durable.
 ///
 /// The rules are the seam's own newtypes rather than checks this crate keeps:
 /// `addressee` is required and closed, a note's text refuses a blank, and a
@@ -726,12 +1049,19 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
 /// criteria — a version literal among them, because a release cut between the note
 /// being written and the work being judged makes finished work fail against it.
 ///
-/// What only an end-to-end journey can show is that all four hold at the **wire**,
-/// on the envelope a manager really sends, rather than on a constructor a test can
-/// call. A malformed note that parsed and became durable would still be offered to
-/// the live conversation by the reconciler: the manager would read a refusal and
-/// the worker would read the note. So the conversation is held open across all
-/// four, and the queue is asked while the reconciler is still passing over it.
+/// Three of them are not the seam's: the removed `context` op and the removed
+/// `auto` delivery value are refused because this envelope declares neither, which
+/// is the intended failure for a caller that has not moved; and `deliver: next`
+/// with `persist: false` is refused because those two fields decide between them
+/// that the note reaches nobody, before the run is reached at all.
+///
+/// What only an end-to-end journey can show is that every one of them holds at the
+/// **wire**, on the envelope a manager really sends, rather than on a constructor a
+/// test can call. A malformed note that parsed and became durable would still be
+/// offered to the live conversation by the reconciler: the manager would read a
+/// refusal and the worker would read the note. So the conversation is held open
+/// across all of them, and the queue is asked while the reconciler is still passing
+/// over it.
 #[test]
 fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued() {
     let world = World::new("note-boundary");
@@ -742,6 +1072,27 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
     // about it. A bare `missing field` would say a note was rejected; these say
     // what to send instead.
     let refused = [
+        // The op that was collapsed into this one. Refused by name, which is the
+        // intended failure for a caller that has not moved: the envelope refuses
+        // what it does not declare rather than quietly dropping it.
+        (
+            json!({"op": "context", "id": "build", "note": NOTE}),
+            "unknown variant `context`",
+        ),
+        // And the delivery value that went with it, for the same reason: `auto`
+        // named a combination of both axes, and its meaning is `deliver: live`
+        // with `persist: true`.
+        (
+            json!({"op": "note", "id": "build", "addressee": "worker", "text": NOTE,
+                   "deliver": "auto"}),
+            "unknown variant `auto`",
+        ),
+        // The envelope-time half of the one reach-nobody rule: these two fields
+        // decide it between them, so it never reaches a run at all.
+        (
+            note_op_with("build", NOTE, "next", false),
+            "reaches nobody whatever the run does",
+        ),
         (
             json!({"op": "note", "id": "build", "addressee": "worker", "text": "   \n"}),
             "this one was blank",
@@ -789,8 +1140,8 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
         );
     }
 
-    // And the conversation those four never reached runs to its own end, so what
-    // was refused is the envelope rather than the node it named.
+    // And the conversation none of them reached runs to its own end, so what was
+    // refused is the envelope rather than the node it named.
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     world.until("the run to settle", |world| {

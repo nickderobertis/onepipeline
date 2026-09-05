@@ -2241,8 +2241,9 @@ pub(crate) fn deliver_note_envelope(
         // environment — and this call is a library call, so a journey driving it
         // would have to mutate the test binary's own environment while its other
         // journeys run in parallel threads. The op's own timeout path is driven
-        // end to end by `context_delivery`, through the envelope, where the bound
-        // is a subprocess's to set.
+        // end to end by `live_edit::edits_accepted_but_not_reconciled_in_time_are_
+        // reported_queued`, through the envelope, where the bound is a
+        // subprocess's to set.
         Submitted::Queued { .. } => Ok(crate::note::Delivered::Queued),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         Submitted::Answered { .. } => Err(Error::Refused(
@@ -2523,11 +2524,24 @@ fn apply_here(
         addressee,
         text,
         criterion,
+        deliver,
+        persist,
     } = command
     else {
         return Ok(operations);
     };
-    match engine::deliver_manager_note(paths, *addressee, id, text, criterion.as_ref(), None) {
+    let offered = engine::Offered {
+        id,
+        addressee: *addressee,
+        text,
+        criterion: criterion.as_ref(),
+        reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        // Nothing is driving the run, so the frontier this was validated against
+        // is the whole of what says whether the node has a dispatch left to carry
+        // the note to.
+        dispatchable: frontier.recorded.get(id) != Some(&crate::graph::NodeStatus::Done),
+    };
+    match engine::deliver_manager_note(paths, &offered, None) {
         Ok(operations) => Ok(operations),
         Err(error) => {
             // The refusal is the run's record as much as the caller's answer: a

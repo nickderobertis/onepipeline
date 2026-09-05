@@ -41,7 +41,7 @@ const RULING: &str = "The four redundant comment lines are out of scope for this
 const CORRECTION: &str = "Restore the four comment lines after all; the reviewer asked for them.";
 
 fn envelope(commands: Value) -> String {
-    json!({"version": 1, "commands": commands}).to_string()
+    json!({"version": 2, "commands": commands}).to_string()
 }
 
 /// The task prose each of a node's dispatches was given, in dispatch order.
@@ -469,7 +469,7 @@ fn a_monitor_is_refused_amend_by_name_and_told_what_to_do_instead() {
         .run_with_stdin(
             &["reply", &run],
             &json!({
-                "version": 1,
+                "version": 2,
                 "author": "monitor",
                 "commands": [{"op": "amend", "id": "later", "text": RULING}],
             })
@@ -480,14 +480,15 @@ fn a_monitor_is_refused_amend_by_name_and_told_what_to_do_instead() {
         .err_has("Surface it to the planner instead");
 
     // The lever it *does* have goes through, so what is refused is the authority
-    // rather than the author.
+    // rather than the author — and it is the one its own persona names as the
+    // answer: raise what it saw to the planner, who owns the bar.
     world
         .run_with_stdin(
             &["reply", &run],
             &json!({
-                "version": 1,
+                "version": 2,
                 "author": "monitor",
-                "commands": [{"op": "context", "id": "later", "note": "the fixture moved"}],
+                "commands": [{"op": "finding", "id": "later", "message": RULING}],
             })
             .to_string(),
         )

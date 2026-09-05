@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 const SHORT_GRACE: &str = "1";
 
 fn envelope(commands: Value) -> String {
-    json!({"version": 1, "commands": commands}).to_string()
+    json!({"version": 2, "commands": commands}).to_string()
 }
 
 /// Start a run whose node is held open, and wait until its turn is something an

@@ -2967,7 +2967,7 @@ fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
     world
         .run_with_stdin(
             &["reply", "parkedrun"],
-            &serde_json::json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]})
+            &serde_json::json!({"version": 2, "commands": [{"op": "cancel", "id": "slow"}]})
                 .to_string(),
         )
         .exited(0);
@@ -3177,7 +3177,7 @@ fn a_run_that_is_both_parked_and_judged_is_told_to_requeue_first() {
     world
         .run_with_stdin(
             &["reply", "bothrun"],
-            &serde_json::json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]})
+            &serde_json::json!({"version": 2, "commands": [{"op": "cancel", "id": "slow"}]})
                 .to_string(),
         )
         .exited(0);
