@@ -593,8 +593,8 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
     assert_eq!(
         driven,
         [
-            "add", "amend", "attest", "cancel", "complete", "drop", "finding", "note",
-            "reparent", "requeue", "retry",
+            "add", "amend", "attest", "cancel", "complete", "drop", "finding", "note", "reparent",
+            "requeue", "retry",
         ]
         .into_iter()
         .map(str::to_string)

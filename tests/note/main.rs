@@ -613,7 +613,10 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
     // other way the note could be in the instruction this turn opened on.
     let dispatched = dispatches_of(&world, run, "later");
     let [first] = &dispatched[..] else {
-        panic!("`later` was dispatched {} times, not once", dispatched.len());
+        panic!(
+            "`later` was dispatched {} times, not once",
+            dispatched.len()
+        );
     };
     assert!(
         first.iter().any(|instruction| instruction.contains(NOTE)),

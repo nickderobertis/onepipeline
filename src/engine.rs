@@ -1993,9 +1993,11 @@ pub(crate) fn deliver_manager_note(
     }
     let attempted = match live.cloned().or_else(|| last_turn_address(paths, id)) {
         Some(address) => agentgraph::note(&address, &note).map_err(|why| why.to_string()),
-        None => Err("no dispatch of this node has reported a member yet, so there is no \
+        None => Err(
+            "no dispatch of this node has reported a member yet, so there is no \
                      conversation to hand it to"
-            .to_string()),
+                .to_string(),
+        ),
     };
     match attempted {
         // A turn of the running dispatch's conversation took it — including the

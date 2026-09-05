@@ -413,9 +413,9 @@ fn work(
         // that text, because the gates are one pair for the whole world: a
         // second node's turn consuming them would take the gate the first one is
         // still waiting on, and hang it.
-        if fake::node_script(dir, "turn", "hold-each").is_some_and(|marker| {
-            marker.trim().is_empty() || prompt.contains(marker.trim())
-        }) {
+        if fake::node_script(dir, "turn", "hold-each")
+            .is_some_and(|marker| marker.trim().is_empty() || prompt.contains(marker.trim()))
+        {
             for gate in ["turn.go", "turn.settle"] {
                 let _ = std::fs::remove_file(dir.join(gate));
             }

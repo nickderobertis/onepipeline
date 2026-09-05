@@ -1466,7 +1466,10 @@ fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
         .expect("entry 60 names what it removes");
     assert_eq!(
         removed,
-        REMOVED_OPS.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        REMOVED_OPS
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
         "the record and this suite disagree about which of the contract's ops are gone"
     );
     for op in REMOVED_OPS {
@@ -2314,14 +2317,19 @@ fn a_note_carries_two_axes_and_the_defaults_entry_60_declares() {
     let deliver = &block["deliver"];
     let values: Vec<String> =
         serde_json::from_value(deliver["values"].clone()).expect("entry 60 names them");
-    let default = deliver["default"].as_str().expect("entry 60 names the default");
-    let gone = deliver["gone"].as_str().expect("entry 60 names what is gone");
+    let default = deliver["default"]
+        .as_str()
+        .expect("entry 60 names the default");
+    let gone = deliver["gone"]
+        .as_str()
+        .expect("entry 60 names what is gone");
     let persists = block["persist"]["default"]
         .as_bool()
         .expect("entry 60 names `persist`'s default");
 
     let note = |extra: Value| {
-        let mut value = json!({"op": "note", "id": "slow", "addressee": "worker", "text": "the fix landed"});
+        let mut value =
+            json!({"op": "note", "id": "slow", "addressee": "worker", "text": "the fix landed"});
         for (key, field) in extra.as_object().expect("an object") {
             value[key] = field.clone();
         }
@@ -4544,7 +4552,9 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         let read = serde_json::from_value::<Edit>(fixture.clone());
         let err = read
             .err()
-            .unwrap_or_else(|| panic!("the envelope's boundary accepted a note it cannot deliver: {fixture}"))
+            .unwrap_or_else(|| {
+                panic!("the envelope's boundary accepted a note it cannot deliver: {fixture}")
+            })
             .to_string();
         let op = fixture["op"].as_str().expect("the fixture names its op");
         if removed.contains(&op.to_string()) {
@@ -4555,9 +4565,9 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         }
     }
     assert!(
-        refused
-            .iter()
-            .any(|fixture| removed.contains(&fixture["op"].as_str().unwrap_or_default().to_string())),
+        refused.iter().any(
+            |fixture| removed.contains(&fixture["op"].as_str().unwrap_or_default().to_string())
+        ),
         "entry 60 removes an op and drives no envelope carrying it"
     );
 
