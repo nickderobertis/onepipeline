@@ -25,6 +25,13 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use crate::harness::end_process;
 
+/// The bound on how many times one driver starts a run's observer graph again.
+///
+/// Spelled rather than imported: the crate under test keeps it in a private
+/// module, and it is reached here exactly as an operator reaches it, through the
+/// environment of the process being driven.
+pub const OBSERVER_RESTARTS_ENV: &str = "ONEPIPELINE_OBSERVER_RESTARTS";
+
 /// The effective oneharness configuration one member's dispatch was prepared
 /// with, read off the run's own merged store.
 ///
@@ -124,17 +131,42 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     // and the other one is what the detached journeys exercise.
     assert_eq!(launch["dir"], json!(world.root));
     // Held against the run's own merged store rather than against anything this
-    // test knows: the driver's `graph-started` carries the run id `oneagentgraph`
-    // stamped on it, so a record naming anything else is a record naming a run
-    // that never drove this one.
-    let announced = world
+    // test knows: each observer's `graph-started` carries the run id
+    // `oneagentgraph` stamped on it, so a record naming anything else is a record
+    // naming a run that never watched this one.
+    //
+    // Every one of them, because a driver starts another observer when the one
+    // watching it stops: the record has to name each graph that has watched, in
+    // the order they did, or a reader meeting one graph's records in this very
+    // store could not say whose observer wrote them.
+    let announced: Vec<String> = world
         .journal("relative-defaults")
         .into_iter()
-        .find(|event| event["kind"] == "graph-started" && event["labels"]["node"].is_null())
-        .expect("the driver announced itself into the merged store");
+        .filter(|event| event["kind"] == "graph-started" && event["labels"]["node"].is_null())
+        .filter_map(|event| event["labels"]["run_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !announced.is_empty(),
+        "no observer announced itself into the merged store"
+    );
+    let watched: Vec<String> = launch["observer_runs"]
+        .as_array()
+        .expect("the record names the graphs that have watched")
+        .iter()
+        .filter_map(|run| run.as_str().map(str::to_string))
+        .collect();
+    // A prefix rather than the whole list: the last graph this driver started
+    // may have been asked to stop before its announcement reached the store,
+    // which is a graph the record still has to name.
+    assert!(
+        watched.starts_with(&announced),
+        "the record does not name the graphs that watched this run, in order: \
+         {watched:?} against {announced:?}"
+    );
     assert_eq!(
-        launch["graph_run"], announced["labels"]["run_id"],
-        "the record names a different graph run from the one that drove the run"
+        launch["graph_run"],
+        json!(watched.last()),
+        "the run addresses a graph that is not the last one it started: {launch}"
     );
 }
 
@@ -3117,7 +3149,14 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
 #[cfg(unix)]
 #[test]
 fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
-    let world = World::new("real-observer-dead");
+    // Restarting switched off, because the subject here is the *reading* — what
+    // a view answers about a graph run whose owner is gone — and a driver that
+    // started a replacement would put a live graph in front of it before the
+    // question could be asked. Zero is the operator's own off switch and is
+    // exactly what every build before restarting did; the restart itself is
+    // driven by
+    // `a_killed_observer_is_replaced_and_the_run_goes_on_being_watched` below.
+    let world = World::new("real-observer-dead").with_env(OBSERVER_RESTARTS_ENV, "0");
     world.write_graphs();
     // The node's turn is held for the whole journey, so both runs are executing
     // throughout: an observer verdict is about a run that is *working*.
@@ -3249,6 +3288,249 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
     world.release("turn.settle");
 }
 
+/// A killed observer is replaced, and the run goes on being watched.
+///
+/// Against the real sibling, because the claim is that a graph run this host can
+/// prove is over has another in its place: a run whose observer has gone
+/// executes with nothing comparing what it is doing against what it was asked to
+/// do, while every view reports a plain `ACTIVE`.
+///
+/// The observer here really ends — its owning process is killed outright, mid
+/// turn — while the run is still being driven, and what is asserted is that the
+/// run is watched *again* afterwards, by a graph run of its own rather than by
+/// the one that was killed.
+#[cfg(unix)]
+#[test]
+fn a_killed_observer_is_replaced_and_the_run_goes_on_being_watched() {
+    let world = World::new("real-observer-restarted");
+    world.write_graphs();
+    // The node's turn is held for the whole journey, so the run is being driven
+    // throughout: a restart is for a run that is still working, and one whose
+    // loop had finished would need no observer at all.
+    world.script("turn.hold", "hold");
+    // And every observing turn is held, so each graph is genuinely watching —
+    // the first when it is killed, the second when it is read.
+    world.script("observer.wait", "hold");
+
+    let path = world.plan(
+        "rewatched",
+        &plan_of("rewatched", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0);
+
+    let recorded = || world.run_json("rewatched", "launch.json");
+    let graph_run = || {
+        recorded()["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    world.until("the observer graph to be recorded", |_| {
+        !graph_run().is_empty()
+    });
+    let killed = graph_run();
+
+    // The process that owns that graph run's state, as the run's own lock names
+    // it: `<pid> <start token>`. Nothing is searched for and nothing is matched
+    // against a command line, which knows nothing about whose work it matched.
+    let graph_dir = world.graph_state().join(&killed);
+    let lock = std::fs::read_to_string(graph_dir.join(oneagentgraph::liveness::OWNER_LOCK_FILE))
+        .expect("the graph run records who owns its state");
+    let owner: i32 = lock
+        .split_whitespace()
+        .next()
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the owner lock names no process: {lock:?}"));
+    // SAFETY: `kill` takes a pid and a signal and reports failure in its return
+    // value; nothing is borrowed. The pid is the one this run's own ownership
+    // record names, which is the only process this journey may end.
+    assert_eq!(
+        unsafe { libc::kill(owner, libc::SIGKILL) },
+        0,
+        "could not end the process the graph run's own lock names"
+    );
+
+    world.until("the run to be watched by another graph", |_| {
+        let now = graph_run();
+        !now.is_empty() && now != killed
+    });
+    let record = recorded();
+    // Both of them, in order, so a reader meeting either graph's records in the
+    // merged store can still say whose observer wrote them.
+    assert_eq!(
+        record["observer_runs"],
+        json!([killed, graph_run()]),
+        "the run does not name the graphs that have watched it: {record}"
+    );
+    assert!(
+        record["observer_ending"].is_null(),
+        "a run that is being watched again says nothing is watching it: {record}"
+    );
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run_on_agentgraph(&view);
+        rendered.exited(0);
+        let line = rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains("rewatched"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
+        assert!(
+            line.contains("ACTIVE") && !line.contains("OBSERVER"),
+            "a run whose observer was replaced still reads as unwatched: {line}"
+        );
+    }
+    // And the driver said both halves where a detached run's driver says
+    // everything, so an operator following the log reads the replacement rather
+    // than inferring it from a graph run id that changed.
+    world.until_run_file_holds("rewatched", "driver.log", "started another observer graph");
+
+    world.release("observer.go");
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// A supervisory read can say **which graph** a settlement record belongs to,
+/// after the run has moved past that graph.
+///
+/// A `graph-settled` names no member, so the graph run `oneagentgraph` stamped it
+/// with is the only thing on it that says whose it is. Unless the run names every
+/// graph that has watched it, that id has nothing to be held against once
+/// `graph_run` has moved on, and the dead observer's records in the store are
+/// indistinguishable from a node dispatch's.
+///
+/// Read the way a supervisor reads: the run's own merged store, joined to the
+/// run's own launch record. Nothing here knows a graph run id in advance.
+#[test]
+fn a_settlement_record_is_still_attributable_to_the_observer_that_wrote_it() {
+    // One restart, so the run has had exactly two observers by the time the
+    // bound is spent — enough that `graph_run` has moved past the first, which
+    // is the state the attribution has to survive.
+    let world = World::new("real-observer-attributed").with_env(OBSERVER_RESTARTS_ENV, "1");
+    world.write_graphs();
+    // The node's turn is held for the whole journey and the observing one is
+    // not, so each observer settles while the run it was watching goes on being
+    // driven.
+    world.script("turn.hold", "hold");
+
+    let path = world.plan(
+        "attributed",
+        &plan_of("attributed", vec![agent("build", &[])]),
+    );
+    // Attached, because that is the launch that relays what its observer says
+    // into the run's own store — and spawned, because it stays for the run.
+    let mut command = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    let mut launch = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached launch starts");
+
+    world.until("the run to be recorded", |world| {
+        world.run_file("attributed", "launch.json").is_file()
+    });
+    let watched = || -> Vec<String> {
+        world.run_json("attributed", "launch.json")["observer_runs"]
+            .as_array()
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|run| run.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    world.until("the driver to spend its restart bound", |world| {
+        watched().len() == 2
+            && world.run_json("attributed", "launch.json")["observer_ending"].is_string()
+    });
+    let observers = watched();
+    let record = world.run_json("attributed", "launch.json");
+    assert_eq!(
+        record["graph_run"],
+        json!(observers[1]),
+        "the run addresses a graph that is not the last one it started: {record}"
+    );
+
+    // The records of the graph that is *gone*: the run has moved on, and its
+    // settlement still has to be readable as this run's observer.
+    let of = |run: &str, kind: &str| -> Vec<Value> {
+        world
+            .journal("attributed")
+            .into_iter()
+            .filter(|event| event["kind"] == json!(kind) && event["labels"]["run_id"] == json!(run))
+            .collect()
+    };
+    world.until("the first observer's settlement to reach the store", |_| {
+        !of(&observers[0], "graph-settled").is_empty()
+    });
+    let settled = of(&observers[0], "graph-settled");
+    assert_eq!(
+        settled.len(),
+        1,
+        "the graph that stopped watching settled more than once: {settled:#?}"
+    );
+    // What a supervisory read has to be able to say about it, and all of it is
+    // on the record itself: which graph wrote it, and that the graph was this
+    // run's observer rather than one of its node dispatches.
+    assert!(
+        settled[0]["labels"]["node"].is_null(),
+        "the observer's settlement is labelled as a node dispatch's: {}",
+        settled[0]
+    );
+    assert!(
+        observers.contains(
+            &settled[0]["labels"]["run_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        ),
+        "the run does not name the graph that wrote its observer's settlement: {record}"
+    );
+    // And it ran before it ended: both halves of that graph's life are in the
+    // one store an operator reads.
+    assert!(
+        !of(&observers[0], "graph-started").is_empty(),
+        "the store says the observer settled without ever having started"
+    );
+
+    // The join discriminates rather than matching everything: the graph
+    // dispatching the node is stamped with a run of its own, which this run's
+    // record does not name as an observer.
+    let dispatched: Vec<String> = world
+        .journal("attributed")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == json!("build"))
+        .filter_map(|event| event["labels"]["run_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !dispatched.is_empty(),
+        "the node was never dispatched, so there is nothing to tell the observer from"
+    );
+    assert!(
+        dispatched.iter().all(|run| !observers.contains(run)),
+        "a node dispatch's graph is named as one of this run's observers: {dispatched:?}"
+    );
+
+    world.release("turn.go");
+    world.release("turn.settle");
+    let status = launch.wait().expect("the attached launch exits");
+    assert!(status.success(), "the attached launch failed: {status}");
+}
+
 /// The other way an observer stops: it finishes, and the run it was watching
 /// does not.
 ///
@@ -3257,7 +3539,10 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
 /// that never got to write anything.
 #[test]
 fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
-    let world = World::new("real-observer-finished");
+    // Restarting switched off, for the reason the killed journey above gives:
+    // this is about the half of the verdict a *settled* graph run answers, and a
+    // replacement would answer it instead.
+    let world = World::new("real-observer-finished").with_env(OBSERVER_RESTARTS_ENV, "0");
     world.write_graphs();
     // The node's turn is held and the observing one is not, so the graph settles
     // while the run it was watching is still going.
