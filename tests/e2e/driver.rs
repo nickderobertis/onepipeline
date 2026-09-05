@@ -159,19 +159,31 @@ fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption(
     // `plan_of` states this goal, so a task without it is one the plan never
     // reached.
     let goal = "Deliver described";
+    // Every launch rather than the first, and no count: a driver starts another
+    // observer when the one watching it stops, so how many a run has had is a
+    // fact about that driver's watch and not about what a launch is handed.
     let launched = dag_launch_tasks(&world);
-    assert_eq!(launched.len(), 1, "{launched:?}");
-    assert_says_only_what_the_run_is(&launched[0], &run, goal);
+    assert!(!launched.is_empty(), "no dag-scope graph was launched");
+    for task in &launched {
+        assert_says_only_what_the_run_is(task, &run, goal);
+    }
 
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
+    // Counted with that driver gone, so what follows is the adoption's own.
+    let before = dag_launch_tasks(&world).len();
     // A run parked on a person is *awaiting the planner*, not abandoned: the
     // adoption picks it up and returns on the decision it cannot clear.
     world.run(&["adopt", &run]).exited(0);
     let relaunched = dag_launch_tasks(&world);
-    assert_eq!(relaunched.len(), 2, "{relaunched:?}");
-    assert_says_only_what_the_run_is(&relaunched[1], &run, goal);
+    assert!(
+        relaunched.len() > before,
+        "the adoption launched no observer of its own: {relaunched:?}"
+    );
+    for task in &relaunched[before..] {
+        assert_says_only_what_the_run_is(task, &run, goal);
+    }
 }
 
 /// A goal is optional in the plan schema, and the task's shape is not.
@@ -200,8 +212,10 @@ fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
         .exited(0);
 
     let launched = dag_launch_tasks(&world);
-    assert_eq!(launched.len(), 1, "{launched:?}");
-    assert_says_only_what_the_run_is(&launched[0], "goalless", "(no goal stated)");
+    assert!(!launched.is_empty(), "no dag-scope graph was launched");
+    for task in &launched {
+        assert_says_only_what_the_run_is(task, "goalless", "(no goal stated)");
+    }
 }
 
 #[test]
@@ -932,14 +946,17 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 
     let dirs = dag_launch_dirs(&world);
-    assert_eq!(
-        dirs.len(),
-        2,
-        "expected one launch from `start` and one from `adopt`: {dirs:?}"
+    // At least the two this journey is about — one from `start`, one from
+    // `adopt` — and however many more each driver started when the graph
+    // watching its run stopped. Every one of them names the same place, which is
+    // the claim: the run's members do not move with whoever typed the verb.
+    assert!(
+        dirs.len() >= 2,
+        "expected a launch from `start` and one from `adopt`: {dirs:?}"
     );
-    assert_eq!(
-        dirs[0], dirs[1],
-        "`start` and `adopt` sent the sibling two different directories for one run"
+    assert!(
+        dirs.iter().all(|dir| dir == &dirs[0]),
+        "one run's launches went to more than one directory: {dirs:?}"
     );
     assert_eq!(
         Path::new(&dirs[0]),
@@ -1752,6 +1769,184 @@ fn an_attached_launch_returns_once_its_observer_graph_has_stopped_and_the_run_ad
     );
     let result = world.run_json("outlasted", "result.json");
     assert_eq!(result["state"], "complete");
+}
+
+/// An observer that stops watching a run that is still being driven is started
+/// again, and the restarting is **bounded**.
+///
+/// The defect this closes: the driver noticed its observer had gone, wrote one
+/// line to its own log, and returned — so the run went on executing with nothing
+/// comparing what it was doing against what it was asked to do, while every view
+/// reported a plain `ACTIVE`. The only remedy an operator had was `adopt`, which
+/// ends every dispatch running beside it, and one such gap on a real run ran for
+/// about three and a half hours because taking that trade was worse.
+///
+/// The observer here is one that will not stay up: it records what it saw and
+/// exits at once, every time. That is the case the bound exists for — a relaunch
+/// loop against a graph that cannot run spends a whole agent-graph launch per
+/// turn of the driver's watch — so this drives it to the bound and reads what
+/// the bound did off the run, which is where an operator looks.
+#[test]
+fn an_observer_that_stops_watching_a_driven_run_is_started_again_within_a_bound() {
+    // Two rather than the shipped eight, so the bound is reached inside a
+    // journey: what is under test is that the count is a bound and that the run
+    // says what it did, neither of which is a fact about the default.
+    let world =
+        World::new("driver-observer-restarted").with_env("ONEPIPELINE_OBSERVER_RESTARTS", "2");
+    // The node's dispatch is held for the whole journey, so the run is being
+    // driven throughout: an observer is restarted for a run that is still
+    // working, and a run whose loop had finished would need none.
+    world.script("build.wait", "hold");
+    // Every observer is held until this journey lets that one go, which is what
+    // makes the sequence its own rather than the scheduler's: each graph is
+    // watching until it is released, and it is released one at a time.
+    world.script("observer.wait", "hold");
+    let run = start_detached_observed(&world, "restarted", vec![agent("build", &[])]);
+
+    for nth in 1..=3 {
+        world.until(&format!("observer {nth} to be watching"), |world| {
+            world.observer_saw().len() >= nth
+        });
+        world.release(&format!("observer.go.{nth}"));
+    }
+    world.until("the driver to spend its restart bound", |world| {
+        world.run_json(&run, "launch.json")["observer_ending"].is_string()
+    });
+    let record = world.run_json(&run, "launch.json");
+    // Three graphs watched this run: the one the driver opened with, and the two
+    // restarts the bound allowed. A fourth would be a bound that is not one.
+    let saw = world.observer_saw();
+    assert_eq!(
+        saw.len(),
+        3,
+        "the driver did not restart its observer exactly twice: {saw:?}\n{}",
+        world.dump()
+    );
+    assert!(
+        saw.iter().all(|seen| seen["run"] == json!("restarted")),
+        "a restart watched some other run: {saw:?}"
+    );
+    // And the run's own record names each of them, so a reader meeting one of
+    // their records in the merged store can still tell whose observer wrote it
+    // once `graph_run` has moved past it.
+    let observed = record["observer_runs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the record names the graphs that watched: {record}"));
+    assert_eq!(observed.len(), 3, "{record}");
+    assert_eq!(
+        observed.last(),
+        Some(&record["graph_run"]),
+        "the run addresses a graph that is not the last one it started: {record}"
+    );
+    let mut distinct: Vec<&serde_json::Value> = observed.iter().collect();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "a restart was recorded as the graph run it replaced: {record}"
+    );
+
+    // What the bound did, where a supervisory read of the run sees it: not
+    // watching, and the reason it will not be watched again.
+    let ending = record["observer_ending"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the record says why nothing is watching: {record}"));
+    assert!(
+        ending.contains("bound of 2 restart(s) is spent") && ending.contains("adopt restarted"),
+        "the record does not say what the bound did, or what to do about it: {ending}"
+    );
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run(&view);
+        rendered.exited(0);
+        let line = rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains(&run))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
+        assert!(
+            line.contains("ACTIVE") && line.contains("OBSERVER NOT RESTARTED"),
+            "a run nothing will watch again reads as one being quietly retried: {line}"
+        );
+        assert!(
+            line.contains(ending),
+            "the view says nothing about why: {line}"
+        );
+    }
+    // The driver said it on its own log too, which is where an operator
+    // following a detached run reads everything else.
+    world.until_run_file_holds(&run, "driver.log", "started another observer graph");
+
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+}
+
+/// A restart the observer's graph refuses is reported once, and not retried.
+///
+/// The other half of the bound, and the reason the bound alone is not the whole
+/// answer: the launcher already refuses a graph that would not start, so a
+/// refusal is an answer rather than a guess. Asking again would spend the rest of
+/// the budget learning the same thing and would bury the reason under the last
+/// attempt's.
+#[test]
+fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
+    let world = World::new("driver-observer-restart-refused");
+    // Both held, so the observer is watching and the node is genuinely in flight
+    // before the graph becomes unrunnable: what is under test is a *restart*
+    // being refused, not a launch being refused.
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "refused-restart", vec![agent("build", &[])]);
+    world.until(
+        "the observer to be watching and the node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty()
+                && world.was_invoked(
+                    "oneagentgraph",
+                    &["run", "--label", "onepipeline.node=build"],
+                )
+        },
+    );
+
+    // From here the graph will not start at all — a config that no longer
+    // resolves, a directory that has gone — and then the observer goes.
+    world.script("run.refuse-after", "0");
+    world.release("observer.go");
+
+    world.until("the driver to report the refusal", |world| {
+        world.run_json(&run, "launch.json")["observer_ending"].is_string()
+    });
+    let record = world.run_json(&run, "launch.json");
+    let ending = record["observer_ending"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the record says why nothing is watching: {record}"));
+    assert!(
+        ending.contains("would not start again"),
+        "the refusal is not what the record says ended the watch: {ending}"
+    );
+    // One graph watched this run and no other: the refusal was not asked again.
+    assert_eq!(
+        world.observer_saw().len(),
+        1,
+        "a graph that refused a restart was asked again\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        record["observer_runs"].as_array().map(Vec::len),
+        Some(1),
+        "{record}"
+    );
+    let rendered = world.run(&["status"]);
+    rendered.exited(0);
+    assert!(
+        rendered.stdout.contains("OBSERVER NOT RESTARTED"),
+        "a run whose observer would not start again reads as watched: {}",
+        rendered.stdout
+    );
+
+    world.release("build.go");
 }
 
 /// The `(pid, parent pid)` pairs this host reports.

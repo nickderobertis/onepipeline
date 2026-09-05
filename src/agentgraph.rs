@@ -806,11 +806,44 @@ enum Output {
         /// somebody asks — see [`Said`].
         stderr: Said,
     },
-    /// Appended to this file. It is the only place a refusal's message exists
-    /// for a launch that logs, and it holds one launch's output and no other:
-    /// the only caller that logs is `start --detach`, into a run directory
-    /// minted for that launch.
-    Logged(PathBuf),
+    /// Appended to this file, from the offset this launch's own output starts
+    /// at. It is the only place a refusal's message exists for a launch that
+    /// logs.
+    ///
+    /// The offset is what makes a *second* launch into one log readable, and a
+    /// driver that restarts the graph watching its run makes exactly that: it
+    /// starts the replacement into the log it has been writing all along. A
+    /// handshake reading that file from the top would find the announcement of
+    /// the observer that already died and take it for this one's — reporting a
+    /// graph that refused as a graph that started, under the run id of a graph
+    /// that is gone — and a refusal's evidence would be whatever the file
+    /// happened to end with rather than what this launch said.
+    Logged {
+        path: PathBuf,
+        /// The file's length when this launch was started: everything before it
+        /// belongs to somebody else.
+        from: u64,
+    },
+}
+
+/// What a logged launch has written into its file, from where its own output
+/// begins.
+///
+/// Leniently, like every other read of a file a live writer is appending to: a
+/// file that is not there yet, a tail that is not whole UTF-8 because a write is
+/// half-done, and an offset past the end are all "nothing yet" rather than
+/// failures — the caller is polling, and it asks again.
+fn logged_since(path: &Path, from: u64) -> String {
+    use std::io::{Read, Seek};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    if file.seek(std::io::SeekFrom::Start(from)).is_err() {
+        return String::new();
+    }
+    let mut said = String::new();
+    let _ = file.read_to_string(&mut said);
+    said
 }
 
 /// The executable that answers this crate's own command line, once the caller
@@ -942,11 +975,17 @@ impl ProcessGraphRun {
             command.env(key, value);
         }
         command.stdin(Stdio::null());
+        // Where this launch's own output will start, read **before** the child
+        // exists so that nothing it writes is counted as somebody else's. A file
+        // that is not there yet begins at nought, which is the ordinary case: the
+        // first launch into a fresh run directory.
+        let mut logged_from = 0;
         match output {
             GraphOutput::Relayed => {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
             }
             GraphOutput::Logged(path) => {
+                logged_from = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
                 // One file, opened twice: the two streams interleave the way
                 // they would on a terminal, which is how they are read.
                 let log = |path: &Path| {
@@ -981,7 +1020,10 @@ impl ProcessGraphRun {
                 stdout: child.stdout.take().map(BufReader::new),
                 stderr: Said::draining(child.stderr.take()),
             },
-            GraphOutput::Logged(path) => Output::Logged(path.to_path_buf()),
+            GraphOutput::Logged(path) => Output::Logged {
+                path: path.to_path_buf(),
+                from: logged_from,
+            },
         };
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
@@ -1025,7 +1067,7 @@ impl ProcessGraphRun {
         let piped = match &mut self.output {
             Output::Relayed { stdout, .. } => stdout.take(),
             // Written to a file, so the answer is read from there.
-            Output::Logged(_) => return self.await_logged_line(),
+            Output::Logged { .. } => return self.await_logged_line(),
         };
         match piped {
             // Piped here, so the first line is the answer — and it is an
@@ -1139,10 +1181,10 @@ impl ProcessGraphRun {
     /// the graph said on stderr, and past a line from a build whose shape this
     /// one cannot read, rather than taking either for an announcement.
     fn logged_envelope(&self) -> Option<Envelope> {
-        let Output::Logged(path) = &self.output else {
+        let Output::Logged { path, from } = &self.output else {
             return None;
         };
-        let text = std::fs::read_to_string(path).ok()?;
+        let text = logged_since(path, *from);
         text.split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
             .find_map(envelope_of)
@@ -1202,7 +1244,7 @@ impl ProcessGraphRun {
     /// first.
     fn evidence(&mut self) -> String {
         let text = match &self.output {
-            Output::Logged(path) => std::fs::read_to_string(path).unwrap_or_default(),
+            Output::Logged { path, from } => logged_since(path, *from),
             Output::Relayed { .. } => self.said(),
         };
         let trimmed = text.trim();
@@ -1229,7 +1271,7 @@ impl ProcessGraphRun {
             Output::Relayed { stdout, .. } => stdout.take(),
             // A logged launch's envelopes are in its file, which stays named —
             // its refusal is still read from there.
-            Output::Logged(_) => None,
+            Output::Logged { .. } => None,
         };
         let Some(stdout) = piped else {
             return Box::new(std::iter::empty());
@@ -1281,7 +1323,7 @@ impl ProcessGraphRun {
     fn said(&self) -> String {
         match &self.output {
             Output::Relayed { stderr, .. } => stderr.settled(),
-            Output::Logged(_) => String::new(),
+            Output::Logged { .. } => String::new(),
         }
     }
 

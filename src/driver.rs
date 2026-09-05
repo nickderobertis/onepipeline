@@ -525,6 +525,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // Replaced below by the graph run's own id, which does not exist until
         // the launch below has produced it.
         graph_run: String::new(),
+        observer_runs: Vec::new(),
+        observer_ending: String::new(),
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
         node_validator: node_validator.unwrap_or_default(),
@@ -635,7 +637,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         return Ok(EXIT_SUCCESS);
     }
 
-    let goal = plan.goal.as_ref().map(|goal| goal.text.as_str());
+    let goal = plan.goal.as_ref().map(|goal| goal.text.clone());
     // The observer, if the launch named one. It watches and reports; the loop
     // below is what drives the run either way, so a graph that refuses to start
     // fails the launch rather than leaving a run nothing executes.
@@ -643,9 +645,11 @@ fn start(args: &StartArgs) -> Result<i32> {
     // run's single writer, and a launch that started an observer and then lost
     // that race would leave a graph watching a run it does not drive.
     let lock = engine::claim(&paths)?;
-    let mut observer = observe(&paths, &mut record, goal, agentgraph::GraphOutput::Relayed)?;
+    let output = agentgraph::GraphOutput::Relayed;
+    let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     ledger::write_json(&paths.launch(), &record)?;
-    attach(&paths, observer.as_mut(), lock)
+    let mut watch = ObserverWatch::of(&paths, record, goal, output);
+    attach(&paths, observer.as_mut(), &mut watch, lock)
 }
 
 /// Launch the run's observer graph, when it was launched with one.
@@ -664,10 +668,12 @@ fn observe(
         return Ok(None);
     }
     let launched = launch_graph(paths, record, goal, output)?;
-    record.graph_run = launched
-        .run_id()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    record.watched_by(
+        launched
+            .run_id()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    );
     Ok(Some(launched))
 }
 
@@ -825,16 +831,14 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
         take_the_run_over(&paths, &mut record)?;
         report_and_journal_adoption(&paths, &record, &view)?;
     }
-    let mut observer = observe(
-        &paths,
-        &mut record,
-        view.state
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.goal.as_ref())
-            .map(|goal| goal.text.as_str()),
-        agentgraph::GraphOutput::Logged(&log),
-    )?;
+    let goal = view
+        .state
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.goal.as_ref())
+        .map(|goal| goal.text.clone());
+    let output = agentgraph::GraphOutput::Logged(&log);
+    let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
 
@@ -843,8 +847,12 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     let settled = {
         let driving = AtomicBool::new(true);
         let watched = observer.as_mut();
+        // The record as it stands *now*, with this process's own claim on it:
+        // the watch is the only writer of it from here, so a restart records the
+        // graph it started beside the driver that started it.
+        let mut watch = ObserverWatch::of(&paths, record, goal, output);
         std::thread::scope(|scope| {
-            scope.spawn(|| watch_and_reap_observer(watched, &paths.run, &driving));
+            scope.spawn(|| watch_and_reap_observer(watched, &mut watch, &driving));
             let settled = engine::drive_holding(&paths, lock);
             driving.store(false, Ordering::Release);
             settled
@@ -856,15 +864,26 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     Ok(settled.exit_code())
 }
 
-/// Reap the graph watching this run once it goes, and say so on the driver's log.
+/// Keep the run watched, and reap the graph that stopped watching it.
 ///
-/// The reaping is the load-bearing half: unreaped, a dead observer is a zombie
+/// The reaping is load-bearing on its own: unreaped, a dead observer is a zombie
 /// for the life of this driver, and a zombie answers a liveness probe as the
 /// live process it is not — so the `owner.lock` the views read the observer's
 /// verdict off would go on naming a graph nothing is running.
+///
+/// What it does *next* is start another one. A run whose observer has gone
+/// executes with nothing comparing what it is doing against what it was asked to
+/// do, while every view goes on reporting a driver hard at work — and the only
+/// remedy an operator had was to `adopt`, which ends every dispatch running
+/// beside it. So the driver that noticed is the one that fixes it.
+///
+/// Bounded by [`ObserverWatch`], and it stops at the first restart that will not
+/// start: a relaunch loop against a graph that cannot run is worse than no
+/// relaunch, because it spends a whole agent-graph launch per turn of this loop
+/// and reports nothing for any of them.
 fn watch_and_reap_observer(
     observer: Option<&mut agentgraph::GraphRun>,
-    run: &str,
+    watch: &mut ObserverWatch<'_>,
     driving: &AtomicBool,
 ) {
     let Some(observer) = observer else {
@@ -872,13 +891,174 @@ fn watch_and_reap_observer(
     };
     while driving.load(Ordering::Acquire) {
         if observer.has_exited() {
-            eprintln!(
-                "onepipeline: the observer graph for '{run}' has stopped watching; \
-                 the run is still being driven"
-            );
-            return;
+            observer_stopped_watching(&watch.paths.run);
+            if watch.restart(observer).is_none() {
+                return;
+            }
         }
         std::thread::sleep(ATTACH_POLL);
+    }
+}
+
+/// What the driver says on its own log when the graph watching the run stops.
+///
+/// One sentence for both driving paths, because an operator reading a detached
+/// run's log and one watching an attached launch are reading the same event.
+fn observer_stopped_watching(run: &str) {
+    eprintln!(
+        "onepipeline: the observer graph for '{run}' has stopped watching; \
+         the run is still being driven"
+    );
+}
+
+/// How many times one driver starts a run's observer graph again after it has
+/// stopped watching.
+///
+/// A bound on **spending**, not a retry schedule: every restart is a whole
+/// agent-graph launch, and a graph that starts and stops at once would otherwise
+/// be relaunched for as long as the run is driven. Eight covers the failure this
+/// exists for over a day-long run — an observer whose conversation runs out of
+/// turns, which recurs on the scale of hours — while an observer that cannot
+/// stay up spends the whole budget in seconds and then stops. What the bound did
+/// is written to the launch record either way, so a run nothing is going to
+/// watch again reads as unwatched rather than as one being quietly retried.
+const DEFAULT_OBSERVER_RESTARTS: u32 = 8;
+
+/// The environment variable that moves that bound.
+const OBSERVER_RESTARTS_ENV: &str = "ONEPIPELINE_OBSERVER_RESTARTS";
+
+/// How many restarts this driver has.
+///
+/// `0` is a **value** here rather than an unusable one, which is why it is not
+/// filtered away as the other bounds in this crate filter theirs: it says never
+/// restart, which is exactly what every run did before this existed and is the
+/// off switch for an operator who would rather be told and intervene. Only an
+/// absent or unreadable value falls back to the default.
+fn observer_restarts() -> u32 {
+    std::env::var(OBSERVER_RESTARTS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_OBSERVER_RESTARTS)
+}
+
+/// What starts another observer for a run being driven, and what stops it doing
+/// so.
+///
+/// Held by the driver rather than by the graph, because a replacement is a
+/// *launch* — the graph reference, the directory, the overrides and the source
+/// filter the run was launched with — and the launch record is where all of that
+/// is. It carries the record because this process is that record's single
+/// writer: a restart moves the graph run a later `next` addresses the pacemaker
+/// by, and a reader that went on addressing the graph that died would reset a
+/// pacemaker nothing is running.
+struct ObserverWatch<'a> {
+    paths: &'a RunPaths,
+    /// The run's launch record, as this driver holds it.
+    record: LaunchRecord,
+    /// The plan's goal, which is the only thing besides the run id that reaches
+    /// the observer's task.
+    goal: Option<String>,
+    /// Where a replacement's envelopes go — the promise the driver that opened
+    /// this watch made about itself. See [`launch_graph`].
+    output: agentgraph::GraphOutput<'a>,
+    /// The bound, and how much of it has been spent.
+    limit: u32,
+    restarted: u32,
+}
+
+impl<'a> ObserverWatch<'a> {
+    /// The watch a driver opens over the observer it has just launched.
+    fn of(
+        paths: &'a RunPaths,
+        record: LaunchRecord,
+        goal: Option<String>,
+        output: agentgraph::GraphOutput<'a>,
+    ) -> Self {
+        Self {
+            paths,
+            record,
+            goal,
+            output,
+            limit: observer_restarts(),
+            restarted: 0,
+        }
+    }
+
+    /// Start another observer in place of the one that has stopped.
+    ///
+    /// `Some` where the run is being watched again — the handle is replaced in
+    /// place, so a caller that relays what an observer says wires itself to the
+    /// graph now in it. `None` where nothing will start another, and the launch
+    /// record then says why, unless restarting was switched off in the first
+    /// place.
+    fn restart(&mut self, observer: &mut agentgraph::GraphRun) -> Option<()> {
+        // Restarting switched off, which is a run's operator saying they would
+        // rather be told and intervene. Nothing is recorded for it: the record
+        // says why *a driver that restarts observers* stopped, and a driver that
+        // was never going to restart has nothing to say beyond the sentence it
+        // has already put on its log — leaving the verdict to the liveness probe
+        // every build before this answered with.
+        if self.limit == 0 {
+            return None;
+        }
+        if self.restarted >= self.limit {
+            return self.gave_out(format!(
+                "this driver's bound of {} restart(s) is spent; take the run over to start \
+                 another: onepipeline adopt {}",
+                self.limit, self.paths.run
+            ));
+        }
+        let started =
+            match launch_graph(self.paths, &self.record, self.goal.as_deref(), self.output) {
+                Ok(started) => started,
+                // The launcher already refuses a graph that would not start, so this
+                // is that refusal rather than a guess: one attempt, reported, and no
+                // more. Retrying a graph that cannot run buys nothing and hides the
+                // reason under the next attempt's.
+                Err(error) => return self.gave_out(format!("it would not start again: {error}")),
+            };
+        self.restarted += 1;
+        self.record.watched_by(
+            started
+                .run_id()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
+        // Best effort, and the run is watched either way: a record this driver
+        // could not write leaves a later `next` addressing the pacemaker of the
+        // graph that died, which is worth saying out loud and is not worth
+        // ending a working observer over.
+        if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
+            eprintln!(
+                "onepipeline: started another observer for '{}' but could not record it: {error}",
+                self.paths.run
+            );
+        }
+        eprintln!(
+            "onepipeline: started another observer graph for '{}' ({} of {} restart(s))",
+            self.paths.run, self.restarted, self.limit
+        );
+        *observer = started;
+        Some(())
+    }
+
+    /// Record that nothing is starting this run's observer again, and why.
+    ///
+    /// Always `None`, so the one call site reads as the answer it is: this watch
+    /// is over, and the reason is now on the record every view reads.
+    fn gave_out(&mut self, reason: String) -> Option<()> {
+        eprintln!(
+            "onepipeline: no observer graph is watching '{}': {reason}",
+            self.paths.run
+        );
+        self.record.observer_ending = reason;
+        if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
+            eprintln!(
+                "onepipeline: could not record why '{}' is unwatched: {error}",
+                self.paths.run
+            );
+        }
+        None
     }
 }
 
@@ -987,6 +1167,38 @@ impl Settlement {
     }
 }
 
+/// Relay one observer graph's envelopes to the attach loop.
+///
+/// One relay per graph run, because a `GraphRun` hands its stream over once:
+/// the observer an attach opens with and every replacement started after it each
+/// get their own, all feeding the one channel the loop drains — so the merged
+/// store holds what *this run's* observer said rather than what its first one
+/// said.
+///
+/// A `None` sender is an attach that is finished with observers, which is the
+/// one state where there is nothing to relay into.
+fn relay_observer(
+    paths: &RunPaths,
+    run: &mut agentgraph::GraphRun,
+    relay: &Option<std::sync::mpsc::Sender<crate::event::Envelope>>,
+) -> Result<()> {
+    let Some(tx) = relay.as_ref().cloned() else {
+        return Ok(());
+    };
+    let events = run.events();
+    std::thread::Builder::new()
+        .name(format!("attach-{}", paths.run))
+        .spawn(move || {
+            for envelope in events.flatten() {
+                if tx.send(envelope).is_err() {
+                    return;
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| Error::Invalid(format!("cannot start the attach relay: {e}")))
+}
+
 /// Run the engine loop in this process and stream the run until it settles.
 ///
 /// The loop runs on a thread of its own so this one can render. Reading it
@@ -1002,22 +1214,19 @@ impl Settlement {
 fn attach(
     paths: &RunPaths,
     observer: Option<&mut agentgraph::GraphRun>,
+    watch: &mut ObserverWatch<'_>,
     lock: ledger::OwnershipLock,
 ) -> Result<i32> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watched = observer;
+    // The sender is kept as well as given away, because a restart needs one for
+    // the observer it starts: what an attach relays into the merged store is
+    // whichever graph is watching now, not the one this launch happened to open
+    // with. It is released the moment nothing will start another, so the drain
+    // below still ends on the relay closing rather than on its whole grace.
+    let mut relay = Some(tx);
     if let Some(run) = watched.as_deref_mut() {
-        let events = run.events();
-        std::thread::Builder::new()
-            .name(format!("attach-{}", paths.run))
-            .spawn(move || {
-                for envelope in events.flatten() {
-                    if tx.send(envelope).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|e| Error::Invalid(format!("cannot start the attach relay: {e}")))?;
+        relay_observer(paths, run, &relay)?;
     }
     let mut reported = 0usize;
     let mut observer_gone = false;
@@ -1042,22 +1251,28 @@ fn attach(
         // settles as the `complete` it is rather than as an `unattended` this
         // loop merely looked at too early.
         // Reaped rather than merely probed: an observer nobody waits on stays a
-        // zombie, and a zombie answers a liveness probe as alive. Said once, so
-        // a graph that stopped watching a live run is visible to the operator
-        // reading the stream.
+        // zombie, and a zombie answers a liveness probe as alive. Said each time
+        // one goes, so a graph that stopped watching a live run is visible to
+        // the operator reading the stream — and then another is started, because
+        // an attached run is being driven exactly as a detached one is and an
+        // unwatched run is the same failure either way.
         if let Some(run) = watched.as_deref_mut() {
             if run.has_exited() && !observer_gone {
-                observer_gone = true;
-                eprintln!(
-                    "onepipeline: the observer graph for '{}' has stopped watching; \
-                     the run is still being driven",
-                    paths.run
-                );
+                observer_stopped_watching(&paths.run);
+                match watch.restart(run) {
+                    Some(()) => relay_observer(paths, run, &relay)?,
+                    None => observer_gone = true,
+                }
             }
         }
 
         let concluded = engine.is_finished();
         if concluded {
+            // Nothing will start another observer for a run whose loop has
+            // finished, so the sender kept for one is released here: the drain
+            // below is waiting for every writing handle to close, and one held
+            // for a relaunch that will never happen is one that never closes.
+            relay = None;
             // The observer's last envelopes are still in flight between the
             // relay thread and this one. Collecting them before the settlement
             // is what makes the merged store the whole of what it said.
@@ -1173,35 +1388,26 @@ fn adopt(args: &AdoptArgs) -> Result<i32> {
     // run this driver is adopting, and that project may have moved on or gone.
     //
     // The observer only, and only when the run was launched with one: what
-    // adoption is *for* is the loop below, which this process runs itself.
-    let mut observer = if record.observer_graph().is_none() {
-        None
-    } else {
-        let launched = launch_graph(
-            &paths,
-            &record,
-            view.state
-                .plan
-                .as_ref()
-                .and_then(|plan| plan.goal.as_ref())
-                .map(|goal| goal.text.as_str()),
-            agentgraph::GraphOutput::Relayed,
-        )?;
-        // A fresh observer is a fresh graph run with an id of its own, and the
-        // pacemaker is addressed by that id — so the record names the run that
-        // is watching now rather than the one that died.
-        record.graph_run = launched
-            .run_id()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        Some(launched)
-    };
+    // adoption is *for* is the loop below, which this process runs itself. A
+    // fresh observer is a fresh graph run with an id of its own, and the
+    // pacemaker is addressed by that id — so [`observe`] is what records it,
+    // exactly as it does for a launch, and the run names what is watching it now
+    // rather than the graph that died.
+    let goal = view
+        .state
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.goal.as_ref())
+        .map(|goal| goal.text.clone());
+    let output = agentgraph::GraphOutput::Relayed;
+    let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     ledger::write_json(&paths.launch(), &record)?;
+    let mut watch = ObserverWatch::of(&paths, record, goal, output);
     // An adoption resumes the graph exactly where the journal left it, including
     // mid-decision: the fold reconstructs the outstanding decision points from
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
-    attach(&paths, observer.as_mut(), lock)
+    attach(&paths, observer.as_mut(), &mut watch, lock)
 }
 
 /// The checks every adoption makes before anything is written, and the parked
@@ -2707,6 +2913,8 @@ mod tests {
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
             node_validator: String::new(),

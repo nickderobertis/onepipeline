@@ -144,8 +144,13 @@ enum ObserverLiveness {
     /// The launch named an observer graph and nothing says its run has ended.
     Watching,
     /// The launch named one and this host can prove that graph run is over. The
-    /// run is executing with nothing watching it.
+    /// run is executing with nothing watching it — for now: a driver that
+    /// notices starts another, so this is what the window between them reads as.
     ObserverDead,
+    /// The launch named one, its driver has stopped starting another, and the
+    /// record says why. Nothing is watching this run and nothing is going to,
+    /// which is the state an operator has to act on rather than wait out.
+    ObserverNotRestarted,
     /// The launch named no observer graph at all — the shipped default, since no
     /// agent is required to execute a plan. Nothing is watching this run either,
     /// and nothing ever was: a different fact, and a different fix.
@@ -159,6 +164,7 @@ impl ObserverLiveness {
         match self {
             Self::Watching => "",
             Self::ObserverDead => "OBSERVER DEAD",
+            Self::ObserverNotRestarted => "OBSERVER NOT RESTARTED",
             Self::Unobserved => "NO OBSERVER",
         }
     }
@@ -174,6 +180,13 @@ impl ObserverLiveness {
 fn observer_liveness(launch: &LaunchRecord) -> ObserverLiveness {
     if launch.observer_graph().is_none() {
         return ObserverLiveness::Unobserved;
+    }
+    // The driver's own account first, because it is the stronger evidence: a
+    // driver that has stopped starting another observer *knows* the run will not
+    // be watched again, where the probe below reports only what this host can
+    // prove and answers everything else with "still watching".
+    if !launch.observer_ending.is_empty() {
+        return ObserverLiveness::ObserverNotRestarted;
     }
     if crate::agentgraph::graph_run_ended(&launch.graph_run, &launch.run_id) {
         return ObserverLiveness::ObserverDead;
@@ -957,9 +970,18 @@ fn observer_word(view: &RunView, standing: &Standing) -> &'static str {
     observer_liveness(&view.launch).as_str()
 }
 
+/// That word, and — where the driver recorded one — why nothing is watching.
+///
+/// The reason travels on the same line rather than under it, because this is the
+/// one observer verdict a reader has to act on and the act depends on which
+/// reason it is: a bound that is spent is a run to take over, and a graph that
+/// would not start is a graph to fix first.
 fn observer_suffix(view: &RunView, standing: &Standing) -> String {
     match observer_word(view, standing) {
         "" => String::new(),
+        word if word == ObserverLiveness::ObserverNotRestarted.as_str() => {
+            format!("  {word}: {}", view.launch.observer_ending)
+        }
         word => format!("  {word}"),
     }
 }
@@ -2555,6 +2577,8 @@ mod tests {
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
