@@ -77,6 +77,7 @@ enum Act {
     Began,
     Reported,
     LandingRead,
+    RepositoryOpen,
     StoreRead,
     ProcessSpawn,
 }
@@ -87,6 +88,7 @@ impl Act {
             Act::Began => "render",
             Act::Reported => "reported",
             Act::LandingRead => "landing-read",
+            Act::RepositoryOpen => "repository-open",
             Act::StoreRead => "store-read",
             Act::ProcessSpawn => "process-spawn",
         }
@@ -234,6 +236,21 @@ impl Drop for Deciding {
             });
         }
     }
+}
+
+/// Record that one repository was opened to decide a landing.
+///
+/// Recorded from [`crate::vcs::landing_now`] because that is where the open
+/// happens: the read this crate calls loads the registry and resolves the
+/// repository itself, once per call, inside the sibling. Counting it here is what
+/// makes the residual cost a **measurement** rather than a claim — and what lets
+/// `tests/e2e/landing.rs` hold a second open for one node to be a failure.
+///
+/// It is deliberately not recorded from a repository handle of this crate's own:
+/// there is no such handle, because there is nothing on the sibling's public
+/// surface to build one out of. See that module's own note, and divergence 33.
+pub(crate) fn repository_opened(repo: Option<&str>) {
+    record(Act::RepositoryOpen, json!({ "repo": repo }));
 }
 
 /// Record that the one read a landing decision is allowed to make was taken.

@@ -410,7 +410,28 @@ pub(crate) enum LandingRead {
 /// which narrows a branch name two identities could both hold to the one this
 /// run's work is in.
 ///
-/// Divergence 33 in `docs/contract-divergences.md` records what this reaches.
+/// # One repository open per read, and why it is not one per render
+///
+/// This read **opens the repository itself**: `landing_status` loads the registry
+/// and resolves `repo` inside the sibling, on every call. So a render deciding
+/// five landings in one repository opens that repository five times, and this
+/// crate cannot collapse that — the open is not one it performs.
+///
+/// Nothing on `onevcs` 0.19.1's public surface lets it. `landing_status` is the
+/// only landing read that answers for a branch a publication **pushed**, and it
+/// takes one reference. The only per-repository batch,
+/// [`onevcs::Vcs::preserved`] over `Scope::Repo`, enumerates
+/// `git::unpublished_branches` — "local branches holding commits no `origin`
+/// remote-tracking ref has" — so it excludes every branch that was pushed to open
+/// a change request, which is every branch a view asks about. And `store`,
+/// `workspace` and `status` are private modules there, so a caller cannot hand in
+/// a loaded registry or a resolved repository either.
+///
+/// The open is therefore **recorded** rather than removed:
+/// [`crate::rendercost::repository_opened`] counts one per read, and
+/// `tests/e2e/landing.rs` holds it to one per node whose line the render prints —
+/// which is the bound this crate can keep. Divergence 33 in
+/// `docs/contract-divergences.md` records what would close the rest.
 //
 // llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
 // reference in this crate is, for the reason `crate::projection`'s `landing_commits`
@@ -419,6 +440,10 @@ pub(crate) enum LandingRead {
 // by `usable`, which is what wrote every value that reaches this.
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
+    // One per read, because the read opens one. Recorded beside it rather than
+    // inferred from it, so a build that opened a repository *without* reading a
+    // landing — or twice for one read — is counted rather than assumed away.
+    crate::rendercost::repository_opened(repo);
     read_of(onevcs::landing_status(branch, repo))
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
