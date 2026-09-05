@@ -521,6 +521,42 @@ pub struct LaunchRecord {
     /// observer graph was launched.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub graph_run: String,
+    /// Every `oneagentgraph` run this run's observer graph has been, oldest
+    /// first, ending with the one [`graph_run`](Self::graph_run) names.
+    ///
+    /// A different question from that field, and it becomes one the moment an
+    /// observer is replaced: `graph_run` says what to address **now** — the
+    /// pacemaker a later `next` resets — while this says what has watched the
+    /// run at all. A graph run that ended is still the producer of every
+    /// envelope it wrote, and once `graph_run` has moved past it a reader
+    /// meeting one of its records in the merged store has nothing else to tell
+    /// this run's observer from one of its node dispatches.
+    ///
+    /// Written by [`watched_by`](Self::watched_by), which is the one writer of
+    /// both fields, so the two cannot come apart. Omitted when empty, like every
+    /// other field added to this record after it shipped, so a build that
+    /// predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observer_runs: Vec<String>,
+    /// Why nothing is starting this run's observer graph again, or empty while
+    /// something still would.
+    ///
+    /// The driver's own statement, which is stronger evidence than any probe of
+    /// the graph run beside it: a driver that has stopped restarting knows the
+    /// run is not going to be watched again, where
+    /// [`agentgraph::graph_run_ended`] can only report what this host can prove.
+    /// So it is what a view reads first — see
+    /// [`views`](crate::views) — and it is cleared by
+    /// [`watched_by`](Self::watched_by), because whatever ended the last
+    /// observer is not true of the one now watching.
+    ///
+    /// Empty on every record written before this field existed, which reads as
+    /// the run those builds always had: one whose observer nothing was going to
+    /// restart, and which said so by leaving this unset.
+    ///
+    /// [`agentgraph::graph_run_ended`]: crate::agentgraph::graph_run_ended
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub observer_ending: String,
     /// The default node-scope agent-graph config every dispatch launches.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_graph: String,
@@ -691,6 +727,30 @@ impl LaunchRecord {
         self.started = sys::process_start_token(self.pid)
             .map(|token| token.recorded().to_string())
             .unwrap_or_default();
+    }
+
+    /// Record the observer graph run that is watching this run now.
+    ///
+    /// The one writer of [`graph_run`](Self::graph_run),
+    /// [`observer_runs`](Self::observer_runs) and
+    /// [`observer_ending`](Self::observer_ending), because they are one fact
+    /// about one graph: what to address, what has watched, and whether anything
+    /// still will. Every path that starts an observer — the launch, the driver a
+    /// detached launch retains, each adoption, and each restart — goes through
+    /// here, so a record naming a graph run that is not in its own history is a
+    /// shape this crate cannot write.
+    ///
+    /// An empty id is a graph that started without announcing itself, which is
+    /// the one case that leaves nothing to address: it moves the field, because
+    /// the old address is not this observer's, and adds nothing to the history,
+    /// because there is nothing to add.
+    pub fn watched_by(&mut self, graph_run: String) {
+        self.graph_run = graph_run;
+        if !self.graph_run.is_empty() {
+            self.observer_runs.push(self.graph_run.clone());
+        }
+        // Whatever stopped the observer before this one is not true of this one.
+        self.observer_ending.clear();
     }
 
     /// The observer graph this run was launched with, when it was launched with
@@ -1686,6 +1746,8 @@ mod tests {
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
@@ -2022,6 +2084,8 @@ mod tests {
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
@@ -2050,6 +2114,8 @@ mod tests {
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
+            observer_runs: Vec::new(),
+            observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),

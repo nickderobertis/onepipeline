@@ -1174,12 +1174,19 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
         .exited(0)
         .err_has("has stopped watching");
 
+    // Every record rather than a count of them: a driver starts another observer
+    // when the one watching it stops, and a graph whose judge side cannot run
+    // stops every time — so how many of these there are is the driver's bound
+    // rather than anything about the refusal, and each one has to name it.
     let reported = world.observer_supervision();
-    assert_eq!(reported.len(), 1, "{reported:#?}");
     assert!(
-        reported[0]["misconfigured"]
+        !reported.is_empty(),
+        "the graph was never supervised at all"
+    );
+    assert!(
+        reported.iter().all(|record| record["misconfigured"]
             .as_str()
-            .is_some_and(|why| why.contains("needs a command to run")),
+            .is_some_and(|why| why.contains("needs a command to run"))),
         "the misconfiguration was not named: {reported:#?}"
     );
     assert!(

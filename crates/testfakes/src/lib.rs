@@ -515,6 +515,9 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
         Ok(run) if !run.is_empty() => run,
         _ => fail(&format!("{RUN_ID_ENV} is unset: no run to observe")),
     };
+    // Which observer of this world's runs this is, counting this one, so a
+    // journey can address the hold below to one of them.
+    let nth = count(dir, "observe");
     // The first thing a real monitor member does is read the run's ledger, so
     // the first thing this one records is whether that ledger was there to be
     // read. A launcher that started its observer before writing the launch
@@ -529,7 +532,18 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
     );
 
     if dir.join("observer.wait").exists() {
-        wait_for(&dir.join("observer.go"));
+        // Either release: `observer.go` frees every observer this world starts,
+        // which is what a journey that only needs one held asks for, and
+        // `observer.go.<nth>` frees the *nth* one alone. A run's driver starts
+        // another observer when the one watching it stops, so a journey about
+        // that sequence has to let go of them one at a time — and holding each
+        // until it is released is also what makes every one of them a graph that
+        // has announced itself before it goes, rather than one whose launcher
+        // may have met its exit first.
+        wait_for_any(&[
+            dir.join("observer.go"),
+            dir.join(format!("observer.go.{nth}")),
+        ]);
     }
     std::process::ExitCode::SUCCESS
 }
