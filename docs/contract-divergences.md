@@ -1013,8 +1013,8 @@ Re-reading it needed one of two answers, and this crate could reach neither:
   but a `RemoteHost` comes from `Hosting::for_repo(slug)`, and the `owner/name`
   slug is derived from an identity key by `onevcs`'s own private `gh::slug`.
   Deriving it here would be a second copy of a sibling's rule, and this crate
-  never re-declares a sibling's vocabulary — and it would fail in the direction that matters: a
-  copy that drifted, or an identity on a host that is not GitHub, would address
+  never re-declares a sibling's vocabulary — and it would fail in the direction
+  that matters: a copy that drifted, or an identity on a host that is not GitHub, would address
   *some other repository* and answer confidently about it.
 * **Git's.** `Vcs::recoverable` makes precisely the comparison —
   `git diff --quiet <base> <branch>`, "whether the base already carries this
@@ -1066,8 +1066,9 @@ per-node work at all.
 and that is this proposal's remaining half.** `landing_status` loads the registry
 and resolves the repository *itself* before it reads anything, on every call, so
 five nodes of one repository take it from scratch five times and the consuming
-crate cannot collapse that: the work is not work it performs. Nothing on `onevcs` 0.19.1's surface lets it be collapsed either.
-That read is the only one that answers for a branch a publication **pushed**, and
+crate cannot collapse that: the work is not work it performs. Nothing on
+`onevcs` 0.19.2's surface lets it be collapsed either. That read is the only one
+that answers for a branch a publication **pushed**, and
 it takes one reference; the only per-repository batch, `Vcs::preserved` over
 `Scope::Repo`, enumerates `git::unpublished_branches` — "local branches holding
 commits no `origin` remote-tracking ref has" — and so excludes every branch that
@@ -1079,8 +1080,8 @@ hand in a loaded registry or a resolved repository instead.
 So they are **counted rather than claimed away**: `rendercost` records one per
 read and the journey holds it to one per node whose line the render prints, which
 is the bound this crate can keep — asking again about a repository a node has
-already been decided against fails there by name. **Proposal (for `onevcs`): a landing read
-that takes a repository and several references — or a resolved-repository handle
+already been decided against fails there by name. **Proposal (for `onevcs`): a
+landing read that takes a repository and several references — or a resolved-repository handle
 that answers them — so a render pays one open for a repository however many of its
 nodes it prints.**
 

@@ -247,7 +247,10 @@ resolver = "2"
 #   release target**. A requirement, because the read it replaces selected one
 #   first and so refused a repository that declares none — which is the host this
 #   crate runs on, where no view could correct a settlement's answer. `src/vcs.rs`
-#   is the call site. `onevcs-testing` 0.5.4 requires exactly this `onevcs`.
+#   is the call site. The pin stands past it at 0.19.2, which this crate reads
+#   nothing new from — it rewords a session-close refusal and moves a helper
+#   between that library's own modules — and is taken because the block below
+#   admits no older release; `onevcs-testing` 0.5.5 requires exactly it.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -352,7 +355,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.19.1"
+onevcs = "0.19.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -393,7 +396,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.5.4"
+onevcs-testing = "0.5.5"
 
 [package]
 name = "onepipeline"
