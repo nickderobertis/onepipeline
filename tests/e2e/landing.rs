@@ -45,6 +45,14 @@
 //! seconds it takes are a fact about the host's load at that instant.
 //! <!-- llmlint: ignore-end[comments_earn_their_place] -->
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: this whole module runs in about 20 seconds and its slowest journey in about
+// six, in a binary that already holds three deliberately minute-long ones in
+// `loopcost.rs` — the journeys this rule's own suppression in that file is about. What it
+// exercises is `views`, `vcs` and `rendercost`, which any change under `src/` can move,
+// so a project edged narrower than the crate could not honestly run it: it would drop out
+// of `nx affected` for the very changes it exists to catch.
+
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
 // binary and the sibling these journeys are about — `onevcs` — is the real library, over
 // real git and a real origin on disk. `oneagentgraph` is substituted at its subprocess

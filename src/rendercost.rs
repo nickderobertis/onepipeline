@@ -158,7 +158,6 @@ pub(crate) struct Render {
     outermost: bool,
 }
 
-/// Begin a render of `view` over `run`.
 pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
     let outermost = INSIDE.with_borrow_mut(|inside| {
         if inside.is_some() {
@@ -239,20 +238,13 @@ impl Drop for Deciding {
     }
 }
 
-/// Record that one landing decision made the sibling resolve its repository.
-///
-/// Named for what is certainly true rather than for what a caller hopes: the read
-/// resolves the repository before it reads anything, so one per read is by
-/// construction, and what it goes on to open depends on the answer. Recorded
-/// *after* the read returns, so it records something that happened.
-///
-/// Why it is one per read rather than one per render is
-/// [`crate::vcs::landing_now`]'s to say.
+/// Named for the resolution rather than for an *open*, because that is the part
+/// the read certainly does; what it goes on to open depends on the answer. Its
+/// cost is [`crate::vcs::landing_now`]'s to explain.
 pub(crate) fn repository_resolved(repo: Option<&str>) {
     record(Act::RepositoryResolved, json!({ "repo": repo }));
 }
 
-/// Record that the one read a landing decision is allowed to make was taken.
 pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
     record(
         Act::LandingRead,
@@ -385,18 +377,15 @@ mod tests {
         {
             let render = rendering(Rendered::Status, "measured");
             render.reported("alpha");
-            // Outside any decision: one read the whole render made once.
             store_read(11);
             {
                 let _deciding = deciding("alpha");
                 landing_read_taken("alpha-branch", None);
                 store_read(3);
                 process_spawned("git");
-                // An inner scope names no second node.
                 let _nested = deciding("beta");
                 landing_read_taken("beta-branch", None);
             }
-            // A nested render records nothing of its own.
             let _inner = rendering(Rendered::Summary, "measured");
         }
         std::env::remove_var(RENDER_COST_ENV);

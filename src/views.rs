@@ -2300,20 +2300,10 @@ fn summarize(event: &Envelope) -> String {
 
 /// How a landing reads on a rendered line.
 ///
-/// A phrase rather than the bare word, and it says **what read it** and when,
-/// because a landing is only ever as good as the evidence behind it. A change
-/// observed on its base has reached it and a base does not stop carrying what it
-/// carries; a change that had not reached it is an observation of a moment, and
-/// the moment passes — a node that settled `done (queued)` was still reporting
-/// the settlement's answer hours after its change had merged, and a supervisor
-/// read that as work nobody had landed and re-dispatched three nodes against a
-/// base that already carried their work.
-///
-/// So every answer but the first is read **as this line renders**, through
-/// [`crate::vcs::landing_now`], and carries the tier that decided it. Where that
-/// read cannot decide, the line says so in its own words rather than in either
-/// of the other two — and the settlement's own dated claim rides along behind
-/// it, which is what it always was.
+/// A phrase rather than the bare word, because it has to say **what decided it**:
+/// a node that settled `done (queued)` was still reporting the settlement's
+/// answer hours after its change had merged, and a supervisor re-dispatched three
+/// nodes against a base that already carried their work.
 ///
 /// `None` where the node never had a change to land, which is what its absence
 /// on every other node's line has always meant.

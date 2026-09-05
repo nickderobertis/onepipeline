@@ -36,12 +36,6 @@ mod envelope_reviewer;
 mod filter;
 mod holds;
 mod journal;
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the whole module runs in about 20 seconds and its slowest journey in about
-// six, against a binary that already holds three deliberately minute-long ones in
-// `loopcost.rs` — which are the journeys this rule's own suppression in that file is
-// about. What it exercises is `views`, `vcs` and `rendercost`, which any change under
-// `src/` can move, so a project edged narrower than the crate could not honestly run it.
 mod landing;
 mod lifecycle;
 mod live_edit;
