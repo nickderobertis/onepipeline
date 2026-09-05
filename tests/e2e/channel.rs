@@ -363,6 +363,16 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     world.release("build.go");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the three journeys
+// below cost 9.7s, 10.7s and 10.8s and run concurrently in 10.8s together — the same tier,
+// the same binary, and the same real `onepipeline` subprocess every other journey in this
+// file drives, and cheaper than journeys already beside them. Their one-second reply bounds
+// are what makes them that fast: each is a failure bound the server leaves the moment it is
+// answered, not a sleep. The separately-edged project this repository does have,
+// `onepipeline-note-journeys`, is edged on *conversational* cost — each of its journeys
+// holds a two-party turn open — which none of these has; moving them behind that edge would
+// put them where a change to `src/channel.rs` does not run them, which is the one change
+// that must.
 /// A surface whose server exited with the side that asked already gone stops
 /// counting as one the planner is waiting on.
 ///
@@ -448,7 +458,14 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
         .expect("the run recorded its surfaces");
     let abandoned: Vec<serde_json::Value> = record
         .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|line| {
+            // Every line of that record is one the run wrote, so a line that
+            // does not parse is the defect this journey would otherwise skip
+            // over on its way to a count that happened to come out right.
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+                panic!("the run wrote a surface record that is not JSON ({e}): {line}")
+            })
+        })
         .filter(|surface| surface["abandoned"] == json!(true))
         .collect();
     assert_eq!(abandoned.len(), 2, "{record}");
@@ -637,7 +654,10 @@ fn a_blocking_surface_outlives_a_server_whose_asker_is_still_there() {
     let stdout = serving.stdout.take().expect("stdout is piped");
     let timed_out = BufReader::new(stdout)
         .lines()
-        .map_while(std::result::Result::ok)
+        // Not `map_while(Result::ok)`: a stdout that failed mid-read is not the
+        // same fact as a server that said nothing, and read as one this journey
+        // would report the wrong half of what went wrong.
+        .map(|line| line.expect("the server's stdout reads"))
         .find(|line| line.contains("timed out"))
         .expect("the server reported its own timeout");
     assert!(timed_out.contains("no planner reply"), "{timed_out}");
@@ -676,6 +696,7 @@ fn a_blocking_surface_outlives_a_server_whose_asker_is_still_there() {
 
     world.release("build.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 #[test]
 fn a_legacy_verdict_is_accepted_and_recorded() {
