@@ -363,6 +363,80 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     }
 }
 
+/// What a landing read taken **now** says about one branch.
+///
+/// Two cases, because there are two things that can happen: the sibling answered,
+/// or the read refused. The answer is that library's own [`onevcs::Landed`],
+/// carried whole rather than unpacked into a verdict and a sentence beside it —
+/// so evidence that does not belong to an answer is unrepresentable, and this
+/// crate holds no second account of what a landing is. Which of the three a
+/// reader is shown is decided at the line that prints it, out of the same value.
+///
+/// The refusal is prose because it is somebody else's error, which is the one
+/// thing here that has no type to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LandingRead {
+    /// `onevcs` decided it, and this is what it decided.
+    Answered(onevcs::Landed),
+    /// The read did not get an answer, and this is what refused.
+    Refused {
+        /// What could not decide it, on one line.
+        because: String,
+    },
+}
+
+/// Ask `onevcs` whether one branch's work has reached its base, as of now.
+///
+/// [`onevcs::landing_status`] is the landing decision on that library's public
+/// surface **on its own**: it takes no release target, reads no release
+/// configuration, and answers every repository the same way — which is what
+/// makes it askable of a run whose repository declares no release target at all.
+/// The four tiers behind it are that library's, decided in one place there, so
+/// this crate holds no second account of what a landing is.
+///
+/// The **branch** is the reference, because that is the spelling the sibling
+/// resolves work by — see [`crate::release::Dependency::reference`], which asks
+/// the same library the same way — and `repo` is the node's own repository,
+/// which narrows a branch name two identities could both hold to the one this
+/// run's work is in.
+///
+/// **This read takes the repository from scratch on every call**, so a render
+/// pays for one per node rather than one per repository. That cost is counted
+/// rather than assumed — see [`crate::rendercost::repository_asked`] — and
+/// divergence 33 in `docs/contract-divergences.md` records why none of the
+/// sibling's reads can collapse it, and the proposal that would.
+//
+// llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
+// reference in this crate is, for the reason `crate::projection`'s `landing_commits`
+// records: it is what the journal payload carries and what the sibling's own reference
+// grammar takes. What could go wrong with an unchecked one is checked where it enters,
+// by `usable`, which is what wrote every value that reaches this.
+pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
+    crate::rendercost::landing_read_taken(branch, repo);
+    let answered = read_of(onevcs::landing_status(branch, repo));
+    // One per read, because the read takes one from scratch. Recorded after it
+    // rather than inferred from it, so a build that asked about a repository
+    // *without* reading a landing — or twice for one read — is counted rather
+    // than assumed away.
+    crate::rendercost::repository_asked(repo);
+    answered
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// How the sibling's answer reaches a caller.
+///
+/// Split out so a refusal is provable without a repository: the two are not the
+/// same answer, and a refusal read as "not landed" is the one mistake that sends
+/// somebody to publish work the base already carries.
+fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
+    match answered {
+        Ok(landed) => LandingRead::Answered(landed),
+        Err(refused) => LandingRead::Refused {
+            because: crate::views::one_line(&format!("this host could not decide it: {refused}")),
+        },
+    }
+}
+
 /// Whether `onevcs` can **show** that one branch's work reached its base.
 ///
 /// Named for the proof rather than for the question: `false` is "no landing was
@@ -370,34 +444,12 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
 /// sibling declining to answer at all. A caller acts on `true` alone — it
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
-///
-/// `onevcs::release_status` is the one read on that library's public surface
-/// that carries its four-tier landing decision, made against the publication
-/// checkout's own history, across the seam: it answers `not landed` before it
-/// looks at any release at all, and each of the three release answers is it
-/// having found the landing commit first. The **branch** is the reference,
-/// because that is the spelling the sibling resolves work by — see
-/// `crate::release::Dependency::reference`, which asks the same library the same
-/// way.
-///
-/// Divergence 33 in `docs/contract-divergences.md` records what this reaches and
-/// what it still does not.
-//
-// llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
-// reference in this crate is, for the reason `crate::projection`'s `landing_commits`
-// records: it is what the journal payload carries and what the sibling's own reference
-// grammar takes. What could go wrong with an unchecked one is checked where it enters,
-// by `usable`, which is what wrote every value that reaches this.
-pub fn proved_landed(branch: &str) -> bool {
-    use onevcs::ReleaseStatus;
+pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
     matches!(
-        onevcs::release_status(branch, None),
-        Ok(ReleaseStatus::Released { .. }
-            | ReleaseStatus::NotReleased { .. }
-            | ReleaseStatus::AwaitingHumanStep { .. })
+        landing_now(branch, repo),
+        LandingRead::Answered(landed) if landed.is_landed()
     )
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Where a human reads the change a publication produced, when there is one.
 ///
@@ -1897,5 +1949,48 @@ mod tests {
         assert_eq!(envelope.labels.extra["member"], "worker");
         assert_eq!(envelope.labels.extra["session"], "s-1");
         assert_eq!(envelope.artifacts[0].id.0, "a-1");
+    }
+
+    /// A read that did not get an answer says what refused, on one line.
+    ///
+    /// The one thing this seam decides: a refusal is **not** the sibling saying
+    /// the work has not landed, and reading it as one is what would send somebody
+    /// to publish work the base already carries. The sibling's answers travel
+    /// whole and are read where they are printed — see `views::evidence` and
+    /// `Reported::stands` — so there is nothing else to decide here.
+    ///
+    /// Stripped, because the message is somebody else's and a rendered line is
+    /// one line.
+    #[test]
+    fn a_read_that_got_no_answer_says_what_refused_rather_than_that_nothing_landed() {
+        let refused = read_of(Err(onevcs::Error::Invalid {
+            reason: "no such repository\nand a second line".into(),
+        }));
+        assert_eq!(
+            refused,
+            LandingRead::Refused {
+                because: "this host could not decide it: invalid input: no such repository and \
+                          a second line"
+                    .into()
+            }
+        );
+        assert!(!proved_landed_from(&refused), "a refusal read as a landing");
+
+        // And the sibling's own answers reach a caller unchanged.
+        let landed = read_of(Ok(onevcs::Landed::Yes {
+            evidence: onevcs::LandingEvidence::RecordedLanding {
+                commit: onevcs::Sha("abc1234".into()),
+            },
+        }));
+        assert!(matches!(
+            &landed,
+            LandingRead::Answered(onevcs::Landed::Yes { .. })
+        ));
+        assert!(proved_landed_from(&landed));
+    }
+
+    /// What [`proved_landed`] decides, without a repository to ask.
+    fn proved_landed_from(read: &LandingRead) -> bool {
+        matches!(read, LandingRead::Answered(landed) if landed.is_landed())
     }
 }

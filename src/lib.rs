@@ -78,6 +78,7 @@ mod plancheck;
 mod projection;
 mod refusal;
 mod release;
+mod rendercost;
 mod summary;
 mod sys;
 mod taskgraph;

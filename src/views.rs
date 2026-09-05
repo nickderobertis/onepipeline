@@ -56,8 +56,10 @@ use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
+use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
+use crate::vcs::LandingRead;
 
 /// A run root a view refused, and the reason it gave.
 ///
@@ -328,6 +330,187 @@ fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
     }
 }
 
+/// One render of one view, and the scope every landing read it takes is asked
+/// once inside.
+///
+/// Two things at once, because they are the same scope: what a render costs is
+/// counted against it — see [`crate::rendercost`] — and the memo below is
+/// emptied when it opens, so **a node not already recorded landed is asked again
+/// on every render**. That is the point: the two answers a later merge changes
+/// are exactly `not landed` and `could not be decided`, and a view that reused
+/// yesterday's would be the stale claim this exists to stop making.
+///
+/// Nested scopes are one render: `status` prints [`RunView::summary`] inside
+/// itself, and a second scope there would empty the memo half-way through and
+/// ask every node twice.
+struct Rendering(crate::rendercost::Render);
+
+impl Rendering {
+    /// Record that this render reported on one node's landing, which is the set
+    /// every read it takes is held against.
+    fn reported(&self, node: &str) {
+        self.0.reported(node);
+    }
+}
+
+thread_local! {
+    /// Every landing this render has already read, keyed by run and node.
+    ///
+    /// A render asks the sibling **at most once for each node whose line it
+    /// prints**: `status` reports the same node on its own line and inside the
+    /// summary it prints above it, and two reads of one node would double what a
+    /// supervisory look costs to say one thing.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
+    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// Begin rendering `view` over `run`.
+fn rendering(view: Rendered, run: &str) -> Rendering {
+    let render = crate::rendercost::rendering(view, run);
+    if render.outermost() {
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+    }
+    Rendering(render)
+}
+
+/// Where one node's change stands, as the render printing it can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stands {
+    /// On its base.
+    Landed,
+    /// There is work on its branch the base does not carry.
+    NotLanded,
+    /// Nothing this host can read decides it — which is neither of the other
+    /// two, and is reported as itself.
+    Undecided,
+    /// The node never had a change to land, so nothing is said about one.
+    NoChangeToLand,
+}
+
+/// What the settlement recorded, for the answers a later read can still move.
+///
+/// `landed` is deliberately not one of them: that answer is
+/// [`Reported::TheRunObserved`] and is never read again, so a settlement value
+/// carried alongside a read cannot be it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The publication answered `unlanded`: there was a change, and it had not
+    /// reached the base when the node settled.
+    Unlanded,
+    /// The publication answered no landing at all — a node that failed, or one
+    /// whose base already carried its content.
+    Nothing,
+}
+
+/// What a render reports about one node's landing.
+///
+/// Four cases rather than two records beside each other, because the pairs that
+/// would be contradictory are the ones a reader acts on: a landing the run
+/// observed is never re-read, so it can carry no later read to disagree with and
+/// no settlement value to contradict.
+enum Reported {
+    /// The run itself observed the change reach its base. **Never re-read**: a
+    /// base does not stop carrying work it has taken, so the one read that could
+    /// move this could only agree with it, at a cost.
+    TheRunObserved,
+    /// A read taken while this view rendered, over what the settlement recorded.
+    ReadNow {
+        settled: Settled,
+        read: std::rc::Rc<LandingRead>,
+    },
+    /// The settlement said `unlanded` and there is no branch to ask about, so
+    /// its own claim is all there has ever been and it stands, dated.
+    UnlandedAtSettlement,
+    /// The node never had a change to land.
+    NoChangeToLand,
+}
+
+impl Reported {
+    fn stands(&self) -> Stands {
+        match self {
+            Reported::TheRunObserved => Stands::Landed,
+            Reported::ReadNow { read, .. } => match read.as_ref() {
+                LandingRead::Answered(landed) => match landed {
+                    // A landing the branch has since gone past is not this
+                    // node's work finished: the sibling's own `is_landed` says
+                    // so, and the commits above it are work still to publish.
+                    onevcs::Landed::Yes { .. } => Stands::Landed,
+                    onevcs::Landed::InPart { .. } | onevcs::Landed::No => Stands::NotLanded,
+                    // Deliberately not a `no`: the base carries the change and
+                    // nothing records why, which is equally what somebody else
+                    // making the same change leaves behind.
+                    onevcs::Landed::Unknown => Stands::Undecided,
+                },
+                LandingRead::Refused { .. } => Stands::Undecided,
+            },
+            Reported::UnlandedAtSettlement => Stands::NotLanded,
+            Reported::NoChangeToLand => Stands::NoChangeToLand,
+        }
+    }
+}
+
+/// What this render says about one node's landing, reading now wherever a read
+/// could change the answer.
+///
+/// **Asked for every node whose line the render prints, and for no other** — the
+/// render is told which those are as it prints them, so a read taken for a node
+/// nobody is shown fails the bound `tests/e2e/landing.rs` holds.
+fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported {
+    render.reported(node);
+    let settled = view.state.landings.get(node).copied();
+    if settled == Some(Landing::Landed) {
+        return Reported::TheRunObserved;
+    }
+    // The branch the dispatch reported, which is the only spelling of this work
+    // the sibling can resolve, and the repository the question is narrowed to. A
+    // node that settled without a branch — every node that never published, and
+    // every node still in flight — has nothing to ask about; a node that names
+    // no repository publishes nothing at all, so it has no change to land and
+    // asking after one would search every identity this host knows for a branch
+    // no repository of theirs was ever asked to carry.
+    let asked = view.state.branches.get(node).zip(
+        view.state
+            .graph
+            .get(node)
+            .and_then(|node| node.repo.as_deref()),
+    );
+    let settled = match settled {
+        Some(Landing::Unlanded) => Settled::Unlanded,
+        // `landed` is unreachable here: it returned above, which is what makes
+        // [`Settled`] the two answers a read can still move.
+        Some(Landing::Landed) | None => Settled::Nothing,
+    };
+    match (asked, settled) {
+        (Some((branch, repo)), settled) => Reported::ReadNow {
+            settled,
+            read: read_now(view, node, branch, repo),
+        },
+        (None, Settled::Unlanded) => Reported::UnlandedAtSettlement,
+        (None, Settled::Nothing) => Reported::NoChangeToLand,
+    }
+}
+
+/// One node's landing, read now — or handed back from the read this render
+/// already took of it.
+fn read_now(view: &RunView, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
+    let key = (view.paths.run.clone(), node.to_owned());
+    if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
+        return read;
+    }
+    // Everything the decision costs is counted against this node, which is what
+    // makes "no other per-node work" a measurement rather than a promise.
+    let read = {
+        let _deciding = crate::rendercost::deciding(node);
+        std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
+    };
+    READ_THIS_RENDER.with_borrow_mut(|reads| {
+        reads.insert(key, std::rc::Rc::clone(&read));
+    });
+    read
+}
+
 /// Everything a view needs about one run, read once.
 #[derive(Debug)]
 pub struct RunView {
@@ -406,21 +589,29 @@ impl RunView {
     /// request nobody merged. So the count of what has not landed rides the same
     /// line, and is absent — rather than a zero — when there is nothing to say.
     ///
-    /// Dated, for the reason the per-node phrase is: it counts what each
-    /// settlement observed, plus whatever the run's own close-out re-read
-    /// afterwards — and a count that read as the state of things now would say a
-    /// merged change had reached nobody. Divergence 33 in
-    /// [the divergence record](../../../docs/contract-divergences.md) records
-    /// what that re-read still cannot reach.
+    /// Read **as this line renders**, rather than as each node settled: a change
+    /// that reached its base after the node that made it settled is not work
+    /// nobody landed, and a count that said it was is what sent a supervisor to
+    /// re-dispatch nodes whose work was already on the base. A landing this host
+    /// cannot decide is counted under its own word rather than folded into
+    /// either of the other two, because "not landed" is a claim and an undecided
+    /// read makes none.
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
     pub fn summary(&self) -> String {
+        let render = rendering(Rendered::Summary, &self.paths.run);
         let statuses = self.state.statuses();
         let done = statuses
             .values()
             .filter(|status| **status == NodeStatus::Done)
             .count();
-        let unlanded = match unlanded_nodes(self).len() {
+        let outstanding = outstanding_landings(self, &render);
+        let unlanded = match outstanding.not_landed.len() {
             0 => String::new(),
-            count => format!(", {count} not landed as of settlement"),
+            count => format!(", {count} not landed"),
+        };
+        let undecided = match outstanding.undecided.len() {
+            0 => String::new(),
+            count => format!(", {count} landing undecided"),
         };
         // What is *missing* from the count above splits two ways, and only one
         // of them is work that was attempted: `n/n done` on its own left a
@@ -434,7 +625,10 @@ impl RunView {
             0 => String::new(),
             count => format!(", {count} never attempted"),
         };
-        format!("{done}/{} done{unlanded}{skipped}", statuses.len())
+        format!(
+            "{done}/{} done{unlanded}{undecided}{skipped}",
+            statuses.len()
+        )
     }
 }
 
@@ -1069,9 +1263,14 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
 }
 
 /// `onepipeline status`.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn status(survey: &Survey) -> String {
     let mut out = String::new();
     for view in &survey.views {
+        // Opened before anything under it renders, so the summary this line
+        // carries and the outstanding-landing lines below it are one render and
+        // ask each node once between them.
+        let render = rendering(Rendered::Status, &view.paths.run);
         let standing = Standing::of(view);
         out.push_str(&format!(
             "{}  {}{}  {}\n",
@@ -1262,13 +1461,26 @@ pub fn status(survey: &Survey) -> String {
         // a run go quiet and took that for a run whose work had landed. Named
         // here rather than left to `results`, because deciding there is nothing
         // left to do is a decision made from this view.
-        let unlanded = unlanded_nodes(view);
-        if !unlanded.is_empty() {
+        let outstanding = outstanding_landings(view, &render);
+        if !outstanding.not_landed.is_empty() {
             out.push_str(&format!(
-                "  {} node(s) settled without landing: {} — as each settled, not as of now; \
+                "  {} node(s) have not landed: {} — read as this rendered; \
                  `results {}` names the change to open\n",
-                unlanded.len(),
-                unlanded.join(", "),
+                outstanding.not_landed.len(),
+                outstanding.not_landed.join(", "),
+                view.paths.run
+            ));
+        }
+        // Kept apart from the count above, because it is not a count of work
+        // nobody landed: it is a count of nodes nothing here could decide, and
+        // reporting them as unlanded would put back the false claim the line
+        // above stopped making.
+        if !outstanding.undecided.is_empty() {
+            out.push_str(&format!(
+                "  {} node(s) whose landing this host could not decide: {} — \
+                 `results {}` says what refused, and names the change to open\n",
+                outstanding.undecided.len(),
+                outstanding.undecided.join(", "),
                 view.paths.run
             ));
         }
@@ -1615,34 +1827,53 @@ fn attested_after_failing(view: &RunView, node: &str) -> bool {
         })
 }
 
-/// The nodes whose change had not reached its base when they settled, in id
-/// order.
+/// The nodes whose change is still outstanding, read as the view renders.
 ///
-/// Read off what each settlement observed, plus whatever the run's own settled
-/// report re-read afterwards — never off a node's repository or its policy — so
-/// a node absent from this list is one that either landed or had no change to
-/// land, and never one nobody looked at.
+/// Two lists rather than one, because the two call for opposite things from
+/// whoever is reading them: a change the base does not carry is work somebody
+/// has to land, and a landing this host cannot decide is a question somebody has
+/// to answer by opening the change.
+#[derive(Debug, Default)]
+struct Outstanding {
+    /// Read now, and the base does not carry it.
+    not_landed: Vec<String>,
+    /// Read now, and nothing this host can read decides it.
+    undecided: Vec<String>,
+}
+
+/// What of this run's work has not reached a base, in id order.
 ///
-/// It is deliberately not called what has *not landed now*: the re-read happens
-/// when a driver closes the run out and cannot always answer, so a node here is
-/// one no read has moved rather than one proved still open. Every line rendered
-/// from this list says so — see the per-node phrase below, and divergence 33 in
-/// [the divergence record](../../../docs/contract-divergences.md) for the half
-/// that still cannot be reached.
-fn unlanded_nodes(view: &RunView) -> Vec<String> {
+/// Asked of the nodes whose publication answered a landing at all, which is what
+/// it has always been counted over: a node that published nothing has no change
+/// outstanding, and one whose settlement recorded a landing already is never
+/// asked again. So the read happens for exactly the two answers a later merge
+/// changes — `unlanded`, and a landing an earlier read could not decide.
+///
+/// Not "what had not landed as of settlement". A settlement is an observation of
+/// a moment and the moment passes: a run reported four of eleven nodes done
+/// while nine of the eleven had landed, and an adoption node was dispatched three
+/// times against work that was already on its base.
+fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
     let statuses = view.state.statuses();
-    view.state
+    let mut outstanding = Outstanding::default();
+    for (node, _) in view
+        .state
         .landings
         .iter()
-        .filter(|(_, landing)| **landing == Landing::Unlanded)
         // A node whose change is held as a draft has not landed and is not one of
         // these: this list is work an operator has to *decide* about — a change
         // sitting open that nobody merged — and a draft is a change this run is
         // deliberately holding and will lift itself. It has a line of its own,
         // which says what it is waiting on.
         .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
-        .map(|(node, _)| node.clone())
-        .collect()
+    {
+        match reported_landing(view, render, node).stands() {
+            Stands::NotLanded => outstanding.not_landed.push(node.clone()),
+            Stands::Undecided => outstanding.undecided.push(node.clone()),
+            Stands::Landed | Stands::NoChangeToLand => {}
+        }
+    }
+    outstanding
 }
 
 /// The nodes whose work is complete and whose change is held back as a draft,
@@ -2096,22 +2327,14 @@ fn summarize(event: &Envelope) -> String {
 
 /// How a landing reads on a rendered line.
 ///
-/// A phrase rather than the bare word, and it says **when** it was true, because
-/// only one of the two answers stays true. A change observed on its base has
-/// reached it and a base does not stop carrying what it carries; a change that
-/// had not reached it is an observation of a moment, and the moment passes — a
-/// node that settled `done (queued)` was still reporting the settlement's answer
-/// hours after its change had merged, and a supervisor read that as work nobody
-/// had landed.
+/// A phrase rather than the bare word, because it has to say **what decided it**:
+/// a node that settled `done (queued)` was still reporting the settlement's
+/// answer hours after its change had merged, and a supervisor re-dispatched three
+/// nodes against a base that already carried their work.
 ///
-/// So the unlanded phrase is dated, and says that no later read has moved it.
-/// One does look: a driver asks again as the run closes out and records what it
-/// found, which [`landings_the_run_re_read`] is what carries onto these lines. It
-/// cannot always answer — see [`crate::vcs::proved_landed`] and divergence 33 in
-/// [the divergence record](../../../docs/contract-divergences.md) — and where it
-/// does not, this is the claim that stands: the settlement's own, dated, beside
-/// the change's own URL. Asserting the state of things now would not be honest.
-fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
+/// `None` where the node never had a change to land, which is what its absence
+/// on every other node's line has always meant.
+fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String> {
     let ago = match settled_at {
         Some(at) => format!(
             " {} ago",
@@ -2121,11 +2344,75 @@ fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
         // still the settlement's, and saying *when* would be inventing one.
         None => String::new(),
     };
-    match landing {
-        Landing::Landed => "landed on its base".to_string(),
-        Landing::Unlanded => format!(
+    match reported {
+        // The run's own observation, and the reason no read was taken.
+        Reported::TheRunObserved => {
+            Some("landed on its base — the run observed the change reach it".to_string())
+        }
+        Reported::ReadNow { settled, read } => Some(match read.as_ref() {
+            LandingRead::Answered(landed) => match landed {
+                onevcs::Landed::Yes { .. } => {
+                    format!("landed on its base — read now: {}", evidence(landed))
+                }
+                onevcs::Landed::InPart { .. } | onevcs::Landed::No => format!(
+                    "NOT landed: read now, {} — open the change for where it is",
+                    evidence(landed)
+                ),
+                onevcs::Landed::Unknown => undecided(&evidence(landed), settled, &ago),
+            },
+            // The one answer nothing gave, said in its own words rather than in
+            // either of the other two — with the settlement's own dated claim
+            // behind it, which is what it always was.
+            LandingRead::Refused { because } => undecided(because, settled, &ago),
+        }),
+        // No branch to ask about, so the settlement's own claim is all there has
+        // ever been: dated, and saying that nothing has moved it.
+        Reported::UnlandedAtSettlement => Some(format!(
             "NOT landed: the change had not reached its base when this settled{ago}, and \
              no later read has said otherwise — open the change for where it is now"
+        )),
+        Reported::NoChangeToLand => None,
+    }
+}
+
+/// How a landing nothing could decide reads, with the settlement's own dated
+/// claim behind it where there was one.
+///
+/// One phrasing for the two ways a read fails to decide — the sibling answering
+/// that it cannot tell, and the read refusing outright — because what a reader
+/// does about either is the same: open the change and look.
+fn undecided(because: &str, settled: &Settled, ago: &str) -> String {
+    match settled {
+        Settled::Unlanded => format!(
+            "landing UNDECIDED: read now, {because}; it had not reached its base when this \
+             settled{ago} — open the change for where it is now"
+        ),
+        Settled::Nothing => {
+            format!("landing UNDECIDED: read now, {because} — open the change for where it is")
+        }
+    }
+}
+
+/// What decided one of the sibling's answers, in the words a line prints.
+///
+/// Composed here rather than in `crate::vcs`, because it is prose for a rendered
+/// line: the tier is that library's own word for it, and the commit and the count
+/// beside it are what a reader deciding what to do next needs.
+fn evidence(landed: &onevcs::Landed) -> String {
+    match landed {
+        onevcs::Landed::Yes { evidence } => format!("{} at {}", landed.tier(), evidence.commit()),
+        onevcs::Landed::InPart { evidence, unlanded } => format!(
+            "{} at {}, with {unlanded} commit(s) above it the landing did not carry",
+            landed.tier(),
+            evidence.commit()
+        ),
+        onevcs::Landed::No => format!(
+            "{}: the base does not carry what this branch changed",
+            landed.tier()
+        ),
+        onevcs::Landed::Unknown => format!(
+            "{}: the base already carries what this branch changed, and nothing records why",
+            landed.tier()
         ),
     }
 }
@@ -2151,7 +2438,9 @@ fn journal_loss_line(view: &RunView) -> String {
 }
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn results(view: &RunView) -> String {
+    let render = rendering(Rendered::Results, &view.paths.run);
     // The run and how its graph stands — deliberately not the node tally the
     // other views carry, because every line under this one is a node's own
     // status and a header that also said `done` would read as one of them.
@@ -2182,9 +2471,10 @@ pub fn results(view: &RunView) -> String {
         // the unlanded one — a reader who sees the qualifier where a change was
         // open and nothing where it merged is reading the absence, which is what
         // every other node's absence already means.
-        if let Some(landing) = view.state.landings.get(&node.id) {
-            let settled_at = view.state.settled_at.get(&node.id).copied();
-            out.push_str(&format!(" — {}", landed_phrase(*landing, settled_at)));
+        let reported = reported_landing(view, &render, &node.id);
+        if let Some(phrase) = landed_phrase(&reported, view.state.settled_at.get(&node.id).copied())
+        {
+            out.push_str(&format!(" — {phrase}"));
         }
         // The attestation settles the node, so the status word alone would
         // report a dispatch that failed as one that succeeded. Both records
@@ -2576,6 +2866,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// Each of the four answers `onevcs` gives reads back as one of the three
+    /// things a line can say, with the evidence that decided it.
+    ///
+    /// Two of the four are exactly the readings that must not be collapsed: a
+    /// landing the branch has gone past is **not** finished work — the sibling's
+    /// own `is_landed` says so, and the commits above it are work still to
+    /// publish — and a base that carries the change with nothing recording why is
+    /// **undecided** rather than landed. Driven through the answer rather than
+    /// through a repository, because what is decided here is which answer is
+    /// which; `tests/e2e/landing.rs` drives the repository.
+    #[test]
+    fn each_answer_the_sibling_gives_reads_back_as_one_of_the_three_with_its_evidence() {
+        use crate::vcs::LandingRead;
+        use onevcs::{Landed, LandingEvidence, Sha};
+        let read = |landed: Landed| Reported::ReadNow {
+            settled: Settled::Unlanded,
+            read: std::rc::Rc::new(LandingRead::Answered(landed)),
+        };
+        let recorded = LandingEvidence::RecordedLanding {
+            commit: Sha("abc1234".into()),
+        };
+
+        let yes = Landed::Yes {
+            evidence: recorded.clone(),
+        };
+        assert_eq!(read(yes.clone()).stands(), Stands::Landed);
+        assert_eq!(evidence(&yes), "a recorded landing at abc1234");
+
+        let part = Landed::InPart {
+            evidence: recorded,
+            unlanded: std::num::NonZeroUsize::new(2).expect("two"),
+        };
+        assert_eq!(read(part.clone()).stands(), Stands::NotLanded);
+        assert_eq!(
+            evidence(&part),
+            "a recorded landing at abc1234, with 2 commit(s) above it the landing did not carry"
+        );
+
+        assert_eq!(read(Landed::No).stands(), Stands::NotLanded);
+        assert!(evidence(&Landed::No).contains("the base does not carry"));
+
+        assert_eq!(
+            read(Landed::Unknown).stands(),
+            Stands::Undecided,
+            "a base that carries the change with nothing recording why was read as an answer"
+        );
+        assert!(evidence(&Landed::Unknown).contains("nothing records why"));
+
+        // And a read that got no answer at all is undecided too.
+        assert_eq!(
+            Reported::ReadNow {
+                settled: Settled::Nothing,
+                read: std::rc::Rc::new(LandingRead::Refused {
+                    because: "this host could not decide it".into()
+                }),
+            }
+            .stands(),
+            Stands::Undecided
+        );
     }
 
     fn plan() -> Plan {

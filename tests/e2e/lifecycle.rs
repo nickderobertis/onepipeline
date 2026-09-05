@@ -1449,18 +1449,23 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
         "{result}\n{}",
         why(&world, &run)
     );
-    // And it claims no landing. A publication that ran and did not land settles
-    // `failed` under its own name, which no reader mistakes for success — so
-    // qualifying it would put a second word on a fact already stated, and
-    // `unlanded` in particular would send a planner looking for a change request
-    // that was never opened.
+    // And its **settlement** claims no landing. A publication that ran and did
+    // not land settles `failed` under its own name, which no reader mistakes for
+    // success — so qualifying it would put a second word on a fact already
+    // stated, and `unlanded` in particular would send a planner looking for a
+    // change request that was never opened.
     assert_eq!(result["nodes"][0]["landing"], json!(null), "{result}");
     let failed = world.run(&["results", &run]);
     failed.exited(0).out_has("push-rejected");
+    // The *view* still asks where the work is, because a node the run settled
+    // failed is one whose branch somebody may have landed since — and it reports
+    // what the read said rather than what the settlement recorded. Here the base
+    // does not carry it, which is the state a rejected push leaves.
+    failed.out_has("NOT landed: read now, content comparison: the base does not carry");
     assert!(
-        !failed.stdout.contains("landed"),
-        "a node whose publication failed is reported as one whose change did or did not \
-         land:\n{}",
+        !failed.stdout.contains("landed on its base"),
+        "a node whose publication failed and whose branch the base does not carry is \
+         reported as landed:\n{}",
         failed.stdout
     );
 
@@ -3151,7 +3156,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did() {
     world
         .run(&["status", &open])
         .exited(0)
-        .out_has("1 node(s) settled without landing: service");
+        .out_has("1 node(s) have not landed: service");
     world
         .run(&["goals", &open])
         .exited(0)
@@ -3190,7 +3195,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did() {
     let status = world.run(&["status", &landed]);
     status.exited(0);
     assert!(
-        !status.stdout.contains("settled without landing"),
+        !status.stdout.contains("node(s) have not landed"),
         "a run with nothing outstanding is reported as holding an unlanded change:\n{}",
         status.stdout
     );
@@ -4234,23 +4239,25 @@ fn a_verdict_written_in_the_machinerys_own_shape_is_read_as_the_machinery() {
     );
 }
 
-/// A change that has merged since the node settled is not reported as work
-/// nobody landed.
+/// A change that reached its base by a route nothing recorded is reported as
+/// **undecided**, and never as either answer nobody gave.
 ///
-/// The settlement is an observation of a moment: the host was holding this
-/// change when the node settled, and the run neither blocks nor polls for a
-/// merge somebody else owns. Hours later that snapshot was still being rendered
-/// as the state of things now, and `just runs` reported a change that had merged
-/// and released as one that had reached nobody.
+/// The other half of the read this crate now takes when a view renders. The
+/// settlement is an observation of a moment — the host was holding this change
+/// when the node settled — and the moment passes; so the line reads again, and
+/// here what it finds is a base that carries the branch's changes with nothing
+/// recording why. That is equally what somebody else making the same change
+/// leaves behind, so `onevcs` will not call it a landing and neither does this:
+/// the line says the question is open, says what refused to close it, and keeps
+/// the settlement's own dated claim behind it.
 ///
-/// So every line that carries the count says *when* it was true and points at
-/// the change. What it does not say is that the change is still open, because
-/// nothing here has looked: a change request lives on the repository's host,
-/// `onevcs` owns every route to one, and the read that would answer this is not
-/// on that library's surface — the proposal is recorded in
-/// `docs/contract-divergences.md`.
+/// It was that dated claim, asserted alone, that started the incident: `just
+/// runs` reported a change that had merged and released as one that had reached
+/// nobody, and a supervisor re-dispatched nodes whose work was on the base. What
+/// keeps it honest now is that it rides *behind* a read rather than instead of
+/// one.
 #[test]
-fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now() {
+fn a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided() {
     let world = World::new("lifecycle-landing-stale");
     // A change request left for a person to merge, so the node settles with its
     // change unlanded — the state the incident started from.
@@ -4265,9 +4272,10 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
         .expect("the node names the branch its work is on")
         .to_owned();
 
-    // And then the world moves on: the change reaches the base, and nothing
-    // tells the settled run about it. This is the state every assertion below
-    // is about.
+    // And then the world moves on: the change reaches the base by a route that
+    // records nothing — no change request named in the squash, no landing
+    // trailer, no landing this host performed. This is the state every assertion
+    // below is about.
     crate::harness::git(&world, &repository.checkout, &["fetch", "origin"]);
     crate::harness::git(
         &world,
@@ -4280,30 +4288,34 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
             .base_commits(&world)
             .iter()
             .any(|subject| subject == "chore: land the change"),
-        "the change never reached the base, so there is nothing stale to report"
+        "the change never reached the base, so there is nothing to be undecided about"
     );
 
-    // The per-node view: dated, and pointing at the change rather than claiming
-    // to know where it is now.
+    // The per-node view: the read, what refused to decide it, and the
+    // settlement's own dated claim behind it.
     let results = world.run(&["results", &run]);
-    results.exited(0).out_has("NOT landed");
-    results.out_has("when this settled");
-    results.out_has("no later read has said otherwise");
+    results.exited(0).out_has("landing UNDECIDED: read now");
+    results.out_has("the base already carries what this branch changed, and nothing records why");
+    results.out_has("it had not reached its base when this settled");
     results.out_has("open the change for where it is now");
+    // Neither of the two answers nothing gave.
+    results.out_lacks("NOT landed");
+    results.out_lacks("landed on its base");
 
-    // The counting views, which are the ones a planner closes work from.
+    // The counting views, which are the ones a planner closes work from. An
+    // undecided landing is counted apart from work nobody landed: reporting it
+    // as unlanded would put back the claim this read exists to stop making.
     world
         .run(&["runs"])
         .exited(0)
-        .out_has("1 not landed as of settlement");
-    world
-        .run(&["goals", &run])
-        .exited(0)
-        .out_has("1 not landed as of settlement");
+        .out_has("1 landing undecided");
+    let goals = world.run(&["goals", &run]);
+    goals.exited(0).out_has("1 landing undecided");
+    goals.out_lacks("1 not landed");
     world
         .run(&["status", &run])
         .exited(0)
-        .out_has("as each settled, not as of now");
+        .out_has("1 node(s) whose landing this host could not decide: service");
 }
 
 /// This host's release-targets document for the repository under test, declaring
@@ -4433,10 +4445,7 @@ fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed
     let results = world.run(&["results", run]);
     results.exited(0).out_has("landed on its base");
     results.out_lacks("NOT landed");
-    world
-        .run(&["runs"])
-        .exited(0)
-        .out_lacks("not landed as of settlement");
+    world.run(&["runs"]).exited(0).out_lacks("not landed");
 }
 
 /// A change request this crate cannot read the record of settles the failure it

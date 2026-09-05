@@ -35,6 +35,14 @@ mod envelope_reviewer;
 mod filter;
 mod holds;
 mod journal;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
+// `tests/e2e/landing.rs`, and is carried here too because this declaration is the other
+// site the rule reads: the module is measured at about 45 seconds on an idle host, and
+// about 110 under a loaded one, against a binary that already holds three deliberately
+// minute-long journeys — and what it exercises is `views`, `vcs` and `rendercost`, so a
+// project edged narrower than the crate would drop it out of `nx affected` for the very
+// changes it exists to catch.
+mod landing;
 mod lifecycle;
 mod live_edit;
 mod loopcost;

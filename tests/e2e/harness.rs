@@ -719,6 +719,23 @@ impl World {
         )
     }
 
+    /// Run a command to completion, recording what each of its renders did.
+    ///
+    /// The record goes to `path` and nowhere else, so a journey measuring three
+    /// renders gives each its own file. Per invocation rather than per world,
+    /// because [`with_env`](World::with_env) consumes the world and the renders
+    /// being compared are three commands against one.
+    pub fn run_recording_renders(&self, path: &Path, args: &[&str]) -> Run {
+        Run::of(
+            self.cmd(args)
+                .env(RENDER_COST_ENV, path)
+                .output()
+                .expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
     /// The same, from a chosen working directory.
     ///
     /// For the one journey whose claim is about *where* a path is resolved: a
@@ -4657,6 +4674,21 @@ fn yaml_scalar(text: &str) -> String {
 /// a name it does not read writes no counts file at all, and [`counts`] fails
 /// naming the file it never found rather than passing a little emptier.
 pub const LOOP_STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
+
+/// The environment variable asking a process to record what each render of a
+/// view did **per node** — every act, not the landing reads alone.
+///
+/// It names a file the process appends a line to per act, so a journey measuring
+/// one command points it at a path of that command's own — see
+/// `tests/e2e/landing.rs`, which holds a render's cost as work rather than as
+/// elapsed time.
+///
+/// Spelled here because a test binary cannot see a private module's constants.
+/// The gate that keeps this copy and the crate's one vocabulary is
+/// `rendercost`'s own `every_word_this_record_is_read_by_is_the_word_it_writes`,
+/// which pins the variable and every act and view word this file and that journey
+/// read by.
+pub const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
 
 /// What one driver's reconcile loop did, as it reports it.
 ///

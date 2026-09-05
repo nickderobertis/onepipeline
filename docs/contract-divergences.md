@@ -992,27 +992,32 @@ key nothing can satisfy.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
-## 33. Nothing on `onevcs`'s surface says whether a published change has landed *since* — OPEN
+## 33. A view reports a node's landing from a read taken when it renders, and the contract does not say so — OPEN
 
-**Proposal (for `onevcs`): a read that answers "has this branch reached its
-base?" for a branch that was pushed — the change request's state, or the
-comparison against the base that `Vcs::recoverable` already makes internally.**
+**Proposal (for the contract's planner): say that the views report a landing from
+a read taken **when they render** — `landed`, `not landed`, or `undecided`, each
+carrying the evidence tier that decided it — rather than from the observation the
+run made when the node settled. The read `onevcs` publishes to answer it now
+exists; what the contract still describes is the settlement's snapshot.**
 
 A node's `landing` is an observation made at settlement: `onevcs publish`
 answers `ChangeOpen` or `Queued`, this crate records `unlanded`, and the run
 neither blocks nor polls for a merge somebody else owns. That is deliberate. What
-is not deliberate is that the snapshot is all any later reader has — a node that
+was not deliberate is that the snapshot was all any later reader had — a node that
 settled `done (queued)` was still rendering `NOT landed` hours after its change
-had merged and released, and `just runs` counted it against the run.
+had merged and released, `just runs` counted it against the run, and one run
+reported four of eleven nodes done while nine of the eleven had landed. An
+adoption node was dispatched three times against work that was already on its
+base.
 
-Re-reading it needs one of two answers, and this crate can reach neither:
+Re-reading it needed one of two answers, and this crate could reach neither:
 
 * **The host's.** `RemoteHost::find_changes(head, base)` is exactly the read —
   but a `RemoteHost` comes from `Hosting::for_repo(slug)`, and the `owner/name`
   slug is derived from an identity key by `onevcs`'s own private `gh::slug`.
-  Deriving it here would be a second copy of a sibling's rule, which
-  `src/AGENTS.md` forbids — and it would fail in the direction that matters: a
-  copy that drifted, or an identity on a host that is not GitHub, would address
+  Deriving it here would be a second copy of a sibling's rule, and this crate
+  never re-declares a sibling's vocabulary — and it would fail in the direction
+  that matters: a copy that drifted, or an identity on a host that is not GitHub, would address
   *some other repository* and answer confidently about it.
 * **Git's.** `Vcs::recoverable` makes precisely the comparison —
   `git diff --quiet <base> <branch>`, "whether the base already carries this
@@ -1020,35 +1025,73 @@ Re-reading it needs one of two answers, and this crate can reach neither:
   first, which is those with commits on no `origin` remote-tracking ref. A change
   request's branch was pushed to open it, so it is excluded whether it merged or
   not, and its absence from that list says nothing. The comparison is there; it
-  is not reachable for the branches that need it.
+  was not reachable for the branches that need it.
 
-Until one exists, **no view claims to know where a change is now.** Every line
-that carries an unlanded node dates its answer to the settlement, says no later
-read has said otherwise, and names the change to open —
-`views::landed_phrase`, `RunView::summary`, and the `status` line, all held by
-`a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now`.
-That is the honest half of what the change asked for: the stale fact is no longer
-asserted, and it still cannot be corrected from here.
+While neither existed, **no view claimed to know where a change was now.** Every
+line carrying an unlanded node dated its answer to the settlement, said no later
+read had said otherwise, and named the change to open. That was the honest half:
+the stale fact was not asserted, and it could not be corrected from here.
 
-**Since: one read of it is reachable, and only one.** `onevcs::release_status`
-takes the four-spelling reference this crate already resolves work by and answers
-`not landed` before it looks at any release at all — so it carries that library's
-own four-tier landing decision, made against the publication checkout's own
-history, across the seam. A driver asks it once, as the run closes out, of every
-change the run recorded unlanded: `vcs::proved_landed`, `engine`'s
-`landings_after_asking_again`, and `views::landings_the_run_re_read`, which is
-what puts the answer on the views beside the report.
-`a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed`
-drives it end to end over a real origin.
+**Since: `onevcs` publishes the read, and the views take it.**
+`onevcs::landing_status(reference, repo)` is that library's landing decision on
+its own — it answers the `Landed` enum with the tier that decided it *inside* the
+answer, takes the four-spelling reference this crate already resolves work by,
+and takes no release target at all. That last part is what closes the half an
+earlier attempt could not: `release_status` selected a release target before it
+returned the landing it had already decided, so a repository declaring no targets
+was **refused** — and a refusal is *undecided* rather than "not landed", so on the
+consuming host, whose own repository declares none, nothing ever corrected a
+settlement's answer.
 
-What that does **not** reach, and why this stays open: the answer is only
-available where this host has release configuration for the repository, because
-that call selects a release target before it returns the landing it already
-decided — a repository nobody has declared targets for is refused, and a refusal
-is *undecided* rather than "not landed". It is asked once, at close-out, so it is
-still not "where is this now" for a run in flight or for one that finished an
-hour ago. Both halves are what a landing read of its own — the proposal above —
-would settle.
+`vcs::landing_now` is this crate's one call site. `vcs::proved_landed` is that
+call read as a boolean, which is what the driver's close-out
+(`engine::landings_after_asking_again`) asks. And `views::reported_landing` is
+what puts it on the three places a landing is reported — `views::landed_phrase`
+on the node line, `RunView::summary`'s count, and the `status` line — asked when
+the view renders, for each node whose line that render prints and for no other.
+Two rules bound it:
+
+* **Never for a node the run recorded as landed.** A base does not stop carrying
+  work it has taken, so that is the one answer a later read cannot overturn.
+* **On every render for the other two.** A node recorded `unlanded`, and a node
+  whose landing an earlier read could not decide, are exactly the two answers a
+  later merge changes.
+
+A read that cannot decide is reported as **undecided**, distinctly from landed and
+from not landed, with the settlement's own dated claim behind it — the property
+the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it
+over real repositories it creates on disk, and holds what a render costs as *work*
+rather than as elapsed time: at most one landing read per node it reports on, none
+for a node already recorded landed, one repository ask per read, and no other
+per-node work at all.
+
+**A render asks about each repository once per node rather than once per render,
+and that is this proposal's remaining half.** `landing_status` loads the registry
+and resolves the repository *itself* before it reads anything, on every call, so
+five nodes of one repository take it from scratch five times and the consuming
+crate cannot collapse that: the work is not work it performs. Nothing on
+`onevcs` 0.19.2's surface lets it be collapsed either. That read is the only one
+that answers for a branch a publication **pushed**, and
+it takes one reference; the only per-repository batch, `Vcs::preserved` over
+`Scope::Repo`, enumerates `git::unpublished_branches` — "local branches holding
+commits no `origin` remote-tracking ref has" — and so excludes every branch that
+was pushed to open a change request, which is every branch a view asks about. It
+is the same exclusion this entry already records against `Vcs::recoverable`. And
+`store`, `workspace` and `status` are private modules there, so a caller cannot
+hand in a loaded registry or a resolved repository instead.
+
+So they are **counted rather than claimed away**: `rendercost` records one per
+read and the journey holds it to one per node whose line the render prints, which
+is the bound this crate can keep — asking again about a repository a node has
+already been decided against fails there by name. **Proposal (for `onevcs`): a
+landing read that takes a repository and several references — or a resolved-repository handle
+that answers them — so a render pays one open for a repository however many of its
+nodes it prints.**
+
+**What is still open on this side is the contract's wording.** It describes a
+landing as what the settlement observed; nothing in it says a view reads again, or
+that `undecided` is one of the three answers a reader can meet. That is the
+planner's to rule on, not this repository's.
 
 ## 34. A drafting dispatch that produced no body was reported nowhere — RESOLVED
 
