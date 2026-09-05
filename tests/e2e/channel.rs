@@ -739,7 +739,55 @@ fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_a
         .out_has("waiting for planner decision: blocker — is this base still right?");
     ended(rearmed);
 
-    // The third listener is the one holding the wait when the manager finally
+    // A listener that takes the question back over and then stops **on its own
+    // bound** leaves it exactly where it found it. That ending says only that
+    // this process is done — the member is still there — so a session that has
+    // just adopted an outstanding question must not turn round and give it up on
+    // the way out.
+    let mut bounded = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, asker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut armed = bounded.stdin.take().expect("stdin is piped");
+    writeln!(
+        armed,
+        r#"{{"kind":"planner-question","message":"a bounded listener re-armed","blocking":false}}"#
+    )
+    .expect("the frame is written");
+    armed.flush().expect("the frame flushes");
+    world.until("the bounded re-arm to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["message"] == "a bounded listener re-armed")
+    });
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+    // Ended by its own bound with the stream still open in this journey's hand,
+    // which is what makes the assertion after it about the ending rather than
+    // about the stream.
+    let reached = bounded.wait_with_output().expect("the session ends");
+    assert!(reached.status.success(), "{reached:?}");
+    assert!(
+        String::from_utf8_lossy(&reached.stderr).contains("ONEPIPELINE_SERVE_SESSION_SECONDS"),
+        "the session ended some other way than on its bound: {}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+    drop(armed);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+
+    // The last listener is the one holding the wait when the manager finally
     // answers. The verdict names the question — and it reaches the asker, which
     // is the whole of what was lost.
     let mut waiting = listening(
