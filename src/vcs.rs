@@ -2040,7 +2040,8 @@ mod tests {
         }));
         assert_eq!(refused.verdict, LandingVerdict::Undecided);
         assert_eq!(
-            refused.evidence, "this host could not decide it: invalid input: no such repository and a second line",
+            refused.evidence,
+            "this host could not decide it: invalid input: no such repository and a second line",
             "a refusal reaches a rendered line unstripped"
         );
     }

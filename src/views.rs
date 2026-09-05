@@ -339,6 +339,14 @@ fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// ask every node twice.
 struct Rendering(crate::rendercost::Render);
 
+impl Rendering {
+    /// Record that this render reported on one node's landing, which is the set
+    /// every read it takes is held against.
+    fn reported(&self, node: &str) {
+        self.0.reported(node);
+    }
+}
+
 thread_local! {
     /// Every landing this render has already read, keyed by run and node.
     ///
@@ -413,7 +421,7 @@ impl Reported {
 /// render is told which those are as it prints them, so a read taken for a node
 /// nobody is shown fails the bound `tests/e2e/landing.rs` holds.
 fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported {
-    render.0.reported(node);
+    render.reported(node);
     let recorded = view.state.landings.get(node).copied();
     // Never asked: a base does not stop carrying work it has taken, so the one
     // read that could move this could only agree with it.
