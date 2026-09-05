@@ -32,9 +32,8 @@
 //! | `goals` (the run summary) | 4 | 4, all of `service` | 4 | 612 ms |
 //! | `status` | 4 | 4, all of `service` | 4 | 955 ms |
 //!
-//! The resolutions are one per read and not one per render, which is the
-//! dependency's limit rather than a choice here — `vcs::landing_now` carries the
-//! whole of why, and the bound the check holds is stated with it.
+//! The resolutions are one per read and not one per render — `vcs::landing_now`
+//! says why.
 //!
 //! The reads, the resolutions and the lines are the same on every run; the clock is
 //! not. Seven readings taken while this was written put each render between about
@@ -677,14 +676,10 @@ fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
 ///    run's ledger or journal, and so no walk of a base's history taken here and
 ///    no request over a network, both of which from this crate are a process.
 ///
-/// Bound 4 is one resolution per *node*, not one per render, and that is a limit
-/// of the dependency rather than a choice here: `onevcs::landing_status` loads
-/// the registry and resolves the repository itself on every call, and nothing on
-/// that library's 0.19.1 surface takes a repository once and answers several
-/// references — its only per-repository batch, `Vcs::preserved`, enumerates
-/// `unpublished_branches` and so cannot see a branch a publication pushed. So they
-/// are **counted and reported** rather than claimed away; `vcs::landing_now`
-/// carries the whole of why, and divergence 33 records what would close it.
+/// Bound 4 is one resolution per *node*, not one per render, because that is what
+/// the dependency's read costs — `vcs::landing_now` says why, and divergence 33
+/// records what would close it. So they are **counted and reported** here rather
+/// than claimed away.
 #[test]
 fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_per_node() {
     let Fixture { world, run } = fixture("landing-cost");

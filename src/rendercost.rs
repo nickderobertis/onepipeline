@@ -242,14 +242,12 @@ impl Drop for Deciding {
 /// Record that one landing decision made the sibling resolve its repository.
 ///
 /// Named for what is certainly true rather than for what a caller hopes: the read
-/// this crate calls loads the registry and resolves `repo` **before it reads
-/// anything**, on every call, so one resolution per read is by construction. What
-/// it goes on to open depends on the answer, and this does not claim to know.
+/// resolves the repository before it reads anything, so one per read is by
+/// construction, and what it goes on to open depends on the answer. Recorded
+/// *after* the read returns, so it records something that happened.
 ///
-/// Recorded *after* the read returns, so it records something that happened. It
-/// is the quantity the render bound is about: a repository resolved once for each
-/// node rather than once for the render, which is the sibling's limit and not this
-/// crate's choice — see [`crate::vcs::landing_now`] and divergence 33.
+/// Why it is one per read rather than one per render is
+/// [`crate::vcs::landing_now`]'s to say.
 pub(crate) fn repository_resolved(repo: Option<&str>) {
     record(Act::RepositoryResolved, json!({ "repo": repo }));
 }

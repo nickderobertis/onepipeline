@@ -1012,8 +1012,8 @@ Re-reading it needed one of two answers, and this crate could reach neither:
 * **The host's.** `RemoteHost::find_changes(head, base)` is exactly the read —
   but a `RemoteHost` comes from `Hosting::for_repo(slug)`, and the `owner/name`
   slug is derived from an identity key by `onevcs`'s own private `gh::slug`.
-  Deriving it here would be a second copy of a sibling's rule, which
-  `src/AGENTS.md` forbids — and it would fail in the direction that matters: a
+  Deriving it here would be a second copy of a sibling's rule, and this crate
+  never re-declares a sibling's vocabulary — and it would fail in the direction that matters: a
   copy that drifted, or an identity on a host that is not GitHub, would address
   *some other repository* and answer confidently about it.
 * **Git's.** `Vcs::recoverable` makes precisely the comparison —
