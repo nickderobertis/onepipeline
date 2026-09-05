@@ -26,17 +26,17 @@
 //! separate invocation of the binary, so the wall clock is the whole cost a
 //! supervisor pays at a terminal rather than the render alone:
 //!
-//! | render | landing reads | repository resolutions | lines printed | wall clock |
+//! | render | landing reads | repository asks | lines printed | wall clock |
 //! | --- | --- | --- | --- | --- |
-//! | `results` | 5 | 5, all of `service` | 8 | 636 ms |
-//! | `goals` (the run summary) | 4 | 4, all of `service` | 4 | 612 ms |
-//! | `status` | 4 | 4, all of `service` | 4 | 955 ms |
+//! | `results` | 5 | 5, all of `service` | 8 | 839 ms |
+//! | `goals` (the run summary) | 4 | 4, all of `service` | 4 | 540 ms |
+//! | `status` | 4 | 4, all of `service` | 4 | 618 ms |
 //!
-//! The resolutions are one per read and not one per render — `vcs::landing_now`
-//! says why.
+//! The asks are one per read and not one per render — `vcs::landing_now` says
+//! why.
 //!
-//! The reads, the resolutions and the lines are the same on every run; the clock is
-//! not. Seven readings taken while this was written put each render between about
+//! The reads, the asks and the lines are the same on every run; the clock is
+//! not. Eight readings taken while this was written put each render between about
 //! 0.12 s and 0.96 s, and the difference was what else the host was doing — which
 //! is why **no assertion below is a threshold on that time**: what a render costs is
 //! held as *work* — see
@@ -677,14 +677,14 @@ fn a_branch_name_two_repositories_hold_is_answered_about_the_node_s_own() {
 /// 1. at most one landing read for each node the render reports on;
 /// 2. no read at all for a node the run already recorded as landed;
 /// 3. no read for a node the render does not report on;
-/// 4. at most one **repository resolution** per node, for a repository of a node
-///    it prints, and exactly one per read — so a second resolution of a repository
-///    a node has already been decided against fails here;
+/// 4. at most one **repository ask** per node, for a repository of a node it
+///    prints, and exactly one per read — so asking again about a repository a node
+///    has already been decided against fails here;
 /// 5. **nothing else per node** — no process this crate started, no read of the
 ///    run's ledger or journal, and so no walk of a base's history taken here and
 ///    no request over a network, both of which from this crate are a process.
 ///
-/// Bound 4 is one resolution per *node*, not one per render, because that is what
+/// Bound 4 is one ask per *node*, not one per render, because that is what
 /// the dependency's read costs — `vcs::landing_now` says why, and divergence 33
 /// records what would close it. So they are **counted and reported** here rather
 /// than claimed away.
@@ -770,25 +770,23 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
              {reported:?}"
         );
 
-        // The repositories the render made the sibling resolve to decide those
-        // landings, by the node each was resolved for. The read resolves one
-        // itself — see `vcs::landing_now` — so these are counted rather than
-        // absent, and held to one per node: a second resolution of a repository a
-        // node has already been decided against is work nobody is shown.
+        // The repositories the render asked the sibling about to decide those
+        // landings, by the node each was asked for. The read takes one from
+        // scratch — see `vcs::landing_now` — so these are counted rather than
+        // absent, and held to one per node: asking again about a repository a node
+        // has already been decided against is work nobody is shown.
         let opened: Vec<(String, String)> = rendered
             .iter()
-            .filter(|act| act["act"] == "repository-resolved")
+            .filter(|act| act["act"] == "repository-asked")
             .map(|act| {
                 (
                     act["repo"]
                         .as_str()
-                        .unwrap_or_else(|| panic!("a resolution naming no repository: {act}"))
+                        .unwrap_or_else(|| panic!("an ask naming no repository: {act}"))
                         .to_owned(),
                     act["node"]
                         .as_str()
-                        .unwrap_or_else(|| {
-                            panic!("a resolution outside any node's decision: {act}")
-                        })
+                        .unwrap_or_else(|| panic!("an ask outside any node's decision: {act}"))
                         .to_owned(),
                 )
             })
@@ -799,34 +797,34 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         assert_eq!(
             opened_once.len(),
             opened.len(),
-            "{view} resolved one repository twice over for a node it had already decided: \
+            "{view} asked about one repository twice over for a node it had already decided: \
              {opened:?}"
         );
         for (repo, node) in &opened {
             assert!(
                 reported.contains(node),
-                "{view} resolved {repo} for {node}, whose line it does not print: {reported:?}"
+                "{view} asked about {repo} for {node}, whose line it does not print: {reported:?}"
             );
         }
-        // One resolution per read and no other: one without a read would be this
-        // crate resolving a repository of its own, which it does not do.
+        // One ask per read and no other: one without a read would be this crate
+        // taking a repository of its own, which it does not do.
         assert_eq!(
             opened.len(),
             asked.len(),
-            "{view} resolved {} repositor(ies) for {} landing read(s): {opened:?}",
+            "{view} asked about {} repositor(ies) for {} landing read(s): {opened:?}",
             opened.len(),
             asked.len()
         );
 
         // And nothing else per node: every act recorded inside a node's landing
-        // decision is that node's one landing read and the one resolution it makes.
+        // decision is that node's one landing read and the one ask it makes.
         let per_node: Vec<&&Value> = rendered
             .iter()
             .filter(|act| act["act"] != "render" && act["act"] != "reported")
             .collect();
         for act in &per_node {
             assert!(
-                act["act"] == "landing-read" || act["act"] == "repository-resolved",
+                act["act"] == "landing-read" || act["act"] == "repository-asked",
                 "{view} did per-node work no landing read accounts for: {act}"
             );
         }
@@ -843,7 +841,7 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
             *per_repository.entry(repo.as_str()).or_default() += 1;
         }
         measured_cost.push_str(&format!(
-            "  {view:<8} {} landing read(s), {} repository resolution(s) {:?}, {} line(s) \
+            "  {view:<8} {} landing read(s), {} repository ask(s) {:?}, {} line(s) \
              printed, {:?} per render\n",
             asked.len(),
             opened.len(),

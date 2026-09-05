@@ -1059,14 +1059,14 @@ from not landed, with the settlement's own dated claim behind it — the propert
 the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it
 over real repositories it creates on disk, and holds what a render costs as *work*
 rather than as elapsed time: at most one landing read per node it reports on, none
-for a node already recorded landed, one repository resolution per read, and no
-other per-node work at all.
+for a node already recorded landed, one repository ask per read, and no other
+per-node work at all.
 
-**A render has each repository resolved once per node rather than once per render,
+**A render asks about each repository once per node rather than once per render,
 and that is this proposal's remaining half.** `landing_status` loads the registry
 and resolves the repository *itself* before it reads anything, on every call, so
-five nodes of one repository resolve it five times and the consuming crate cannot
-collapse that: the resolution is not one it performs. Nothing on `onevcs` 0.19.1's surface lets it be collapsed either.
+five nodes of one repository take it from scratch five times and the consuming
+crate cannot collapse that: the work is not work it performs. Nothing on `onevcs` 0.19.1's surface lets it be collapsed either.
 That read is the only one that answers for a branch a publication **pushed**, and
 it takes one reference; the only per-repository batch, `Vcs::preserved` over
 `Scope::Repo`, enumerates `git::unpublished_branches` — "local branches holding
@@ -1078,7 +1078,7 @@ hand in a loaded registry or a resolved repository instead.
 
 So they are **counted rather than claimed away**: `rendercost` records one per
 read and the journey holds it to one per node whose line the render prints, which
-is the bound this crate can keep — a second resolution of a repository a node has
+is the bound this crate can keep — asking again about a repository a node has
 already been decided against fails there by name. **Proposal (for `onevcs`): a landing read
 that takes a repository and several references — or a resolved-repository handle
 that answers them — so a render pays one open for a repository however many of its

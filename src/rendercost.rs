@@ -77,7 +77,7 @@ enum Act {
     Began,
     Reported,
     LandingRead,
-    RepositoryResolved,
+    RepositoryAsked,
     StoreRead,
     ProcessSpawn,
 }
@@ -88,7 +88,7 @@ impl Act {
             Act::Began => "render",
             Act::Reported => "reported",
             Act::LandingRead => "landing-read",
-            Act::RepositoryResolved => "repository-resolved",
+            Act::RepositoryAsked => "repository-asked",
             Act::StoreRead => "store-read",
             Act::ProcessSpawn => "process-spawn",
         }
@@ -238,11 +238,15 @@ impl Drop for Deciding {
     }
 }
 
-/// Named for the resolution rather than for an *open*, because that is the part
-/// the read certainly does; what it goes on to open depends on the answer. Its
-/// cost is [`crate::vcs::landing_now`]'s to explain.
-pub(crate) fn repository_resolved(repo: Option<&str>) {
-    record(Act::RepositoryResolved, json!({ "repo": repo }));
+/// Record that one landing decision asked the sibling about a repository.
+///
+/// Named for the asking rather than for a *resolution* or an *open*, because
+/// asking is the whole of what this crate can witness: the read takes the
+/// repository from scratch every time, and whether it got as far as resolving or
+/// opening one is inside an answer this does not read. What it counts is
+/// therefore exactly the cost [`crate::vcs::landing_now`] cannot collapse.
+pub(crate) fn repository_asked(repo: Option<&str>) {
+    record(Act::RepositoryAsked, json!({ "repo": repo }));
 }
 
 pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
@@ -312,7 +316,7 @@ mod tests {
             (Act::Began, "render"),
             (Act::Reported, "reported"),
             (Act::LandingRead, "landing-read"),
-            (Act::RepositoryResolved, "repository-resolved"),
+            (Act::RepositoryAsked, "repository-asked"),
             (Act::StoreRead, "store-read"),
             (Act::ProcessSpawn, "process-spawn"),
         ] {
@@ -320,7 +324,7 @@ mod tests {
                 Act::Began
                 | Act::Reported
                 | Act::LandingRead
-                | Act::RepositoryResolved
+                | Act::RepositoryAsked
                 | Act::StoreRead
                 | Act::ProcessSpawn => {}
             }

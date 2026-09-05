@@ -400,9 +400,9 @@ pub(crate) enum LandingRead {
 /// which narrows a branch name two identities could both hold to the one this
 /// run's work is in.
 ///
-/// **This read resolves the repository itself, on every call**, so a render pays
-/// one resolution per node rather than one per repository. That cost is counted
-/// rather than assumed — see [`crate::rendercost::repository_resolved`] — and
+/// **This read takes the repository from scratch on every call**, so a render
+/// pays for one per node rather than one per repository. That cost is counted
+/// rather than assumed — see [`crate::rendercost::repository_asked`] — and
 /// divergence 33 in `docs/contract-divergences.md` records why none of the
 /// sibling's reads can collapse it, and the proposal that would.
 //
@@ -414,10 +414,11 @@ pub(crate) enum LandingRead {
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
     let answered = read_of(onevcs::landing_status(branch, repo));
-    // One per read, because the read resolves one. Recorded after it rather than
-    // inferred from it, so a build that resolved a repository *without* reading a
-    // landing — or twice for one read — is counted rather than assumed away.
-    crate::rendercost::repository_resolved(repo);
+    // One per read, because the read takes one from scratch. Recorded after it
+    // rather than inferred from it, so a build that asked about a repository
+    // *without* reading a landing — or twice for one read — is counted rather
+    // than assumed away.
+    crate::rendercost::repository_asked(repo);
     answered
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
