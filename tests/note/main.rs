@@ -43,7 +43,7 @@ use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reach
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
-use harness::{agent, plan_of, World, REFUSED};
+use harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
 
 /// The correction a manager sends at the moment it matters: while the worker is
 /// still working, and before its judge has ruled on anything.
@@ -634,8 +634,11 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
 /// the only way one node here is dispatched twice, and what is read is the prompt
 /// that second dispatch was really handed.
 ///
-/// The human action is what keeps a driver on the run while its one agent node is
-/// parked: a graph nothing can move has no reconciler left to pick a requeue up.
+/// The second node is what keeps a driver on the run while this one is parked: a
+/// graph whose every node has settled has no reconciler left to pick a requeue up,
+/// and a `kind: human` action does not answer for it — an unattested one settles
+/// `waiting`, which the loop counts as finished with. So `keep` is an agent node
+/// whose **judge** is held, which is a turn nothing in this journey releases.
 #[test]
 fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
     let world = World::new("note-not-carried");
@@ -651,19 +654,27 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
         "Run the check again and report what it said.",
     );
     world.script("turn.hold", "hold");
-    // One at a time, and a second node behind this one. That ordering is what
-    // keeps a reconciler on the run across the park: `keep` cannot start while
-    // `build` holds the only slot, so it starts *because* `build` parked — and
-    // its own first turn is then held by the gates `build`'s last turn consumed,
-    // which is a sequence rather than a race.
-    let mut plan = plan_of(run, vec![agent("build", &[]), agent("keep", &[])]);
-    plan["concurrency"] = json!(1);
+    // `keep`'s judge, held and never released, so that node is still *running*
+    // when the requeue arrives however its worker turn raced `build`'s for the
+    // gates above — the two share one pair, and a second node that settled would
+    // take the reconciler down with it. `build` never reaches a judge at all: its
+    // worker turn is held from the moment the note reopens it until the deadline
+    // below reaps it.
+    world.script("judge.hold", "hold");
     world.write_graphs();
     world.write_supervised_node_graph();
-    let path = world.plan(run, &plan);
-    world
-        .run_on_agentgraph(&["start", &path, "--detach"])
-        .exited(0);
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("keep", &[])]),
+    );
+    // A deadline this journey waits *out* rather than one it waits on. The note
+    // reopens the worker's turn and every turn of this node is held, so nothing
+    // of the dispatch answers the cancellation's ask — the loop's own clock is
+    // what ends it, and being reaped rather than judged is what leaves the node
+    // parked for the requeue below instead of settled `done`.
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
     world.until("the worker's turn to open", |world| {
         !world.events_of(run, "turn-started").is_empty()
     });
@@ -697,9 +708,7 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
         )
         .exited(0);
 
-    release(&world.fakes, "turn.go");
-    release(&world.fakes, "turn.settle");
-    world.until("the parked node to settle", |world| {
+    world.until("the held dispatch to be reaped at its deadline", |world| {
         world
             .events_of(run, "node-settled")
             .iter()
@@ -710,10 +719,12 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
             world.agentgraph_cmd(&["reply", run]),
             &envelope(json!({"op": "requeue", "id": "build"})),
         )
-        .exited(0);
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    // The second dispatch's own turn is held by the gates the first one consumed,
+    // which is what makes the instruction below readable while it is still open
+    // rather than a race against a turn that ends as soon as it starts.
     world.until("the requeued node to be dispatched again", |world| {
-        release(&world.fakes, "turn.go");
-        release(&world.fakes, "turn.settle");
         dispatches_of(world, run, "build")
             .get(1)
             .is_some_and(|turns| !turns.is_empty())
@@ -731,6 +742,12 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
          it:\n{:#?}",
         dispatched[1]
     );
+
+    // Released so the held turns end with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle", "judge.go"] {
+        release(&world.fakes, gate);
+    }
 }
 
 /// A note offered while the **judge** is the party taking a turn re-takes that

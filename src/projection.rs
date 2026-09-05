@@ -2078,6 +2078,61 @@ mod tests {
         assert_eq!(state.graph.get("build").expect("build").context, None);
     }
 
+    /// The same fact under the op that replaced `context`, in **both** directions.
+    ///
+    /// One direction alone would pass a fold that always composes forward, and
+    /// what `persist` promises is a biconditional: the note no running turn took
+    /// is owed to the node's next dispatch, and the note one did take is owed to
+    /// no dispatch at all. The disposition is the only thing that says which, so
+    /// it is what this arm reads.
+    #[test]
+    fn only_a_note_no_running_turn_took_is_owed_to_the_nodes_next_dispatch() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let delivered = |reached: crate::note::Reached| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                1,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: "the fixture moved".parse().expect("a usable note"),
+                        criterion: None,
+                        reached,
+                    }]),
+                )],
+            )
+        };
+
+        let carried = fold(&[started.clone(), delivered(crate::note::Reached::Carried)]);
+        assert_eq!(carried.pending_context["build"], "the fixture moved");
+        assert_eq!(
+            carried
+                .graph
+                .get("build")
+                .expect("build")
+                .context
+                .as_deref(),
+            Some("the fixture moved"),
+            "a note no turn took did not reach the node it is still owed to"
+        );
+
+        let taken = fold(&[started, delivered(crate::note::Reached::Worker)]);
+        assert!(
+            taken.pending_context.is_empty(),
+            "a note a running turn read was also owed to the dispatch after it"
+        );
+        assert_eq!(taken.graph.get("build").expect("build").context, None);
+    }
+
     /// An arrival note the running turn could not take is owed to the node's next
     /// dispatch, and is reconstructed from the versions the record names.
     ///
