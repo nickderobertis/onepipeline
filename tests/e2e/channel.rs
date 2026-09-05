@@ -1142,6 +1142,57 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
     drop(silent);
     world.release("build.go");
 }
+/// A queue that records a name identifying nobody still hands over every surface
+/// in it.
+///
+/// The one place this crate reads an asker leniently, and the reason it does. A
+/// queue is read with `unwrap_or_default`, so a record this build refused would
+/// not cost one field — it would read as **no queue at all**, and every question
+/// in it would go missing from `status`, from `next`, and from the decisions the
+/// run is held on. A blank name identifies nobody, which is what "no asker"
+/// already means, so it is read as that and the surface around it is untouched.
+///
+/// The record is placed by hand because nothing this crate does can produce one:
+/// every path that writes an asker checks it first. That is what makes this
+/// worth a journey rather than a unit test — what is under test is not the
+/// parse, it is whether a live run still answers for the queue holding it.
+#[test]
+fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces() {
+    let world = World::new("channel-blank-record");
+    world.script("build.wait", "hold");
+    let run = running(&world, "blankrecord", vec![agent("build", &[])]);
+
+    // Renamed into place rather than written over: the run's own loop is reading
+    // this file while this happens, and a half-written one would read as the
+    // empty queue this journey exists to prove it is not.
+    let queue = world.run_file(&run, "channel/queue.json");
+    let staged = queue.with_extension("staged");
+    std::fs::write(
+        &staged,
+        concat!(
+            r#"{"waiting":[{"id":0,"kind":"blocker","message":"is anyone there?","#,
+            r#""source":"proposal","blocking":true,"queued_at":0,"asker":""}],"#,
+            r#""pending":null,"next_id":1}"#,
+        ),
+    )
+    .expect("the record is staged");
+    std::fs::rename(&staged, &queue).expect("the record is placed");
+
+    // The run answers for it exactly as it does for any question nobody has read.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    // And it is handed over whole, under nobody's name rather than under a name
+    // that means nothing.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("is anyone there?");
+    assert_eq!(read.json()["surface"]["asker"], serde_json::Value::Null);
+    assert_eq!(read.json()["surface"]["abandoned"], serde_json::Value::Null);
+
+    world.release("build.go");
+}
+
 /// An asker this session cannot name is refused before it serves.
 ///
 /// A blank value is not the absence it looks like: absent means this session
