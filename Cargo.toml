@@ -243,6 +243,16 @@ resolver = "2"
 #   reads, not a call site. Taken because `onevcs-testing` 0.5.3 requires exactly
 #   this `onevcs`, so the two move together, and a lock carrying them apart would
 #   resolve `onevcs` twice.
+# - `onevcs` 0.19.1 carries `landing_status`, which is the landing decision on
+#   that library's public surface **on its own** — the `Landed` enum with the tier
+#   that decided it inside the answer, taking no release target and reading no
+#   release configuration. A requirement: `release_status` selected a release
+#   target before it returned the landing it had already decided, so a repository
+#   declaring none was refused, and the views could not correct a settlement's
+#   answer on a host whose repository declares no targets. `src/vcs.rs`'s
+#   `landing_now` is the one call site, and `src/views.rs` asks it when a view
+#   renders. `onevcs-testing` 0.5.4 requires exactly this `onevcs`, so the two
+#   move together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so

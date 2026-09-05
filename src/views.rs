@@ -549,8 +549,8 @@ impl RunView {
     /// nobody landed, and a count that said it was is what sent a supervisor to
     /// re-dispatch nodes whose work was already on the base. A landing this host
     /// cannot decide is counted under its own word rather than folded into
-    /// either of the other two — see [`Stands`] — because "not landed" is a
-    /// claim and an undecided read makes none.
+    /// either of the other two, because "not landed" is a claim and an undecided
+    /// read makes none.
     pub fn summary(&self) -> String {
         let render = rendering("summary", &self.paths.run);
         let statuses = self.state.statuses();

@@ -1980,4 +1980,68 @@ mod tests {
         assert_eq!(envelope.labels.extra["session"], "s-1");
         assert_eq!(envelope.artifacts[0].id.0, "a-1");
     }
+
+    /// Each of the sibling's five answers reads back as one verdict and the
+    /// evidence that decided it.
+    ///
+    /// The mapping is where a wrong reading costs most, and two of the five are
+    /// exactly the readings that must not be collapsed: a landing the branch has
+    /// gone past is **not** finished work, and a base that carries the change
+    /// with nothing recording why is **undecided** rather than landed. Driven
+    /// through the answer rather than through a repository, because what is
+    /// being decided here is which answer is which — `tests/e2e/landing.rs`
+    /// drives the repository.
+    #[test]
+    fn each_answer_the_sibling_gives_reads_back_as_one_verdict_and_its_evidence() {
+        use onevcs::{Landed, LandingEvidence, Sha};
+        let landing = |commit: &str| LandingEvidence::RecordedLanding {
+            commit: Sha(commit.into()),
+        };
+
+        let yes = read_of(Ok(Landed::Yes {
+            evidence: landing("abc1234"),
+        }));
+        assert_eq!(yes.verdict, LandingVerdict::Landed);
+        assert_eq!(yes.evidence, "a recorded landing at abc1234");
+
+        // A landing that accounts for part of the branch: there is work left to
+        // publish, so it is not a landing — and the commit that *did* land is
+        // named anyway, because a reader deciding what to do next needs both.
+        let part = read_of(Ok(Landed::InPart {
+            evidence: landing("abc1234"),
+            unlanded: std::num::NonZeroUsize::new(2).expect("two"),
+        }));
+        assert_eq!(part.verdict, LandingVerdict::NotLanded);
+        assert_eq!(
+            part.evidence,
+            "a recorded landing at abc1234, with 2 commit(s) above it the landing did not carry"
+        );
+
+        let no = read_of(Ok(Landed::No));
+        assert_eq!(no.verdict, LandingVerdict::NotLanded);
+        assert!(no.evidence.contains("the base does not carry"), "{no:?}");
+
+        let unknown = read_of(Ok(Landed::Unknown));
+        assert_eq!(
+            unknown.verdict,
+            LandingVerdict::Undecided,
+            "a base that carries the change with nothing recording why was read as an answer"
+        );
+        assert!(
+            unknown.evidence.contains("nothing records why"),
+            "{unknown:?}"
+        );
+
+        // A refusal is undecided too, and it says what refused — a supervisor
+        // meeting "this host could not decide it" has something to fix, where a
+        // bare `not landed` sends them to re-publish landed work.
+        let refused = read_of(Err(onevcs::Error::Invalid {
+            reason: "no such repository\nand a second line".into(),
+        }));
+        assert_eq!(refused.verdict, LandingVerdict::Undecided);
+        assert_eq!(
+            refused.evidence, "this host could not decide it: invalid input: no such repository and a second line",
+            "a refusal reaches a rendered line unstripped"
+        );
+    }
 }
