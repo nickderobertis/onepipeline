@@ -2088,6 +2088,12 @@ fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
 /// case rather than a contrivance, and it is the one `persist` exists for — so
 /// both halves are asserted: the run records `carried` rather than a delivery to
 /// a turn, and the note really rides the node's next dispatch.
+// llmlint: ignore-block[tests_mirror_real_usage] the name reads as the sibling's binary
+// and is not: [`World::agentgraph_cmd`] composes **this crate's own** command through
+// `World::cmd`, and what it changes is the environment around it — it removes
+// `ONEPIPELINE_ONEAGENTGRAPH_BIN` so every verb takes the default library path, and puts
+// the real sibling on `PATH`. So the envelope below goes in at `onepipeline reply`, on
+// stdin, which is the documented product entry point and the only one this journey uses.
 #[test]
 fn a_note_delivered_through_the_real_sibling_records_what_the_conversation_answered() {
     let world = World::new("real-note");
@@ -2140,7 +2146,7 @@ fn a_note_delivered_through_the_real_sibling_records_what_the_conversation_answe
 
     world.release("turn.go");
     world.release("turn.settle");
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A `cancel` stops a dispatch running on the **library** backend, through that
 /// library's own two levers.
