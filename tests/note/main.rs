@@ -408,6 +408,14 @@ fn a_binding_note_enters_the_bar_its_judge_decides_against_as_the_workers_own() 
 /// worker did another forty minutes of correct work, and the node was failed for a
 /// completion report that preceded its own subsequent commits. A refusal would have
 /// let the manager relaunch instead.
+///
+/// **Both places the one reach-nobody rule can be decided about a settled node are
+/// driven here**, because a node that will never be dispatched again is what makes
+/// them one rule rather than two. Under the default the conversation answers
+/// first, and `persist` then has nowhere to carry what it could not deliver; under
+/// `deliver: next` no conversation is asked at all, so the run's own record decides
+/// it a step earlier. Neither is a special case beside the other, and each refusal
+/// names what left the note nowhere to go.
 #[test]
 fn a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded() {
     let world = World::new("note-late");
@@ -432,7 +440,24 @@ fn a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded() {
     refused
         .exited(2)
         .err_has("was not delivered")
-        .err_has("build");
+        .err_has("build")
+        // The half of the rule only the run can decide: the live attempt found no
+        // turn, and the `persist` this default carries had nowhere to carry it,
+        // because a node that has settled `done` has no next dispatch.
+        .err_has("no dispatch of it will take the note either");
+
+    // The same note to the same node, asked for no live delivery at all. Nothing
+    // asks the conversation this time — there is nothing a note could be carried
+    // to — so the same rule is decided off the run's own record, before the run is
+    // reached, and says which of the two fields left it nowhere.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(REFUSED)
+        .err_has("it has settled done")
+        .err_has("`deliver: next` asks for no live delivery");
 
     // Nothing was silently accepted: no note is on the run's committed record.
     let committed: Vec<Value> = world

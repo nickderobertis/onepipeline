@@ -4459,10 +4459,6 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
             .expect("entry 60's ops travel in a reply envelope");
     assert_eq!(envelope.commands.len(), fixtures.len());
 
-    // The whole field set, and nothing outside it. A note carrying every field
-    // the entry names parses; one carrying anything else is refused by name,
-    // which is what makes the removed op's own field a refusal rather than a
-    // value quietly dropped.
     // The whole field set, and nothing outside it. Every field the entry names is
     // carried by one of its fixtures and every key a fixture carries is one it
     // names, so the set is proven from both ends — a field added to the op
