@@ -2989,7 +2989,7 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     queued.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
 
     // llmlint: ignore-end[tests_mirror_real_usage]
-    let answered = world.run_with_stdin_on(
+    let submitted = world.run_with_stdin_on(
         queued,
         &json!({
             "completion": false,
@@ -3000,10 +3000,13 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
         })
         .to_string(),
     );
-    answered.exited(QUEUED).out_has("\"queued\"");
+    submitted.exited(QUEUED).out_has("\"queued\"");
     // Two fates, and the receipt names each: the ruling is gone to a reader and
     // the edits are still in the queue, which one word could only say one of.
-    let receipt = answered.json();
+    // Held to entry 64 here rather than only in the receipt journey, because this
+    // is the one shape that reaches the record's `queued` words.
+    let receipt = submitted.json();
+    stated_by_entry_64(&receipt, "a verdict beside queued edits", true, true);
     assert_eq!(receipt["state"], "queued");
     assert_eq!(receipt["verdict"], "delivered");
     assert_eq!(receipt["commands"], "queued");
@@ -4361,7 +4364,6 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
 /// either receipt which of them had answered it.
 #[test]
 fn the_reply_receipt_names_each_half_the_envelope_carried() {
-    let stated = entry_64_receipt();
     let world = World::new("channel-receipt-halves");
     world.script("build.wait", "hold");
     let run = running(&world, "receipted", vec![agent("build", &[])]);
@@ -4402,33 +4404,7 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
         answered.exited(0);
         let receipt = answered.json();
-        let carried = |present: &str| match present {
-            "always" => true,
-            "with a verdict half" => verdict,
-            "with commands" => commands,
-            other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
-        };
-        for (key, rule) in &stated {
-            let present = rule["present"]
-                .as_str()
-                .expect("entry 64 states each key's presence rule");
-            let answer = receipt.get(key);
-            assert_eq!(
-                answer.is_some(),
-                carried(present),
-                "{shape}: '{key}' is stated present {present}, and the receipt says otherwise: \
-                 {receipt}"
-            );
-            let Some(answer) = answer else { continue };
-            if let Some(words) = rule["values"].as_array() {
-                assert!(
-                    words.contains(answer),
-                    "{shape}: '{key}' answered {answer}, which entry 64 does not state: {words:?}"
-                );
-            } else {
-                assert!(answer.is_u64(), "{shape}: '{key}' answered {answer}");
-            }
-        }
+        stated_by_entry_64(&receipt, shape, verdict, commands);
         // And each half's word is its own, so an envelope that did both is not
         // read off one of them: the note landed, and the ruling did too.
         if commands {
@@ -4447,11 +4423,13 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
     world.release("build.go");
 }
 
-/// Entry 64's block, which is what the journey above holds the verb to: every
-/// key, the words each may answer, and which half its presence depends on.
+/// Hold one receipt to entry 64 of `docs/contract-divergences.md`: every key it
+/// answers is one the record names, every key that record names is present
+/// exactly when the half it depends on was carried, and every word is one that
+/// key may answer.
 ///
 /// `live_edit.rs`'s `from_entry_57` reads its entry the same way.
-fn entry_64_receipt() -> Vec<(String, Value)> {
+fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: bool) {
     let record = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
     )
@@ -4465,16 +4443,46 @@ fn entry_64_receipt() -> Vec<(String, Value)> {
         .nth(1)
         .and_then(|rest| rest.split("```").next())
         .expect("entry 64 carries the json block this journey drives");
-    let block: serde_json::Map<String, Value> =
+    let stated: serde_json::Map<String, Value> =
         serde_json::from_str(block).expect("entry 64's block is a JSON object");
-    let stated: Vec<(String, Value)> = block.into_iter().collect();
-    assert_eq!(
-        stated.len(),
-        4,
-        "entry 64 names {} receipt keys, and this journey drives four: {stated:?}",
-        stated.len()
-    );
-    stated
+
+    let answered = receipt
+        .as_object()
+        .expect("the receipt is one JSON object")
+        .keys();
+    for key in answered {
+        assert!(
+            stated.contains_key(key),
+            "{shape}: the receipt answered '{key}', which entry 64 does not name: {receipt}"
+        );
+    }
+    for (key, rule) in &stated {
+        let present = rule["present"]
+            .as_str()
+            .expect("entry 64 states each key's presence rule");
+        let carried = match present {
+            "always" => true,
+            "with a verdict half" => verdict,
+            "with commands" => commands,
+            other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
+        };
+        let answer = receipt.get(key);
+        assert_eq!(
+            answer.is_some(),
+            carried,
+            "{shape}: '{key}' is stated present {present}, and the receipt says otherwise: \
+             {receipt}"
+        );
+        let Some(answer) = answer else { continue };
+        if let Some(words) = rule["values"].as_array() {
+            assert!(
+                words.contains(answer),
+                "{shape}: '{key}' answered {answer}, which entry 64 does not state: {words:?}"
+            );
+        } else {
+            assert!(answer.is_u64(), "{shape}: '{key}' answered {answer}");
+        }
+    }
 }
 
 /// And a reader that only knows the older answer still reads a correct result
