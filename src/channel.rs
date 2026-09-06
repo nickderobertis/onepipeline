@@ -701,12 +701,85 @@ pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 /// is, so a verdict a member is waiting on is never cut off half-written.
 ///
 /// The endings are not the same fact and are deliberately not treated the same.
-/// A stream that ended proves the side that was asking has gone, so nothing is
-/// left that could read an answer and what it raised is abandoned. A session that
-/// reached this bound proves only that *this process* is done: the stream is
-/// still open, the member is still there, and every question it raised is still
-/// owed an answer — so nothing is withdrawn.
+/// A stream that ended leaves what this session raised marked: nothing is
+/// listening for those answers *now*, which is what the mark says and all it says
+/// — an asker that rents its listeners takes them back through
+/// `ChannelState::attend` the moment it arms another. A session that reached
+/// this bound does not even say that much: the stream is still open, the member
+/// is still there, and every question it raised is still owed an answer, so
+/// nothing is marked at all.
 pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
+
+/// The environment variable naming who a `channel serve` session listens on
+/// behalf of.
+///
+/// A serving process is a listener a side rents, and never that side itself: an
+/// asker may raise one question through one session and wait for the verdict
+/// through a succession of them. Two sessions carrying the same value are one
+/// asker, and the later takes back over what the earlier left outstanding — see
+/// `ChannelState::attend`, which is where that is spelled out.
+///
+/// The value is **opaque and compared for equality only**. Every dispatch this
+/// crate makes carries one of its own, composed in
+/// `executor::prepare_dispatch_env`. A session carrying none listens on its own:
+/// it adopts nothing and nothing adopts what it raised.
+pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
+
+/// One asker's name: the word by which two serving sessions are one side.
+///
+/// A type rather than a `String`, so that the two names which are not identities
+/// are unrepresentable in everything that takes one — a **blank** one, which
+/// every session carrying it would match, and one that is **not Unicode**, which
+/// collapses onto every other such value when it is read. The refusals below say
+/// what each would cost. The value is otherwise opaque: compared for equality,
+/// never parsed, and written as the word itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct Asker(String);
+
+impl Asker {
+    /// The asker one environment value names, or a refusal saying why it names
+    /// none.
+    pub(crate) fn named(value: &std::ffi::OsStr) -> crate::Result<Self> {
+        let value = value.to_str().ok_or_else(|| {
+            crate::Error::Refused(format!(
+                "{ASKER_ENV} is set to a value this host cannot read as text; an asker is \
+                 compared to other askers as one word, and two values that are not text read \
+                 as the same word — set it to a name in Unicode, or leave it unset for a \
+                 session that listens on its own"
+            ))
+        })?;
+        Self::checked(value)
+    }
+
+    /// The same check, over a name that is already text: the queue's own record
+    /// comes back this way.
+    fn checked(value: &str) -> crate::Result<Self> {
+        if value.trim().is_empty() {
+            return Err(crate::Error::Refused(format!(
+                "{ASKER_ENV} is set to a blank value, which names no asker; leave it unset for \
+                 a session that listens on its own, or set it to the one value every session \
+                 of this asker carries"
+            )));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Read the asker a queue recorded, reading a name that names nobody as none.
+///
+/// The one lenient boundary in this file, and the leniency is the point. A queue
+/// is read with `read_json_opt(..).unwrap_or_default()`, so a refusal here would
+/// not refuse one field — it would read the **whole queue** as empty and lose
+/// every surface in it, which is a far worse answer to a name this crate never
+/// writes than simply not knowing whose it was. A blank name identifies nobody,
+/// and `None` is what this file already means by that, so it is read as that and
+/// the invariant `Asker` carries survives the round trip.
+fn recorded_asker<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Asker>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.and_then(|name| Asker::checked(&name).ok()))
+}
 
 /// What raised a surface.
 ///
@@ -744,16 +817,34 @@ pub(crate) struct Surface {
     /// The node that provoked it, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workstream: Option<String>,
-    /// Whether anybody is still waiting for the answer.
+    /// Whether anybody is listening for the answer.
     ///
     /// Set by [`abandon`](ChannelState::abandon) when the process serving this
-    /// surface exited without an answer and the side that asked ended with it.
-    /// The surface keeps its text and stays claimable; what it gives up is its
-    /// claim on the unread count and on the subtree a blocking surface holds.
-    /// Omitted from the wire while it is false, so a queue nothing has abandoned
-    /// serializes exactly as it always did.
+    /// surface exited without an answer, and lifted by
+    /// [`attend`](ChannelState::attend) when a later listener of the same asker
+    /// takes it back over — a listener ending is not the asker going. While it
+    /// stands, the surface keeps its text and its place: what it gives up is its
+    /// claim on the unread count, on the subtree a blocking surface holds, and on
+    /// being reported as a question the run awaits a verdict on. Omitted from the
+    /// wire while it is false, so a queue nothing has abandoned serializes
+    /// exactly as it always did.
     #[serde(default, skip_serializing_if = "is_false")]
     pub abandoned: bool,
+    /// Who raised it, when the session that did named an asker.
+    ///
+    /// The key [`attend`](ChannelState::attend) matches on: a later session of
+    /// the same asker takes this surface back over, and a session of any other
+    /// asker leaves it exactly where it is. `None` is a surface nobody named an
+    /// asker for — every one an older build wrote, and every one raised outside a
+    /// serving session — and nothing ever adopts one of those. Omitted from the
+    /// wire while it is absent, so a queue no asker was named on serializes
+    /// exactly as it always did.
+    #[serde(
+        default,
+        deserialize_with = "recorded_asker",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub asker: Option<Asker>,
 }
 
 /// The durable channel state for one run.
@@ -935,28 +1026,35 @@ impl ChannelState {
             // is not answering a question, and a decision the planner never made
             // must not release the subtree it is holding.
             //
-            // An abandoned one is the exception, and for the reason the pending
-            // slot exists: nothing is waiting for its answer any more, so
-            // holding it there would report the run as awaiting a planner on
-            // behalf of a reader that has gone. It is still handed over — the
-            // text is what a manager reads it for — and it is handed over last,
-            // behind everything somebody is still waiting on.
-            if surface.blocking && !surface.abandoned {
-                queue.pending = Some(surface.clone());
+            // An abandoned one is handed over too — the text is what a manager
+            // reads it for — and last, behind everything somebody is still
+            // waiting on. It takes the slot only when nothing else is holding
+            // one: nothing waits on its answer, so it may not displace a
+            // question somebody does wait on, and the slot is where a listener
+            // that comes back for it looks. What the run *reports* is not
+            // decided here but by [`pending`](Self::pending), which passes over
+            // an abandoned occupant.
+            if surface.blocking && (!surface.abandoned || queue.pending.is_none()) {
+                // The slot's own text is not written over on its way out: an
+                // abandoned surface goes back among the readable ones, because
+                // this queue is the only place a reader can still reach it.
+                if let Some(displaced) = queue.pending.replace(surface.clone()) {
+                    if displaced.abandoned {
+                        queue.waiting.push(displaced);
+                    }
+                }
             }
         }
         self.write_queue(&queue)?;
         Ok(claimed)
     }
 
-    /// Say of every surface in `raised` that nobody is waiting for its answer,
-    /// and give up the pending slot if one of them is holding it.
+    /// Say of every surface in `raised` that nobody is waiting for its answer.
     ///
-    /// Called when a serving process is about to exit with the side that asked
-    /// already gone: its stream ended, so no answer to anything it raised has a
-    /// reader left. Answering the surfaces it raised is not the same question as
-    /// whether they are still *interesting*, which is why this marks rather than
-    /// deletes.
+    /// Called when a serving process is about to exit: no answer to anything it
+    /// raised has a reader left *in this session*. Answering those surfaces is
+    /// not the same question as whether they are still *interesting*, which is
+    /// why this marks rather than deletes.
     ///
     /// **Marked, not discarded**, and the queue is what decides it. A surface
     /// still in `waiting` is one no manager has ever seen, and this queue holds
@@ -966,31 +1064,24 @@ impl ChannelState {
     /// already looks for it and [`claim`](Self::claim) still hands it out; the
     /// flag is what the unread accounting and the decision points read.
     ///
-    /// What is genuinely **withdrawn** is narrower and is the half where nothing
-    /// can be lost: the *pending slot*. Its surface has already been delivered
-    /// to the reader holding it, so putting it back among the readable ones
-    /// costs that reader nothing and stops the run reporting that it awaits a
-    /// planner nobody is waiting on.
+    /// **Nothing moves**, the pending slot included. A surface in that slot has
+    /// been delivered to a manager and is the one a verdict binds to, so taking
+    /// it out and putting it back among the readable ones both delivers it twice
+    /// and leaves the run with no question for a verdict to name — which is how
+    /// a question whose listener merely re-armed was lost. It stays in the slot
+    /// and is marked there; [`pending`](Self::pending) passes over it, so the
+    /// run stops reporting that it awaits a planner nobody is waiting on, and
+    /// [`attend`](Self::attend) is what can take it back.
     ///
     /// Returns what it marked, so the caller can record it.
     pub fn abandon(&self, raised: &[u64]) -> crate::Result<Vec<Surface>> {
         let mut queue = self.queue();
         let mut marked: Vec<Surface> = Vec::new();
-        for surface in &mut queue.waiting {
+        for surface in queue.waiting.iter_mut().chain(queue.pending.iter_mut()) {
             if raised.contains(&surface.id) && !surface.abandoned {
                 surface.abandoned = true;
                 marked.push(surface.clone());
             }
-        }
-        if let Some(mut pending) = queue
-            .pending
-            .clone()
-            .filter(|surface| raised.contains(&surface.id))
-        {
-            queue.pending = None;
-            pending.abandoned = true;
-            marked.push(pending.clone());
-            queue.waiting.push(pending);
         }
         if marked.is_empty() {
             return Ok(marked);
@@ -1009,8 +1100,68 @@ impl ChannelState {
         Ok(marked)
     }
 
-    /// Whether a surface is waiting for an answer.
+    /// Take back over everything `asker` left outstanding, and say what was
+    /// taken.
+    ///
+    /// The other half of [`abandon`](Self::abandon), and the half that makes its
+    /// verdict revisable rather than final. A listener exiting proves that
+    /// listener is done; only the *asker* going proves nobody is waiting, and a
+    /// wrapper that re-arms produces the first without the second, over and over,
+    /// against one question that stays open the whole time. So a session says who
+    /// it listens for before it reads a frame, and what an earlier session of the
+    /// same asker gave up is simply given back: the mark comes off, the surface
+    /// counts again, and a question still in the pending slot is a question a
+    /// verdict can name again.
+    ///
+    /// Scoped to the asker, and that is the whole of what keeps it honest. A
+    /// session of some *other* asker is not a reader for this one's questions,
+    /// and adopting run-wide would resurrect a dead member's question for as long
+    /// as any unrelated session happened to be serving — which is the defect
+    /// `abandon` exists to stop, returned by another door. A surface naming no
+    /// asker is adopted by nobody.
+    ///
+    /// Nothing moves and nothing is re-queued: this only clears a flag, so a
+    /// surface a manager has already been handed is not handed to them twice by
+    /// its asker coming back.
+    pub fn attend(&self, asker: &Asker) -> crate::Result<Vec<Surface>> {
+        let mut queue = self.queue();
+        let mut taken: Vec<Surface> = Vec::new();
+        for surface in queue.waiting.iter_mut().chain(queue.pending.iter_mut()) {
+            if surface.abandoned && surface.asker.as_ref() == Some(asker) {
+                surface.abandoned = false;
+                taken.push(surface.clone());
+            }
+        }
+        if taken.is_empty() {
+            return Ok(taken);
+        }
+        self.write_queue(&queue)?;
+        // Recorded under the same id and beside the line that said nobody was
+        // waiting on it, so the run's own record carries the correction rather
+        // than ending on a statement that stopped being true.
+        for surface in &taken {
+            crate::ledger::append_line(
+                &self.paths.channel("surfaces.jsonl"),
+                &serde_json::to_string(surface)
+                    .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
+            )?;
+        }
+        Ok(taken)
+    }
+
+    /// The surface waiting for an answer, if one is.
+    ///
+    /// The slot can hold a surface nobody is waiting on — an abandoned one stays
+    /// where it was delivered, so the listener that comes back for it finds it
+    /// there — and that is not a surface waiting for an answer. Every reader
+    /// asking whether this run owes a verdict asks here; [`held`](Self::held) is
+    /// for the one reader that asks what is in the slot whatever became of it.
     pub fn pending(&self) -> Option<Surface> {
+        self.held().filter(|surface| !surface.abandoned)
+    }
+
+    /// Whatever the pending slot holds, abandoned or not.
+    pub fn held(&self) -> Option<Surface> {
         self.queue().pending
     }
 
@@ -1159,6 +1310,7 @@ mod tests {
             blocking,
             queued_at: 0,
             abandoned: false,
+            asker: None,
             workstream: Some("ship".to_owned()),
         }
     }
@@ -1252,11 +1404,12 @@ mod tests {
     /// The two are not the same case and are deliberately not treated the same.
     /// A surface still `waiting` is one no manager has seen, so the queue holds
     /// the only copy of its text: it is marked in place and stays claimable. One
-    /// in `pending` has already been delivered to a reader, so the *slot* is
-    /// withdrawn — nothing is waiting for its answer — and the surface goes back
-    /// among the readable ones rather than being dropped.
+    /// in `pending` has been delivered to a reader and is the surface a verdict
+    /// binds to, so it is marked *where it is* — the slot keeps it, and nothing
+    /// reports the run as awaiting a planner, because that is
+    /// [`ChannelState::pending`]'s answer rather than the slot's occupancy.
     #[test]
-    fn abandoning_keeps_every_surface_readable_and_withdraws_only_the_pending_slot() {
+    fn abandoning_keeps_every_surface_readable_and_leaves_the_slot_holding_its_own() {
         let root = std::env::temp_dir().join(format!("onepipeline-abandon-{}", crate::sys::pid()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = crate::ledger::RunPaths::under(&root, "gone");
@@ -1280,25 +1433,31 @@ mod tests {
         assert_eq!(marked.len(), 2, "{marked:?}");
         assert!(marked.iter().all(|surface| surface.abandoned));
 
-        // The slot is given up, and nothing is reported as awaiting a planner.
+        // Nothing is reported as awaiting a planner, and the slot still holds
+        // the question it was handed: those are two facts rather than one.
         assert_eq!(channel.pending(), None);
+        assert_eq!(channel.held().map(|held| held.id), Some(read.id));
+        assert!(channel.held().is_some_and(|held| held.abandoned));
         let queue = channel.queue();
-        assert_eq!(queue.waiting.len(), 2, "{queue:?}");
-        assert!(queue.waiting.iter().all(|surface| surface.abandoned));
+        assert_eq!(queue.waiting.len(), 1, "{queue:?}");
         // Both texts survive, the delivered one included.
-        let mut messages: Vec<&str> = queue
+        let mut messages: Vec<String> = queue
             .waiting
             .iter()
-            .map(|surface| surface.message.as_str())
+            .chain(queue.pending.iter())
+            .map(|surface| surface.message.clone())
             .collect();
-        messages.sort_unstable();
+        messages.sort();
         assert_eq!(messages, vec!["nobody has seen this", "something happened"]);
 
-        // Both stay claimable, and neither takes the pending slot back.
+        // The unread one stays claimable, and taking it does not put the run
+        // back to awaiting a ruling nobody is owed. The delivered one is not
+        // handed out a second time: it is in the slot its reader already has it
+        // from.
         let first = channel.claim().expect("a claim").expect("a surface");
+        assert_eq!(first.id, unread.id);
         assert!(first.abandoned);
         assert_eq!(channel.pending(), None);
-        assert!(channel.claim().expect("a claim").is_some());
         assert_eq!(channel.claim().expect("a claim"), None);
 
         // The run's own record carries what became of each, under its own id.
@@ -1314,6 +1473,160 @@ mod tests {
                 "no record that surface {id} was abandoned: {logged:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A recorded asker comes back as the name it was, and one that names nobody
+    /// comes back as nobody — rather than taking the queue around it down.
+    #[test]
+    fn a_recorded_asker_that_names_nobody_reads_as_nobody() {
+        let raised = Surface {
+            asker: Some(Asker::checked("dispatch-a").expect("a name")),
+            ..surface(7, true)
+        };
+        let written = serde_json::to_string(&raised).expect("the surface writes");
+        assert!(written.contains(r#""asker":"dispatch-a""#), "{written}");
+        let read: Surface = serde_json::from_str(&written).expect("the surface reads back");
+        assert_eq!(read.asker, raised.asker);
+
+        // The two shapes this crate never writes: a name that identifies nobody,
+        // and no name at all. Both are the same fact, and neither costs the
+        // surface around them.
+        for recorded in [r##","asker":"""##, ""] {
+            let line = written.replace(r#","asker":"dispatch-a""#, recorded);
+            let read: Surface = serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("a queue recording {recorded:?} was lost: {e}"));
+            assert_eq!(read.asker, None, "{line}");
+            assert_eq!(read.message, raised.message);
+        }
+    }
+
+    /// A live question takes the slot from an abandoned one without taking its
+    /// text with it.
+    ///
+    /// The slot holds one surface, and a question somebody is waiting on outranks
+    /// one nobody is. What must not happen is the abandoned one being written
+    /// over: the queue is the only place a reader can still reach it, so it goes
+    /// back among the readable ones on its way out.
+    #[test]
+    fn a_live_question_takes_the_slot_and_the_abandoned_one_it_displaces_stays_readable() {
+        let root = std::env::temp_dir().join(format!("onepipeline-displace-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "displaced");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+
+        let gone = channel.push(surface(0, true)).expect("the question queues");
+        channel.claim().expect("a claim").expect("a surface");
+        channel.abandon(&[gone.id]).expect("it is marked");
+        assert_eq!(channel.held().map(|held| held.id), Some(gone.id));
+
+        let live = channel
+            .push(Surface {
+                message: "somebody is waiting on this".to_owned(),
+                ..surface(0, true)
+            })
+            .expect("the live question queues");
+        let claimed = channel.claim().expect("a claim").expect("a surface");
+        assert_eq!(claimed.id, live.id);
+        assert_eq!(channel.pending().map(|held| held.id), Some(live.id));
+        // And the one it displaced is still there to read.
+        let queue = channel.queue();
+        assert_eq!(
+            queue
+                .waiting
+                .iter()
+                .map(|surface| (surface.id, surface.message.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(gone.id, "something happened")],
+            "{queue:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A listener that comes back takes its own asker's questions and nobody
+    /// else's, and a surface naming no asker is taken by neither.
+    ///
+    /// The scoping is the whole of what keeps adoption honest, so it is stated
+    /// here against the queue directly: run-wide adoption would hand a dead
+    /// member's question back to the run for as long as any unrelated session
+    /// happened to be serving it.
+    #[test]
+    fn attending_takes_back_one_askers_surfaces_and_leaves_every_other_alone() {
+        let root = std::env::temp_dir().join(format!("onepipeline-attend-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "back");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+
+        let asked = |asker: Option<&str>, blocking: bool, message: &str| Surface {
+            message: message.to_owned(),
+            asker: asker.map(|name| Asker::checked(name).expect("a name")),
+            ..surface(0, blocking)
+        };
+        let mine = channel
+            .push(asked(Some("dispatch-a"), true, "is this base still right?"))
+            .expect("the question queues");
+        let theirs = channel
+            .push(asked(Some("dispatch-b"), true, "somebody else's question"))
+            .expect("their question queues");
+        let nobodys = channel
+            .push(asked(None, false, "raised by no session"))
+            .expect("the narration queues");
+        // Mine is the one a manager read, so it is the one in the slot.
+        channel.claim().expect("a claim").expect("a surface");
+        assert_eq!(channel.pending().map(|held| held.id), Some(mine.id));
+        channel
+            .abandon(&[mine.id, theirs.id, nobodys.id])
+            .expect("all three are marked");
+        assert_eq!(channel.pending(), None);
+
+        let named = |name: &str| Asker::checked(name).expect("a name");
+        let taken = channel
+            .attend(&named("dispatch-a"))
+            .expect("mine comes back");
+        assert_eq!(
+            taken.iter().map(|surface| surface.id).collect::<Vec<_>>(),
+            vec![mine.id]
+        );
+        // The question is answerable again, in the slot a verdict names.
+        assert_eq!(channel.pending().map(|held| held.id), Some(mine.id));
+        let queue = channel.queue();
+        assert!(
+            queue
+                .waiting
+                .iter()
+                .all(|surface| surface.abandoned && surface.id != mine.id),
+            "attending took a surface belonging to another asker: {queue:?}"
+        );
+        // A second listener of the same asker finds nothing left to take, and
+        // says so without writing a further record.
+        let lines = crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len();
+        assert!(channel
+            .attend(&named("dispatch-a"))
+            .expect("nothing")
+            .is_empty());
+        assert!(channel
+            .attend(&named("dispatch-c"))
+            .expect("nothing")
+            .is_empty());
+        assert_eq!(
+            crate::ledger::read_lines(&paths.channel("surfaces.jsonl")).len(),
+            lines,
+            "attending what was already attended wrote a second record"
+        );
+        // And the record carries the correction under the surface's own id.
+        let logged: Vec<Surface> = crate::ledger::read_lines(&paths.channel("surfaces.jsonl"))
+            .iter()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert!(
+            logged.iter().any(|surface| surface.id == mine.id
+                && !surface.abandoned
+                && surface.asker.is_some()),
+            "no record that surface {} was taken back: {logged:?}",
+            mine.id
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

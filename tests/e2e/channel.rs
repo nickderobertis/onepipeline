@@ -559,11 +559,16 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
             .iter()
             .any(|event| event["labels"]["node"] == "ship")
     });
+    // Said out loud from the slot it was delivered into, and not as a decision:
+    // the run is not held on it, and its text is still in front of the manager
+    // who was handed it.
     world
         .run(&["status", &run])
         .exited(0)
         .out_lacks("waiting for planner")
-        .out_has("1 planner update(s) nobody is waiting on");
+        .out_has(
+            "a planner update nobody is waiting on any more: blocker — is this base still right?",
+        );
 
     // A live report queued after it goes first, though it is newer and holds
     // nothing: the older question is blocking and would have led the queue, and
@@ -592,23 +597,360 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
     assert_eq!(live.json()["surface"]["message"], "the gate is green");
     assert_eq!(live.json()["surface"]["abandoned"], serde_json::Value::Null);
 
-    // And the question is still readable behind it — and claiming it does not
-    // put the run back to waiting for a ruling nobody is owed.
-    let last = world.run(&["next", &run]);
-    last.exited(0);
-    assert_eq!(
-        last.json()["surface"]["message"],
-        "is this base still right?"
-    );
-    assert_eq!(last.json()["surface"]["abandoned"], json!(true));
+    // And the question is not handed over a second time. It was delivered
+    // before its asker went, and it stays in the slot it was delivered into —
+    // both because a reader that already has it does not need it twice, and
+    // because that slot is where a listener coming back for it looks. The run
+    // still does not say it is waiting for a ruling nobody is owed.
+    let after = world.run(&["next", &run]);
+    after.exited(0);
+    assert_eq!(after.json()["surface"], serde_json::Value::Null);
     world
         .run(&["status", &run])
         .exited(0)
-        .out_lacks("waiting for planner");
+        .out_lacks("waiting for planner")
+        .out_has(
+            "a planner update nobody is waiting on any more: blocker — is this base still right?",
+        );
 
     drop(reported);
     ended(reporting);
     world.release("ship.go");
+}
+
+/// A question stays answerable across its listener being replaced, twice, and
+/// the verdict sent afterwards reaches the side that asked.
+///
+/// **This is the shape a dispatched agent's `ask-manager` wrapper actually
+/// uses**, and the one the other journeys here leave out. That wrapper is not a
+/// member holding a conversation open: it raises one blocking question through
+/// one `channel serve`, and then waits for the verdict through a *succession* of
+/// them, re-arming each time a listener exits with the question still open. Every
+/// one of those exits is a frame stream that ended, and none of them is the asker
+/// going anywhere — so a run that read the two as one fact took the question out
+/// from under an agent that was still blocked on it, and the agent sat until it
+/// was killed with nothing on either pipe. Nothing raised a surface and nothing
+/// failed a node while that happened, which is why it is proven here rather than
+/// left to a count.
+///
+/// Three real servers, each started and ended by this journey and none of them
+/// signalled: the question outlives the first two and is answered through the
+/// third.
+#[test]
+fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_asker() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-rearm");
+    world.script("build.wait", "hold");
+    let run = running(&world, "rearmed", vec![agent("build", &[])]);
+    let asker = "dispatch-that-is-still-blocked";
+
+    // One listener of that asker: it raises the question, and its stream is a
+    // pipe that is closed the moment the frame is written — which is what the
+    // wrapper's own `printf | onepipeline channel serve` produces, and what
+    // proves nothing about whether the agent behind it is still waiting.
+    let listening = |frame: &str, window: &str| {
+        let mut serving = world
+            .cmd(&["channel", "serve", &run])
+            .env(onepipeline::channel::ASKER_ENV, asker)
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", window)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(stdin, "{frame}").expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        drop(stdin);
+        serving
+    };
+
+    // One re-arm: another listener of the same asker, saying only that somebody
+    // is listening again. `nth` is how many have been sent, so the wait below is
+    // for *this* one rather than for any of them.
+    let rearm = |nth: usize| {
+        let rearmed = listening(
+            r#"{"kind":"planner-question","message":"a listener re-armed","blocking":false}"#,
+            "1",
+        );
+        world.until(&format!("re-arm {nth} to reach the planner"), |world| {
+            world
+                .events_of(&run, "planner-surface-queued")
+                .iter()
+                .filter(|event| event["payload"]["message"] == "a listener re-armed")
+                .count()
+                >= nth
+        });
+        rearmed
+    };
+
+    // The question, and the listener that raised it going away without an
+    // answer: a one-second window makes the wait its own synthesized `continue`,
+    // so the listener ends exactly as the wrapper's does — having relayed
+    // something that is not this question's answer.
+    let asked = listening(
+        r#"{"kind":"blocker","message":"is this base still right?","node":"build"}"#,
+        "1",
+    );
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    ended(asked);
+
+    // One re-arm, and this one is the question **nobody has read yet**: it is in
+    // the queue rather than in the slot, so what has to come back is its place in
+    // the count a supervisor may not filter.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_has("1 planner update(s) nobody is waiting on");
+    let rearmed = rearm(1);
+    // Two, and the kinds say which: the re-arm's own note, and the question it
+    // came back for — which is counted again, and is no longer one nobody is
+    // waiting on.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("nobody is waiting on")
+        .out_has("2 planner update(s) waiting (1 blocker, 1 planner-question)");
+    ended(rearmed);
+
+    // The manager reads it, which is what puts a question where a verdict can
+    // name it. Read here — after a listener has gone — because that is the
+    // window the wrapper's re-arm falls in, and reading in it is what used to
+    // consume the question into nothing.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("is this base still right?");
+    assert_eq!(read.json()["surface"]["abandoned"], json!(true));
+
+    // And a re-arm against the question in the slot, which is the other half:
+    // the asker is still there, so the question is still owed an answer, and a
+    // verdict has a question to bind to again.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner");
+    let rearmed = rearm(2);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+    ended(rearmed);
+
+    // A listener that takes the question back over and then stops **on its own
+    // bound** leaves it exactly where it found it. That ending says only that
+    // this process is done — the member is still there — so a session that has
+    // just adopted an outstanding question must not turn round and give it up on
+    // the way out.
+    let mut bounded = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, asker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut armed = bounded.stdin.take().expect("stdin is piped");
+    writeln!(
+        armed,
+        r#"{{"kind":"planner-question","message":"a bounded listener re-armed","blocking":false}}"#
+    )
+    .expect("the frame is written");
+    armed.flush().expect("the frame flushes");
+    world.until("the bounded re-arm to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["message"] == "a bounded listener re-armed")
+    });
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+    // Ended by its own bound with the stream still open in this journey's hand,
+    // which is what makes the assertion after it about the ending rather than
+    // about the stream.
+    let reached = bounded.wait_with_output().expect("the session ends");
+    assert!(reached.status.success(), "{reached:?}");
+    assert!(
+        String::from_utf8_lossy(&reached.stderr).contains("ONEPIPELINE_SERVE_SESSION_SECONDS"),
+        "the session ended some other way than on its bound: {}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+    drop(armed);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+
+    // The last listener is the one holding the wait when the manager finally
+    // answers. The verdict names the question — and it reaches the asker, which
+    // is the whole of what was lost.
+    let mut waiting = listening(
+        r#"{"kind":"planner-question","message":"a listener re-armed","blocking":false}"#,
+        "60",
+    );
+    world.until("the last re-arm to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["message"] == "a listener re-armed")
+            .count()
+            >= 3
+    });
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"message":"yes, that base is still right","reason":"answered"}"#,
+        )
+        .exited(0);
+
+    let stdout = waiting.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("completion"))
+        .expect("the listener wrote a verdict back to its asker");
+    assert!(
+        verdict.contains("yes, that base is still right"),
+        "the listener was handed something that is not the answer to its question: {verdict}"
+    );
+
+    // Answered, so the run is no longer waiting on it, and this time that is a
+    // verdict rather than a listener exiting.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+    ended(waiting);
+    world.release("build.go");
+}
+
+/// A listener belonging to some *other* asker leaves an ended asker's question
+/// exactly where it is.
+///
+/// The other direction, and the one that keeps the repair from being a
+/// withdrawal of the fix it repairs. Taking a question back over is scoped to
+/// the asker that raised it: were it scoped to the run, a question whose member
+/// died would be resurrected — and would hold the subtree, and inflate the one
+/// count a supervising manager may not filter — for as long as any unrelated
+/// session happened to be serving that run, which is the defect the marking
+/// exists to stop, arriving through another door.
+#[test]
+fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
+    use std::io::Write;
+
+    let world = World::new("channel-other-asker");
+    world.script("build.wait", "hold");
+    let run = running(&world, "otherasker", vec![agent("build", &[])]);
+
+    let serving = |asker: &str, frame: &str| {
+        let mut serving = world
+            .cmd(&["channel", "serve", &run])
+            .env(onepipeline::channel::ASKER_ENV, asker)
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(stdin, "{frame}").expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        drop(stdin);
+        serving
+    };
+
+    // One asker's question, read by the manager and then left behind: this
+    // asker's work is over, and nothing of it will come back.
+    let asked = serving(
+        "the-asker-that-ended",
+        r#"{"kind":"blocker","message":"who owns this decision?","node":"build"}"#,
+    );
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("who owns this decision?");
+    // The surface says whose it is, which is the whole of what the scoping below
+    // is decided on.
+    assert_eq!(
+        read.json()["surface"]["asker"],
+        json!("the-asker-that-ended")
+    );
+    ended(asked);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner")
+        .out_has(
+            "a planner update nobody is waiting on any more: blocker — who owns this decision?",
+        );
+
+    // A different asker serves the same run. It is a reader on this channel, and
+    // it is still not the side that asked: the question stays where it is, the
+    // run stays not-waiting, and the subtree stays released.
+    let stranger = serving(
+        "some-other-dispatch",
+        r#"{"kind":"monitor","message":"unrelated work is green","blocking":false}"#,
+    );
+    world.until("the stranger's report to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner")
+        .out_has(
+            "a planner update nobody is waiting on any more: blocker — who owns this decision?",
+        );
+    ended(stranger);
+
+    // And a question the stranger *is* waiting on takes the slot the abandoned
+    // one was sitting in — a live question outranks one nobody is waiting on —
+    // without taking its text down with it. The queue is the only place a reader
+    // can still reach that text, so the displaced question is still handed over.
+    let pressing = serving(
+        "some-other-dispatch",
+        r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
+    );
+    world.until("the stranger's question to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 3
+    });
+    let live = world.run(&["next", &run]);
+    live.exited(0);
+    assert_eq!(live.json()["surface"]["message"], "whose call is the base?");
+    assert_eq!(live.json()["surface"]["abandoned"], serde_json::Value::Null);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — whose call is the base?");
+    // Then what nobody is waiting on, in arrival order: the stranger's own
+    // report, which was queued first, and behind it the question the live one
+    // displaced out of the slot — still there, still saying what it is.
+    let report = world.run(&["next", &run]);
+    report.exited(0);
+    assert_eq!(
+        report.json()["surface"]["message"],
+        "unrelated work is green"
+    );
+    let displaced = world.run(&["next", &run]);
+    displaced.exited(0);
+    assert_eq!(
+        displaced.json()["surface"]["message"],
+        "who owns this decision?"
+    );
+    assert_eq!(displaced.json()["surface"]["abandoned"], json!(true));
+    ended(pressing);
+    world.release("build.go");
 }
 
 /// A blocking surface whose server stopped while the side that asked stayed is
@@ -868,6 +1210,120 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
         .out_lacks("nobody is waiting on");
 
     drop(silent);
+    world.release("build.go");
+}
+/// A queue that records a name identifying nobody still hands over every surface
+/// in it.
+///
+/// The one place this crate reads an asker leniently, and the reason it does. A
+/// queue is read with `unwrap_or_default`, so a record this build refused would
+/// not cost one field — it would read as **no queue at all**, and every question
+/// in it would go missing from `status`, from `next`, and from the decisions the
+/// run is held on. A blank name identifies nobody, which is what "no asker"
+/// already means, so it is read as that and the surface around it is untouched.
+///
+/// The record is placed by hand because nothing this crate does can produce one:
+/// every path that writes an asker checks it first. That is what makes this
+/// worth a journey rather than a unit test — what is under test is not the
+/// parse, it is whether a live run still answers for the queue holding it.
+#[test]
+fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces() {
+    let world = World::new("channel-blank-record");
+    world.script("build.wait", "hold");
+    let run = running(&world, "blankrecord", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing route to
+    // this state and that is the property under test: every path that writes an
+    // asker checks it first, so a record naming nobody is one only another build,
+    // a hand edit, or a partial write can leave. What the journey drives through
+    // the CLI is what matters — whether a live run still answers for the queue
+    // holding it — and the record it answers about has to be placed.
+    //
+    // Renamed into place rather than written over: the run's own loop is reading
+    // this file while this happens, and a half-written one would read as the
+    // empty queue this journey exists to prove it is not.
+    let queue = world.run_file(&run, "channel/queue.json");
+    let staged = queue.with_extension("staged");
+    std::fs::write(
+        &staged,
+        concat!(
+            r#"{"waiting":[{"id":0,"kind":"blocker","message":"is anyone there?","#,
+            r#""source":"proposal","blocking":true,"queued_at":0,"asker":""}],"#,
+            r#""pending":null,"next_id":1}"#,
+        ),
+    )
+    .expect("the record is staged");
+    std::fs::rename(&staged, &queue).expect("the record is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // The run answers for it exactly as it does for any question nobody has read.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    // And it is handed over whole, under nobody's name rather than under a name
+    // that means nothing.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("is anyone there?");
+    assert_eq!(read.json()["surface"]["asker"], serde_json::Value::Null);
+    assert_eq!(read.json()["surface"]["abandoned"], serde_json::Value::Null);
+
+    world.release("build.go");
+}
+
+/// An asker this session cannot name is refused before it serves.
+///
+/// A blank value is not the absence it looks like: absent means this session
+/// listens on its own, and blank would make it a session every other blank one
+/// matches — so it would take over questions belonging to askers it has never
+/// heard of, and hand their answers to the wrong side. Refused before the first
+/// frame is read, so nothing is raised under a name that means nothing.
+#[test]
+fn an_asker_this_session_cannot_name_is_refused_before_it_serves() {
+    let world = World::new("channel-blank-asker");
+    world.script("build.wait", "hold");
+    let run = running(&world, "blankasker", vec![agent("build", &[])]);
+
+    for given in ["", "   "] {
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command.env(onepipeline::channel::ASKER_ENV, given);
+        // Its stdin is closed, which is the frame stream ending — the one ending
+        // that exits 0. So an exit 2 here is the refusal rather than the server
+        // running out of input.
+        world
+            .run_on(command, "channel serve with a blank asker")
+            .exited(2)
+            .err_has("ONEPIPELINE_CHANNEL_ASKER is set to a blank value");
+    }
+
+    // And a value that is not text at all, which is the worse of the two because
+    // it does not announce itself: read lossily, two environments that differ
+    // collapse onto one string of replacement characters and two askers become
+    // one. Unix-only, because that is where an environment value can hold bytes
+    // no encoding claims.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command.env(
+            onepipeline::channel::ASKER_ENV,
+            std::ffi::OsStr::from_bytes(b"asker-\xff\xfe"),
+        );
+        world
+            .run_on(command, "channel serve with an asker that is not text")
+            .exited(2)
+            .err_has("cannot read as text");
+    }
+
+    // Nothing was carried and nothing is waiting: the refusal happened before a
+    // frame was read, so no surface was raised and then stranded.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("planner update(s) waiting")
+        .out_lacks("nobody is waiting on");
+
     world.release("build.go");
 }
 

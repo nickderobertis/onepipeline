@@ -2065,6 +2065,10 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
+        // Raised by a command that has already answered its caller and exited,
+        // so there is no listener to name and none to come back: nothing
+        // abandons this and nothing adopts it.
+        asker: None,
         workstream: None,
     })?;
     let mut journal = Journal::open(&paths);
@@ -2605,6 +2609,23 @@ fn serve_session_deadline() -> Result<Option<Instant>> {
         })
 }
 
+/// Who this session listens on behalf of, or `None` for one that listens on its
+/// own.
+///
+/// Absent is the default and is what [`ASKER_ENV`](crate::channel::ASKER_ENV)
+/// documents: a session that names no asker adopts nothing and is adopted by
+/// nobody. Anything *present* is external input at a trust boundary, and a blank
+/// value is **refused** rather than read as the absence it is not — an asker
+/// every session matches equally is not an identity, and the session that had it
+/// would take over questions belonging to askers it has never heard of. The
+/// refusal is made before the first frame is read, so a session that cannot say
+/// who it listens for never raises a question under the wrong name.
+fn serve_asker() -> Result<Option<crate::channel::Asker>> {
+    std::env::var_os(crate::channel::ASKER_ENV)
+        .map(|value| crate::channel::Asker::named(&value))
+        .transpose()
+}
+
 /// Why a serving session stopped, which is the whole of what decides whether
 /// what it raised is still owed an answer.
 ///
@@ -2612,16 +2633,18 @@ fn serve_session_deadline() -> Result<Option<Instant>> {
 /// own exit instead, a question would be taken out from under a member that is
 /// still working and still waiting for it.
 enum Served {
-    /// The frame stream ended, so the side that was asking ended with it: this
-    /// loop was the only reader an answer to any of these had.
-    AskerGone,
+    /// The frame stream ended, so this loop is done reading: nothing is listening
+    /// for an answer to anything it raised *now*. Named for what it observed and
+    /// not for what that used to be read as — an asker that rents its listeners
+    /// is still there after one of them ends, and takes back what this one leaves
+    /// the moment it arms another.
+    StreamEnded,
     /// The member declared its work complete in a verdict this session carried
-    /// back to it. Its conversation is over too, so nothing is left to read an
-    /// answer to whatever it left outstanding — the same fact as the stream
-    /// ending, reached by the member saying so rather than by its stream closing.
+    /// back to it. Its conversation is over, so this loop is done reading too,
+    /// reached by the member saying so rather than by its stream closing.
     Completed,
     /// This session reached its own bound with the stream still open. The member
-    /// is still there, so nothing it raised is withdrawn.
+    /// is still there and still sending, so nothing it raised is marked.
     SessionOver,
 }
 
@@ -2638,8 +2661,17 @@ fn serve(args: &RunArgs) -> Result<i32> {
     // Every surface this session raised, so that what it leaves behind can be
     // said out loud rather than left standing as a question with no asker.
     let mut raised: Vec<u64> = Vec::new();
+    let asker = serve_asker()?;
     let session_deadline = serve_session_deadline()?;
-    let mut ending = Served::AskerGone;
+    // Before a frame is read, and before anything this session raises: an asker
+    // that re-armed is waiting on a question an earlier listener of its own gave
+    // up, and the manager it is waiting on may look at the queue at any moment.
+    // Taken into `raised` as well, because this session is now the listener that
+    // will leave them behind if its own asker goes.
+    if let Some(asker) = &asker {
+        raised.extend(channel.attend(asker)?.into_iter().map(|surface| surface.id));
+    }
+    let mut ending = Served::StreamEnded;
     // Frames arrive on a thread of their own, so the bound above is a real
     // deadline and not merely a thing noticed between exchanges: a member that
     // has gone quiet must not hold a session past the moment it said it would
@@ -2724,6 +2756,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
             blocking: frame.blocking,
             queued_at: sys::now_millis(),
             abandoned: false,
+            asker: asker.clone(),
             workstream: frame.node,
         })?;
         let mut journal = Journal::open(&paths);
@@ -2777,20 +2810,23 @@ fn serve(args: &RunArgs) -> Result<i32> {
         );
     }
     // Which ending this was decides it, and the question each is answering is
-    // whether the side that asked is still there. A stream that ended and a
-    // member that declared itself complete both say it is not: this loop was the
-    // only reader an answer to anything it raised had, so what it leaves behind
-    // is marked — rather than deleted, which [`ChannelState::abandon`] says why —
-    // so the run stops reporting a decision nobody is waiting on while the text
-    // stays where a manager can still read it. A session that reached its own
-    // bound says nothing of the kind: the member is still holding the stream open
-    // and still owed every answer, so nothing is withdrawn and everything stays
-    // counted.
+    // whether anything is listening for these answers as this process leaves. A
+    // stream that ended and a member that declared itself complete both say
+    // nothing is: what this session leaves behind is marked — rather than
+    // deleted, which [`ChannelState::abandon`] says why — so the run stops
+    // reporting a decision nobody is waiting on while the text stays where a
+    // manager can still read it. A session that reached its own bound says the
+    // opposite: the member is still holding the stream open and still owed every
+    // answer, so nothing is marked and everything stays counted.
+    //
+    // The mark is a statement about now and not a verdict about the asker, which
+    // is why it is [`ChannelState::attend`]'s to lift: an asker whose whole way
+    // of waiting is a succession of listeners reaches here on every one of them.
     //
     // Deliberately not reached by the `?` paths above either: a refused frame is
     // this server rejecting what the member said, and the member is still there
-    // to be told. Only a stream that ended proves the asker did.
-    if matches!(ending, Served::AskerGone | Served::Completed) {
+    // to be told.
+    if matches!(ending, Served::StreamEnded | Served::Completed) {
         channel.abandon(&raised)?;
     }
     Ok(EXIT_SUCCESS)

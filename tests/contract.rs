@@ -4330,6 +4330,70 @@ fn the_divergence_record_matches_the_code_it_describes() {
         "divergence 60 says exactly one ending withdraws nothing; the guard marks {marking:?} of \
          {endings:?}"
     );
+
+    // Divergence 62 restates three things it does not own either: the name of
+    // the variable a serving session says who it listens for with, the field a
+    // surface carries that on, and the two journeys it says hold the seam end to
+    // end. It is the entry a consumer writing an asking wrapper reads instead of
+    // the implementation, so each copy is gated against its own source and a
+    // rename fails here rather than leaving that consumer following a wrapper
+    // this build no longer answers.
+    let rest = raw
+        .split_once("\n## 62. ")
+        .expect("the record carries divergence 62")
+        .1;
+    let entry = rest.split_once("\n## ").map_or(rest, |(entry, _)| entry);
+    let channel =
+        std::fs::read_to_string(repo_root().join("src/channel.rs")).expect("the channel ships");
+    let asker = channel
+        .split_once("pub const ASKER_ENV: &str = \"")
+        .expect("the channel names the variable a session says its asker with")
+        .1
+        .split_once('"')
+        .expect("that name is a string literal")
+        .0
+        .to_string();
+    assert!(
+        entry.contains(&asker),
+        "divergence 62 names an asker variable the channel does not declare: {asker}"
+    );
+    assert!(
+        surface
+            .lines()
+            .any(|line| line.trim() == "pub asker: Option<Asker>,"),
+        "divergence 62 describes an `asker` a surface does not carry"
+    );
+    assert!(
+        channel.contains("pub fn attend(&self, asker: &Asker)"),
+        "divergence 62 describes an `attend` the channel does not declare"
+    );
+    let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
+        .expect("the channel journeys ship");
+    // The journeys, and not the types the entry also names under that path: a
+    // test's name is snake case and a type's is not, which is the whole of the
+    // difference and is why it is read off the shape rather than off a list here
+    // that would go stale.
+    let named: Vec<&str> = entry
+        .split("`channel::")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('`').map(|(name, _)| name))
+        .filter(|name| {
+            name.chars().all(|letter| {
+                letter.is_ascii_lowercase() || letter.is_ascii_digit() || letter == '_'
+            })
+        })
+        .collect();
+    assert_eq!(
+        named.len(),
+        2,
+        "divergence 62 says two journeys hold this seam; it names {named:?}"
+    );
+    for journey in named {
+        assert!(
+            journeys.contains(&format!("fn {journey}(")),
+            "divergence 62 names a journey the channel suite does not run: {journey}"
+        );
+    }
 }
 
 #[test]

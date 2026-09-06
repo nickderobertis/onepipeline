@@ -55,6 +55,33 @@ fn kept(world: &World, at: &std::path::Path) {
     );
 }
 
+/// The asker each of a node's dispatches was given, in dispatch order, read out
+/// of the run's own store.
+///
+/// The same evidence as [`given`] and for the same reason: what a journey states
+/// is what the dispatch itself took out of its environment, rather than anything
+/// a double reported back on the side.
+// llmlint: ignore-block[tests_mirror_real_usage] the run's journal is a product
+// surface rather than a shortcut around one — it is what `onepipeline` writes for an
+// operator to read and what this suite states every dispatch-side promise off, `given`
+// three lines above included. What is being asserted is a property of the *dispatch*,
+// so the evidence has to be the value that dispatch itself acted on; the only route
+// through a user-facing command would be a surface the dispatch raised, and the verb
+// that raises one deliberately names no asker.
+fn asked_as(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .events_of(run, "turn-activity")
+        .into_iter()
+        .filter(|event| event["labels"]["onepipeline.node"] == node)
+        .map(|event| {
+            event["payload"]["asker"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a dispatch's environment carried no asker: {event}"))
+                .to_string()
+        })
+        .collect()
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &path, "--attach"]).settled();
@@ -129,4 +156,65 @@ fn every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away(
     for at in &named {
         kept(&world, at);
     }
+}
+
+/// Every dispatch is given an asker of its own, and no two dispatches share one.
+///
+/// This is the half of the re-arm repair that belongs to the *executor*, and the
+/// half a `channel serve` cannot state for itself. A dispatched agent asks its
+/// manager through a succession of serving sessions and waits for its verdict
+/// through all of them; what makes those sessions one side rather than a series
+/// of sides that have each gone is the word they carry, and nothing the agent
+/// does supplies it. So the dispatch is given one, and it has to be **the same
+/// throughout that dispatch** — every session it starts inherits this one value —
+/// and **not shared with any other dispatch**, or one agent's listener would take
+/// over another's open question and be handed its answer.
+///
+/// The other half — that two sessions carrying one asker recover a question the
+/// first of them left open — is
+/// `channel::a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_asker`.
+///
+/// Read off the run's store rather than off the double's files: the promise is a
+/// property of the *dispatch*, so the evidence is the value the dispatch itself
+/// took out of its environment and published.
+#[test]
+fn every_dispatch_is_given_an_asker_of_its_own_that_no_other_dispatch_carries() {
+    let world = World::new("scratch-asker");
+    let run = settle(
+        &world,
+        "askers",
+        vec![agent("build", &[]), agent("ship", &["build"])],
+    );
+
+    let mut every: Vec<String> = Vec::new();
+    for node in ["build", "ship"] {
+        let named = asked_as(&world, &run, node);
+        assert_eq!(named.len(), 1, "{named:?}\n{}", world.dump());
+        assert!(
+            !named[0].trim().is_empty(),
+            "{node} was dispatched with an asker that names nobody: {named:?}"
+        );
+        // What the value *is*, gated rather than restated: the divergence record
+        // says a dispatch's asker is the scratch directory it was given, because
+        // that directory is already the one handle minted per dispatch. Composing
+        // a second one, or naming it after something two dispatches can share,
+        // fails here.
+        let dirs = given(&world, &run, node);
+        assert_eq!(
+            named,
+            dirs.iter()
+                .map(|at| at.display().to_string())
+                .collect::<Vec<_>>(),
+            "{node}'s asker is no longer the scratch directory the same dispatch was given\n{}",
+            world.dump()
+        );
+        every.extend(named);
+    }
+    let distinct: std::collections::BTreeSet<&String> = every.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        every.len(),
+        "two dispatches were given the same asker, so either one's listener would take over \
+         the other's open question: {every:?}"
+    );
 }

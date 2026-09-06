@@ -1159,6 +1159,12 @@ fn use_the_scratch_dir(key: &str) -> std::path::PathBuf {
 /// the engine through a rename no agent could have followed.
 const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
+/// The variable naming who this dispatch's channel sessions listen for.
+///
+/// Spelled here rather than taken from the crate under test, for the reason
+/// [`SCRATCH_DIR_ENV`] records.
+const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
+
 /// What a dispatch writes into the directory it was given, under its own key.
 ///
 /// The name is this program's own and no journey spells it: what a journey reads
@@ -1613,6 +1619,19 @@ fn emit(
             // environment, on the run's own record: a journey asserts the
             // promise from the store rather than from this program's files.
             "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+            // And who this dispatch asks its manager as, so a journey can assert
+            // from the store that a real dispatch is given one and that no two
+            // share it.
+            //
+            // llmlint: ignore[boundary_inputs_validated] reported rather than
+            // checked, deliberately: a double that refused a name it did not
+            // like could not show a journey an engine that handed out a bad one,
+            // which is what this value exists to be asserted against. Lossy for
+            // the same reason — dropping a value this host cannot read as text
+            // would report it as *nothing given*, a different failure from the
+            // one that happened — so absent here means no asker was given at all.
+            "asker": std::env::var_os(ASKER_ENV)
+                .map(|given| given.to_string_lossy().into_owned()),
             // What this turn was told to do instead, while it was running.
             "redirected": redirected,
         }),
