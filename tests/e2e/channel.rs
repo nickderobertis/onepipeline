@@ -3836,6 +3836,80 @@ fn a_monitor_cannot_declare_the_run_complete_with_a_commandless_verdict() {
     world.release("build.go");
 }
 
+/// And it may not carry that declaration through by attaching a command to it.
+///
+/// The allowlist has to mean the same thing whatever else the envelope carries.
+/// Asked only of a commandless verdict, it was bypassable by anyone who could
+/// issue any op at all: `finding` is on the monitor's list, and an envelope
+/// pairing one with `completion: true` walked the completion straight past the
+/// guard. That is a privilege escalation rather than a reporting defect, so the
+/// whole envelope is turned away — the ruling is not queued and the edit beside
+/// it is never applied.
+#[test]
+fn a_monitor_cannot_declare_the_run_complete_by_attaching_a_command_to_the_verdict() {
+    let world = World::new("channel-monitor-verdict-beside-edits");
+    world.script("build.wait", "hold");
+    let run = running(&world, "smuggled", vec![agent("build", &[])]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+                "version": 2,
+                "commands": [
+                    {"op": "finding", "message": "the build looks done", "id": "build"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_has("Surface it to the planner");
+
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "the monitor declared the run complete beside a command: {:?}",
+        world.kinds(&run)
+    );
+    assert!(
+        world.events_of(&run, "planner-replied").is_empty(),
+        "the refused verdict was journalled anyway: {:?}",
+        world.kinds(&run)
+    );
+    // Half applied is the other half of the refusal: the command it rode in on
+    // never reached the graph either.
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty(),
+        "the command beside the refused verdict was applied: {:?}",
+        world.kinds(&run)
+    );
+    world.run(&["next", &run]).exited(0).out_lacks("looks done");
+
+    // The same envelope from the planner is accepted, which is what makes the
+    // refusal about the author rather than about the shape.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": true,
+                "reason": "the run is finished",
+                "version": 2,
+                "commands": [
+                    {"op": "finding", "message": "the build looks done", "id": "build"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the planner's edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    world.release("build.go");
+}
+
 /// An edit the monitor applies to a run nothing is driving is surfaced to the
 /// planner exactly as one applied by the loop is.
 ///

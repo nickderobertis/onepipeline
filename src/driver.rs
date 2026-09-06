@@ -2321,11 +2321,19 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     let view = RunView::open(paths)?;
     let channel = ChannelState::new(paths);
 
+    // The verdict is subject to the author's allowlist exactly as an op is: a
+    // reply declaring the run finished says what `complete` says, and an
+    // allowlist that guarded only the ops would let it past. Asked here, of
+    // **every** envelope, rather than on the commandless branch alone: an author
+    // that may not declare the run complete could otherwise carry that
+    // declaration through by attaching any command it *is* allowed, which is the
+    // allowlist meaning one thing on its own and another beside an edit.
+    //
+    // Before anything is validated, queued, or applied, so the whole envelope is
+    // turned away rather than half of it.
+    crate::channel::allows_completion(envelope.author, envelope.completion)?;
+
     if envelope.commands.is_empty() {
-        // The verdict is subject to the author's allowlist exactly as an op is:
-        // a commandless reply declaring the run finished says what `complete`
-        // says, and an allowlist that guarded only the ops would let it past.
-        crate::channel::allows_completion(envelope.author, envelope.completion)?;
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
