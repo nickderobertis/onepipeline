@@ -1234,6 +1234,10 @@ impl ChannelState {
     /// past the reply this claim took — so a skipped envelope is passed over
     /// behind a delivery rather than on its own account, and a poll that takes
     /// nothing leaves the cursor exactly where it was.
+    ///
+    /// Among the readers that do reach it, none is addressed: entry 63 of
+    /// `docs/contract-divergences.md` is what that costs and what it is waiting
+    /// on.
     pub fn claim_reply(&self) -> crate::Result<Option<QueuedReply>> {
         let cursor_path = self.paths.channel("replies-cursor.json");
         let claimed_through: u64 = crate::ledger::read_json_opt(&cursor_path).unwrap_or(0);

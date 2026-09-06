@@ -12,7 +12,7 @@
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -1408,6 +1408,97 @@ fn a_legacy_verdict_is_accepted_and_recorded() {
     world.release("build.go");
 }
 
+/// And a verdict that arrived beside graph edits is recorded exactly as one that
+/// arrived alone.
+///
+/// The run's journal is its own account of what it was told and why it stopped
+/// waiting, and which branch of the reply path an envelope took is not a fact
+/// about the ruling. Recorded only for the commandless branch, the record went
+/// missing for exactly the envelopes that did the most — and a completion
+/// declared beside a command raised no completion request at all, so the one
+/// event a supervisor watches for a run asking to finish was absent while the
+/// receipt said the reply was applied.
+#[test]
+fn a_verdict_beside_commands_is_journalled_exactly_as_a_commandless_one_is() {
+    let world = World::new("channel-verdict-journal");
+    world.script("build.wait", "hold");
+    let run = running(&world, "journalled", vec![agent("build", &[])]);
+
+    // The commandless shape, which is what the both-halves shape is held to.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"completion": false, "reason": "keep going"}).to_string(),
+        )
+        .exited(0);
+    let alone = world.events_of(&run, "planner-replied");
+    assert_eq!(alone.len(), 1, "{alone:?}");
+    assert_eq!(alone[0]["payload"]["reason"], "keep going");
+    assert_eq!(alone[0]["payload"]["completion"], json!(false));
+
+    // The same verdict with a command riding along.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "reason": "keep going, with this in hand",
+                "version": 2,
+                "commands": [
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "the fixture moved", "deliver": "next"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the verdict beside the edit to be recorded", |world| {
+        world.events_of(&run, "planner-replied").len() >= 2
+    });
+    let beside = world.events_of(&run, "planner-replied");
+    assert_eq!(beside.len(), 2, "{beside:?}");
+    assert_eq!(
+        beside[1]["payload"]["reason"],
+        "keep going, with this in hand"
+    );
+    assert_eq!(beside[1]["payload"]["author"], "planner");
+    // And the command half still reached the graph, so this is the record of an
+    // envelope that did both rather than of one that was routed away from them.
+    world.until("the edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+
+    // And the completion request a completion verdict raises, which is the event
+    // a supervisor watches for a run asking to finish.
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "a run that never declared itself complete raised a completion request"
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": true,
+                "reason": "publication verified",
+                "version": 2,
+                "commands": [
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "wrapping up", "deliver": "next"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the completion request to be raised", |world| {
+        !world.events_of(&run, "completion-requested").is_empty()
+    });
+    let requested = world.events_of(&run, "completion-requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["payload"]["reason"], "publication verified");
+    assert_eq!(world.events_of(&run, "planner-replied").len(), 3);
+    world.release("build.go");
+}
+
 #[test]
 fn a_reply_may_be_given_as_a_file_as_well_as_on_stdin() {
     let world = World::new("channel-file");
@@ -2518,6 +2609,15 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
         verdict.contains("go on; the note was optional"),
         "the verdict was withheld because the edits beside it were refused: {verdict}"
     );
+    // And the run's own record says so, on this path as on the ones the edits
+    // survived: a ruling that was delivered is a ruling that happened, whatever
+    // the reconciler made of what rode beside it.
+    let replied = world.events_of("bothrefused", "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(
+        replied[0]["payload"]["reason"],
+        "go on; the note was optional"
+    );
     world
         .run(&["status", "bothrefused"])
         .exited(0)
@@ -2889,20 +2989,32 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     queued.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
 
     // llmlint: ignore-end[tests_mirror_real_usage]
-    world
-        .run_with_stdin_on(
-            queued,
-            &json!({
-                "completion": false,
-                "reason": "carry on while that lands",
-                "version": 2,
-                "commands": [{"op": "note", "id": "build", "addressee": "worker",
-                              "text": "a note", "deliver": "next"}]
-            })
-            .to_string(),
-        )
-        .exited(QUEUED)
-        .out_has("\"queued\"");
+    let submitted = world.run_with_stdin_on(
+        queued,
+        &json!({
+            "completion": false,
+            "reason": "carry on while that lands",
+            "version": 2,
+            "commands": [{"op": "note", "id": "build", "addressee": "worker",
+                          "text": "a note", "deliver": "next"}]
+        })
+        .to_string(),
+    );
+    submitted.exited(QUEUED).out_has("\"queued\"");
+    // Two fates, and the receipt names each: the ruling is gone to a reader and
+    // the edits are still in the queue, which one word could only say one of.
+    // Held to entry 64 here rather than only in the receipt journey, because this
+    // is the one shape that reaches the record's `queued` words.
+    let receipt = submitted.json();
+    stated_by_entry_64(&receipt, "a verdict beside queued edits", true, true);
+    assert_eq!(receipt["state"], "queued");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(receipt["commands"], "queued");
+    // And the run's own record says a verdict was given, on this path as on the
+    // ones where the edits landed.
+    let replied = world.events_of(&run, "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(replied[0]["payload"]["reason"], "carry on while that lands");
 
     assert!(
         world.events_of(&run, "edit-committed").is_empty(),
@@ -3836,6 +3948,100 @@ fn a_monitor_cannot_declare_the_run_complete_with_a_commandless_verdict() {
     world.release("build.go");
 }
 
+/// And it may not carry that declaration through by attaching a command to it.
+///
+/// The allowlist has to mean the same thing whatever else the envelope carries.
+/// Asked only of a commandless verdict, it was bypassable by anyone who could
+/// issue any op at all: `finding` is on the monitor's list, and an envelope
+/// pairing one with `completion: true` walked the completion straight past the
+/// guard. That is a privilege escalation rather than a reporting defect, so the
+/// whole envelope is turned away — the ruling is not queued and the edit beside
+/// it is never applied.
+#[test]
+fn a_monitor_cannot_declare_the_run_complete_by_attaching_a_command_to_the_verdict() {
+    let world = World::new("channel-monitor-verdict-beside-edits");
+    world.script("build.wait", "hold");
+    let run = running(&world, "smuggled", vec![agent("build", &[])]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+                "version": 2,
+                "commands": [
+                    {"op": "finding", "message": "the build looks done", "id": "build"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_has("Surface it to the planner");
+
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "the monitor declared the run complete beside a command: {:?}",
+        world.kinds(&run)
+    );
+    assert!(
+        world.events_of(&run, "planner-replied").is_empty(),
+        "the refused verdict was journalled anyway: {:?}",
+        world.kinds(&run)
+    );
+    // Half applied is the other half of the refusal: the command it rode in on
+    // never reached the graph either.
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty(),
+        "the command beside the refused verdict was applied: {:?}",
+        world.kinds(&run)
+    );
+    world.run(&["next", &run]).exited(0).out_lacks("looks done");
+
+    // And the completion is what the envelope is refused for even where something
+    // else in it is wrong too: asked before the version and before the ops, so a
+    // monitor that mistypes an edit envelope is told the thing that matters
+    // rather than being sent to fix the version and try the same escalation
+    // again.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+                "commands": [{"op": "complete", "reason": "and here it is again"}],
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_lacks("requires version");
+
+    // The same envelope from the planner is accepted, which is what makes the
+    // refusal about the author rather than about the shape.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": true,
+                "reason": "the run is finished",
+                "version": 2,
+                "commands": [
+                    {"op": "finding", "message": "the build looks done", "id": "build"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the planner's edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    world.release("build.go");
+}
+
 /// An edit the monitor applies to a run nothing is driving is surfaced to the
 /// planner exactly as one applied by the loop is.
 ///
@@ -4080,6 +4286,63 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     world.release("build.go");
 }
 
+/// A verdict applied by `reply` itself, because nothing was driving the run, is
+/// recorded and named exactly as one the reconciler applied.
+///
+/// Which process took the run's ownership lock is an accident of what else was
+/// running, and it decides where the commands are compiled — not whether the
+/// ruling beside them happened. A journal that recorded the verdict only where a
+/// loop was alive would lose it for exactly the runs a manager reaches for by
+/// hand.
+#[test]
+fn a_verdict_beside_commands_applied_with_nothing_driving_is_journalled_and_named() {
+    let world = World::new("channel-undriven-verdict");
+    let path = world.plan(
+        "undrivenverdict",
+        &plan_of("undrivenverdict", vec![human("approve", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    let applied = world.run_with_stdin(
+        &["reply", "undrivenverdict"],
+        &json!({
+            "completion": true,
+            "reason": "the approval is all that is left",
+            "version": 2,
+            "commands": [{"op": "finding", "message": "waiting on a person", "id": "approve"}],
+        })
+        .to_string(),
+    );
+    applied.exited(0);
+    let receipt = applied.json();
+    // `0` because this process applied them itself: there was no queue to name.
+    assert_eq!(receipt["reply"], json!(0));
+    assert_eq!(receipt["state"], "applied");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(receipt["commands"], "applied");
+
+    let replied = world.events_of("undrivenverdict", "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(
+        replied[0]["payload"]["reason"],
+        "the approval is all that is left"
+    );
+    let requested = world.events_of("undrivenverdict", "completion-requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(
+        requested[0]["payload"]["reason"],
+        "the approval is all that is left"
+    );
+    // And the command half reached the graph in the same process.
+    assert!(
+        !world
+            .events_of("undrivenverdict", "edit-committed")
+            .is_empty(),
+        "the commands were not applied: {:?}",
+        world.kinds("undrivenverdict")
+    );
+}
+
 /// A finding raised while nothing is driving the run reaches the planner all the
 /// same, applied by the `reply` that carried it.
 ///
@@ -4113,3 +4376,380 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["source"], "proposal");
     assert_eq!(surface["blocking"], json!(false));
 }
+
+/// One envelope of each shape a reply can take, against the receipt entry 64 of
+/// `docs/contract-divergences.md` states.
+///
+/// The manager who had sent two envelopes to one question could not tell from
+/// either receipt which of them had answered it.
+#[test]
+fn the_reply_receipt_names_each_half_the_envelope_carried() {
+    let world = World::new("channel-receipt-halves");
+    world.script("build.wait", "hold");
+    let run = running(&world, "receipted", vec![agent("build", &[])]);
+
+    let note = |text: &str| {
+        json!({"op": "note", "id": "build", "addressee": "worker",
+               "text": text, "deliver": "next"})
+    };
+    // Each envelope with the halves it carries, which is what entry 64's presence
+    // rules are read against.
+    let shapes = [
+        (
+            "a verdict alone",
+            json!({"completion": false, "reason": "carry on"}),
+            true,
+            false,
+        ),
+        (
+            "commands alone",
+            json!({"version": 2, "commands": [note("the fixture moved")]}),
+            false,
+            true,
+        ),
+        (
+            "both halves",
+            json!({
+                "completion": false,
+                "reason": "carry on, with this in hand",
+                "version": 2,
+                "commands": [note("and again")],
+            }),
+            true,
+            true,
+        ),
+    ];
+
+    for (shape, envelope, verdict, commands) in shapes {
+        let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
+        answered.exited(0);
+        let receipt = answered.json();
+        stated_by_entry_64(&receipt, shape, verdict, commands);
+        // And each half's word is its own, so an envelope that did both is not
+        // read off one of them: the note landed, and the ruling did too.
+        if commands {
+            assert_eq!(receipt["commands"], "applied", "{shape}: {receipt}");
+        }
+        if verdict {
+            assert_eq!(receipt["verdict"], "delivered", "{shape}: {receipt}");
+        }
+        assert_eq!(
+            receipt["state"],
+            if commands { "applied" } else { "delivered" },
+            "{shape}: {receipt}"
+        );
+    }
+
+    world.release("build.go");
+}
+
+/// Hold one receipt to entry 64 of `docs/contract-divergences.md`: every key it
+/// answers is one the record names, every key that record names is present
+/// exactly when the half it depends on was carried, and every word is one that
+/// key may answer.
+///
+/// `live_edit.rs`'s `from_entry_57` reads its entry the same way.
+fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: bool) {
+    let record = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("64."))
+        .expect("the divergence record still carries entry 64");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 64 carries the json block this journey drives");
+    let stated: serde_json::Map<String, Value> =
+        serde_json::from_str(block).expect("entry 64's block is a JSON object");
+
+    let answered = receipt
+        .as_object()
+        .expect("the receipt is one JSON object")
+        .keys();
+    for key in answered {
+        assert!(
+            stated.contains_key(key),
+            "{shape}: the receipt answered '{key}', which entry 64 does not name: {receipt}"
+        );
+    }
+    for (key, rule) in &stated {
+        let present = rule["present"]
+            .as_str()
+            .expect("entry 64 states each key's presence rule");
+        let carried = match present {
+            "always" => true,
+            "with a verdict half" => verdict,
+            "with commands" => commands,
+            other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
+        };
+        let answer = receipt.get(key);
+        assert_eq!(
+            answer.is_some(),
+            carried,
+            "{shape}: '{key}' is stated present {present}, and the receipt says otherwise: \
+             {receipt}"
+        );
+        let Some(answer) = answer else { continue };
+        if let Some(words) = rule["values"].as_array() {
+            assert!(
+                words.contains(answer),
+                "{shape}: '{key}' answered {answer}, which entry 64 does not state: {words:?}"
+            );
+        } else {
+            assert!(answer.is_u64(), "{shape}: '{key}' answered {answer}");
+        }
+    }
+}
+
+/// And a reader that only knows the older answer still reads a correct result
+/// from each of them.
+///
+/// `reply` and `state` keep their spelling and their meaning, and the two new
+/// keys are added beside them rather than in place of anything — so a consumer
+/// written before this change is unaffected, which is what lets the keys land
+/// with no consumer to coordinate with.
+#[test]
+fn a_reader_of_the_older_receipt_still_reads_every_answer() {
+    /// The receipt as it was before the two halves were named: exactly the two
+    /// keys such a reader knew, and no tolerance for the ones it did not — serde
+    /// ignores what it was not told about, which is the property under test.
+    #[derive(serde::Deserialize)]
+    struct OlderReceipt {
+        reply: u64,
+        state: String,
+    }
+
+    let world = World::new("channel-receipt-older-reader");
+    world.script("build.wait", "hold");
+    let run = running(&world, "olderreader", vec![agent("build", &[])]);
+
+    let note = |text: &str| {
+        json!({"op": "note", "id": "build", "addressee": "worker",
+               "text": text, "deliver": "next"})
+    };
+    // Both readings of one answer: what the older shape takes out of it, and what
+    // is actually on the wire. Every key the older reader knows has to read back
+    // the same value, which is the whole of what "unaffected" means.
+    let read = |world: &World, envelope: &serde_json::Value| {
+        let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
+        answered.exited(0);
+        let older: OlderReceipt = serde_json::from_str(answered.stdout.trim())
+            .expect("the older reader reads the receipt");
+        let whole = answered.json();
+        assert_eq!(json!(older.reply), whole["reply"], "{whole}");
+        assert_eq!(json!(older.state), whole["state"], "{whole}");
+        older
+    };
+
+    let verdict_only = read(&world, &json!({"completion": false, "reason": "carry on"}));
+    assert_eq!(verdict_only.state, "delivered");
+
+    let commands_only = read(
+        &world,
+        &json!({"version": 2, "commands": [note("the fixture moved")]}),
+    );
+    assert_eq!(commands_only.state, "applied");
+
+    let both = read(
+        &world,
+        &json!({
+            "completion": false,
+            "reason": "carry on, with this in hand",
+            "version": 2,
+            "commands": [note("and again")],
+        }),
+    );
+    assert_eq!(both.state, "applied");
+
+    world.release("build.go");
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey waits
+// on is a `channel serve` session reaching its own one-second bound, which is the state the
+// finding it proves is only visible in — an asker between listeners, its question still
+// owed an answer — and there is no cheaper way to arrange it: the bound is the binary's own
+// and a shorter one is not a unit this crate accepts. One second is what the two journeys
+// it sits beside already wait, and it belongs in this file with the rest of the channel's
+// routing, which any change under `src/` can move: a project edged narrower than the crate
+// could not honestly run it, and edging one around a single journey would split the
+// channel's behaviour across two projects to no reader's benefit.
+/// A verdict is taken by whichever listener is polling when it lands, and never
+/// by the question it names.
+///
+/// The journey entry 63 of `docs/contract-divergences.md` rests on, which is
+/// where what it costs and what it is waiting on are stated. Two listeners and
+/// one ruling: the question's own asker is between sessions, so the second
+/// listener is the one polling, and it reads the ruling back while the run
+/// reports the question answered.
+///
+/// It runs on top of entry 62's repair rather than around it: the question below
+/// is in the slot and owed an answer when the ruling lands.
+#[test]
+fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-verdict-stolen");
+    world.script("build.wait", "hold");
+    let run = running(&world, "stolen", vec![agent("build", &[])]);
+    let worker = "the-dispatch-that-is-blocked";
+
+    // The blocking question, raised by a listener that then reaches its **own
+    // session bound** with the agent's stream still open. That ending withdraws
+    // nothing — the member is still there and still owed an answer — so what it
+    // leaves is the state the manager sees: a question the run is waiting on, an
+    // agent still blocked on it, and no listener of that agent polling.
+    let mut asking = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, worker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut blocked = asking.stdin.take().expect("stdin is piped");
+    writeln!(
+        blocked,
+        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    blocked.flush().expect("the frame flushes");
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let reached = asking.wait_with_output().expect("the session ends");
+    assert!(reached.status.success(), "{reached:?}");
+    assert!(
+        String::from_utf8_lossy(&reached.stderr).contains("ONEPIPELINE_SERVE_SESSION_SECONDS"),
+        "the listener ended some other way than on its bound: {}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+    world.run(&["next", &run]).exited(0).out_has("is this base");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+
+    // And a listener of somebody else entirely — the monitor's own scoring
+    // session, which raised a narration nobody is waiting on and is now in the
+    // wait every frame is followed by.
+    let mut scoring = world
+        .cmd(&["channel", "serve", &run])
+        .env(
+            onepipeline::channel::ASKER_ENV,
+            "the-monitors-scoring-session",
+        )
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut narrating = scoring.stdin.take().expect("stdin is piped");
+    writeln!(
+        narrating,
+        r#"{{"kind":"planner-question","message":"scoring the run","blocking":false}}"#
+    )
+    .expect("the frame is written");
+    narrating.flush().expect("the frame flushes");
+    world.until("the narration to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["message"] == "scoring the run")
+    });
+
+    // The manager answers the blocking question, and the receipt says delivered.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "message": "yes, that base is still right",
+                "reason": "answered the blocker",
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
+
+    // The scoring session read it. Nothing addressed it there; it was simply the
+    // reader that asked next.
+    let stolen = BufReader::new(scoring.stdout.take().expect("stdout is piped"))
+        .lines()
+        .next()
+        .expect("the scoring session wrote a line")
+        .expect("the line reads");
+    assert!(
+        stolen.contains("yes, that base is still right"),
+        "the scoring session read back something else: {stolen}"
+    );
+
+    // And every manager-visible indicator now says the question was answered:
+    // the slot was cleared by the same call that queued the ruling.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    // The blocked agent re-asks the identical question, and this time it is the
+    // reader holding the wait — so the manager's second, identical copy is the
+    // one that reaches it. That is the whole of the original observation.
+    let mut reasking = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, worker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut again = reasking.stdin.take().expect("stdin is piped");
+    writeln!(
+        again,
+        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    again.flush().expect("the frame flushes");
+    world.until("the question to be asked a second time", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["message"] == "is this base still right?")
+            .count()
+            >= 2
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "message": "yes, that base is still right",
+                "reason": "answered the blocker",
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let answered = BufReader::new(reasking.stdout.take().expect("stdout is piped"))
+        .lines()
+        .next()
+        .expect("the re-asking session wrote a line")
+        .expect("the line reads");
+    assert!(
+        answered.contains("yes, that base is still right"),
+        "the resend did not reach the asker either: {answered}"
+    );
+
+    drop(blocked);
+    drop(narrating);
+    drop(again);
+    world.release("build.go");
+    ended(scoring);
+    ended(reasking);
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

@@ -2176,26 +2176,164 @@ enum Submitted {
 }
 
 /// Validate a reply, queue it, and report which of the four true things happened.
+///
+/// The object this prints is stated in entry **64** of
+/// `docs/contract-divergences.md` and nowhere else;
+/// `channel::the_reply_receipt_names_each_half_the_envelope_carried` gates this
+/// code against it.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
-    match submit_envelope(paths, envelope)? {
-        Submitted::Answered { reply } => {
-            println!("{}", json!({"reply": reply, "state": "delivered"}));
-            Ok(EXIT_SUCCESS)
-        }
-        // `0` is this process's own apply: there was no queue to put it in, so
-        // there is no id in the channel to name.
-        Submitted::AppliedHere { .. } => {
-            println!("{}", json!({"reply": 0, "state": "applied"}));
-            Ok(EXIT_SUCCESS)
-        }
+    let verdict = if envelope.carries_verdict() {
+        VerdictHalf::OnTheQueue
+    } else {
+        VerdictHalf::NotCarried
+    };
+    let (receipt, code) = match submit_envelope(paths, envelope)? {
+        Submitted::Answered { reply } => (Receipt::Answered { reply, verdict }, EXIT_SUCCESS),
+        // This process applied them itself, so there is no queue and no id in it.
+        Submitted::AppliedHere { .. } => (Receipt::AppliedHere { verdict }, EXIT_SUCCESS),
         Submitted::AppliedByRun { reply } => {
-            println!("{}", json!({"reply": reply, "state": "applied"}));
-            Ok(EXIT_SUCCESS)
+            (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
-        Submitted::Queued { reply } => {
-            println!("{}", json!({"reply": reply, "state": "queued"}));
-            Ok(EXIT_QUEUED)
+        Submitted::Queued { reply } => (Receipt::Queued { reply, verdict }, EXIT_QUEUED),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&receipt).map_err(|e| Error::Invalid(format!("receipt: {e}")))?
+    );
+    Ok(code)
+}
+
+/// `onepipeline reply`'s answer, whose shape [`submit`] states.
+///
+/// One variant per outcome [`Submitted`] can reach, so the receipt cannot be
+/// built out of parts that contradict each other: which words `state` and
+/// `commands` spell, and whether there is a channel identifier to name at all,
+/// are decided by the same choice rather than carried as three fields a caller
+/// assembles.
+enum Receipt {
+    /// A commandless verdict.
+    Answered {
+        /// Its id in the channel.
+        reply: u64,
+        /// Whether the envelope carried a verdict at all: an envelope carrying
+        /// neither half is answered here too, and names neither.
+        verdict: VerdictHalf,
+    },
+    /// Every command applied by this process, which had no queue to put them in
+    /// and so has no identifier to name.
+    AppliedHere {
+        /// The verdict half that rode along, if one did.
+        verdict: VerdictHalf,
+    },
+    /// Every command applied by the run's own reconciler.
+    AppliedByRun {
+        /// The envelope's id in the command queue.
+        reply: u64,
+        /// The verdict half that rode along, if one did.
+        verdict: VerdictHalf,
+    },
+    /// Accepted and durable, and not reconciled within the reply timeout. Still
+    /// queued: **not** an instruction to send it again.
+    Queued {
+        /// The envelope's id in the command queue.
+        reply: u64,
+        /// The verdict half that rode along, if one did.
+        verdict: VerdictHalf,
+    },
+}
+
+impl Receipt {
+    /// The identifier in the channel. The wire spells the local apply's absence
+    /// `0`, which is what this receipt has always answered there and is not a
+    /// second identifier.
+    fn reply(&self) -> u64 {
+        match self {
+            Self::Answered { reply, .. }
+            | Self::AppliedByRun { reply, .. }
+            | Self::Queued { reply, .. } => *reply,
+            Self::AppliedHere { .. } => 0,
         }
+    }
+
+    /// The word `state` has spelled since before the two halves were named.
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Answered { .. } => "delivered",
+            Self::AppliedHere { .. } | Self::AppliedByRun { .. } => "applied",
+            Self::Queued { .. } => "queued",
+        }
+    }
+
+    /// The same word again where there were commands to have one, under a name
+    /// saying whose it is, and nothing where the envelope carried none.
+    fn commands(&self) -> Option<&'static str> {
+        match self {
+            Self::Answered { .. } => None,
+            applied_or_queued => Some(applied_or_queued.state()),
+        }
+    }
+
+    /// The verdict half, whichever outcome the commands reached.
+    fn verdict(&self) -> VerdictHalf {
+        match self {
+            Self::Answered { verdict, .. }
+            | Self::AppliedHere { verdict }
+            | Self::AppliedByRun { verdict, .. }
+            | Self::Queued { verdict, .. } => *verdict,
+        }
+    }
+}
+
+/// What became of an envelope's verdict half.
+///
+/// **Two variants and not three**: what happens to a verdict that reaches a
+/// receipt is not a variable — it was queued, on every path [`submit`] can take —
+/// so the only thing left to say is whether the envelope carried one. The other
+/// thing that can happen to a verdict is a refusal, which is an error and never a
+/// receipt.
+#[derive(Clone, Copy)]
+enum VerdictHalf {
+    /// The envelope carried none, so the receipt names none.
+    NotCarried,
+    /// Carried, and on the reply queue for whichever reader claims it.
+    OnTheQueue,
+}
+
+impl VerdictHalf {
+    /// The word the receipt writes, and nothing for the half it never carried.
+    ///
+    /// `delivered` for the same reason `state` has always spelled it so:
+    /// **delivery on this channel is acceptance**, a planner writing when it has
+    /// something to say with nothing obliged to be listening at that moment. So
+    /// the two keys cannot disagree about one half. Which reader then claims it
+    /// is entry 63 of `docs/contract-divergences.md`, and is not something a
+    /// receipt written at submission could answer.
+    fn word(self) -> Option<&'static str> {
+        match self {
+            Self::NotCarried => None,
+            Self::OnTheQueue => Some("delivered"),
+        }
+    }
+}
+
+/// Written by hand rather than derived, because every key is read off the one
+/// variant and a derive would need them stored as fields that could disagree.
+impl serde::Serialize for Receipt {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut receipt = serializer.serialize_map(None)?;
+        receipt.serialize_entry("reply", &self.reply())?;
+        receipt.serialize_entry("state", self.state())?;
+        if let Some(verdict) = self.verdict().word() {
+            receipt.serialize_entry("verdict", verdict)?;
+        }
+        if let Some(commands) = self.commands() {
+            receipt.serialize_entry("commands", commands)?;
+        }
+        receipt.end()
     }
 }
 
@@ -2312,6 +2450,54 @@ fn last_note_delivered(
     Ok(None)
 }
 
+/// Write the run's own record of a verdict: that the planner replied, and — when
+/// the reply declares the run finished — the completion request that declaration
+/// raises.
+///
+/// One function rather than two copies, because the two branches of
+/// [`submit_envelope`] both give a verdict and the run's record must not depend
+/// on which of them the envelope took: a ruling that arrived beside a graph edit
+/// is the same ruling as one that arrived alone, and a journal that recorded only
+/// the second would leave the run's own account of why it stopped waiting missing
+/// for exactly the envelopes that did the most.
+fn journal_verdict(paths: &RunPaths, envelope: &Reply) -> Result<()> {
+    let mut journal = Journal::open(paths);
+    journal.emit(
+        journal::PipelineKind::PlannerReplied,
+        journal::labels(&paths.run, None),
+        journal::payload(&[
+            ("author", json!(envelope.author)),
+            ("completion", json!(envelope.completion)),
+            ("reason", json!(envelope.reason)),
+        ]),
+    )?;
+    if let Some(reason) = &envelope.reason {
+        if envelope.completion == Some(true) {
+            journal.emit(
+                journal::PipelineKind::CompletionRequested,
+                journal::labels(&paths.run, None),
+                journal::payload(&[("reason", json!(reason))]),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Queue and journal the verdict half of an envelope whose commands have already
+/// reached the command path.
+///
+/// [`ChannelState::answer_if_verdict`](crate::channel::ChannelState::answer_if_verdict)
+/// owns the routing — a commands-only envelope leaves the pending surface and its
+/// reader untouched — and this adds the record beside it, so the half that is
+/// delivered is the half that is written down.
+fn deliver_verdict_half(paths: &RunPaths, channel: &ChannelState, envelope: &Reply) -> Result<()> {
+    channel.answer_if_verdict(envelope)?;
+    if envelope.carries_verdict() {
+        journal_verdict(paths, envelope)?;
+    }
+    Ok(())
+}
+
 /// Validate a reply and queue it, or apply it, and say which happened.
 ///
 /// The author's op allowlist is enforced here, before anything is queued: a
@@ -2321,11 +2507,19 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     let view = RunView::open(paths)?;
     let channel = ChannelState::new(paths);
 
+    // The verdict is subject to the author's allowlist exactly as an op is: a
+    // reply declaring the run finished says what `complete` says, and an
+    // allowlist that guarded only the ops would let it past. Asked here, of
+    // **every** envelope, rather than on the commandless branch alone: an author
+    // that may not declare the run complete could otherwise carry that
+    // declaration through by attaching any command it *is* allowed, which is the
+    // allowlist meaning one thing on its own and another beside an edit.
+    //
+    // Before anything is validated, queued, or applied, so the whole envelope is
+    // turned away rather than half of it.
+    crate::channel::allows_completion(envelope.author, envelope.completion)?;
+
     if envelope.commands.is_empty() {
-        // The verdict is subject to the author's allowlist exactly as an op is:
-        // a commandless reply declaring the run finished says what `complete`
-        // says, and an allowlist that guarded only the ops would let it past.
-        crate::channel::allows_completion(envelope.author, envelope.completion)?;
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
@@ -2343,25 +2537,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             )));
         }
         let id = channel.answer(envelope)?;
-        let mut journal = Journal::open(paths);
-        journal.emit(
-            journal::PipelineKind::PlannerReplied,
-            journal::labels(&paths.run, None),
-            journal::payload(&[
-                ("author", json!(envelope.author)),
-                ("completion", json!(envelope.completion)),
-                ("reason", json!(envelope.reason)),
-            ]),
-        )?;
-        if let Some(reason) = &envelope.reason {
-            if envelope.completion == Some(true) {
-                journal.emit(
-                    journal::PipelineKind::CompletionRequested,
-                    journal::labels(&paths.run, None),
-                    journal::payload(&[("reason", json!(reason))]),
-                )?;
-            }
-        }
+        journal_verdict(paths, envelope)?;
         return Ok(Submitted::Answered { reply: id });
     }
 
@@ -2472,7 +2648,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                 }
             }
             lock.release();
-            channel.answer_if_verdict(envelope)?;
+            deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::AppliedHere {
                 operations: compiled,
             })
@@ -2482,7 +2658,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    channel.answer_if_verdict(envelope)?;
+                    deliver_verdict_half(paths, &channel, envelope)?;
                     if outcome.applied {
                         return Ok(Submitted::AppliedByRun { reply: id });
                     }
@@ -2501,7 +2677,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // than the graph, and the reader waiting for it is not the reader
             // waiting for the edits — so it is delivered here as it is on every
             // other path, and only the edits are reported still queued.
-            channel.answer_if_verdict(envelope)?;
+            deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::Queued { reply: id })
         }
         Err(other) => Err(other),
