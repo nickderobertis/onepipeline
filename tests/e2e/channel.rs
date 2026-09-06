@@ -4000,6 +4000,26 @@ fn a_monitor_cannot_declare_the_run_complete_by_attaching_a_command_to_the_verdi
     );
     world.run(&["next", &run]).exited(0).out_lacks("looks done");
 
+    // And the completion is what the envelope is refused for even where something
+    // else in it is wrong too: asked before the version and before the ops, so a
+    // monitor that mistypes an edit envelope is told the thing that matters
+    // rather than being sent to fix the version and try the same escalation
+    // again.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+                "commands": [{"op": "complete", "reason": "and here it is again"}],
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_lacks("requires version");
+
     // The same envelope from the planner is accepted, which is what makes the
     // refusal about the author rather than about the shape.
     world
