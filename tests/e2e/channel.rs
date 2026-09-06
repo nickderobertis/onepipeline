@@ -4279,6 +4279,142 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["blocking"], json!(false));
 }
 
+/// The receipt names each half the envelope carried, and says nothing about a
+/// half it did not.
+///
+/// One `state` word describes one half — it is the commands' word wherever there
+/// are commands and the verdict's only when there are none — so an envelope that
+/// did both reported whichever half the branch it took is named for, and the
+/// other was invisible. The manager who had sent two envelopes to one question
+/// could not tell from either receipt which of them had answered it.
+///
+/// `src/driver.rs`'s `submit` states the receipt's shape; this is that statement
+/// driven through the verb.
+#[test]
+fn the_reply_receipt_names_each_half_the_envelope_carried() {
+    let world = World::new("channel-receipt-halves");
+    world.script("build.wait", "hold");
+    let run = running(&world, "receipted", vec![agent("build", &[])]);
+
+    let note = |text: &str| {
+        json!({"op": "note", "id": "build", "addressee": "worker",
+               "text": text, "deliver": "next"})
+    };
+
+    // A verdict alone: one half carried, one half named.
+    let verdict_only = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"completion": false, "reason": "carry on"}).to_string(),
+    );
+    verdict_only.exited(0);
+    let receipt = verdict_only.json();
+    assert_eq!(receipt["state"], "delivered");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(
+        receipt.get("commands"),
+        None,
+        "the receipt named a command half the envelope never carried: {receipt}"
+    );
+
+    // Commands alone.
+    let commands_only = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"version": 2, "commands": [note("the fixture moved")]}).to_string(),
+    );
+    commands_only.exited(0);
+    let receipt = commands_only.json();
+    assert_eq!(receipt["state"], "applied");
+    assert_eq!(receipt["commands"], "applied");
+    assert_eq!(
+        receipt.get("verdict"),
+        None,
+        "the receipt named a verdict half the envelope never carried: {receipt}"
+    );
+
+    // And both, which is the receipt that could not be read before: each half is
+    // named, and neither is inferred from the other.
+    let both = world.run_with_stdin(
+        &["reply", &run],
+        &json!({
+            "completion": false,
+            "reason": "carry on, with this in hand",
+            "version": 2,
+            "commands": [note("and again")],
+        })
+        .to_string(),
+    );
+    both.exited(0);
+    let receipt = both.json();
+    assert_eq!(receipt["state"], "applied");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(receipt["commands"], "applied");
+
+    world.release("build.go");
+}
+
+/// And a reader that only knows the older answer still reads a correct result
+/// from each of them.
+///
+/// `reply` and `state` keep their spelling and their meaning, and the two new
+/// keys are added beside them rather than in place of anything — so a consumer
+/// written before this change is unaffected, which is what lets the keys land
+/// with no consumer to coordinate with.
+#[test]
+fn a_reader_of_the_older_receipt_still_reads_every_answer() {
+    /// The receipt as it was before the two halves were named: exactly the two
+    /// keys such a reader knew, and no tolerance for the ones it did not — serde
+    /// ignores what it was not told about, which is the property under test.
+    #[derive(serde::Deserialize)]
+    struct OlderReceipt {
+        reply: u64,
+        state: String,
+    }
+
+    let world = World::new("channel-receipt-older-reader");
+    world.script("build.wait", "hold");
+    let run = running(&world, "olderreader", vec![agent("build", &[])]);
+
+    let note = |text: &str| {
+        json!({"op": "note", "id": "build", "addressee": "worker",
+               "text": text, "deliver": "next"})
+    };
+    // Both readings of one answer: what the older shape takes out of it, and what
+    // is actually on the wire. Every key the older reader knows has to read back
+    // the same value, which is the whole of what "unaffected" means.
+    let read = |world: &World, envelope: &serde_json::Value| {
+        let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
+        answered.exited(0);
+        let older: OlderReceipt = serde_json::from_str(answered.stdout.trim())
+            .expect("the older reader reads the receipt");
+        let whole = answered.json();
+        assert_eq!(json!(older.reply), whole["reply"], "{whole}");
+        assert_eq!(json!(older.state), whole["state"], "{whole}");
+        older
+    };
+
+    let verdict_only = read(&world, &json!({"completion": false, "reason": "carry on"}));
+    assert_eq!(verdict_only.state, "delivered");
+
+    let commands_only = read(
+        &world,
+        &json!({"version": 2, "commands": [note("the fixture moved")]}),
+    );
+    assert_eq!(commands_only.state, "applied");
+
+    let both = read(
+        &world,
+        &json!({
+            "completion": false,
+            "reason": "carry on, with this in hand",
+            "version": 2,
+            "commands": [note("and again")],
+        }),
+    );
+    assert_eq!(both.state, "applied");
+
+    world.release("build.go");
+}
+
 /// A verdict is taken by whichever listener is polling when it lands, and never
 /// by the question it names.
 ///

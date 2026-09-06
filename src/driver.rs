@@ -2176,27 +2176,60 @@ enum Submitted {
 }
 
 /// Validate a reply, queue it, and report which of the four true things happened.
+///
+/// # The receipt
+///
+/// **This is the authoritative statement of `onepipeline reply`'s answer.** It
+/// is stated once, here, where the answer is written; no consumer restates it,
+/// and a consumer that needs it reads it from here.
+///
+/// One JSON object, with two keys always present and two that are present only
+/// when the envelope carried the half they name:
+///
+/// - `reply` — the identifier in the channel, and `0` where this process applied
+///   the commands itself and there was no queue to put them in.
+/// - `state` — `delivered`, `applied`, or `queued`, spelled and meaning exactly
+///   what they did before the two keys below were added, so a reader written
+///   against the older answer is unaffected. It names **one** half, whichever the
+///   branch the envelope took is named for.
+/// - `verdict` — present only when the envelope carried a verdict half, and what
+///   became of it: `delivered`, the queue having taken it for whichever reader
+///   the run owes a ruling.
+/// - `commands` — present only when the envelope carried commands, and what
+///   became of them: `applied` or `queued`.
+///
+/// An **absent** key means the envelope carried no such half, which is a
+/// different statement from a half that was carried and did nothing. That is the
+/// whole of why they are omitted rather than spelled `none`: a receipt that
+/// named both halves always would make an envelope that gave a ruling
+/// indistinguishable from one that never carried it.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
-    match submit_envelope(paths, envelope)? {
-        Submitted::Answered { reply } => {
-            println!("{}", json!({"reply": reply, "state": "delivered"}));
-            Ok(EXIT_SUCCESS)
-        }
+    let (reply, state, code) = match submit_envelope(paths, envelope)? {
+        Submitted::Answered { reply } => (reply, "delivered", EXIT_SUCCESS),
         // `0` is this process's own apply: there was no queue to put it in, so
         // there is no id in the channel to name.
-        Submitted::AppliedHere { .. } => {
-            println!("{}", json!({"reply": 0, "state": "applied"}));
-            Ok(EXIT_SUCCESS)
-        }
-        Submitted::AppliedByRun { reply } => {
-            println!("{}", json!({"reply": reply, "state": "applied"}));
-            Ok(EXIT_SUCCESS)
-        }
-        Submitted::Queued { reply } => {
-            println!("{}", json!({"reply": reply, "state": "queued"}));
-            Ok(EXIT_QUEUED)
-        }
+        Submitted::AppliedHere { .. } => (0, "applied", EXIT_SUCCESS),
+        Submitted::AppliedByRun { reply } => (reply, "applied", EXIT_SUCCESS),
+        Submitted::Queued { reply } => (reply, "queued", EXIT_QUEUED),
+    };
+    let mut receipt = serde_json::Map::new();
+    receipt.insert("reply".to_string(), json!(reply));
+    receipt.insert("state".to_string(), json!(state));
+    // A verdict that reached this point was queued, on every path the four
+    // outcomes above name, so which of them the envelope took says nothing about
+    // it: `delivered` is what became of a verdict half, always.
+    if envelope.carries_verdict() {
+        receipt.insert("verdict".to_string(), json!("delivered"));
     }
+    // And `state` is the commands' own word wherever there are commands to have
+    // one: `delivered` is reached only from the commandless branch, so the three
+    // outcomes an envelope carrying commands can reach spell `applied` or
+    // `queued` and this key repeats it under a name that says whose it is.
+    if !envelope.commands.is_empty() {
+        receipt.insert("commands".to_string(), json!(state));
+    }
+    println!("{}", serde_json::Value::Object(receipt));
+    Ok(code)
 }
 
 /// Deliver one note through the channel's own path, and answer what the
