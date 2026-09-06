@@ -4492,7 +4492,10 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
     // wait every frame is followed by.
     let mut scoring = world
         .cmd(&["channel", "serve", &run])
-        .env(onepipeline::channel::ASKER_ENV, "the-monitors-scoring-session")
+        .env(
+            onepipeline::channel::ASKER_ENV,
+            "the-monitors-scoring-session",
+        )
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
