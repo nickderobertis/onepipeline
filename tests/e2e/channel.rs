@@ -1408,6 +1408,97 @@ fn a_legacy_verdict_is_accepted_and_recorded() {
     world.release("build.go");
 }
 
+/// And a verdict that arrived beside graph edits is recorded exactly as one that
+/// arrived alone.
+///
+/// The run's journal is its own account of what it was told and why it stopped
+/// waiting, and which branch of the reply path an envelope took is not a fact
+/// about the ruling. Recorded only for the commandless branch, the record went
+/// missing for exactly the envelopes that did the most — and a completion
+/// declared beside a command raised no completion request at all, so the one
+/// event a supervisor watches for a run asking to finish was absent while the
+/// receipt said the reply was applied.
+#[test]
+fn a_verdict_beside_commands_is_journalled_exactly_as_a_commandless_one_is() {
+    let world = World::new("channel-verdict-journal");
+    world.script("build.wait", "hold");
+    let run = running(&world, "journalled", vec![agent("build", &[])]);
+
+    // The commandless shape, which is what the both-halves shape is held to.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"completion": false, "reason": "keep going"}).to_string(),
+        )
+        .exited(0);
+    let alone = world.events_of(&run, "planner-replied");
+    assert_eq!(alone.len(), 1, "{alone:?}");
+    assert_eq!(alone[0]["payload"]["reason"], "keep going");
+    assert_eq!(alone[0]["payload"]["completion"], json!(false));
+
+    // The same verdict with a command riding along.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "reason": "keep going, with this in hand",
+                "version": 2,
+                "commands": [
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "the fixture moved", "deliver": "next"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the verdict beside the edit to be recorded", |world| {
+        world.events_of(&run, "planner-replied").len() >= 2
+    });
+    let beside = world.events_of(&run, "planner-replied");
+    assert_eq!(beside.len(), 2, "{beside:?}");
+    assert_eq!(
+        beside[1]["payload"]["reason"],
+        "keep going, with this in hand"
+    );
+    assert_eq!(beside[1]["payload"]["author"], "planner");
+    // And the command half still reached the graph, so this is the record of an
+    // envelope that did both rather than of one that was routed away from them.
+    world.until("the edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+
+    // And the completion request a completion verdict raises, which is the event
+    // a supervisor watches for a run asking to finish.
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "a run that never declared itself complete raised a completion request"
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": true,
+                "reason": "publication verified",
+                "version": 2,
+                "commands": [
+                    {"op": "note", "id": "build", "addressee": "worker",
+                     "text": "wrapping up", "deliver": "next"}
+                ],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the completion request to be raised", |world| {
+        !world.events_of(&run, "completion-requested").is_empty()
+    });
+    let requested = world.events_of(&run, "completion-requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["payload"]["reason"], "publication verified");
+    assert_eq!(world.events_of(&run, "planner-replied").len(), 3);
+    world.release("build.go");
+}
+
 #[test]
 fn a_reply_may_be_given_as_a_file_as_well_as_on_stdin() {
     let world = World::new("channel-file");

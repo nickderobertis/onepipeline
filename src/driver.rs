@@ -2312,6 +2312,54 @@ fn last_note_delivered(
     Ok(None)
 }
 
+/// Write the run's own record of a verdict: that the planner replied, and — when
+/// the reply declares the run finished — the completion request that declaration
+/// raises.
+///
+/// One function rather than two copies, because the two branches of
+/// [`submit_envelope`] both give a verdict and the run's record must not depend
+/// on which of them the envelope took: a ruling that arrived beside a graph edit
+/// is the same ruling as one that arrived alone, and a journal that recorded only
+/// the second would leave the run's own account of why it stopped waiting missing
+/// for exactly the envelopes that did the most.
+fn journal_verdict(paths: &RunPaths, envelope: &Reply) -> Result<()> {
+    let mut journal = Journal::open(paths);
+    journal.emit(
+        journal::PipelineKind::PlannerReplied,
+        journal::labels(&paths.run, None),
+        journal::payload(&[
+            ("author", json!(envelope.author)),
+            ("completion", json!(envelope.completion)),
+            ("reason", json!(envelope.reason)),
+        ]),
+    )?;
+    if let Some(reason) = &envelope.reason {
+        if envelope.completion == Some(true) {
+            journal.emit(
+                journal::PipelineKind::CompletionRequested,
+                journal::labels(&paths.run, None),
+                journal::payload(&[("reason", json!(reason))]),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Queue and journal the verdict half of an envelope whose commands have already
+/// reached the command path.
+///
+/// [`ChannelState::answer_if_verdict`](crate::channel::ChannelState::answer_if_verdict)
+/// owns the routing — a commands-only envelope leaves the pending surface and its
+/// reader untouched — and this adds the record beside it, so the half that is
+/// delivered is the half that is written down.
+fn deliver_verdict_half(paths: &RunPaths, channel: &ChannelState, envelope: &Reply) -> Result<()> {
+    channel.answer_if_verdict(envelope)?;
+    if envelope.carries_verdict() {
+        journal_verdict(paths, envelope)?;
+    }
+    Ok(())
+}
+
 /// Validate a reply and queue it, or apply it, and say which happened.
 ///
 /// The author's op allowlist is enforced here, before anything is queued: a
@@ -2351,25 +2399,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             )));
         }
         let id = channel.answer(envelope)?;
-        let mut journal = Journal::open(paths);
-        journal.emit(
-            journal::PipelineKind::PlannerReplied,
-            journal::labels(&paths.run, None),
-            journal::payload(&[
-                ("author", json!(envelope.author)),
-                ("completion", json!(envelope.completion)),
-                ("reason", json!(envelope.reason)),
-            ]),
-        )?;
-        if let Some(reason) = &envelope.reason {
-            if envelope.completion == Some(true) {
-                journal.emit(
-                    journal::PipelineKind::CompletionRequested,
-                    journal::labels(&paths.run, None),
-                    journal::payload(&[("reason", json!(reason))]),
-                )?;
-            }
-        }
+        journal_verdict(paths, envelope)?;
         return Ok(Submitted::Answered { reply: id });
     }
 
@@ -2480,7 +2510,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                 }
             }
             lock.release();
-            channel.answer_if_verdict(envelope)?;
+            deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::AppliedHere {
                 operations: compiled,
             })
@@ -2490,7 +2520,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    channel.answer_if_verdict(envelope)?;
+                    deliver_verdict_half(paths, &channel, envelope)?;
                     if outcome.applied {
                         return Ok(Submitted::AppliedByRun { reply: id });
                     }
@@ -2509,7 +2539,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // than the graph, and the reader waiting for it is not the reader
             // waiting for the edits — so it is delivered here as it is on every
             // other path, and only the edits are reported still queued.
-            channel.answer_if_verdict(envelope)?;
+            deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::Queued { reply: id })
         }
         Err(other) => Err(other),
