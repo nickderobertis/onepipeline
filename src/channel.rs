@@ -1235,17 +1235,9 @@ impl ChannelState {
     /// behind a delivery rather than on its own account, and a poll that takes
     /// nothing leaves the cursor exactly where it was.
     ///
-    /// **A reply is addressed to no asker.** Among the readers that do reach it,
-    /// the one whose question the ruling answers is not privileged: whichever
-    /// polls next takes it, and every `channel serve` frame — a monitor's
-    /// non-blocking narration included — is followed by a poll. So a run with two
-    /// listeners has two claimants for one ruling, and the manager's receipt says
-    /// delivered either way. That is the mechanism behind a queued verdict that
-    /// reached nobody while the agent that asked stayed blocked and re-asked, and
-    /// it is proven end to end by the journey
-    /// `a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names`.
-    /// Repairing it means addressing a verdict to an asker, which is a change to
-    /// the routing this contract states and is nobody's to make unilaterally.
+    /// Among the readers that do reach it, none is addressed: entry 63 of
+    /// `docs/contract-divergences.md` is what that costs and what it is waiting
+    /// on.
     pub fn claim_reply(&self) -> crate::Result<Option<QueuedReply>> {
         let cursor_path = self.paths.channel("replies-cursor.json");
         let claimed_through: u64 = crate::ledger::read_json_opt(&cursor_path).unwrap_or(0);

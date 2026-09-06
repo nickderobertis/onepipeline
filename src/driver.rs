@@ -2204,32 +2204,110 @@ enum Submitted {
 /// named both halves always would make an envelope that gave a ruling
 /// indistinguishable from one that never carried it.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
-    let (reply, state, code) = match submit_envelope(paths, envelope)? {
-        Submitted::Answered { reply } => (reply, "delivered", EXIT_SUCCESS),
+    let (reply, state, commands, code) = match submit_envelope(paths, envelope)? {
+        // Answered is the commandless branch's outcome and only it, so `None` is
+        // the shape of that fact rather than a value chosen beside it.
+        Submitted::Answered { reply } => (reply, ReplyState::Delivered, None, EXIT_SUCCESS),
         // `0` is this process's own apply: there was no queue to put it in, so
         // there is no id in the channel to name.
-        Submitted::AppliedHere { .. } => (0, "applied", EXIT_SUCCESS),
-        Submitted::AppliedByRun { reply } => (reply, "applied", EXIT_SUCCESS),
-        Submitted::Queued { reply } => (reply, "queued", EXIT_QUEUED),
+        Submitted::AppliedHere { .. } => (
+            0,
+            ReplyState::Applied,
+            Some(CommandsBecame::Applied),
+            EXIT_SUCCESS,
+        ),
+        Submitted::AppliedByRun { reply } => (
+            reply,
+            ReplyState::Applied,
+            Some(CommandsBecame::Applied),
+            EXIT_SUCCESS,
+        ),
+        Submitted::Queued { reply } => (
+            reply,
+            ReplyState::Queued,
+            Some(CommandsBecame::Queued),
+            EXIT_QUEUED,
+        ),
     };
-    let mut receipt = serde_json::Map::new();
-    receipt.insert("reply".to_string(), json!(reply));
-    receipt.insert("state".to_string(), json!(state));
-    // A verdict that reached this point was queued, on every path the four
-    // outcomes above name, so which of them the envelope took says nothing about
-    // it: `delivered` is what became of a verdict half, always.
-    if envelope.carries_verdict() {
-        receipt.insert("verdict".to_string(), json!("delivered"));
-    }
-    // And `state` is the commands' own word wherever there are commands to have
-    // one: `delivered` is reached only from the commandless branch, so the three
-    // outcomes an envelope carrying commands can reach spell `applied` or
-    // `queued` and this key repeats it under a name that says whose it is.
-    if !envelope.commands.is_empty() {
-        receipt.insert("commands".to_string(), json!(state));
-    }
-    println!("{}", serde_json::Value::Object(receipt));
+    let receipt = Receipt {
+        reply,
+        state,
+        // A verdict that reached this point was queued, on every path the four
+        // outcomes above name, so which of them the envelope took says nothing
+        // about it.
+        verdict: envelope
+            .carries_verdict()
+            .then_some(VerdictBecame::Delivered),
+        commands,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&receipt).map_err(|e| Error::Invalid(format!("receipt: {e}")))?
+    );
     Ok(code)
+}
+
+/// The word the receipt's `state` names, which is one half's and never both.
+///
+/// Its spelling and its meaning are what they were before `verdict` and
+/// `commands` were added beside it: `delivered` is reached only from the
+/// commandless branch, so an envelope carrying commands spells `applied` or
+/// `queued` here and [`CommandsBecame`] repeats that under a name saying whose
+/// it is.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ReplyState {
+    /// A verdict, queued for whichever reader the run owes one.
+    Delivered,
+    /// Every command applied, by this process or by the run's own reconciler.
+    Applied,
+    /// Accepted and durable, and not reconciled within the reply timeout.
+    Queued,
+}
+
+/// What became of an envelope's verdict half.
+///
+/// **One variant on purpose**: a verdict that reaches the receipt was queued, on
+/// every path [`submit`] can take, and the only other thing that can happen to
+/// one is a refusal — which is an error rather than a receipt. A second variant
+/// would spell an outcome no path reaches and every reader would still have to
+/// answer for.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum VerdictBecame {
+    /// Queued for whichever reader the run owes a ruling.
+    Delivered,
+}
+
+/// What became of an envelope's commands half.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CommandsBecame {
+    /// Reconciled into the graph.
+    Applied,
+    /// Accepted and durable, and not reconciled within the reply timeout. Still
+    /// queued: **not** an instruction to send it again.
+    Queued,
+}
+
+/// `onepipeline reply`'s answer, whose shape [`submit`] states.
+///
+/// A struct rather than a map built key by key, so the two halves cannot be named
+/// with a word belonging to the other and an envelope's halves cannot be
+/// described by keys it did not carry: `None` is the absence of the half and is
+/// the only way to leave a key out.
+#[derive(serde::Serialize)]
+struct Receipt {
+    /// The identifier in the channel.
+    reply: u64,
+    /// The one word an older reader knows.
+    state: ReplyState,
+    /// Present only when the envelope carried a verdict half.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<VerdictBecame>,
+    /// Present only when the envelope carried commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commands: Option<CommandsBecame>,
 }
 
 /// Deliver one note through the channel's own path, and answer what the

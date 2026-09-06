@@ -2980,20 +2980,29 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     queued.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
 
     // llmlint: ignore-end[tests_mirror_real_usage]
-    world
-        .run_with_stdin_on(
-            queued,
-            &json!({
-                "completion": false,
-                "reason": "carry on while that lands",
-                "version": 2,
-                "commands": [{"op": "note", "id": "build", "addressee": "worker",
-                              "text": "a note", "deliver": "next"}]
-            })
-            .to_string(),
-        )
-        .exited(QUEUED)
-        .out_has("\"queued\"");
+    let answered = world.run_with_stdin_on(
+        queued,
+        &json!({
+            "completion": false,
+            "reason": "carry on while that lands",
+            "version": 2,
+            "commands": [{"op": "note", "id": "build", "addressee": "worker",
+                          "text": "a note", "deliver": "next"}]
+        })
+        .to_string(),
+    );
+    answered.exited(QUEUED).out_has("\"queued\"");
+    // Two fates, and the receipt names each: the ruling is gone to a reader and
+    // the edits are still in the queue, which one word could only say one of.
+    let receipt = answered.json();
+    assert_eq!(receipt["state"], "queued");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(receipt["commands"], "queued");
+    // And the run's own record says a verdict was given, on this path as on the
+    // ones where the edits landed.
+    let replied = world.events_of(&run, "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(replied[0]["payload"]["reason"], "carry on while that lands");
 
     assert!(
         world.events_of(&run, "edit-committed").is_empty(),
@@ -4252,6 +4261,63 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
 /// alive, and both sides raise what the op compiled to — otherwise a watcher's
 /// finding would be silently swallowed by exactly the runs a planner is most
 /// likely to be away from.
+/// A verdict applied by `reply` itself, because nothing was driving the run, is
+/// recorded and named exactly as one the reconciler applied.
+///
+/// Which process took the run's ownership lock is an accident of what else was
+/// running, and it decides where the commands are compiled — not whether the
+/// ruling beside them happened. A journal that recorded the verdict only where a
+/// loop was alive would lose it for exactly the runs a manager reaches for by
+/// hand.
+#[test]
+fn a_verdict_beside_commands_applied_with_nothing_driving_is_journalled_and_named() {
+    let world = World::new("channel-undriven-verdict");
+    let path = world.plan(
+        "undrivenverdict",
+        &plan_of("undrivenverdict", vec![human("approve", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    let applied = world.run_with_stdin(
+        &["reply", "undrivenverdict"],
+        &json!({
+            "completion": true,
+            "reason": "the approval is all that is left",
+            "version": 2,
+            "commands": [{"op": "finding", "message": "waiting on a person", "id": "approve"}],
+        })
+        .to_string(),
+    );
+    applied.exited(0);
+    let receipt = applied.json();
+    // `0` because this process applied them itself: there was no queue to name.
+    assert_eq!(receipt["reply"], json!(0));
+    assert_eq!(receipt["state"], "applied");
+    assert_eq!(receipt["verdict"], "delivered");
+    assert_eq!(receipt["commands"], "applied");
+
+    let replied = world.events_of("undrivenverdict", "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(
+        replied[0]["payload"]["reason"],
+        "the approval is all that is left"
+    );
+    let requested = world.events_of("undrivenverdict", "completion-requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(
+        requested[0]["payload"]["reason"],
+        "the approval is all that is left"
+    );
+    // And the command half reached the graph in the same process.
+    assert!(
+        !world
+            .events_of("undrivenverdict", "edit-committed")
+            .is_empty(),
+        "the commands were not applied: {:?}",
+        world.kinds("undrivenverdict")
+    );
+}
+
 #[test]
 fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     let world = World::new("channel-finding-undriven");
@@ -4279,17 +4345,11 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["blocking"], json!(false));
 }
 
-/// The receipt names each half the envelope carried, and says nothing about a
-/// half it did not.
+/// The receipt `src/driver.rs`'s `submit` states, driven through the verb: three
+/// envelopes, one per shape a reply can take, and the answer each one produces.
 ///
-/// One `state` word describes one half — it is the commands' word wherever there
-/// are commands and the verdict's only when there are none — so an envelope that
-/// did both reported whichever half the branch it took is named for, and the
-/// other was invisible. The manager who had sent two envelopes to one question
-/// could not tell from either receipt which of them had answered it.
-///
-/// `src/driver.rs`'s `submit` states the receipt's shape; this is that statement
-/// driven through the verb.
+/// The manager who had sent two envelopes to one question could not tell from
+/// either receipt which of them had answered it.
 #[test]
 fn the_reply_receipt_names_each_half_the_envelope_carried() {
     let world = World::new("channel-receipt-halves");
@@ -4418,28 +4478,14 @@ fn a_reader_of_the_older_receipt_still_reads_every_answer() {
 /// A verdict is taken by whichever listener is polling when it lands, and never
 /// by the question it names.
 ///
-/// The reproduction behind this node, and it is a **finding about the channel**
-/// rather than about the reply path: the ruling below is queued exactly as the
-/// contract says, the manager's receipt says it was delivered, and the agent
-/// that asked never sees it. `ChannelState::claim_reply` hands the next reply to
-/// the next reader that asks for one, and every `channel serve` frame — a
-/// monitor's non-blocking narration included — is followed by a wait that asks.
-/// So a run with two listeners has two claimants for one ruling, and the
-/// question's own asker is not privileged among them.
+/// The journey entry 63 of `docs/contract-divergences.md` rests on, which is
+/// where what it costs and what it is waiting on are stated. Two listeners and
+/// one ruling: the question's own asker is between sessions, so the second
+/// listener is the one polling, and it reads the ruling back while the run
+/// reports the question answered.
 ///
-/// Two candidates were weighed for the original observation, and this is the one
-/// that survives. The other was the listener re-arm that used to withdraw an
-/// open question, repaired in `v0.22.2` — but a withdrawn question does not
-/// explain a *queued* verdict going unread, because
-/// [`ChannelState::claim_reply`](onepipeline::channel) consults neither the
-/// pending slot nor the asker, and hands an unclaimed reply to the next poller
-/// whatever became of the surface. `a_question_survives_its_listener_being_
-/// replaced_and_the_verdict_reaches_the_asker` holds that repair; this journey
-/// runs *on top of* it and the ruling still reaches the wrong reader.
-///
-/// Deliberately not repaired here: addressing a verdict to an asker is a change
-/// to the channel contract's routing, which this node does not own. It is proven
-/// so that the next reader meets the behaviour rather than rediscovering it.
+/// It runs on top of entry 62's repair rather than around it: the question below
+/// is in the slot and owed an answer when the ruling lands.
 #[test]
 fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names() {
     use std::io::{BufRead, BufReader, Write};

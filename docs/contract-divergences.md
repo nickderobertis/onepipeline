@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–61 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–63 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 60 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 63 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -3834,3 +3834,42 @@ and still hold the direction it was written for.
 on its public surface at all — the environment variable, and the `asker` a
 surface `next` hands back now carries — or whether the third clearing should be
 stated in the sentence 61 quotes and the mechanism left unspecified.
+
+## 63. A verdict is claimed by whichever reader polls next, and the question it answers has no claim on it — OPEN
+
+**Proposal (for the planner who owns the contract): state whether a reply is
+addressed. The contract says a reply is routed by the halves it carries, "never
+by which reader reaches the queue first" — which settles the routing *between*
+the two paths and says nothing about the readers on the verdict side, where
+arrival order decides everything. Either the verdict half names the surface or
+the asker it answers and is handed only to a reader waiting on that, or the
+contract says outright that it is not addressed and a run with two listeners has
+two claimants for one ruling.**
+
+**What the code does.** `ChannelState::claim_reply` hands the oldest reply no
+reader has taken to whoever asks next, advancing one cursor. Which readers reach
+it at all is decided by the halves — a commands-only envelope is not on this
+queue — and among the ones that do, nothing distinguishes them. `channel serve`
+follows **every** frame with a wait that claims, a monitor's non-blocking
+narration included, so a scoring session that raised something nobody is waiting
+on takes the ruling meant for the blocking question a dispatched agent is still
+sitting on. The receipt says `delivered` either way, because the reply was
+queued, which is all the queue can answer for.
+
+**What it cost.** A manager's ruling reached nobody during real supervision while
+the worker re-asked the identical question under the same correlation token; a
+second, commands-free copy of the same verdict then unblocked it, and nothing in
+either receipt said which of the two envelopes had answered the question. Two
+candidates were weighed. The listener re-arm 62 repairs is **not** it: a
+withdrawn question does not explain a *queued* verdict going unread, because
+`claim_reply` consults neither the pending slot nor the asker and hands an
+unclaimed reply to the next poller whatever became of the surface. This is what
+survives, and it survives 62's repair —
+`channel::a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names`
+drives it end to end on top of that fix: a blocking question in the slot with its
+asker between listeners, a second asker's session polling, one ruling, and the
+scoring session reading it back while `status` reports the question answered.
+
+**Why nothing here resolves it.** Addressing a verdict is a change to the routing
+the contract states, and 62's asker is the identity it would be addressed by — so
+the two entries are one decision, not two. Recorded rather than repaired.
