@@ -12,7 +12,7 @@
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -2609,6 +2609,15 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
         verdict.contains("go on; the note was optional"),
         "the verdict was withheld because the edits beside it were refused: {verdict}"
     );
+    // And the run's own record says so, on this path as on the ones the edits
+    // survived: a ruling that was delivered is a ruling that happened, whatever
+    // the reconciler made of what rode beside it.
+    let replied = world.events_of("bothrefused", "planner-replied");
+    assert_eq!(replied.len(), 1, "{replied:?}");
+    assert_eq!(
+        replied[0]["payload"]["reason"],
+        "go on; the note was optional"
+    );
     world
         .run(&["status", "bothrefused"])
         .exited(0)
@@ -4345,23 +4354,14 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["blocking"], json!(false));
 }
 
-/// The four keys entry 64 of `docs/contract-divergences.md` states, read out of
-/// that entry and driven through the verb: three envelopes, one per shape a reply
-/// can take, and the answer each one produces.
+/// One envelope of each shape a reply can take, against the receipt entry 64 of
+/// `docs/contract-divergences.md` states.
 ///
-/// Read from the record rather than spelled here, so the record is the source: a
-/// key it stops naming, or one the code stops answering, fails this rather than
-/// drifting. The manager who had sent two envelopes to one question could not
-/// tell from either receipt which of them had answered it.
+/// The manager who had sent two envelopes to one question could not tell from
+/// either receipt which of them had answered it.
 #[test]
 fn the_reply_receipt_names_each_half_the_envelope_carried() {
-    let stated = receipt_keys_from_entry_64();
-    let (reply, state, verdict, commands) = (
-        stated[0].as_str(),
-        stated[1].as_str(),
-        stated[2].as_str(),
-        stated[3].as_str(),
-    );
+    let stated = entry_64_receipt();
     let world = World::new("channel-receipt-halves");
     world.script("build.wait", "hold");
     let run = running(&world, "receipted", vec![agent("build", &[])]);
@@ -4370,67 +4370,88 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         json!({"op": "note", "id": "build", "addressee": "worker",
                "text": text, "deliver": "next"})
     };
+    // Each envelope with the halves it carries, which is what entry 64's presence
+    // rules are read against.
+    let shapes = [
+        (
+            "a verdict alone",
+            json!({"completion": false, "reason": "carry on"}),
+            true,
+            false,
+        ),
+        (
+            "commands alone",
+            json!({"version": 2, "commands": [note("the fixture moved")]}),
+            false,
+            true,
+        ),
+        (
+            "both halves",
+            json!({
+                "completion": false,
+                "reason": "carry on, with this in hand",
+                "version": 2,
+                "commands": [note("and again")],
+            }),
+            true,
+            true,
+        ),
+    ];
 
-    // A verdict alone: one half carried, one half named.
-    let verdict_only = world.run_with_stdin(
-        &["reply", &run],
-        &json!({"completion": false, "reason": "carry on"}).to_string(),
-    );
-    verdict_only.exited(0);
-    let receipt = verdict_only.json();
-    assert!(receipt[reply].is_u64(), "{receipt}");
-    assert_eq!(receipt[state], "delivered");
-    assert_eq!(receipt[verdict], "delivered");
-    assert_eq!(
-        receipt.get(commands),
-        None,
-        "the receipt named a command half the envelope never carried: {receipt}"
-    );
-
-    let commands_only = world.run_with_stdin(
-        &["reply", &run],
-        &json!({"version": 2, "commands": [note("the fixture moved")]}).to_string(),
-    );
-    commands_only.exited(0);
-    let receipt = commands_only.json();
-    assert_eq!(receipt[state], "applied");
-    assert_eq!(receipt[commands], "applied");
-    assert_eq!(
-        receipt.get(verdict),
-        None,
-        "the receipt named a verdict half the envelope never carried: {receipt}"
-    );
-
-    // And both, which is the receipt that could not be read before: each half is
-    // named, and neither is inferred from the other.
-    let both = world.run_with_stdin(
-        &["reply", &run],
-        &json!({
-            "completion": false,
-            "reason": "carry on, with this in hand",
-            "version": 2,
-            "commands": [note("and again")],
-        })
-        .to_string(),
-    );
-    both.exited(0);
-    let receipt = both.json();
-    assert_eq!(receipt[state], "applied");
-    assert_eq!(receipt[verdict], "delivered");
-    assert_eq!(receipt[commands], "applied");
+    for (shape, envelope, verdict, commands) in shapes {
+        let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
+        answered.exited(0);
+        let receipt = answered.json();
+        let carried = |present: &str| match present {
+            "always" => true,
+            "with a verdict half" => verdict,
+            "with commands" => commands,
+            other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
+        };
+        for (key, rule) in &stated {
+            let present = rule["present"]
+                .as_str()
+                .expect("entry 64 states each key's presence rule");
+            let answer = receipt.get(key);
+            assert_eq!(
+                answer.is_some(),
+                carried(present),
+                "{shape}: '{key}' is stated present {present}, and the receipt says otherwise: \
+                 {receipt}"
+            );
+            let Some(answer) = answer else { continue };
+            if let Some(words) = rule["values"].as_array() {
+                assert!(
+                    words.contains(answer),
+                    "{shape}: '{key}' answered {answer}, which entry 64 does not state: {words:?}"
+                );
+            } else {
+                assert!(answer.is_u64(), "{shape}: '{key}' answered {answer}");
+            }
+        }
+        // And each half's word is its own, so an envelope that did both is not
+        // read off one of them: the note landed, and the ruling did too.
+        if commands {
+            assert_eq!(receipt["commands"], "applied", "{shape}: {receipt}");
+        }
+        if verdict {
+            assert_eq!(receipt["verdict"], "delivered", "{shape}: {receipt}");
+        }
+        assert_eq!(
+            receipt["state"],
+            if commands { "applied" } else { "delivered" },
+            "{shape}: {receipt}"
+        );
+    }
 
     world.release("build.go");
 }
 
-/// The receipt's four keys, in the order entry 64 of
-/// `docs/contract-divergences.md` states them.
+/// Entry 64's block, which is what the journey above holds the verb to: every
+/// key, the words each may answer, and which half its presence depends on.
 ///
-/// The entry's block is the source for what `onepipeline reply` answers — the
-/// approved contract fixes this verb's exit codes and not its body — so the
-/// journey above reads the keys from there rather than knowing them itself.
-/// `live_edit.rs`'s `from_entry_57` reads entry 57's fixtures the same way and
-/// for the same reason.
-fn receipt_keys_from_entry_64() -> Vec<String> {
+/// `live_edit.rs`'s `from_entry_57` reads its entry the same way.
+fn entry_64_receipt() -> Vec<(String, Value)> {
     let record = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
     )
@@ -4444,16 +4465,16 @@ fn receipt_keys_from_entry_64() -> Vec<String> {
         .nth(1)
         .and_then(|rest| rest.split("```").next())
         .expect("entry 64 carries the json block this journey drives");
-    let block: serde_json::Map<String, serde_json::Value> =
+    let block: serde_json::Map<String, Value> =
         serde_json::from_str(block).expect("entry 64's block is a JSON object");
-    let keys: Vec<String> = block.keys().cloned().collect();
+    let stated: Vec<(String, Value)> = block.into_iter().collect();
     assert_eq!(
-        keys.len(),
+        stated.len(),
         4,
-        "entry 64 names {} receipt keys, and this journey drives four: {keys:?}",
-        keys.len()
+        "entry 64 names {} receipt keys, and this journey drives four: {stated:?}",
+        stated.len()
     );
-    keys
+    stated
 }
 
 /// And a reader that only knows the older answer still reads a correct result

@@ -2177,13 +2177,10 @@ enum Submitted {
 
 /// Validate a reply, queue it, and report which of the four true things happened.
 ///
-/// The object this prints is stated once, in entry **64** of
-/// `docs/contract-divergences.md`, which is also the proposal putting it to the
-/// planner who owns the contract — the contract fixes this verb's exit codes and
-/// says nothing about its body. That entry's block is the source for the four
-/// keys and `channel::the_reply_receipt_names_each_half_the_envelope_carried`
-/// reads them out of it, so this code and that record cannot drift apart in
-/// silence. Nothing here restates them.
+/// The object this prints is stated in entry **64** of
+/// `docs/contract-divergences.md` and nowhere else;
+/// `channel::the_reply_receipt_names_each_half_the_envelope_carried` gates this
+/// code against it.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     let (reply, outcome, code) = match submit_envelope(paths, envelope)? {
         Submitted::Answered { reply } => (Some(reply), Outcome::Answered, EXIT_SUCCESS),

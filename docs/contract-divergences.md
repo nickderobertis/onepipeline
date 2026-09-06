@@ -3888,12 +3888,16 @@ present and two are present only when the envelope carried the half they name:
 
 ```json
 {
-  "reply": "the identifier in the channel; 0 where this process applied the commands itself and there was no queue to put them in",
-  "state": "delivered | applied | queued — the one word an older reader knows, naming whichever half the branch the envelope took is named for",
-  "verdict": "delivered — present only when the envelope carried a verdict half",
-  "commands": "applied | queued — present only when the envelope carried commands"
+  "reply": {"present": "always", "values": "a whole number"},
+  "state": {"present": "always", "values": ["delivered", "applied", "queued"]},
+  "verdict": {"present": "with a verdict half", "values": ["delivered"]},
+  "commands": {"present": "with commands", "values": ["applied", "queued"]}
 }
 ```
+
+`reply` is the identifier in the channel, and `0` where this process applied the
+commands itself and there was no queue to put them in. `state` names whichever
+half the branch the envelope took is named for.
 
 An **absent** key means the envelope carried no such half, which is a different
 statement from a half that was carried and did nothing: a receipt that named both
@@ -3918,6 +3922,7 @@ one question and could not tell from either receipt which had answered it.
 
 `src/driver.rs`'s `submit` is where the object is written, and the block above is
 its source: `channel::the_reply_receipt_names_each_half_the_envelope_carried`
-reads the four keys out of **this entry** and drives an envelope of each shape
-through the verb, so a key this record stops naming, or one the code stops
-answering, fails there rather than drifting.
+reads **this entry** — every key, the words each may answer, and which half each
+one's presence depends on — and drives an envelope of each shape through the
+verb, so a key, a word, or a presence rule that moves on either side fails there
+rather than drifting.
