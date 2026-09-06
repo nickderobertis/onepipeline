@@ -2204,41 +2204,17 @@ enum Submitted {
 /// named both halves always would make an envelope that gave a ruling
 /// indistinguishable from one that never carried it.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
-    let (reply, state, commands, code) = match submit_envelope(paths, envelope)? {
-        // Answered is the commandless branch's outcome and only it, so `None` is
-        // the shape of that fact rather than a value chosen beside it.
-        Submitted::Answered { reply } => (reply, ReplyState::Delivered, None, EXIT_SUCCESS),
-        // `0` is this process's own apply: there was no queue to put it in, so
-        // there is no id in the channel to name.
-        Submitted::AppliedHere { .. } => (
-            0,
-            ReplyState::Applied,
-            Some(CommandsBecame::Applied),
-            EXIT_SUCCESS,
-        ),
-        Submitted::AppliedByRun { reply } => (
-            reply,
-            ReplyState::Applied,
-            Some(CommandsBecame::Applied),
-            EXIT_SUCCESS,
-        ),
-        Submitted::Queued { reply } => (
-            reply,
-            ReplyState::Queued,
-            Some(CommandsBecame::Queued),
-            EXIT_QUEUED,
-        ),
+    let (reply, outcome, code) = match submit_envelope(paths, envelope)? {
+        Submitted::Answered { reply } => (Some(reply), Outcome::Answered, EXIT_SUCCESS),
+        // This process applied them itself, so there is no queue and no id in it.
+        Submitted::AppliedHere { .. } => (None, Outcome::Applied, EXIT_SUCCESS),
+        Submitted::AppliedByRun { reply } => (Some(reply), Outcome::Applied, EXIT_SUCCESS),
+        Submitted::Queued { reply } => (Some(reply), Outcome::Queued, EXIT_QUEUED),
     };
     let receipt = Receipt {
         reply,
-        state,
-        // A verdict that reached this point was queued, on every path the four
-        // outcomes above name, so which of them the envelope took says nothing
-        // about it.
-        verdict: envelope
-            .carries_verdict()
-            .then_some(VerdictBecame::Delivered),
-        commands,
+        outcome,
+        verdict: envelope.carries_verdict(),
     };
     println!(
         "{}",
@@ -2247,67 +2223,89 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     Ok(code)
 }
 
-/// The word the receipt's `state` names, which is one half's and never both.
+/// What became of a submitted envelope — **one** choice, which the receipt shows
+/// twice.
 ///
-/// Its spelling and its meaning are what they were before `verdict` and
-/// `commands` were added beside it: `delivered` is reached only from the
-/// commandless branch, so an envelope carrying commands spells `applied` or
-/// `queued` here and [`CommandsBecame`] repeats that under a name saying whose
-/// it is.
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ReplyState {
-    /// A verdict, queued for whichever reader the run owes one.
-    Delivered,
-    /// Every command applied, by this process or by the run's own reconciler.
-    Applied,
-    /// Accepted and durable, and not reconciled within the reply timeout.
-    Queued,
-}
-
-/// What became of an envelope's verdict half.
-///
-/// **One variant on purpose**: a verdict that reaches the receipt was queued, on
-/// every path [`submit`] can take, and the only other thing that can happen to
-/// one is a refusal — which is an error rather than a receipt. A second variant
-/// would spell an outcome no path reaches and every reader would still have to
+/// `state` and `commands` are not independent and are not modelled as though they
+/// were: `delivered` is reached only from the commandless branch, so a receipt
+/// pairing it with a commands outcome, or naming `applied` with no commands to
+/// have been applied, is a state this build cannot produce and cannot be asked to
 /// answer for.
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum VerdictBecame {
-    /// Queued for whichever reader the run owes a ruling.
-    Delivered,
-}
-
-/// What became of an envelope's commands half.
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum CommandsBecame {
-    /// Reconciled into the graph.
+#[derive(Clone, Copy)]
+enum Outcome {
+    /// A commandless verdict, queued for whichever reader the run owes one.
+    Answered,
+    /// Every command applied, by this process or by the run's own reconciler.
     Applied,
     /// Accepted and durable, and not reconciled within the reply timeout. Still
     /// queued: **not** an instruction to send it again.
     Queued,
 }
 
+impl Outcome {
+    /// The word `state` has spelled since before the two halves were named.
+    fn state(self) -> &'static str {
+        match self {
+            Self::Answered => "delivered",
+            Self::Applied => "applied",
+            Self::Queued => "queued",
+        }
+    }
+
+    /// The same word again where there were commands to have one, under a name
+    /// saying whose it is, and nothing where the envelope carried none.
+    fn commands(self) -> Option<&'static str> {
+        match self {
+            Self::Answered => None,
+            other => Some(other.state()),
+        }
+    }
+}
+
 /// `onepipeline reply`'s answer, whose shape [`submit`] states.
-///
-/// A struct rather than a map built key by key, so the two halves cannot be named
-/// with a word belonging to the other and an envelope's halves cannot be
-/// described by keys it did not carry: `None` is the absence of the half and is
-/// the only way to leave a key out.
-#[derive(serde::Serialize)]
 struct Receipt {
-    /// The identifier in the channel.
-    reply: u64,
-    /// The one word an older reader knows.
-    state: ReplyState,
-    /// Present only when the envelope carried a verdict half.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    verdict: Option<VerdictBecame>,
-    /// Present only when the envelope carried commands.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commands: Option<CommandsBecame>,
+    /// The identifier in the channel, and nothing where this process applied the
+    /// commands itself. The wire spells that absence `0`, which is what the
+    /// receipt has always answered there and is not a second identifier.
+    reply: Option<u64>,
+    /// What became of the envelope, from which both `state` and `commands` are
+    /// read.
+    outcome: Outcome,
+    /// Whether the envelope carried a verdict half at all. What became of one is
+    /// not a variable: a verdict that reaches a receipt was queued, on every path
+    /// [`submit`] can take, and the only other thing that happens to one is a
+    /// refusal — which is an error and never a receipt.
+    verdict: bool,
+}
+
+/// Written by hand rather than derived, because `state` and `commands` are two
+/// views of one [`Outcome`] and a derive would need them stored as two fields
+/// that could disagree.
+impl serde::Serialize for Receipt {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut receipt = serializer.serialize_map(None)?;
+        receipt.serialize_entry("reply", &self.reply.unwrap_or(0))?;
+        receipt.serialize_entry("state", self.outcome.state())?;
+        if self.verdict {
+            // **Delivery on this channel is acceptance**, which is the meaning
+            // `state: delivered` has carried for a commandless verdict since
+            // before this key existed: a planner writes when it has something to
+            // say and nothing has to be listening at that moment. The same half
+            // reaching the same queue is named the same word here, so the two
+            // keys cannot disagree about one half. Which reader then claims it is
+            // entry 63 of `docs/contract-divergences.md`, and is not something a
+            // receipt written at submission could answer.
+            receipt.serialize_entry("verdict", "delivered")?;
+        }
+        if let Some(commands) = self.outcome.commands() {
+            receipt.serialize_entry("commands", commands)?;
+        }
+        receipt.end()
+    }
 }
 
 /// Deliver one note through the channel's own path, and answer what the

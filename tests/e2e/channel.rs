@@ -4376,7 +4376,6 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         "the receipt named a command half the envelope never carried: {receipt}"
     );
 
-    // Commands alone.
     let commands_only = world.run_with_stdin(
         &["reply", &run],
         &json!({"version": 2, "commands": [note("the fixture moved")]}).to_string(),
