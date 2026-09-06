@@ -4113,3 +4113,190 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["source"], "proposal");
     assert_eq!(surface["blocking"], json!(false));
 }
+
+/// A verdict is taken by whichever listener is polling when it lands, and never
+/// by the question it names.
+///
+/// The reproduction behind this node, and it is a **finding about the channel**
+/// rather than about the reply path: the ruling below is queued exactly as the
+/// contract says, the manager's receipt says it was delivered, and the agent
+/// that asked never sees it. `ChannelState::claim_reply` hands the next reply to
+/// the next reader that asks for one, and every `channel serve` frame — a
+/// monitor's non-blocking narration included — is followed by a wait that asks.
+/// So a run with two listeners has two claimants for one ruling, and the
+/// question's own asker is not privileged among them.
+///
+/// Two candidates were weighed for the original observation, and this is the one
+/// that survives. The other was the listener re-arm that used to withdraw an
+/// open question, repaired in `v0.22.2` — but a withdrawn question does not
+/// explain a *queued* verdict going unread, because
+/// [`ChannelState::claim_reply`](onepipeline::channel) consults neither the
+/// pending slot nor the asker, and hands an unclaimed reply to the next poller
+/// whatever became of the surface. `a_question_survives_its_listener_being_
+/// replaced_and_the_verdict_reaches_the_asker` holds that repair; this journey
+/// runs *on top of* it and the ruling still reaches the wrong reader.
+///
+/// Deliberately not repaired here: addressing a verdict to an asker is a change
+/// to the channel contract's routing, which this node does not own. It is proven
+/// so that the next reader meets the behaviour rather than rediscovering it.
+#[test]
+fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-verdict-stolen");
+    world.script("build.wait", "hold");
+    let run = running(&world, "stolen", vec![agent("build", &[])]);
+    let worker = "the-dispatch-that-is-blocked";
+
+    // The blocking question, raised by a listener that then reaches its **own
+    // session bound** with the agent's stream still open. That ending withdraws
+    // nothing — the member is still there and still owed an answer — so what it
+    // leaves is the state the manager sees: a question the run is waiting on, an
+    // agent still blocked on it, and no listener of that agent polling.
+    let mut asking = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, worker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "2")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut blocked = asking.stdin.take().expect("stdin is piped");
+    writeln!(
+        blocked,
+        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    blocked.flush().expect("the frame flushes");
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let reached = asking.wait_with_output().expect("the session ends");
+    assert!(reached.status.success(), "{reached:?}");
+    assert!(
+        String::from_utf8_lossy(&reached.stderr).contains("ONEPIPELINE_SERVE_SESSION_SECONDS"),
+        "the listener ended some other way than on its bound: {}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+    world.run(&["next", &run]).exited(0).out_has("is this base");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — is this base still right?");
+
+    // And a listener of somebody else entirely — the monitor's own scoring
+    // session, which raised a narration nobody is waiting on and is now in the
+    // wait every frame is followed by.
+    let mut scoring = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, "the-monitors-scoring-session")
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut narrating = scoring.stdin.take().expect("stdin is piped");
+    writeln!(
+        narrating,
+        r#"{{"kind":"planner-question","message":"scoring the run","blocking":false}}"#
+    )
+    .expect("the frame is written");
+    narrating.flush().expect("the frame flushes");
+    world.until("the narration to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["message"] == "scoring the run")
+    });
+
+    // The manager answers the blocking question, and the receipt says delivered.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "message": "yes, that base is still right",
+                "reason": "answered the blocker",
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
+
+    // The scoring session read it. Nothing addressed it there; it was simply the
+    // reader that asked next.
+    let stolen = BufReader::new(scoring.stdout.take().expect("stdout is piped"))
+        .lines()
+        .next()
+        .expect("the scoring session wrote a line")
+        .expect("the line reads");
+    assert!(
+        stolen.contains("yes, that base is still right"),
+        "the scoring session read back something else: {stolen}"
+    );
+
+    // And every manager-visible indicator now says the question was answered:
+    // the slot was cleared by the same call that queued the ruling.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    // The blocked agent re-asks the identical question, and this time it is the
+    // reader holding the wait — so the manager's second, identical copy is the
+    // one that reaches it. That is the whole of the original observation.
+    let mut reasking = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, worker)
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut again = reasking.stdin.take().expect("stdin is piped");
+    writeln!(
+        again,
+        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    again.flush().expect("the frame flushes");
+    world.until("the question to be asked a second time", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["message"] == "is this base still right?")
+            .count()
+            >= 2
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "message": "yes, that base is still right",
+                "reason": "answered the blocker",
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let answered = BufReader::new(reasking.stdout.take().expect("stdout is piped"))
+        .lines()
+        .next()
+        .expect("the re-asking session wrote a line")
+        .expect("the line reads");
+    assert!(
+        answered.contains("yes, that base is still right"),
+        "the resend did not reach the asker either: {answered}"
+    );
+
+    drop(blocked);
+    drop(narrating);
+    drop(again);
+    world.release("build.go");
+    ended(scoring);
+    ended(reasking);
+}
