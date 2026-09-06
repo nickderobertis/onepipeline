@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–63 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–64 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 63 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 64 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -3873,3 +3873,51 @@ scoring session reading it back while `status` reports the question answered.
 **Why nothing here resolves it.** Addressing a verdict is a change to the routing
 the contract states, and 62's asker is the identity it would be addressed by — so
 the two entries are one decision, not two. Recorded rather than repaired.
+
+## 64. `reply` answers a JSON object the contract never states — OPEN
+
+**Proposal (for the planner who owns the contract): state `onepipeline reply`'s
+answer. The contract fixes its exit codes — "reply exit 0 = applied, 1 =
+accepted-not-yet-reconciled, 2 = refused/malformed" — and says nothing about the
+object the verb prints, which every caller reading more than an exit code parses.
+Either the contract states it, or it says outright that the body is this build's
+and not promised.**
+
+**What the code does.** One JSON object, always, on stdout. Two keys are always
+present and two are present only when the envelope carried the half they name:
+
+```json
+{
+  "reply": "the identifier in the channel; 0 where this process applied the commands itself and there was no queue to put them in",
+  "state": "delivered | applied | queued — the one word an older reader knows, naming whichever half the branch the envelope took is named for",
+  "verdict": "delivered — present only when the envelope carried a verdict half",
+  "commands": "applied | queued — present only when the envelope carried commands"
+}
+```
+
+An **absent** key means the envelope carried no such half, which is a different
+statement from a half that was carried and did nothing: a receipt that named both
+halves always would make an envelope that gave a ruling indistinguishable from
+one that never carried it. `reply` and `state` keep the spelling and the meaning
+they had before the other two existed, so a reader written against the older
+answer is unaffected — held by
+`channel::a_reader_of_the_older_receipt_still_reads_every_answer`, which
+deserializes each of the three shapes through a struct carrying only those two
+keys.
+
+`verdict` says `delivered` for the same reason `state` always has: **delivery on
+this channel is acceptance.** A planner writes when it has something to say and
+nothing has to be listening at that moment, so what a receipt written at
+submission can answer for is that the ruling reached the queue. Which reader then
+claims it is entry 63, and is not this key's to answer.
+
+**Why the two keys exist.** One `state` word describes one half, so an envelope
+that both ruled and edited reported whichever half its branch is named for and
+the other was invisible — during real supervision a manager sent two envelopes to
+one question and could not tell from either receipt which had answered it.
+
+`src/driver.rs`'s `submit` is where the object is written, and the block above is
+its source: `channel::the_reply_receipt_names_each_half_the_envelope_carried`
+reads the four keys out of **this entry** and drives an envelope of each shape
+through the verb, so a key this record stops naming, or one the code stops
+answering, fails there rather than drifting.

@@ -2177,32 +2177,13 @@ enum Submitted {
 
 /// Validate a reply, queue it, and report which of the four true things happened.
 ///
-/// # The receipt
-///
-/// **This is the authoritative statement of `onepipeline reply`'s answer.** It
-/// is stated once, here, where the answer is written; no consumer restates it,
-/// and a consumer that needs it reads it from here.
-///
-/// One JSON object, with two keys always present and two that are present only
-/// when the envelope carried the half they name:
-///
-/// - `reply` — the identifier in the channel, and `0` where this process applied
-///   the commands itself and there was no queue to put them in.
-/// - `state` — `delivered`, `applied`, or `queued`, spelled and meaning exactly
-///   what they did before the two keys below were added, so a reader written
-///   against the older answer is unaffected. It names **one** half, whichever the
-///   branch the envelope took is named for.
-/// - `verdict` — present only when the envelope carried a verdict half, and what
-///   became of it: `delivered`, the queue having taken it for whichever reader
-///   the run owes a ruling.
-/// - `commands` — present only when the envelope carried commands, and what
-///   became of them: `applied` or `queued`.
-///
-/// An **absent** key means the envelope carried no such half, which is a
-/// different statement from a half that was carried and did nothing. That is the
-/// whole of why they are omitted rather than spelled `none`: a receipt that
-/// named both halves always would make an envelope that gave a ruling
-/// indistinguishable from one that never carried it.
+/// The object this prints is stated once, in entry **64** of
+/// `docs/contract-divergences.md`, which is also the proposal putting it to the
+/// planner who owns the contract — the contract fixes this verb's exit codes and
+/// says nothing about its body. That entry's block is the source for the four
+/// keys and `channel::the_reply_receipt_names_each_half_the_envelope_carried`
+/// reads them out of it, so this code and that record cannot drift apart in
+/// silence. Nothing here restates them.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     let (reply, outcome, code) = match submit_envelope(paths, envelope)? {
         Submitted::Answered { reply } => (Some(reply), Outcome::Answered, EXIT_SUCCESS),
@@ -2214,7 +2195,11 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     let receipt = Receipt {
         reply,
         outcome,
-        verdict: envelope.carries_verdict(),
+        verdict: if envelope.carries_verdict() {
+            VerdictHalf::OnTheQueue
+        } else {
+            VerdictHalf::NotCarried
+        },
     };
     println!(
         "{}",
@@ -2271,11 +2256,40 @@ struct Receipt {
     /// What became of the envelope, from which both `state` and `commands` are
     /// read.
     outcome: Outcome,
-    /// Whether the envelope carried a verdict half at all. What became of one is
-    /// not a variable: a verdict that reaches a receipt was queued, on every path
-    /// [`submit`] can take, and the only other thing that happens to one is a
-    /// refusal — which is an error and never a receipt.
-    verdict: bool,
+    /// The verdict half, from which the `verdict` key is read.
+    verdict: VerdictHalf,
+}
+
+/// What became of an envelope's verdict half.
+///
+/// **Two variants and not three**: what happens to a verdict that reaches a
+/// receipt is not a variable — it was queued, on every path [`submit`] can take —
+/// so the only thing left to say is whether the envelope carried one. The other
+/// thing that can happen to a verdict is a refusal, which is an error and never a
+/// receipt.
+#[derive(Clone, Copy)]
+enum VerdictHalf {
+    /// The envelope carried none, so the receipt names none.
+    NotCarried,
+    /// Carried, and on the reply queue for whichever reader claims it.
+    OnTheQueue,
+}
+
+impl VerdictHalf {
+    /// The word the receipt writes, and nothing for the half it never carried.
+    ///
+    /// `delivered` for the same reason `state` has always spelled it so:
+    /// **delivery on this channel is acceptance**, a planner writing when it has
+    /// something to say with nothing obliged to be listening at that moment. So
+    /// the two keys cannot disagree about one half. Which reader then claims it
+    /// is entry 63 of `docs/contract-divergences.md`, and is not something a
+    /// receipt written at submission could answer.
+    fn word(self) -> Option<&'static str> {
+        match self {
+            Self::NotCarried => None,
+            Self::OnTheQueue => Some("delivered"),
+        }
+    }
 }
 
 /// Written by hand rather than derived, because `state` and `commands` are two
@@ -2290,16 +2304,8 @@ impl serde::Serialize for Receipt {
         let mut receipt = serializer.serialize_map(None)?;
         receipt.serialize_entry("reply", &self.reply.unwrap_or(0))?;
         receipt.serialize_entry("state", self.outcome.state())?;
-        if self.verdict {
-            // **Delivery on this channel is acceptance**, which is the meaning
-            // `state: delivered` has carried for a commandless verdict since
-            // before this key existed: a planner writes when it has something to
-            // say and nothing has to be listening at that moment. The same half
-            // reaching the same queue is named the same word here, so the two
-            // keys cannot disagree about one half. Which reader then claims it is
-            // entry 63 of `docs/contract-divergences.md`, and is not something a
-            // receipt written at submission could answer.
-            receipt.serialize_entry("verdict", "delivered")?;
+        if let Some(verdict) = self.verdict.word() {
+            receipt.serialize_entry("verdict", verdict)?;
         }
         if let Some(commands) = self.outcome.commands() {
             receipt.serialize_entry("commands", commands)?;

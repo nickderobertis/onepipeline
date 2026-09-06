@@ -4254,13 +4254,6 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     world.release("build.go");
 }
 
-/// A finding raised while nothing is driving the run reaches the planner all the
-/// same, applied by the `reply` that carried it.
-///
-/// Which side applies an edit is an accident of whether a driver happened to be
-/// alive, and both sides raise what the op compiled to — otherwise a watcher's
-/// finding would be silently swallowed by exactly the runs a planner is most
-/// likely to be away from.
 /// A verdict applied by `reply` itself, because nothing was driving the run, is
 /// recorded and named exactly as one the reconciler applied.
 ///
@@ -4318,6 +4311,13 @@ fn a_verdict_beside_commands_applied_with_nothing_driving_is_journalled_and_name
     );
 }
 
+/// A finding raised while nothing is driving the run reaches the planner all the
+/// same, applied by the `reply` that carried it.
+///
+/// Which side applies an edit is an accident of whether a driver happened to be
+/// alive, and both sides raise what the op compiled to — otherwise a watcher's
+/// finding would be silently swallowed by exactly the runs a planner is most
+/// likely to be away from.
 #[test]
 fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     let world = World::new("channel-finding-undriven");
@@ -4345,13 +4345,23 @@ fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     assert_eq!(surface["blocking"], json!(false));
 }
 
-/// The receipt `src/driver.rs`'s `submit` states, driven through the verb: three
-/// envelopes, one per shape a reply can take, and the answer each one produces.
+/// The four keys entry 64 of `docs/contract-divergences.md` states, read out of
+/// that entry and driven through the verb: three envelopes, one per shape a reply
+/// can take, and the answer each one produces.
 ///
-/// The manager who had sent two envelopes to one question could not tell from
-/// either receipt which of them had answered it.
+/// Read from the record rather than spelled here, so the record is the source: a
+/// key it stops naming, or one the code stops answering, fails this rather than
+/// drifting. The manager who had sent two envelopes to one question could not
+/// tell from either receipt which of them had answered it.
 #[test]
 fn the_reply_receipt_names_each_half_the_envelope_carried() {
+    let stated = receipt_keys_from_entry_64();
+    let (reply, state, verdict, commands) = (
+        stated[0].as_str(),
+        stated[1].as_str(),
+        stated[2].as_str(),
+        stated[3].as_str(),
+    );
     let world = World::new("channel-receipt-halves");
     world.script("build.wait", "hold");
     let run = running(&world, "receipted", vec![agent("build", &[])]);
@@ -4368,10 +4378,11 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
     );
     verdict_only.exited(0);
     let receipt = verdict_only.json();
-    assert_eq!(receipt["state"], "delivered");
-    assert_eq!(receipt["verdict"], "delivered");
+    assert!(receipt[reply].is_u64(), "{receipt}");
+    assert_eq!(receipt[state], "delivered");
+    assert_eq!(receipt[verdict], "delivered");
     assert_eq!(
-        receipt.get("commands"),
+        receipt.get(commands),
         None,
         "the receipt named a command half the envelope never carried: {receipt}"
     );
@@ -4382,10 +4393,10 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
     );
     commands_only.exited(0);
     let receipt = commands_only.json();
-    assert_eq!(receipt["state"], "applied");
-    assert_eq!(receipt["commands"], "applied");
+    assert_eq!(receipt[state], "applied");
+    assert_eq!(receipt[commands], "applied");
     assert_eq!(
-        receipt.get("verdict"),
+        receipt.get(verdict),
         None,
         "the receipt named a verdict half the envelope never carried: {receipt}"
     );
@@ -4404,11 +4415,45 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
     );
     both.exited(0);
     let receipt = both.json();
-    assert_eq!(receipt["state"], "applied");
-    assert_eq!(receipt["verdict"], "delivered");
-    assert_eq!(receipt["commands"], "applied");
+    assert_eq!(receipt[state], "applied");
+    assert_eq!(receipt[verdict], "delivered");
+    assert_eq!(receipt[commands], "applied");
 
     world.release("build.go");
+}
+
+/// The receipt's four keys, in the order entry 64 of
+/// `docs/contract-divergences.md` states them.
+///
+/// The entry's block is the source for what `onepipeline reply` answers — the
+/// approved contract fixes this verb's exit codes and not its body — so the
+/// journey above reads the keys from there rather than knowing them itself.
+/// `live_edit.rs`'s `from_entry_57` reads entry 57's fixtures the same way and
+/// for the same reason.
+fn receipt_keys_from_entry_64() -> Vec<String> {
+    let record = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+    )
+    .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("64."))
+        .expect("the divergence record still carries entry 64");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 64 carries the json block this journey drives");
+    let block: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(block).expect("entry 64's block is a JSON object");
+    let keys: Vec<String> = block.keys().cloned().collect();
+    assert_eq!(
+        keys.len(),
+        4,
+        "entry 64 names {} receipt keys, and this journey drives four: {keys:?}",
+        keys.len()
+    );
+    keys
 }
 
 /// And a reader that only knows the older answer still reads a correct result
@@ -4503,7 +4548,7 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
         .cmd(&["channel", "serve", &run])
         .env(onepipeline::channel::ASKER_ENV, worker)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
-        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "2")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
