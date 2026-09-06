@@ -376,6 +376,13 @@ fn leave_a_fragment(journal: &std::path::Path, bytes: usize) -> String {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two waits are the
+// reply timeout the *binary* reads, already set to its shortest useful value, and one of
+// the two branches under test is reached only by that timeout elapsing — there is no
+// cheaper arrangement of it. It belongs here with the journal's other two out-of-room
+// journeys, which is where a reader looks for one, and what it exercises is the ordering of
+// a channel write against a journal append: any change under `src/` can move that, so a
+// project edged narrower than the crate could not honestly run it.
 /// A ruling reaches the queue before the record of it, and a journal that cannot
 /// take the record answers the planner rather than reporting a success.
 ///
@@ -501,6 +508,7 @@ fn a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed() {
 
     world.release("build.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A writer that runs out of room mid-record leaves the store on a boundary.
 ///
