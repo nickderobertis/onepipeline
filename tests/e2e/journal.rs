@@ -376,6 +376,77 @@ fn leave_a_fragment(journal: &std::path::Path, bytes: usize) -> String {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A ruling reaches the queue before the record of it, and a journal that cannot
+/// take the record answers the planner rather than reporting a success.
+///
+/// The two writes are deliberately in that order: a verdict written down and
+/// then not queued would leave the run's record claiming a ruling no reader can
+/// ever be handed, which is the worse of the two half-states. So the queue goes
+/// first, and a failed record is a refusal naming the file — with the ruling
+/// durable, which is why the message has to say which file rather than reading
+/// as the reply having been turned away.
+#[cfg(unix)]
+#[test]
+fn a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_already_queued() {
+    let world = World::new("journal-verdict-ceiling");
+    // A run still going, so it has not settled and a commandless verdict is one
+    // it will still take.
+    world.script("build.wait", "hold");
+    let plan = world.plan(
+        "verdictceiling",
+        &plan_of("verdictceiling", vec![agent("build", &[])]),
+    );
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world
+            .events_of("verdictceiling", "node-dispatched")
+            .is_empty()
+    });
+
+    let journal = world.run_file("verdictceiling", "events.jsonl");
+    let before = std::fs::read_to_string(&journal).expect("the journal reads");
+    // The envelope is a file rather than stdin because the ceiling is set on a
+    // child this harness starts for it.
+    let envelope = world.root.join("verdict.json");
+    std::fs::write(
+        &envelope,
+        json!({"completion": false, "reason": "x".repeat(300)}).to_string(),
+    )
+    .expect("the envelope is written");
+
+    // Room for the channel's own small files — the reply queue and its cursor,
+    // written first — and not for another record on a journal several kilobytes
+    // long. The ceiling is on *every* file the process writes.
+    let refused = world.run_with_file_ceiling(
+        &["reply", "verdictceiling", &envelope.to_string_lossy()],
+        before.len() as u64 + 64,
+    );
+    refused.exited(REFUSED).err_has("events.jsonl");
+
+    // The ruling is on the queue all the same, which is what the refusal is
+    // about: the record of it is what would not fit.
+    let replies =
+        std::fs::read_to_string(world.run_file("verdictceiling", "channel/replies.jsonl"))
+            .expect("the reply queue reads");
+    assert!(
+        replies.contains("xxx"),
+        "the refusal took the ruling with it: {replies}"
+    );
+    // And the journal the loop is still writing is on a record boundary, with no
+    // fragment of the record that would not fit left in it.
+    let after = std::fs::read_to_string(&journal).expect("the journal reads");
+    assert!(after.ends_with('\n'), "the journal ends mid-record");
+    for line in after.lines() {
+        serde_json::from_str::<Value>(line)
+            .unwrap_or_else(|e| panic!("a fragment reached the store: {e}: {line}"));
+    }
+    assert!(
+        !after.contains("xxx"),
+        "the record that would not fit reached the journal anyway"
+    );
+    world.release("build.go");
+}
+
 /// A writer that runs out of room mid-record leaves the store on a boundary.
 ///
 /// `write_all` loops on short writes, and a full disk answers the first

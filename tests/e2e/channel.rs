@@ -4548,6 +4548,15 @@ fn a_reader_of_the_older_receipt_still_reads_every_answer() {
     world.release("build.go");
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey waits
+// on is a `channel serve` session reaching its own one-second bound, which is the state the
+// finding it proves is only visible in — an asker between listeners, its question still
+// owed an answer — and there is no cheaper way to arrange it: the bound is the binary's own
+// and a shorter one is not a unit this crate accepts. One second is what the two journeys
+// it sits beside already wait, and it belongs in this file with the rest of the channel's
+// routing, which any change under `src/` can move: a project edged narrower than the crate
+// could not honestly run it, and edging one around a single journey would split the
+// channel's behaviour across two projects to no reader's benefit.
 /// A verdict is taken by whichever listener is polling when it lands, and never
 /// by the question it names.
 ///
@@ -4723,3 +4732,4 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
     ended(scoring);
     ended(reasking);
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
