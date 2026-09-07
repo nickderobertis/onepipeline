@@ -2550,29 +2550,18 @@ mod tests {
     /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
     /// the requirement, are with the pin in `Cargo.toml`.
     ///
-    /// **What depends on it here.** [`crate::vcs::session_open`] is the only way
-    /// a lifecycle node's work gets a tree, and that tree is a linked worktree of
-    /// a clone this crate cuts and never touches again: every command a dispatch
-    /// runs inside it resolves the base by whichever spelling it was written
-    /// with. `onevcs` addresses its own comparisons from `origin/<base>`, so
-    /// below this floor the two spellings name two different commits inside one
-    /// worktree — the bare name standing where the *lender's* checkout happened
-    /// to stand when the clone was cut, which on a host whose execution checkout
-    /// outlives many sessions is however far behind that checkout has drifted.
-    /// A diff a dispatch takes against the bare name then counts already-landed
-    /// commits as its own work, which is `onevcs` #134's own account of it.
-    ///
     /// Driven through [`onevcs::Vcs::open_session`] against a real origin,
     /// because the carry itself is private — that library publishes no type for
     /// what became of the base — so what is asserted is the worktree a dispatch
-    /// is really handed rather than a return value.
+    /// is really handed, which [`crate::vcs::session_open`] is the only way to
+    /// get one of.
     ///
     /// Both halves, as with the floors above. **Forward:** a base behind
     /// origin's is brought up to it. And **not backward:** a base carrying a
     /// commit origin has never seen is unpushed work whose only other copy is
     /// the lender's, so a resolution that fast-forwarded over it would destroy
-    /// work silently — which is a worse failure than the one this floor exists
-    /// to end, and passes the first assertion.
+    /// work silently — a worse failure than the one this floor exists to end,
+    /// and one that passes the first assertion.
     ///
     /// One test for both, because `ONEVCS_HOME` is process-global and two would
     /// point it at two roots at once; [`crate::vcs::scratch_home_held`] is what
@@ -2691,9 +2680,7 @@ mod tests {
              names it without running the suite"
         );
 
-        // The other half: work origin has never seen is left exactly where it was
-        // found. The lender commits on its own base without pushing, so the local
-        // branch now carries a commit `origin/main` does not.
+        // The other half, which needs a base holding what origin does not.
         let unpushed = commit(
             &checkout,
             "unpushed.md",
