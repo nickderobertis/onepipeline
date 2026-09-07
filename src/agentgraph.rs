@@ -98,6 +98,16 @@ pub const DEFAULT_BINARY: &str = "oneagentgraph";
 /// makes a detached launch start at all.
 pub const DRIVE_VERB: &str = "drive";
 
+/// The flag that tells a retained [`drive`] its caller reads the ending off the
+/// graph's own record, so it may not exit before that record carries one.
+///
+/// Named here for the reason the verb is: [`retained_command`] spells it onto a
+/// command line and [`crate::cli`] parses it back off one, and a launch whose
+/// two spellings disagreed would be released inside the very interval the flag
+/// exists to close — silently, because the flag's whole effect is *when* the
+/// process goes.
+pub const AWAIT_ENDING_FLAG: &str = "--await-ending";
+
 /// Where `oneagentgraph` keeps its runs.
 ///
 /// Restated rather than imported, and that is a duplicated configuration
@@ -251,6 +261,27 @@ fn exit_for(error: &oneagentgraph::error::Error) -> i32 {
     match error {
         oneagentgraph::error::Error::InvalidConfig(_) => oneagentgraph::error::EXIT_INVALID_CONFIG,
         _ => oneagentgraph::error::EXIT_MEMBER_FAILED,
+    }
+}
+
+/// How a graph run the sibling itself waited out ended, as this crate reports it.
+///
+/// The *fallback* answer rather than the usual one: a run that announced its
+/// settlement is settled by that announcement, and this is what a run that
+/// ended without one leaves. A refusal is given the code the **process** path
+/// would have carried for it — the sibling's CLI turns its `Error` into an exit
+/// code and the library hands the `Error` over instead, so a caller of both has
+/// to apply that rule itself or the two paths settle the same graph differently.
+fn settled_by(ended: std::result::Result<i32, oneagentgraph::error::Error>) -> Settled {
+    match ended {
+        Ok(code) => Settled {
+            code: Some(code),
+            stderr: String::new(),
+        },
+        Err(error) => Settled {
+            code: Some(exit_for(&error)),
+            stderr: error.to_string(),
+        },
     }
 }
 
@@ -764,6 +795,55 @@ pub enum Environment {
     PerLaunch,
 }
 
+/// How this launch's **caller** learns that the graph has stopped.
+///
+/// Not a preference: it decides what the launch has to hold on to. The sibling
+/// emits `graph-settled` and only *then* stamps `finished_ms` onto its run
+/// record and writes it, so a launch released by the announcement alone is
+/// released inside that interval — and where the launch is a retained process,
+/// what is released reaches its own exit and takes the scheduler thread's
+/// unfinished write with it. A caller reading the record in there meets a graph
+/// that has said it is done and a record that does not say so; a caller reading
+/// it after such a teardown meets a record that never will.
+///
+/// So the launch that will be *read off its record* holds until that record is
+/// written, and the one whose caller settles on the envelope it relayed does
+/// not — which is what keeps a dispatch settling on its terminal event rather
+/// than on the graph's final teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ending {
+    /// The terminal envelope this launch relays. The caller is reading the
+    /// stream — every dispatch — and it has the graph's answer the moment the
+    /// graph gives it.
+    Announced,
+    /// The graph's own run record, and the process holding it. The observer's
+    /// launcher is the one caller that never waits for what it started: it
+    /// probes whether the graph is gone and reads the ending off the record, so
+    /// neither may say so before that record carries one.
+    Recorded,
+}
+
+/// One in-process graph launch, as [`GraphRun::in_library`] receives it.
+///
+/// The [`Launch`] both backends take, narrowed to what a library run needs and
+/// carrying the labels **already rendered** as the `k=v` pairs the sibling
+/// parses: [`drive`] receives them that way, because it is the retained process
+/// and what reached it came off a command line. [`GraphRun::start`] renders its
+/// own with [`label_args`], so both callers hand the sibling's parser the same
+/// spelling. A value rather than eight arguments, for the reason [`Launch`] is
+/// one.
+#[derive(Debug, Clone, Copy)]
+struct LibraryLaunch<'a> {
+    graph: &'a str,
+    task: &'a str,
+    dir: &'a Path,
+    labels: &'a [String],
+    env: &'a [(String, String)],
+    sets: &'a [String],
+    filter: Option<&'a EventFilter>,
+    ending: Ending,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     /// The agent-graph config to run.
@@ -789,6 +869,9 @@ pub struct Launch<'a> {
     pub filter: Option<&'a EventFilter>,
     /// Where the started graph's own output goes.
     pub output: GraphOutput<'a>,
+    /// How this launch's caller learns the graph has stopped, which is what
+    /// decides whether the launch is held until its record says so.
+    pub ending: Ending,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -897,6 +980,7 @@ fn retained_command(
     labels: &[String],
     sets: &[String],
     filter: Option<&EventFilter>,
+    ending: Ending,
 ) -> Result<Command> {
     let mut command = match overridden() {
         true => {
@@ -924,6 +1008,14 @@ fn retained_command(
             )?;
             let mut command = Command::new(exe);
             command.arg(DRIVE_VERB).arg(graph);
+            // A launch read off its record is one this process must not outlive
+            // its own write of. The sibling's `run` already blocks until it has
+            // written one, so the flag is this build's own `drive` and nothing
+            // is spelled onto an overridden binary's command line that it has
+            // never heard of.
+            if ending == Ending::Recorded {
+                command.arg(AWAIT_ENDING_FLAG);
+            }
             command
         }
     };
@@ -976,6 +1068,7 @@ impl ProcessGraphRun {
             &label_args(launch.labels),
             launch.sets,
             launch.filter,
+            launch.ending,
         )?;
         for (key, value) in launch.env {
             command.env(key, value);
@@ -1422,33 +1515,30 @@ impl GraphRun {
                 backend: GraphBackend::Process(run),
             });
         }
-        Self::in_library(
-            launch.graph,
-            launch.task,
-            launch.dir,
-            &label_args(launch.labels),
-            launch.env,
-            launch.sets,
-            launch.filter,
-        )
+        Self::in_library(&LibraryLaunch {
+            graph: launch.graph,
+            task: launch.task,
+            dir: launch.dir,
+            labels: &label_args(launch.labels),
+            env: launch.env,
+            sets: launch.sets,
+            filter: launch.filter,
+            ending: launch.ending,
+        })
     }
 
     /// Start a graph through the sibling library, in this process.
-    ///
-    /// Takes the labels already rendered as the `k=v` pairs the sibling parses,
-    /// because [`drive`] receives them that way: it is the retained process, and
-    /// what reached it came off a command line. [`start`](Self::start) renders
-    /// its own with [`label_args`], so both callers hand the sibling's parser
-    /// the same spelling.
-    fn in_library(
-        graph: &str,
-        task: &str,
-        dir: &Path,
-        labels: &[String],
-        env: &[(String, String)],
-        sets: &[String],
-        filter: Option<&EventFilter>,
-    ) -> Result<Self> {
+    fn in_library(launch: &LibraryLaunch<'_>) -> Result<Self> {
+        let LibraryLaunch {
+            graph,
+            task,
+            dir,
+            labels,
+            env,
+            sets,
+            filter,
+            ending,
+        } = *launch;
         let mut run_env = process_env();
         run_env.extend(env.iter().cloned());
         export(env);
@@ -1517,38 +1607,39 @@ impl GraphRun {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                // **The announcement is not the ending.** The sibling emits
+                // **The announcement is not the ending**, for a caller that
+                // reads the ending off the record. The sibling emits
                 // `graph-settled` and only *then* stamps its run record with
                 // `finished_ms` and writes it, so a relay that answered on the
                 // envelope alone released its caller inside that interval — and
-                // on the retained-process backend the caller is a whole process,
-                // which exits and takes the scheduler thread's unfinished write
-                // with it. A reader of the record in there meets a graph that
-                // has said it is done and a record that does not say so; a
-                // reader after a teardown in there meets a record that never
-                // will, which is what a view deciding whether anything is
-                // watching a run reads. So the answer is held until the
-                // sibling's own `wait` returns, which it does after that write.
+                // where that caller is a retained process, it exits and takes
+                // the scheduler thread's unfinished write with it. A reader of
+                // the record in there meets a graph that has said it is done and
+                // a record that does not say so; a reader after such a teardown
+                // meets a record that never will, which is what a view deciding
+                // whether anything is watching a run reads. So an
+                // [`Ending::Recorded`] launch is held until the sibling's own
+                // `wait` returns, which it does after that write.
+                //
+                // An [`Ending::Announced`] launch is not held, and that is the
+                // same decision rather than an exception to it: its caller
+                // settles on the terminal envelope it relayed, so it never reads
+                // that record — and holding it would make a dispatch wait out
+                // the graph's final teardown, which
+                // `a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_reaper_runs`
+                // is the journey against.
                 //
                 // The announcement still *supplies* the answer where there was
                 // one: it carries the exit code this crate reports for a settled
                 // graph, and what the wait adds is the ordering rather than a
                 // second opinion about how the run ended.
-                let settled = graph_settled.unwrap_or_else(|| match running.wait() {
-                    Ok(code) => Settled {
-                        code: Some(code),
-                        stderr: String::new(),
-                    },
-                    // A refusal, given the code the *process* path would have
-                    // carried for it. The sibling's CLI turns its `Error` into an
-                    // exit code and the library hands the `Error` over instead,
-                    // so a caller of both has to apply that rule itself or the
-                    // two paths settle the same graph differently.
-                    Err(error) => Settled {
-                        code: Some(exit_for(&error)),
-                        stderr: error.to_string(),
-                    },
-                });
+                let settled = match (graph_settled, ending) {
+                    (Some(announced), Ending::Announced) => announced,
+                    (announced, _) => {
+                        let ended = settled_by(running.wait());
+                        announced.unwrap_or(ended)
+                    }
+                };
                 thread_exited.store(true, Ordering::Release);
                 let _ = settled_tx.send(Ok(settled));
             })
@@ -1682,6 +1773,10 @@ impl GraphRun {
 ///
 /// A refusal is left to the caller — printed by the binary with every other one,
 /// into the launch log the launcher reads its evidence from.
+///
+/// `ending` is [`AWAIT_ENDING_FLAG`], parsed: it decides whether this process
+/// may exit on the graph's announcement or has to outlive the sibling's own
+/// write of the record its launcher reads. See [`Ending`].
 pub fn drive(
     graph: &str,
     task: &str,
@@ -1689,6 +1784,7 @@ pub fn drive(
     labels: &[String],
     sets: &[String],
     filter: Option<&str>,
+    ending: Ending,
 ) -> Result<i32> {
     use std::io::Write;
 
@@ -1696,7 +1792,16 @@ pub fn drive(
     // boundary, so the spec arrives as text and this is where it becomes a value
     // again — refused, with the offending matcher named, before a graph starts.
     let filter = filter.map(EventFilter::read).transpose()?;
-    let mut run = GraphRun::in_library(graph, task, dir, labels, &[], sets, filter.as_ref())?;
+    let mut run = GraphRun::in_library(&LibraryLaunch {
+        graph,
+        task,
+        dir,
+        labels,
+        env: &[],
+        sets,
+        filter: filter.as_ref(),
+        ending,
+    })?;
     let mut out = std::io::stdout();
     for envelope in run.events() {
         let envelope = envelope?;
@@ -2325,6 +2430,7 @@ mod tests {
             sets: &[],
             filter: None,
             output: GraphOutput::Relayed,
+            ending: Ending::Announced,
         });
         if let Ok(mut run) = started {
             run.cancel();

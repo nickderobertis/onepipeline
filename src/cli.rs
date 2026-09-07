@@ -378,6 +378,16 @@ pub struct DriveArgs {
     /// receives it.
     #[arg(long, value_name = "SPEC")]
     pub event_filter: Option<String>,
+    /// Hold this process open until the graph's own run record carries the
+    /// ending it stamps *after* announcing its settlement.
+    ///
+    /// What the launcher of an observer passes, because it reads that record
+    /// rather than the envelopes this process relays — see
+    /// [`crate::agentgraph::Ending`]. Spelled by `retained_command` and by
+    /// nobody else, so it is not an operator-facing flag; it is on this hidden
+    /// verb's argv because that argv is how a retained launch is told anything.
+    #[arg(long)]
+    pub await_ending: bool,
 }
 
 /// The channel's server side.
