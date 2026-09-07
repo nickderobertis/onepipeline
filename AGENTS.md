@@ -92,9 +92,10 @@ consuming `project.json` — an undeclared one silently drops that project out o
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
 - **The lock may not lag what the manifest already permits, and it resolves each
-  engine once.** Every pin in `[workspace.dependencies]` is declared at the newest
-  release the registry carries, and `just engines-current` fails on either
-  departure. Neither a tag, a changelog, nor a requirement says what a build
+  engine once.** A pin in `[workspace.dependencies]` is a floor, written at the
+  newest release the registry carried then; a sibling releasing inside that caret
+  moves the lock and not the requirement, and `just engines-current` fails on
+  either departure. Neither a tag, a changelog, nor a requirement says what a build
   contains; only the lock does — and where it carries an engine twice it does not
   say that either, because each copy is separately the newest its own requirement
   permits.

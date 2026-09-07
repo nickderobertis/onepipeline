@@ -2544,6 +2544,164 @@ mod tests {
         assert_eq!(read.schema_version, 1);
     }
 
+    /// The linked `onevcs` brings a session clone's own base branch up to the
+    /// `origin/<base>` ref the clone carries.
+    ///
+    /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
+    /// the requirement, are with the pin in `Cargo.toml`.
+    ///
+    /// The **subject** is this test's own concern. The carry is private — that
+    /// library publishes no type for what became of the base — so there is
+    /// nothing to assert a return value against, and what is read instead is the
+    /// worktree a dispatch is really handed, opened through
+    /// [`crate::vcs::session_open`] because that is the only way one is got.
+    ///
+    /// Both halves in one test, because `ONEVCS_HOME` is process-global and two
+    /// would point it at two roots at once; [`crate::vcs::scratch_home_held`] is
+    /// what they take turns through.
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] every failure below
+    // is a fixture step — a scratch directory, a `git` invocation, a session
+    // opened on it — and a `#[test]` has no caller to propagate one to: the panic
+    // *is* how a test reports that what it meant to assert against never got
+    // built, which is why every test in this module builds its fixture this way.
+    #[test]
+    fn the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it_and_not_off_work_origin_has_never_seen(
+    ) {
+        let _home = crate::vcs::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("op-sessionbase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("a scratch onevcs state root");
+        std::env::set_var("ONEVCS_HOME", &home);
+        // Hermetic git. `onevcs` cuts its clones in *this* process's environment,
+        // so a developer's own global configuration — a hooks path, a signing
+        // key, a commit template — would otherwise reach them.
+        let gitconfig = root.join("gitconfig");
+        std::fs::write(&gitconfig, "[core]\n\tlongpaths = true\n")
+            .expect("the scratch git config is written");
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        for (name, value) in [
+            ("GIT_AUTHOR_NAME", "onepipeline"),
+            ("GIT_COMMITTER_NAME", "onepipeline"),
+            ("GIT_AUTHOR_EMAIL", "onepipeline@example.invalid"),
+            ("GIT_COMMITTER_EMAIL", "onepipeline@example.invalid"),
+        ] {
+            std::env::set_var(name, value);
+        }
+
+        let git = |cwd: &Path, args: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} in {} failed: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let clone_of = |origin: &Path, name: &str| -> PathBuf {
+            git(&root, &["clone", &origin.to_string_lossy(), name]);
+            root.join(name)
+        };
+        let commit = |repo: &PathBuf, file: &str, subject: &str| -> String {
+            std::fs::write(repo.join(file), format!("{subject}\n"))
+                .expect("the working file is written");
+            git(repo, &["add", "-A"]);
+            git(repo, &["commit", "-m", subject]);
+            git(repo, &["rev-parse", "HEAD"])
+        };
+
+        let origin = root.join("origin.git");
+        std::fs::create_dir_all(&origin).expect("a scratch origin");
+        git(&origin, &["init", "--bare", "--initial-branch=main"]);
+        let checkout = clone_of(&origin, "service");
+        commit(&checkout, "README.md", "chore: seed the repository");
+        git(&checkout, &["push", "-u", "origin", "main"]);
+
+        // The identity a session is opened against. Hosted, as every registered
+        // identity on this host is, but nothing here asks a host for anything:
+        // the clone takes its remote from the *checkout*, which points at the
+        // bare origin above, so this journey stays on this disk.
+        let code = {
+            use clap::Parser;
+            onevcs::run(&onevcs::cli::Cli::parse_from([
+                "onevcs",
+                "register",
+                &checkout.to_string_lossy(),
+                "--origin",
+                "https://github.com/owner/service.git",
+            ]))
+        };
+        assert_eq!(code, 0, "onevcs refused to register the scratch checkout");
+
+        // Origin moves without the execution checkout's own `main` moving with
+        // it, which is every checkout a host opens sessions from: somebody
+        // else's change lands, and the lender's local branch stands where it
+        // stood until a person checks it out and pulls. A session's own `refresh`
+        // fetches, so what is stale by the time the clone is cut is exactly the
+        // local branch and nothing else.
+        let elsewhere = clone_of(&origin, "elsewhere");
+        let landed = commit(&elsewhere, "landed.md", "feat: land somebody else's change");
+        git(&elsewhere, &["push", "origin", "main"]);
+        assert_ne!(
+            landed,
+            git(&checkout, &["rev-parse", "main"]),
+            "the execution checkout's own base was not left behind, so this proves nothing"
+        );
+
+        let request = onevcs::SessionRequest {
+            repo: checkout.to_string_lossy().into_owned(),
+            branch: None,
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+        };
+        let opened = crate::vcs::session_open(&request).expect("a session opens on the checkout");
+
+        assert_eq!(
+            git(&opened.worktree, &["rev-parse", "origin/main"]),
+            landed,
+            "the session clone does not carry origin's own view of the base at all, so the \
+             assertion below would be about the wrong thing"
+        );
+        assert_eq!(
+            git(&opened.worktree, &["rev-parse", "main"]),
+            landed,
+            "the base a dispatch names inside its own worktree stands somewhere `origin/main` \
+             does not, so a diff taken against the bare name counts commits that already \
+             landed as this dispatch's own work. `Cargo.toml`'s requirement already permits \
+             a release above this floor, so a resolution failing here is behind the manifest \
+             too and `cargo update -p onevcs` is the whole of the fix; `just engines-current` \
+             names it without running the suite"
+        );
+
+        let unpushed = commit(
+            &checkout,
+            "unpushed.md",
+            "chore: work origin has never seen",
+        );
+        let second = crate::vcs::session_open(&request).expect("a second session opens");
+        assert_eq!(
+            git(&second.worktree, &["rev-parse", "main"]),
+            unpushed,
+            "a base carrying a commit origin has never seen was moved off it: that is unpushed \
+             work whose only other copy is the lender's, and carrying it forward is a fast \
+             forward this must refuse rather than perform"
+        );
+        assert_eq!(
+            git(&second.worktree, &["rev-parse", "origin/main"]),
+            landed,
+            "the session's view of origin's base was not what origin holds"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
+
     /// The `engineer` bar as the judge reviewing a dispatch is handed it, with
     /// its wrapping collapsed.
     ///
