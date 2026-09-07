@@ -3651,6 +3651,13 @@ fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
 /// macOS lane's `timed out waiting for the observer graph to write its ending`,
 /// and it is the record the `OBSERVER DEAD` verdict beside it is read off.
 ///
+/// What answers it is the launch saying which of the two its caller reads: an
+/// observer is launched `Ending::Recorded` and is held until the sibling's own
+/// wait returns, and the retained half carries that on its argv, so the `drive`
+/// child cannot exit inside the interval either. A dispatch stays
+/// `Ending::Announced` — see the journey named for its final reaper — so this
+/// journey and that one are the two halves of one decision.
+///
 /// **The interval is widened on purpose**, because a host that wins the race
 /// every time cannot observe it: the record's write is a plain `fs::write`, so
 /// standing a FIFO in the record's place holds that write at `open` for exactly
