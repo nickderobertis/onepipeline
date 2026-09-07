@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.3](https://github.com/nickderobertis/onepipeline/compare/v0.22.2...v0.22.3) - 2026-09-07
+
+### Fixed
+
+- *(deps)* resolve the newest sibling engines this build's requirements already permit ([#208](https://github.com/nickderobertis/onepipeline/pull/208))
+- *(channel)* hold a verdict carried beside commands to the allowlist, journal it, and report both halves ([#206](https://github.com/nickderobertis/onepipeline/pull/206))
+
 ## [0.22.2](https://github.com/nickderobertis/onepipeline/compare/v0.22.1...v0.22.2) - 2026-09-06
 
 ### Fixed
