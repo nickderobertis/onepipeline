@@ -31,7 +31,7 @@ use std::sync::Arc;
 use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
-use crate::agentgraph::{Environment, GraphOutput, GraphRun, Launch};
+use crate::agentgraph::{Ending, Environment, GraphOutput, GraphRun, Launch};
 use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -254,6 +254,10 @@ impl Executor for LocalExecutor {
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
+            // The dispatch settles on the terminal envelope this launch relays,
+            // which is the answer the graph gives before its own final teardown
+            // — so the launch is not held for the record nobody here reads.
+            ending: Ending::Announced,
         })?;
         // The run's registry of what it is running, and where. Recorded here
         // because this is the layer that knows: the executor is *where a

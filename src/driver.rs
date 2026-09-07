@@ -119,6 +119,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             &args.labels,
             &args.sets,
             args.event_filter.as_deref(),
+            match args.await_ending {
+                true => agentgraph::Ending::Recorded,
+                false => agentgraph::Ending::Announced,
+            },
         ),
     }
 }
@@ -1107,6 +1111,13 @@ fn launch_graph(
         // firehose and dropping most of it.
         filter: record.filters.agentgraph.as_ref(),
         output,
+        // Nothing here waits for the terminal envelope: a launcher is the one
+        // caller that never waits for what it started, and what a driver asks
+        // afterwards is whether the graph is gone — off the process it retained,
+        // and off the record `views::observer_liveness` reads. So this launch
+        // owes both of those the ending in its record before either may say it
+        // has stopped watching.
+        ending: agentgraph::Ending::Recorded,
     })?;
     // A launcher is the one caller that never waits for what it started, so a
     // graph that refused this launch would otherwise be reported as a running
