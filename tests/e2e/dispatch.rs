@@ -3667,6 +3667,12 @@ fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
 ///
 /// Unix only, because a FIFO is. The lane this exists for is macOS, which the
 /// matrix runs and which is unix.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] measured rather than assumed: run
+// with its neighbours (`-E 'binary(e2e) and test(observer)'`) this journey takes 2.7s, less than
+// five of the eighteen observer journeys beside it in the same target — `a_run_whose_observer_
+// graph_is_watching_and_then_is_killed_reads_as_each` is 4.2s and the channel journeys 6.9-8.9s.
+// The two-second window is the driver's own poll cadence forty times over, and the thirty-second
+// FIFO drain is the bound a *failing* run stops at, never spent on a passing one.
 #[cfg(unix)]
 #[test]
 fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
@@ -3716,9 +3722,13 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
 
     let graph_dir = world.graph_state().join(graph_run());
     let record = graph_dir.join(oneagentgraph::run::RECORD_FILE);
+    // llmlint: ignore[tests_mirror_real_usage] the interval this journey is about is the one
+    // between the graph's announcement and its own write of that record, and no user-facing
+    // surface can hold a write still: standing a FIFO in the path's place is the kernel's own
+    // rendezvous, met by the real `fs::write` any host would meet, and it is the only way a
+    // machine that wins the race every time can observe the state a macOS runner lost.
     interpose_a_fifo(&record);
 
-    // The graph settles: it announces, and then blocks writing the ending.
     world.release("observer.go");
     // Read off the observer's own output rather than the run's merged store: a
     // detached launch gives its observer a **file**, and what that file holds is
@@ -3737,6 +3747,14 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
     // which is what the `OBSERVER DEAD` verdict falls back on, and the driver's
     // line, which it writes once its observer's process is away. Neither may say
     // so while the ending is unwritten.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the view that renders this verdict is the
+    // one thing that cannot be asked here: `views::observer_liveness` reads it through
+    // `agentgraph::graph_run_ended`, which opens the record — the path this journey is holding
+    // a FIFO at — so a `runs` inside the interval would itself be the reader that releases the
+    // write and closes the window. `reclaimable` is the very call that verdict falls back on,
+    // read at the one moment the surface over it cannot answer; the surface itself is asserted
+    // below, once the ending is written.
     let gone = |world: &World| -> Option<String> {
         if oneagentgraph::scratch::reclaimable(&graph_dir).is_ok() {
             return Some(format!(
@@ -3749,6 +3767,7 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
         log.contains("has stopped watching")
             .then(|| format!("the driver said its observer had stopped watching:\n{log}"))
     };
+    // llmlint: ignore-end[tests_mirror_real_usage]
     // Watched for rather than sampled once: the driver polls on its own cadence,
     // so a single read taken the instant the announcement lands would pass
     // against a build that ends its observer there and had simply not been asked

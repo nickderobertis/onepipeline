@@ -1607,31 +1607,11 @@ impl GraphRun {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                // **The announcement is not the ending**, for a caller that
-                // reads the ending off the record. The sibling emits
-                // `graph-settled` and only *then* stamps its run record with
-                // `finished_ms` and writes it, so a relay that answered on the
-                // envelope alone released its caller inside that interval — and
-                // where that caller is a retained process, it exits and takes
-                // the scheduler thread's unfinished write with it. A reader of
-                // the record in there meets a graph that has said it is done and
-                // a record that does not say so; a reader after such a teardown
-                // meets a record that never will, which is what a view deciding
-                // whether anything is watching a run reads. So an
-                // [`Ending::Recorded`] launch is held until the sibling's own
-                // `wait` returns, which it does after that write.
-                //
-                // An [`Ending::Announced`] launch is not held, and that is the
-                // same decision rather than an exception to it: its caller
-                // settles on the terminal envelope it relayed, so it never reads
-                // that record — and holding it would make a dispatch wait out
-                // the graph's final teardown, which
-                // `a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_reaper_runs`
-                // is the journey against.
-                //
-                // The announcement still *supplies* the answer where there was
-                // one: it carries the exit code this crate reports for a settled
-                // graph, and what the wait adds is the ordering rather than a
+                // The ordering [`Ending`] describes, applied: a launch read
+                // off its record waits for the sibling's own `wait`, which
+                // returns after that record is written, and one settled on its
+                // announcement answers now. The announcement still supplies the
+                // answer where there was one — the wait adds the ordering, not a
                 // second opinion about how the run ended.
                 let settled = match (graph_settled, ending) {
                     (Some(announced), Ending::Announced) => announced,
