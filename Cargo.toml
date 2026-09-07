@@ -252,12 +252,15 @@ resolver = "2"
 #   between that library's own modules — and is taken because the block below
 #   admits no older release; `onevcs-testing` 0.5.5 requires exactly it.
 #
-# **Every pin in this block is declared at the newest release the registry
-# carries**, because this repository resolves no engine at two versions and so
-# has no older release for a looser requirement to serve. The `oneagentgraph`
-# floors below stay written down anyway: what a release carries is *why* a
-# resolution beneath it is a build this crate does not work, which no version
-# string says.
+# **A pin in this block is a floor, raised when this build needs a release its
+# own caret excludes** — and each was written at the newest release the registry
+# carried then, because this repository resolves no engine at two versions and so
+# has no older release for a looser requirement to serve. A sibling that releases
+# afterwards inside that caret moves the **lock** and not the requirement: the
+# requirement already admits it, so widening one changes nothing about what this
+# build links, and `just engines-current` is what holds the lock to it. The floors
+# below stay written down anyway: what a release carries is *why* a resolution
+# beneath it is a build this crate does not work, which no version string says.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -349,6 +352,26 @@ resolver = "2"
 # raw output. `oneharness-core` 0.11, because `crates/testfakes`'s double must
 # answer the `work` a report states or a failing turn reads to onejudge's
 # fallback as one that never started.
+#
+# `onevcs` 0.19.3 brings a **session clone's own base branch** up to the
+# `origin/<base>` ref the clone carries. That local branch came from the lender at
+# clone time and nothing moved it afterwards, so on a host whose execution
+# checkout outlives many sessions it stands wherever that checkout last happened
+# to stand — while every comparison `onevcs` itself makes is addressed from
+# `origin/<base>`. `src/vcs.rs`'s `session_open` is the only way a lifecycle
+# node's work gets a tree, and that tree is a linked worktree of exactly this
+# clone, so below the floor the two spellings of one base name two different
+# commits inside one dispatch's worktree: a diff taken against the bare name
+# counts already-landed commits as the dispatch's own work, which is the account
+# `onevcs` #134 was merged on and is a judged review of the wrong change rather
+# than a reading. Forward only — a base carrying a commit origin has never seen is
+# unpushed work whose only other copy is the lender's, so it is left where it was
+# found and named. `src/agentgraph.rs`'s
+# `the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it`
+# holds both halves against the linked library, driven through
+# `Vcs::open_session` against a real origin because the carry itself is private:
+# that library publishes no type for what became of the base. `onevcs-testing`
+# 0.5.6 requires `onevcs` 0.19.3, so the one resolution carries both.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
