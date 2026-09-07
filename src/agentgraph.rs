@@ -1517,7 +1517,25 @@ impl GraphRun {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                let settled = graph_settled.unwrap_or_else(|| match running.wait() {
+                // **The announcement is not the ending.** The sibling emits
+                // `graph-settled` and only *then* stamps its run record with
+                // `finished_ms` and writes it, so a relay that answered on the
+                // envelope alone released its caller inside that interval — and
+                // on the retained-process backend the caller is a whole process,
+                // which exits and takes the scheduler thread's unfinished write
+                // with it. A reader of the record in there meets a graph that
+                // has said it is done and a record that does not say so; a
+                // reader after a teardown in there meets a record that never
+                // will, which is what a view deciding whether anything is
+                // watching a run reads. So the answer is held until the
+                // sibling's own `wait` returns, which it does after that write.
+                //
+                // The announcement still *supplies* the answer where there was
+                // one: it carries the exit code this crate reports for a settled
+                // graph, and what the wait adds is the ordering rather than a
+                // second opinion about how the run ended.
+                let ended = running.wait();
+                let settled = graph_settled.unwrap_or_else(|| match ended {
                     Ok(code) => Settled {
                         code: Some(code),
                         stderr: String::new(),
