@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/nickderobertis/onepipeline/compare/v0.22.3...v0.23.0) - 2026-09-07
+
+### Fixed
+
+- *(observer)* stop reading a graph's ending from a record written after it settles ([#209](https://github.com/nickderobertis/onepipeline/pull/209))
+
 ## [0.22.3](https://github.com/nickderobertis/onepipeline/compare/v0.22.2...v0.22.3) - 2026-09-07
 
 ### Fixed
