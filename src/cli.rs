@@ -382,10 +382,13 @@ pub struct DriveArgs {
     /// ending it stamps *after* announcing its settlement.
     ///
     /// What the launcher of an observer passes, because it reads that record
-    /// rather than the envelopes this process relays — see
-    /// [`crate::agentgraph::Ending`]. Spelled by `retained_command` and by
-    /// nobody else, so it is not an operator-facing flag; it is on this hidden
-    /// verb's argv because that argv is how a retained launch is told anything.
+    /// rather than the envelopes this process relays — the engine's `Ending`
+    /// is where that is written down. Named in plain code rather than linked,
+    /// because the engine is private and this struct is public, and rustdoc
+    /// refuses that link under this repository's denied warnings. Spelled by
+    /// `retained_command` and by nobody else, so it is not an operator-facing
+    /// flag; it is on this hidden verb's argv because that argv is how a
+    /// retained launch is told anything.
     #[arg(long)]
     pub await_ending: bool,
 }
