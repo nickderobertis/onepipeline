@@ -367,7 +367,7 @@ resolver = "2"
 # than a reading. Forward only — a base carrying a commit origin has never seen is
 # unpushed work whose only other copy is the lender's, so it is left where it was
 # found and named. `src/agentgraph.rs`'s
-# `the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it`
+# `the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it_and_not_off_work_origin_has_never_seen`
 # holds both halves against the linked library, driven through
 # `Vcs::open_session` against a real origin because the carry itself is private:
 # that library publishes no type for what became of the base. `onevcs-testing`

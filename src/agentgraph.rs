@@ -2559,8 +2559,14 @@ mod tests {
     /// Both halves in one test, because `ONEVCS_HOME` is process-global and two
     /// would point it at two roots at once; [`crate::vcs::scratch_home_held`] is
     /// what they take turns through.
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] every failure below
+    // is a fixture step — a scratch directory, a `git` invocation, a session
+    // opened on it — and a `#[test]` has no caller to propagate one to: the panic
+    // *is* how a test reports that what it meant to assert against never got
+    // built, which is why every test in this module builds its fixture this way.
     #[test]
-    fn the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it() {
+    fn the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it_and_not_off_work_origin_has_never_seen(
+    ) {
         let _home = crate::vcs::scratch_home_held();
         let root = std::env::temp_dir().join(format!("op-sessionbase-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2673,7 +2679,6 @@ mod tests {
              names it without running the suite"
         );
 
-        // The other half, which needs a base holding what origin does not.
         let unpushed = commit(
             &checkout,
             "unpushed.md",
@@ -2695,6 +2700,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
 
     /// The `engineer` bar as the judge reviewing a dispatch is handed it, with
     /// its wrapping collapsed.
