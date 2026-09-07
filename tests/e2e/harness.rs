@@ -1135,6 +1135,39 @@ impl World {
         Repository { origin, checkout }
     }
 
+    /// Install a repository's **own `commit-msg` hook**: the subject policy every
+    /// publication into it is held to.
+    ///
+    /// The rule it states is the one this stack keeps meeting — a repository that
+    /// cuts a release for a feature, a fix, or a performance change, so a subject
+    /// of any other type merges green and never cuts one. It reads the subject
+    /// and nothing else, because that is the only thing there is to read where it
+    /// is asked: `onevcs` puts a change request's title to this hook with no
+    /// index, no diff and no branch, and so does the loader that refuses the
+    /// title before the dispatch is paid for.
+    ///
+    /// Through `core.hooksPath` for [`repository`](World::repository)'s reason —
+    /// a file in the tree would be published by the journeys that install it —
+    /// and set here as well as there, because a repository that installed no
+    /// `pre-push` hook has never had that setting written.
+    pub fn commit_msg_hook(&self, repository: &Repository) {
+        let hooks = hooks_dir(self);
+        std::fs::create_dir_all(&hooks).expect("a hooks directory");
+        let path = hooks.join("commit-msg");
+        std::fs::write(&path, COMMIT_MSG_POLICY).expect("the commit-msg hook is written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the commit-msg hook is executable");
+        }
+        git(
+            self,
+            &repository.checkout,
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+        );
+    }
+
     /// Commit a **release probe** into a repository, and say what it answers.
     ///
     /// The `script` form of a probe is a file the repository being released
@@ -3944,6 +3977,29 @@ const VERBATIM_ARGUMENTS: &str =
 /// Nothing: no runtime stands between this shell and the verb it starts.
 #[cfg(not(windows))]
 const VERBATIM_ARGUMENTS: &str = "";
+
+/// The `commit-msg` hook [`World::commit_msg_hook`] installs, whole.
+///
+/// A real script rather than an argv the way a `pre-push` hook is stated, because
+/// git hands this hook the path to the message and the policy is a fact about
+/// what is *in* that file. Written in the POSIX shell every hook in this suite is
+/// written in.
+///
+/// The refusal's wording is this repository-under-test's own and is asserted on by
+/// the journeys that install it: what the engine reports is whatever the hook
+/// said, verbatim, so a sentence composed anywhere but here would be one the
+/// engine had restated.
+pub const COMMIT_MSG_POLICY: &str = "\
+#!/bin/sh
+subject=$(sed -n '1p' \"$1\")
+case \"$subject\" in
+feat:* | fix:* | perf:*) exit 0 ;;
+'feat('* | 'fix('* | 'perf('*) exit 0 ;;
+esac
+echo \"commit-msg: this repository does not release from '${subject%%[(:]*}:', and every \
+commit here changes the deliverable: $subject\" >&2
+exit 1
+";
 
 /// Where a world keeps the repository's own hooks, which is what its checkout's
 /// `core.hooksPath` names.

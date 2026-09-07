@@ -1756,7 +1756,14 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");
     world.write_graphs();
-    let (engine_repo, _consumer) = two_repositories(&world);
+    // The consumer opens a change request, because its node is a `fast` one
+    // carrying a `consumes`: the pin it is launched against is temporary, the
+    // draft that holds it is a state of a change request, and the loader refuses
+    // that pair on an identity that opens none rather than letting the whole
+    // dispatch be paid for and then thrown away at the publication. Which
+    // repository the journey's own subject — a cross-DAG pin read off the
+    // upstream run's ledger — belongs to is untouched by that.
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&automated(&script));
     releases_at(&answer, "0.1.0");

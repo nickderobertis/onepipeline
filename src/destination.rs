@@ -1,0 +1,729 @@
+//! What a lifecycle node's **destination repository** says about it, asked
+//! before anything is dispatched.
+//!
+//! Every other rule the loader applies is identity-blind: it reads the plan
+//! document and nothing else. Two refusals cannot be made that way, because what
+//! decides them belongs to the repository the node publishes into — and both were
+//! being discovered at the *end* of a node, with the whole dispatch and its judge
+//! already paid for:
+//!
+//! * a `title` the destination repository's own `commit-msg` hook turns down, so
+//!   the publication is refused after the work is finished and passed; and
+//! * a non-empty [`consumes`](crate::plan::Node::consumes) on an identity that
+//!   publishes without opening a change request, where the draft that holds a
+//!   `fast` adoption's temporary pin has nothing to hold — which `onevcs` refuses
+//!   outright at the last step of the node.
+//!
+//! **The rules are the repository's, read where it states them.** The subject
+//! policy is that repository's own hook file, run the way git runs it, rather
+//! than a copy of which types it releases from kept here — a copy is what goes
+//! stale the first time a repository changes its mind, and it is the same reason
+//! the 120-character limit beside it is taken from `onevcs::provenance` rather
+//! than retyped. The publication policy is `onevcs`'s, read off its own
+//! resolution verbs.
+//!
+//! **Those verbs are spawned**, because at the pinned release the resolution they
+//! perform is on the command line and not on the library surface: nothing public
+//! answers a repository's publication checkout or the policy its rules file
+//! resolves to. `Cargo.toml` records that, and the finding asking `onevcs
+//! resolve` to carry the policy in its JSON — after which the prose read below
+//! retires — is with that sibling.
+//!
+//! **A question this host could not answer is never an accept.** A repository
+//! that does not resolve, a verb that is not installed, an answer this build
+//! cannot read: each of those is a node that was *not checked*, and the loader
+//! says so on stderr and loads the plan. Refusing there would refuse every plan
+//! whose repository this host has not registered, which is a plan that launches
+//! correctly today; passing silently would let a plan load looking like it had
+//! cleared a bar nobody applied.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use onevcs::{Adoption, MergePolicy};
+
+use crate::plan::{Node, Plan};
+use crate::refusal::Refusal;
+
+/// The environment variable naming the `onevcs` executable.
+///
+/// In this crate's namespace rather than `onevcs`'s own, for the reason
+/// [`crate::taskgraph::BINARY_ENV`] records about the other sibling: a product
+/// that reads its configuration from its own prefix would take `ONEVCS_BIN` for a
+/// setting called `bin`.
+pub const BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
+
+/// The executable's name when the environment names none.
+pub const DEFAULT_BINARY: &str = "onevcs";
+
+/// The hook git puts a commit message to, and the one `onevcs` puts a publication
+/// subject to.
+const COMMIT_MSG_HOOK: &str = "commit-msg";
+
+/// The line `onevcs rules check` states the resolved publication policy on.
+const PUBLICATION_LINE: &str = "publication:";
+
+/// Hold every lifecycle node of `plan` to what its destination repository says.
+///
+/// The first refusal wins, as it does everywhere else the loader refuses: a plan
+/// is corrected one thing at a time, and a list of them would be this crate
+/// deciding which of a repository's rules the author meant to break.
+///
+/// Each repository is resolved once however many nodes name it — a plan's nodes
+/// are commonly all in one — so a launch pays two subprocesses per repository
+/// rather than two per node.
+pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
+    let mut resolved: BTreeMap<String, Result<Destination, String>> = BTreeMap::new();
+    for node in &plan.tasks {
+        let Some(repo) = node.repo.as_deref() else {
+            continue;
+        };
+        // Nothing to ask about is not a node that went unchecked: a node stating
+        // no title and consuming nothing has neither of the two properties these
+        // rules are about, so a repository that does not resolve leaves it exactly
+        // as checked as it ever was.
+        if node.title.is_none() && node.consumes.is_empty() {
+            continue;
+        }
+        let destination = resolved
+            .entry(repo.to_owned())
+            .or_insert_with(|| resolve(repo));
+        let destination = match destination {
+            Ok(destination) => destination,
+            Err(why) => {
+                unchecked(&node.id, repo, why);
+                continue;
+            }
+        };
+        for asked in [
+            consumes_refusal(node, destination),
+            title_refusal(node, destination),
+        ] {
+            match asked {
+                Ok(Some(refusal)) => return Err(refusal),
+                Ok(None) => {}
+                Err(why) => unchecked(&node.id, repo, &why),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Say that one node was **not** held to its destination repository's rules.
+///
+/// On stderr, where every other diagnosis this binary makes goes, and in a
+/// sentence that says the check did not run rather than that it passed: the two
+/// readings are what this whole module exists to keep apart, and a plan that
+/// loaded in silence would carry the second one for free.
+fn unchecked(node: &str, repo: &str, why: &str) {
+    eprintln!(
+        "onepipeline: node '{node}': this build could not ask {repo} what it says about this \
+         node, so the plan loaded without that check having run — {why}"
+    );
+}
+
+/// What one repository answered about itself.
+struct Destination {
+    /// The identity key `onevcs` resolved the node's `repo` to.
+    identity: String,
+    /// Whether the identity's work publishes locally or through the remote host,
+    /// as the resolution verb spells it.
+    workflow: String,
+    /// The publication checkout, which is where this repository's own hooks are.
+    checkout: PathBuf,
+    /// The policy its rules file resolves it to, or why this build has no answer.
+    ///
+    /// Held apart from the resolution around it rather than sinking the whole of
+    /// it, because the two refusals need different halves: the subject policy
+    /// needs only the checkout, and a rules file this build could not read is no
+    /// reason to stop asking a repository's own hook about a title.
+    publication: std::result::Result<MergePolicy, String>,
+}
+
+/// The executable this process asks.
+fn binary() -> String {
+    std::env::var(BINARY_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_BINARY.to_owned())
+}
+
+/// Run one resolution verb and answer with its stdout, or why there is none.
+fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
+    let binary = binary();
+    let output = Command::new(&binary)
+        .args(verb)
+        .arg(repo)
+        .output()
+        .map_err(|error| {
+            format!(
+                "`{binary} {} {repo}` could not be run: {error} (set {BINARY_ENV} to an \
+                 executable one)",
+                verb.join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{binary} {} {repo}` refused: {}",
+            verb.join(" "),
+            one_line(&String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// One repository, as `onevcs`'s own resolution verbs answer for it.
+fn resolve(repo: &str) -> Result<Destination, String> {
+    let identity: serde_json::Value = serde_json::from_str(ask(&["resolve"], repo)?.trim())
+        .map_err(|error| format!("`onevcs resolve {repo}` did not answer JSON: {error}"))?;
+    let string = |key: &str| {
+        identity[key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("`onevcs resolve {repo}` states no {key}"))
+    };
+    Ok(Destination {
+        identity: string("identity")?,
+        workflow: string("workflow")?,
+        checkout: PathBuf::from(string("publication_checkout")?),
+        publication: ask(&["rules", "check"], repo)
+            .and_then(|reported| publication(repo, &reported)),
+    })
+}
+
+/// The publication policy `onevcs rules check` reported, off the line it states
+/// it on.
+///
+/// A prose read, deliberately and not happily: the policy is what decides whether
+/// a change request is opened at all, and no `onevcs` surface answers it as data
+/// at the pinned release. It is read defensively — the line must be there and the
+/// word on it must be one the sibling's own type accepts — so a reworded report
+/// becomes a node this build could not check rather than a node it waved through.
+fn publication(repo: &str, reported: &str) -> Result<MergePolicy, String> {
+    let stated = reported
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(PUBLICATION_LINE))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| {
+            format!("`onevcs rules check {repo}` states no `{PUBLICATION_LINE}` line")
+        })?;
+    // Through the sibling's own type, so what may spell a policy is its list
+    // rather than a second one here.
+    serde_json::from_value(serde_json::Value::String(stated.to_owned())).map_err(|_| {
+        format!("`onevcs rules check {repo}` states a publication policy this build does not know, '{stated}'")
+    })
+}
+
+/// The refusal a node earns for consuming releases it can never be held for.
+///
+/// Two conditions, and both are needed. The repository has to publish without
+/// opening a change request, because the draft `onevcs` refuses is a *state of a
+/// change request*. And the node's adoption has to be one that can still be
+/// holding a temporary pin when it publishes: a `published` node is not started
+/// until every release it consumes has arrived, so its reference rows all carry a
+/// version, [`crate::release::draft_reason`] asks for no draft, and it publishes
+/// here exactly as it publishes anywhere. That arm is why the sentence below
+/// names the adoption it resolved: the absence of this refusal is not a promise
+/// that any `consumes` on such an identity is safe.
+fn consumes_refusal(
+    node: &Node,
+    destination: &Destination,
+) -> std::result::Result<Option<Refusal>, String> {
+    // Asked in the order that needs the least. A node consuming nothing holds no
+    // pin whatever its repository publishes with, and one that narrowed to a
+    // change-* policy publishes under the one it named — so neither needs the
+    // resolved policy, and neither is reported as a node this build could not
+    // check for want of it.
+    if node.consumes.is_empty() || node.merge_policy.is_some_and(opens_a_change_request) {
+        return Ok(None);
+    }
+    let publication = destination.publication.clone()?;
+    if opens_a_change_request(publication) {
+        return Ok(None);
+    }
+    let adoption = crate::release::adoption_of(node);
+    if adoption == Adoption::Published {
+        return Ok(None);
+    }
+    let consumed = node
+        .consumes
+        .iter()
+        .map(|(dependency, target)| format!("{dependency}={target}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Some(
+        Refusal::node(
+            &node.id,
+            format!(
+                "it consumes the release targets {consumed}, and its repository {identity} \
+                 (workflow: {workflow}) publishes with {publication}, which opens no change \
+                 request at all — so there is nothing for the draft that holds this node's \
+                 temporary pin to be a state of, and `onevcs` refuses the publication outright \
+                 at the last step of the node. Its adoption resolves to `{adoption}`; a node \
+                 whose adoption resolves to `published` is not started until every release it \
+                 consumes has arrived, holds no temporary pin, and publishes here unrefused. \
+                 Adopt `published`, publish under a change-* policy, or drop `consumes`",
+                identity = destination.identity,
+                workflow = destination.workflow,
+                publication = spell(publication),
+                adoption = spell(adoption),
+            ),
+        )
+        .field("consumes"),
+    ))
+}
+
+/// Whether a publication under this policy opens a change request to draft.
+///
+/// One policy does not, and it is the one `onevcs` names when it refuses a draft:
+/// `local-direct` squashes the branch onto the base with git alone.
+fn opens_a_change_request(policy: MergePolicy) -> bool {
+    policy != MergePolicy::LocalDirect
+}
+
+/// How the sibling's own types spell one of their values.
+///
+/// Through serde rather than a `match`, so neither list is restated here.
+fn spell<T: serde::Serialize + std::fmt::Debug>(value: T) -> String {
+    serde_json::to_value(&value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{value:?}"))
+}
+
+/// The refusal a node earns for a title its destination repository turns down.
+///
+/// `Err` is the hook not having been *asked* — a checkout git cannot answer for,
+/// a hook that would not run — which is a node this build could not check rather
+/// than one whose repository was satisfied.
+fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusal>, String> {
+    let Some(title) = node
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(rejection) = ask_the_hook(&destination.checkout, title)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        Refusal::node(
+            &node.id,
+            format!(
+                "the repository {identity} turns this node's title down at its own \
+                 {COMMIT_MSG_HOOK} hook, so the publication this node ends with would be \
+                 refused with the whole dispatch already paid for. The title is {title:?}, and \
+                 the hook ({exit}) said:\n{said}",
+                identity = destination.identity,
+                exit = rejection.exit,
+                said = rejection.said,
+            ),
+        )
+        .field("title"),
+    ))
+}
+
+/// What a repository's own hook said when it turned a subject down.
+#[derive(Debug)]
+struct Rejected {
+    /// How the hook exited, which a rejection cannot have been nought.
+    exit: String,
+    /// Everything it wrote, both streams, whole.
+    said: String,
+}
+
+/// Put one title to a repository's own `commit-msg` hook, the way git puts a
+/// message to it.
+///
+/// `Ok(None)` covers both a hook that accepted and a repository that states no
+/// policy at all: git runs a `commit-msg` only where there is an executable one,
+/// so a repository without it is one this refusal has nothing to read, exactly as
+/// `onevcs` reads it at the publication.
+///
+/// Where the hook lives is git's own answer — `core.hooksPath` wherever the
+/// repository configures one — rather than a path composed here, so the file run
+/// is the file the repository's own `git commit` runs.
+fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String> {
+    let hooks = git_path(checkout, "hooks")?;
+    let hook = hooks.join(COMMIT_MSG_HOOK);
+    if !runnable(&hook)? {
+        return Ok(None);
+    }
+    let message = message_file(title)?;
+    let ran = Command::new(&hook)
+        .arg(&message)
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| {
+            format!(
+                "the {COMMIT_MSG_HOOK} hook at {} could not be run: {error}",
+                hook.display()
+            )
+        });
+    let _ = std::fs::remove_file(&message);
+    let ran = ran?;
+    if ran.status.success() {
+        return Ok(None);
+    }
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let said = said.trim();
+    Ok(Some(Rejected {
+        exit: match ran.status.code() {
+            Some(code) => format!("exit {code}"),
+            None => "killed by a signal".to_owned(),
+        },
+        said: if said.is_empty() {
+            "<no output>".to_owned()
+        } else {
+            said.to_owned()
+        },
+    }))
+}
+
+/// A path git owns for a checkout, resolved **by git** rather than composed here.
+///
+/// `--git-path hooks` is the one name git resolves against `core.hooksPath`, so
+/// asking it is the only way to get the answer a repository configured for
+/// itself.
+fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", name])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| {
+            format!(
+                "git could not be run in the publication checkout {}: {error}",
+                checkout.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "git does not answer for the publication checkout {}: {}",
+            checkout.display(),
+            one_line(&String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        checkout.join(path)
+    })
+}
+
+/// Whether git would run this file as a hook.
+///
+/// The executable bit, which is git's own test on this platform: a `commit-msg`
+/// that is there and not executable is one git skips, and skipping it here is
+/// what keeps this answer and the publication's the same.
+#[cfg(unix)]
+fn runnable(path: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file() && meta.permissions().mode() & 0o111 != 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        // A hook the filesystem will not answer for is not a hook that is absent:
+        // reading the second as the first is how a repository that does state a
+        // policy has none applied.
+        Err(error) => Err(format!(
+            "the {COMMIT_MSG_HOOK} hook at {} cannot be read: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Whether git would run this file as a hook.
+///
+/// Windows carries no executable bit, so presence is the test — which is what Git
+/// for Windows does too.
+#[cfg(not(unix))]
+fn runnable(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "the {COMMIT_MSG_HOOK} hook at {} cannot be read: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// The file the hook is handed, which is the single argument git hands it.
+///
+/// Named for this process and for this call, because several loads can be running
+/// on one host at once and a shared name is one of them reading another's title.
+fn message_file(title: &str) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "onepipeline-{COMMIT_MSG_HOOK}-{}-{}",
+        crate::sys::pid(),
+        ASKED.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, format!("{title}\n")).map_err(|error| {
+        format!(
+            "the message put to the hook could not be written to {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+/// One line of somebody else's output, for a sentence that carries it inline.
+fn one_line(said: &str) -> String {
+    let said = said.trim();
+    match said.lines().next() {
+        Some(first) if !first.is_empty() => first.to_owned(),
+        _ => "it said nothing".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The policy is read off the line the sibling states it on, and every other
+    /// answer is a node this build could not check.
+    ///
+    /// The refusals are the point. This read is prose, deliberately — no `onevcs`
+    /// surface answers the resolved policy as data at the pinned release — so what
+    /// keeps it honest is that anything it does not recognise becomes "could not
+    /// check" rather than an accept: a reworded report must never be able to turn a
+    /// real refusal into a silent pass.
+    #[test]
+    fn the_publication_policy_is_read_off_the_line_and_nothing_else_is_taken_for_one() {
+        let reported = "repo: github.com/owner/service\n\
+             identity: github.com/owner/service\n\
+             checkout: /tmp/service\n\
+             rules: /tmp/home/rules.yml\n\
+             matched: rule 1 {host: github.com, owner: owner, name: service}\n\
+             publication: local-direct (from rule 1)\n\
+             approvals: none (from rule 1)\n";
+        assert_eq!(
+            publication("service", reported).expect("the policy is read"),
+            MergePolicy::LocalDirect
+        );
+        assert_eq!(
+            publication("service", "publication: change-auto (from the default)\n")
+                .expect("the policy is read"),
+            MergePolicy::ChangeAuto
+        );
+
+        // A report with no such line at all — which is every rewording of it.
+        let missing = publication("service", "approvals: none\n").expect_err("no policy is stated");
+        assert!(
+            missing.contains("states no `publication:` line"),
+            "{missing}"
+        );
+
+        // A word on that line the sibling's own type does not accept. `approvals`
+        // sits on the line below and is a legal answer to a different question, so
+        // it is the value most likely to arrive here by a wiring mistake.
+        let unknown = publication("service", "publication: none (from rule 1)\n")
+            .expect_err("an unknown policy is not a policy");
+        assert!(unknown.contains("does not know, 'none'"), "{unknown}");
+    }
+
+    /// A refusal that carries somebody else's output inline carries one line of
+    /// it, and says so where there was none.
+    #[test]
+    fn a_borrowed_sentence_is_one_line_and_never_an_empty_one() {
+        assert_eq!(
+            one_line("  onevcs: no such identity\nand more\n"),
+            "onevcs: no such identity"
+        );
+        assert_eq!(one_line("   \n  \n"), "it said nothing");
+        assert_eq!(one_line(""), "it said nothing");
+    }
+
+    /// Both siblings' vocabularies are spelled by their own types.
+    #[test]
+    fn a_policy_and_an_adoption_are_spelled_by_the_types_that_own_them() {
+        assert_eq!(spell(MergePolicy::LocalDirect), "local-direct");
+        assert_eq!(spell(MergePolicy::ChangeAuto), "change-auto");
+        assert_eq!(spell(Adoption::Published), "published");
+        assert_eq!(spell(Adoption::Fast), "fast");
+    }
+
+    /// A destination this journey states, so the two refusal rules can be asked
+    /// about a repository without one being resolved.
+    fn destination(publication: MergePolicy) -> Destination {
+        Destination {
+            identity: "github.com/owner/service".to_owned(),
+            workflow: "remote".to_owned(),
+            checkout: PathBuf::from("/tmp/service"),
+            publication: Ok(publication),
+        }
+    }
+
+    fn consuming(adoption: Option<Adoption>) -> Node {
+        let mut node = Node {
+            id: "consumer".to_owned(),
+            repo: Some("service".to_owned()),
+            deps: vec!["engine".to_owned()],
+            adoption,
+            ..Node::default()
+        };
+        node.consumes
+            .insert("engine".to_owned(), "crate".parse().expect("a target name"));
+        node
+    }
+
+    /// The rule the `consumes` refusal actually applies, in its four arms.
+    ///
+    /// The two that refuse and the two that must not: a node with nothing to
+    /// consume has no pin to hold, and a repository that opens a change request has
+    /// something to draft. The `published` arm is the one worth stating — it is not
+    /// an oversight that it loads, and the sentence says so.
+    #[test]
+    fn a_consumes_is_refused_only_where_the_pin_it_holds_could_never_be_drafted() {
+        let refusal = consumes_refusal(&consuming(None), &destination(MergePolicy::LocalDirect))
+            .expect("the policy is known, so the rule is answerable")
+            .expect("a fast node consuming on a local-direct repository is refused");
+        assert_eq!(refusal.node.as_deref(), Some("consumer"));
+        assert_eq!(refusal.field.as_deref(), Some("consumes"));
+        for named in [
+            "node 'consumer'",
+            "engine=crate",
+            "github.com/owner/service",
+            "workflow: remote",
+            "local-direct",
+            "adoption resolves to `fast`",
+        ] {
+            assert!(
+                refusal.message.contains(named),
+                "the refusal does not name {named}: {}",
+                refusal.message
+            );
+        }
+
+        let loads = |why: &str, node: &Node, destination: &Destination| {
+            assert!(
+                consumes_refusal(node, destination)
+                    .expect("the rule is answerable")
+                    .is_none(),
+                "{why}"
+            );
+        };
+        loads(
+            "a published node holds no temporary pin, so it has nothing to draft and publishes",
+            &consuming(Some(Adoption::Published)),
+            &destination(MergePolicy::LocalDirect),
+        );
+        loads(
+            "a repository that opens a change request has something to draft",
+            &consuming(None),
+            &destination(MergePolicy::ChangeAuto),
+        );
+        let mut bare = consuming(None);
+        bare.consumes.clear();
+        loads(
+            "a node consuming nothing holds no pin",
+            &bare,
+            &destination(MergePolicy::LocalDirect),
+        );
+
+        // A node that **narrows** its repository's policy publishes under the one
+        // it named, and a change request is what it narrowed to.
+        let mut narrowed = consuming(None);
+        narrowed.merge_policy = Some(MergePolicy::ChangeOpen);
+        loads(
+            "a node that narrowed to a change-* policy opens a change request to draft",
+            &narrowed,
+            &destination(MergePolicy::LocalDirect),
+        );
+    }
+
+    /// A policy this build could not read is a node it could not check — and only
+    /// for the rule that needed the policy.
+    ///
+    /// The two rules are asked separately on purpose. A `rules check` that could
+    /// not be read says nothing about a repository's subject policy, so a title is
+    /// still put to that repository's own hook; and a node with nothing to consume,
+    /// or one that has narrowed to a change-* policy, is answered without the
+    /// policy at all rather than reported as unchecked for want of it.
+    #[test]
+    fn a_policy_this_build_could_not_read_is_reported_only_where_the_rule_needed_it() {
+        let unreadable = Destination {
+            identity: "github.com/owner/service".to_owned(),
+            workflow: "remote".to_owned(),
+            checkout: PathBuf::from("/tmp/service"),
+            publication: Err(
+                "`onevcs rules check service` states no `publication:` line".to_owned()
+            ),
+        };
+        let why = consumes_refusal(&consuming(None), &unreadable)
+            .expect_err("a rule that needs the policy cannot be answered without it");
+        assert!(why.contains("states no `publication:` line"), "{why}");
+
+        let mut bare = consuming(None);
+        bare.consumes.clear();
+        assert!(consumes_refusal(&bare, &unreadable)
+            .expect("a node consuming nothing needs no policy")
+            .is_none());
+        let mut narrowed = consuming(None);
+        narrowed.merge_policy = Some(MergePolicy::ChangeAuto);
+        assert!(consumes_refusal(&narrowed, &unreadable)
+            .expect("a node that named its own change-* policy needs no resolved one")
+            .is_none());
+    }
+
+    /// A hook that is not there is a repository stating no policy; a path that is
+    /// not a repository at all is a question this build could not ask.
+    #[test]
+    fn an_absent_hook_states_no_policy_and_a_directory_git_cannot_answer_for_is_not_a_verdict() {
+        let scratch = std::env::temp_dir().join(format!(
+            "onepipeline-destination-{}-{}",
+            crate::sys::pid(),
+            "nohook"
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+
+        assert!(
+            !runnable(&scratch.join(COMMIT_MSG_HOOK))
+                .expect("an absent hook is readable as absent"),
+            "a hook that is not there was read as one git would run"
+        );
+
+        // Not a git repository, so git answers for nothing here — which is a
+        // node that could not be checked rather than a title that passed.
+        let why = ask_the_hook(&scratch, "feat: x")
+            .expect_err("a directory that is no repository answers no verdict");
+        assert!(
+            why.contains(&scratch.display().to_string()),
+            "the refusal does not name the checkout it could not read: {why}"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The message put to the hook is written per call, so two loads on one host
+    /// never read each other's title.
+    #[test]
+    fn every_message_put_to_a_hook_is_its_own_file() {
+        let first = message_file("feat: one").expect("a message file");
+        let second = message_file("feat: two").expect("a second message file");
+        assert_ne!(first, second, "two calls shared one message file");
+        assert_eq!(
+            std::fs::read_to_string(&first).expect("the first is written"),
+            "feat: one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).expect("the second is written"),
+            "feat: two\n"
+        );
+        for path in [first, second] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}

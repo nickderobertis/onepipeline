@@ -8,10 +8,26 @@ resolver = "2"
 
 # The siblings this crate composes, pinned once for the whole workspace so both
 # members build against the same version. `onevcs` is *called* rather than
-# spawned, so nothing stands in for it; the `oneagentgraph` double still answers
-# out of the real crate's own types — it refuses what the real CLI refuses by
-# calling its parser — because a double that accepted more than the sibling is an
-# oracle for a build nothing runs.
+# spawned everywhere the library answers, so nothing stands in for it; the
+# `oneagentgraph` double still answers out of the real crate's own types — it
+# refuses what the real CLI refuses by calling its parser — because a double that
+# accepted more than the sibling is an oracle for a build nothing runs.
+#
+# **The two resolution verbs are the exception, and they are spawned.** At the pin
+# below, what `src/destination.rs` needs to hold a lifecycle node to its
+# destination repository before anything is dispatched — that repository's
+# publication checkout, so its own `commit-msg` hook can be run, and the merge
+# policy its rules file resolves to, so a `consumes` that can never be drafted is
+# refused — is on the command line and not on the library surface: `store::resolve`,
+# `policy::resolve` and `git::message_policy` are all private modules. So
+# `onevcs resolve` and `onevcs rules check` are run as subprocesses, at
+# `ONEPIPELINE_ONEVCS_BIN` or on the `PATH`. Nothing stands in for those either —
+# `tests/e2e/harness.rs` already builds and leads the `PATH` with the real
+# `onevcs` binary out of this very pin — and a verb that cannot be run or cannot
+# be read leaves the node reported as one this build could not check rather than
+# as one that passed. The finding asking `onevcs resolve` to carry the resolved
+# policy in the JSON it already prints is with that sibling; when it lands, the
+# `rules check` prose read retires and only the one verb is spawned.
 #
 # `oneagentgraph`'s floor is a **requirement**, and it is one about *this* build
 # rather than about any install: the dispatch path links the crate, so raising a
