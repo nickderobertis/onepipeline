@@ -354,24 +354,16 @@ resolver = "2"
 # fallback as one that never started.
 #
 # `onevcs` 0.19.3 brings a **session clone's own base branch** up to the
-# `origin/<base>` ref the clone carries. That local branch came from the lender at
-# clone time and nothing moved it afterwards, so on a host whose execution
-# checkout outlives many sessions it stands wherever that checkout last happened
-# to stand — while every comparison `onevcs` itself makes is addressed from
-# `origin/<base>`. `src/vcs.rs`'s `session_open` is the only way a lifecycle
-# node's work gets a tree, and that tree is a linked worktree of exactly this
-# clone, so below the floor the two spellings of one base name two different
-# commits inside one dispatch's worktree: a diff taken against the bare name
-# counts already-landed commits as the dispatch's own work, which is the account
-# `onevcs` #134 was merged on and is a judged review of the wrong change rather
-# than a reading. Forward only — a base carrying a commit origin has never seen is
-# unpushed work whose only other copy is the lender's, so it is left where it was
-# found and named. `src/agentgraph.rs`'s
+# `origin/<base>` ref the clone carries — forward only, because a base holding a
+# commit origin has never seen is unpushed work whose only other copy is the
+# lender's. Every lifecycle node's tree is a worktree of such a clone, and every
+# comparison `onevcs` makes is addressed from `origin/<base>`, so below this floor
+# the two spellings of one base name two different commits inside one dispatch's
+# worktree and a diff taken against the bare name counts already-landed commits as
+# that dispatch's own work. `src/agentgraph.rs`'s
 # `the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it_and_not_off_work_origin_has_never_seen`
-# holds both halves against the linked library, driven through
-# `Vcs::open_session` against a real origin because the carry itself is private:
-# that library publishes no type for what became of the base. `onevcs-testing`
-# 0.5.6 requires `onevcs` 0.19.3, so the one resolution carries both.
+# holds both halves against the linked library. `onevcs-testing` 0.5.6 requires
+# `onevcs` 0.19.3, so the one resolution carries both.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
