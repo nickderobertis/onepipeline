@@ -91,6 +91,13 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
+- **A check the loader could not run says so; it never passes quietly.** Two of
+  its refusals are the destination repository's own rules — its `commit-msg`
+  hook, and the policy `onevcs` resolves it to — so a repository this host cannot
+  answer for leaves them unasked. That is a node reported on stderr as **not
+  checked** and a plan that loads, never an accept: refusing an unregistered
+  repository would refuse plans that launch correctly today, and loading in
+  silence would let one look as though it had cleared a bar nobody applied.
 - **The lock may not lag what the manifest already permits, and it resolves each
   engine once.** A pin in `[workspace.dependencies]` is a floor, written at the
   newest release the registry carried then; a sibling releasing inside that caret

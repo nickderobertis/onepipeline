@@ -707,6 +707,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// A repository's own hook, asked about three titles in a real checkout.
+    ///
+    /// The one arm worth stating on its own is the **silent** refusal: a hook that
+    /// exits non-zero and writes nothing has still turned the title down, and a
+    /// refusal that carried an empty quotation would read as one nobody made.
+    ///
+    /// Unix-only for the reason [`ask_the_hook`]'s callers are: a `#!` script is
+    /// started directly here, exactly as `onevcs` starts it at the publication.
+    #[cfg(unix)]
+    #[test]
+    fn a_repositorys_own_hook_answers_for_each_title_it_is_put() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let checkout = std::env::temp_dir().join(format!(
+            "onepipeline-destination-hook-{}",
+            crate::sys::pid()
+        ));
+        let _ = std::fs::remove_dir_all(&checkout);
+        std::fs::create_dir_all(&checkout).expect("a checkout to ask");
+        let git = |args: &[&str]| {
+            let ran = Command::new("git")
+                .args(args)
+                .current_dir(&checkout)
+                .output()
+                .expect("git runs");
+            assert!(ran.status.success(), "git {args:?}: {ran:?}");
+        };
+        git(&["init", "--initial-branch=main"]);
+
+        // Where this repository keeps its hooks is its own business, and
+        // `core.hooksPath` is how it says so — the setting the answer has to be
+        // read through rather than around.
+        let hooks = checkout.join("policy-hooks");
+        std::fs::create_dir_all(&hooks).expect("a hooks directory");
+        git(&["config", "core.hooksPath", "policy-hooks"]);
+
+        // Nothing installed yet: the repository states no subject policy.
+        assert!(
+            ask_the_hook(&checkout, "refactor(x): y")
+                .expect("a repository with no hook answers")
+                .is_none(),
+            "a repository with no commit-msg hook acquired one by being asked"
+        );
+
+        let install = |body: &str| {
+            let path = hooks.join(COMMIT_MSG_HOOK);
+            std::fs::write(&path, body).expect("the hook is written");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the hook is executable");
+        };
+
+        install(
+            "#!/bin/sh\ngrep -q '^feat' \"$1\" && exit 0\necho 'only feat: here' >&2\nexit 3\n",
+        );
+        assert!(
+            ask_the_hook(&checkout, "feat: ship it")
+                .expect("the hook runs")
+                .is_none(),
+            "a title this repository releases from was turned down"
+        );
+        let rejected = ask_the_hook(&checkout, "refactor(x): y")
+            .expect("the hook runs")
+            .expect("a title this repository does not release from is turned down");
+        assert_eq!(rejected.exit, "exit 3");
+        assert_eq!(rejected.said, "only feat: here");
+
+        // A hook that refuses and says nothing has still refused.
+        install("#!/bin/sh\nexit 1\n");
+        let silent = ask_the_hook(&checkout, "feat: ship it")
+            .expect("the hook runs")
+            .expect("a silent refusal is still a refusal");
+        assert_eq!(silent.exit, "exit 1");
+        assert_eq!(
+            silent.said, "<no output>",
+            "a refusal nobody can read must say that it said nothing"
+        );
+
+        // A hook git would not run — present, and not executable — is a
+        // repository stating no policy, because that is what git makes of it.
+        let path = hooks.join(COMMIT_MSG_HOOK);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("the hook is made unrunnable");
+        assert!(
+            ask_the_hook(&checkout, "refactor(x): y")
+                .expect("a hook git would skip answers")
+                .is_none(),
+            "a hook git would skip was run anyway"
+        );
+
+        let _ = std::fs::remove_dir_all(&checkout);
+    }
+
     /// The message put to the hook is written per call, so two loads on one host
     /// never read each other's title.
     #[test]
