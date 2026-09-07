@@ -1534,8 +1534,7 @@ impl GraphRun {
                 // one: it carries the exit code this crate reports for a settled
                 // graph, and what the wait adds is the ordering rather than a
                 // second opinion about how the run ended.
-                let ended = running.wait();
-                let settled = graph_settled.unwrap_or_else(|| match ended {
+                let settled = graph_settled.unwrap_or_else(|| match running.wait() {
                     Ok(code) => Settled {
                         code: Some(code),
                         stderr: String::new(),
