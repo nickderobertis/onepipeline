@@ -22,12 +22,25 @@
 //! than retyped. The publication policy is `onevcs`'s, read off its own
 //! resolution verbs.
 //!
-//! **Those verbs are spawned**, because at the pinned release the resolution they
-//! perform is on the command line and not on the library surface: nothing public
-//! answers a repository's publication checkout or the policy its rules file
-//! resolves to. `Cargo.toml` records that, and the finding asking `onevcs
-//! resolve` to carry the policy in its JSON — after which the prose read below
-//! retires — is with that sibling.
+//! **Those verbs are spawned**, and everywhere else in this crate `onevcs` is
+//! called. At the pinned release the resolution they perform is on the command
+//! line and not on the library surface — `store::resolve`, `policy::resolve` and
+//! `git::message_policy` are private modules — so neither the publication
+//! checkout nor the resolved policy can be had any other way. Spawning a
+//! sibling's own published verb is not standing in for it; nothing is
+//! substituted, and `tests/e2e/harness.rs` already builds and leads the `PATH`
+//! with the real `onevcs` binary out of this same pin. The finding asking
+//! `onevcs resolve` to carry the policy in the JSON it already prints is with
+//! that sibling; when it lands, [`publication`]'s prose read retires and only
+//! the one verb is spawned.
+//!
+//! **It stays inside this crate's own project rather than becoming one.** What
+//! is spawned is not a command this tool exposes and not a client of a live
+//! service: it is two offline reads of a sibling this crate is already built
+//! around, made *by the loader*, so a change to the loader is exactly the change
+//! that has to re-run these journeys. Edged into a project of its own it would
+//! have to declare a dependency back on the one it was split from to stay in
+//! `nx affected` at all, and this crate is one Rust build unit besides.
 //!
 //! **A question this host could not answer is never an accept.** A repository
 //! that does not resolve, a verb that is not installed, an answer this build
@@ -123,15 +136,38 @@ fn unchecked(node: &str, repo: &str, why: &str) {
     );
 }
 
+/// The three fields of `onevcs resolve`'s answer this loader reads, as the
+/// **shape** they arrive in rather than as keys probed off an untyped document.
+///
+/// A subprocess's stdout is external input, so it is deserialized at the boundary
+/// and every field is typed: an absent key, a key of the wrong type, and a
+/// `workflow` outside the sibling's own enum are each refused by serde, in serde's
+/// own words, before anything downstream can read them. The verb prints more keys
+/// than these — an alias, a repo type, a gate — and they are ignored rather than
+/// refused, because a *newer* `onevcs` printing a fourth is one this build must go
+/// on reading.
+#[derive(serde::Deserialize)]
+struct Resolved {
+    /// The identity key `onevcs` resolved the node's `repo` to.
+    // llmlint: ignore[invalid_states_unrepresentable] a repository identity is a `String`
+    // on every surface `onevcs` publishes — `registry::Identity::origin`,
+    // `SessionHolder::identity`, `RepositoryReleases::identity` — and this crate already
+    // carries one as a `String` beside them, in `release::CrossRepoReference::repository`.
+    // A newtype here would be *this* crate minting a second vocabulary for a value the
+    // sibling owns and hands back, which is the identity chain AGENTS.md says stays in
+    // that crate. What is checkable here is that the sibling stated one at all, and
+    // `resolve` refuses a blank.
+    identity: String,
+    /// Whether the identity's work publishes locally or through the remote host.
+    workflow: onevcs::registry::Workflow,
+    /// The publication checkout, which is where this repository's own hooks are.
+    publication_checkout: PathBuf,
+}
+
 /// What one repository answered about itself.
 struct Destination {
-    /// The identity key `onevcs` resolved the node's `repo` to.
-    identity: String,
-    /// Whether the identity's work publishes locally or through the remote host,
-    /// as the resolution verb spells it.
-    workflow: String,
-    /// The publication checkout, which is where this repository's own hooks are.
-    checkout: PathBuf,
+    /// What the resolution verb stated, at the shape it stated it in.
+    resolved: Resolved,
     /// The policy its rules file resolves it to, or why this build has no answer.
     ///
     /// Held apart from the resolution around it rather than sinking the whole of
@@ -175,19 +211,17 @@ fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
 
 /// One repository, as `onevcs`'s own resolution verbs answer for it.
 fn resolve(repo: &str) -> Result<Destination, String> {
-    let identity: serde_json::Value = serde_json::from_str(ask(&["resolve"], repo)?.trim())
-        .map_err(|error| format!("`onevcs resolve {repo}` did not answer JSON: {error}"))?;
-    let string = |key: &str| {
-        identity[key]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| format!("`onevcs resolve {repo}` states no {key}"))
-    };
+    let resolved: Resolved =
+        serde_json::from_str(ask(&["resolve"], repo)?.trim()).map_err(|error| {
+            format!("`onevcs resolve {repo}` did not answer the shape this build reads: {error}")
+        })?;
+    // The one thing the shape cannot say: an identity is what every refusal below
+    // names the repository by, and a blank one names nothing.
+    if resolved.identity.trim().is_empty() {
+        return Err(format!("`onevcs resolve {repo}` states a blank identity"));
+    }
     Ok(Destination {
-        identity: string("identity")?,
-        workflow: string("workflow")?,
-        checkout: PathBuf::from(string("publication_checkout")?),
+        resolved,
         publication: ask(&["rules", "check"], repo)
             .and_then(|reported| publication(repo, &reported)),
     })
@@ -266,8 +300,8 @@ fn consumes_refusal(
                  whose adoption resolves to `published` is not started until every release it \
                  consumes has arrived, holds no temporary pin, and publishes here unrefused. \
                  Adopt `published`, publish under a change-* policy, or drop `consumes`",
-                identity = destination.identity,
-                workflow = destination.workflow,
+                identity = destination.resolved.identity,
+                workflow = spell(destination.resolved.workflow),
                 publication = spell(publication),
                 adoption = spell(adoption),
             ),
@@ -308,7 +342,7 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
     else {
         return Ok(None);
     };
-    let Some(rejection) = ask_the_hook(&destination.checkout, title)? else {
+    let Some(rejection) = ask_the_hook(&destination.resolved.publication_checkout, title)? else {
         return Ok(None);
     };
     Ok(Some(
@@ -319,7 +353,7 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
                  {COMMIT_MSG_HOOK} hook, so the publication this node ends with would be \
                  refused with the whole dispatch already paid for. The title is {title:?}, and \
                  the hook ({exit}) said:\n{said}",
-                identity = destination.identity,
+                identity = destination.resolved.identity,
                 exit = rejection.exit,
                 said = rejection.said,
             ),
@@ -558,10 +592,17 @@ mod tests {
     /// about a repository without one being resolved.
     fn destination(publication: MergePolicy) -> Destination {
         Destination {
-            identity: "github.com/owner/service".to_owned(),
-            workflow: "remote".to_owned(),
-            checkout: PathBuf::from("/tmp/service"),
+            resolved: resolved(),
             publication: Ok(publication),
+        }
+    }
+
+    /// What the resolution verb stated, as this journey states it.
+    fn resolved() -> Resolved {
+        Resolved {
+            identity: "github.com/owner/service".to_owned(),
+            workflow: onevcs::registry::Workflow::Remote,
+            publication_checkout: PathBuf::from("/tmp/service"),
         }
     }
 
@@ -654,9 +695,7 @@ mod tests {
     #[test]
     fn a_policy_this_build_could_not_read_is_reported_only_where_the_rule_needed_it() {
         let unreadable = Destination {
-            identity: "github.com/owner/service".to_owned(),
-            workflow: "remote".to_owned(),
-            checkout: PathBuf::from("/tmp/service"),
+            resolved: resolved(),
             publication: Err(
                 "`onevcs rules check service` states no `publication:` line".to_owned()
             ),

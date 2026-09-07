@@ -4001,6 +4001,16 @@ commit here changes the deliverable: $subject\" >&2
 exit 1
 ";
 
+/// The `commit-msg` hook [`World::commit_msg_hook`] installed, as a path.
+///
+/// A journey that makes the repository's own hook *unrunnable* — the two states
+/// git tells apart, present-but-not-executable and executable-but-unstartable —
+/// edits the file this returns rather than composing a second guess at where it
+/// went.
+pub fn commit_msg_hook(world: &World) -> PathBuf {
+    hooks_dir(world).join("commit-msg")
+}
+
 /// Where a world keeps the repository's own hooks, which is what its checkout's
 /// `core.hooksPath` names.
 ///
