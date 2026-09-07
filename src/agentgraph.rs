@@ -2550,22 +2550,15 @@ mod tests {
     /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
     /// the requirement, are with the pin in `Cargo.toml`.
     ///
-    /// Driven through [`onevcs::Vcs::open_session`] against a real origin,
-    /// because the carry itself is private — that library publishes no type for
-    /// what became of the base — so what is asserted is the worktree a dispatch
-    /// is really handed, which [`crate::vcs::session_open`] is the only way to
-    /// get one of.
+    /// The **subject** is this test's own concern. The carry is private — that
+    /// library publishes no type for what became of the base — so there is
+    /// nothing to assert a return value against, and what is read instead is the
+    /// worktree a dispatch is really handed, opened through
+    /// [`crate::vcs::session_open`] because that is the only way one is got.
     ///
-    /// Both halves, as with the floors above. **Forward:** a base behind
-    /// origin's is brought up to it. And **not backward:** a base carrying a
-    /// commit origin has never seen is unpushed work whose only other copy is
-    /// the lender's, so a resolution that fast-forwarded over it would destroy
-    /// work silently — a worse failure than the one this floor exists to end,
-    /// and one that passes the first assertion.
-    ///
-    /// One test for both, because `ONEVCS_HOME` is process-global and two would
-    /// point it at two roots at once; [`crate::vcs::scratch_home_held`] is what
-    /// they take turns through.
+    /// Both halves in one test, because `ONEVCS_HOME` is process-global and two
+    /// would point it at two roots at once; [`crate::vcs::scratch_home_held`] is
+    /// what they take turns through.
     #[test]
     fn the_linked_onevcs_carries_a_session_clones_base_up_to_the_origin_ref_beside_it() {
         let _home = crate::vcs::scratch_home_held();
