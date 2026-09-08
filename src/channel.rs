@@ -1315,6 +1315,140 @@ impl ChannelState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// The checked-in shape of the envelope this build reads and writes.
+    ///
+    /// Read rather than restated, for the reason `src/filter.rs`'s launch-config
+    /// golden is: this is the document a *person types* and this build parses, so
+    /// it is the only thing that stops a field being renamed, an optional one
+    /// becoming an explicit null, or the version moving without anyone deciding
+    /// to move it.
+    const ENVELOPE_GOLDEN: &str = include_str!("../tests/golden/reply-envelope-v2.json");
+
+    /// The envelope the golden pins, as the types hold it.
+    ///
+    /// Three settles, because what the golden has to pin about this op is the
+    /// **optional** landing at every value it takes: each of the two spellings
+    /// `onevcs` resolves work by, and the absence that is every envelope written
+    /// before the field existed. The author is the planner and the golden names
+    /// none, which is the same rule one rung up: omitted *is* the planner, and an
+    /// envelope that wrote the default back would be a key every caller written
+    /// before authors existed never sent.
+    fn envelope_golden() -> Reply {
+        let settled = |id: &str, outcome: SettleOutcome, evidence: &str, landing: Option<&str>| {
+            Command::Settle {
+                id: id.to_owned(),
+                outcome,
+                evidence: evidence.to_owned(),
+                landing: landing.map(str::to_owned),
+            }
+        };
+        Reply {
+            version: Some(REPLY_ENVELOPE_VERSION),
+            author: Author::Planner,
+            commands: vec![
+                settled(
+                    "publish",
+                    SettleOutcome::Done,
+                    "the change merged while the dispatch was dying; the run recorded the \
+                     death and never the merge",
+                    Some("https://github.com/owner/engine/pull/12"),
+                ),
+                settled(
+                    "release",
+                    SettleOutcome::Done,
+                    "the operator read the merge on the base branch",
+                    Some("3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"),
+                ),
+                settled(
+                    "announce",
+                    SettleOutcome::Failed,
+                    "the wait it was on can never clear, and nothing published",
+                    None,
+                ),
+            ],
+            ..Reply::default()
+        }
+    }
+
+    /// The envelope is the shape the golden pins, and the version is the one this
+    /// build declares.
+    ///
+    /// The version moves when a change to this serialized contract **breaks** a
+    /// caller — `docs/contract-divergences.md` entry 60 moved it to 2 for that
+    /// reason, and `tests/contract.rs` holds the constant against the number that
+    /// entry names. An optional field a caller may omit breaks nobody, so what
+    /// stands in for a bump is this: the shape is pinned, at every value the new
+    /// field takes.
+    #[test]
+    fn the_reply_envelope_is_the_shape_the_golden_pins() {
+        let rendered =
+            serde_json::to_string_pretty(&envelope_golden()).expect("the envelope serialises");
+        assert_eq!(
+            rendered.trim(),
+            ENVELOPE_GOLDEN.trim(),
+            "the reply envelope changed shape. If that change breaks a caller, bump \
+             REPLY_ENVELOPE_VERSION and add the golden for the new version beside this one; \
+             if it does not, update tests/golden/reply-envelope-v2.json with it"
+        );
+    }
+
+    /// Both landings survive the wire, and a settle that names none carries no
+    /// key.
+    ///
+    /// The omission is the half that has to be checked at the wire rather than
+    /// through the types: `None` and a landing are different values in Rust
+    /// whatever the serializer does, but a `landing: null` on a settle that named
+    /// none would have every caller written before the field branching on one
+    /// that is always present and usually meaningless — which is the whole of
+    /// what makes an optional field additive.
+    #[test]
+    fn a_settled_landing_round_trips_at_both_spellings_and_is_omitted_where_there_is_none() {
+        let envelope = envelope_golden();
+        let read: Reply =
+            serde_json::from_str(ENVELOPE_GOLDEN).expect("the golden reads back into the types");
+        assert_eq!(read, envelope, "the golden is not the envelope it pins");
+        let again: Reply =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("it serialises"))
+                .expect("it reads back");
+        assert_eq!(again, envelope, "the envelope does not round-trip");
+
+        let document: Value =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("it serialises"))
+                .expect("it is JSON");
+        assert_eq!(
+            document["commands"][0]["landing"],
+            json!("https://github.com/owner/engine/pull/12"),
+            "the change-request spelling of a landing did not survive the wire"
+        );
+        assert_eq!(
+            document["commands"][1]["landing"],
+            json!("3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"),
+            "the commit spelling of a landing did not survive the wire"
+        );
+        assert!(
+            document["commands"][2].get("landing").is_none(),
+            "a settle that named no landing carries a landing key anyway: {}",
+            document["commands"][2]
+        );
+
+        // And an envelope written before the field existed is exactly the
+        // envelope it was: it parses, carries no landing, and writes none back.
+        let bare = json!({
+            "version": REPLY_ENVELOPE_VERSION,
+            "commands": [{
+                "op": "settle", "id": "announce", "outcome": "failed",
+                "evidence": "the wait it was on can never clear, and nothing published",
+            }],
+        });
+        let before: Reply = serde_json::from_value(bare.clone()).expect("it parses");
+        assert_eq!(
+            serde_json::to_value(&before).expect("it serialises"),
+            bare,
+            "an envelope written before the landing existed did not round-trip unchanged"
+        );
+    }
 
     fn surface(id: u64, blocking: bool) -> Surface {
         Surface {

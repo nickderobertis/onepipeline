@@ -3270,6 +3270,26 @@ accepts.
 }
 ```
 
+**The envelope version does not move for it, and that is a decision rather than
+an omission.** What moves it is stated in entry 60, which is where it last moved:
+*"bump the reply envelope to version 2, because this is a breaking change to a
+serialized contract"* — there, an op removed outright and a `deliver` value
+dropped. This build reads an edit envelope at exactly
+[`REPLY_ENVELOPE_VERSION`](crate::channel::REPLY_ENVELOPE_VERSION) and refuses
+every other number, so a bump *is* the breaking change: every caller sending the
+current version — this repository's own journeys, the shipped monitor persona,
+and the orchestration repository's reply wrapper — would be refused for a field
+they never had to send. An optional field a caller may omit breaks nobody, which
+is the same ground `cancel`'s `reason` was added on in this entry.
+
+What stands in for a bump is a **checked-in golden**:
+`tests/golden/reply-envelope-v2.json` is the envelope this build reads and
+writes, carrying a settle at each value the landing takes — both spellings and
+the absence — and `src/channel.rs` pins the shape against it, round-trips it, and
+holds that a settle naming no landing writes no key. `tests/contract.rs` holds
+that golden's landings against the `settle_landings` this entry names, so the
+document, the golden and the types cannot drift apart.
+
 `reason` is optional on `cancel` and a `cancel` stating none still parks, so
 every park written before this field existed is exactly the park it was; present
 and blank is refused rather than recorded, as `amend`'s ruling and a `finding`'s

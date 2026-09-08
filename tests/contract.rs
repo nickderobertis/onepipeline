@@ -1694,6 +1694,40 @@ fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
             "a settle's landing at `{landing}` does not round-trip"
         );
     }
+    // The golden is the envelope a person types and this build parses, and these
+    // are the landings it carries: the entry, the golden and the types are held
+    // against each other so no two of them can drift. The envelope version does
+    // not move for an optional field — this entry says why, and entry 60 is where
+    // it last moved and states the rule.
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v2.json"))
+            .expect("the reply envelope golden ships"),
+    )
+    .expect("the golden is JSON");
+    assert_eq!(
+        golden["version"],
+        json!(onepipeline::channel::REPLY_ENVELOPE_VERSION),
+        "the golden envelope is not at the version this build reads and writes"
+    );
+    let carried: Vec<String> = golden["commands"]
+        .as_array()
+        .expect("the golden carries commands")
+        .iter()
+        .filter_map(|command| command.get("landing")?.as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        carried, landings,
+        "the golden envelope does not carry the landings entry 57 names"
+    );
+    assert!(
+        golden["commands"]
+            .as_array()
+            .expect("the golden carries commands")
+            .iter()
+            .any(|command| command["op"] == json!("settle") && command.get("landing").is_none()),
+        "the golden envelope pins no settle that names a landing at all: {golden}"
+    );
+
     let mut unnamed = settling.clone();
     unnamed
         .as_object_mut()
