@@ -152,10 +152,9 @@ pub enum Operation {
     // llmlint: ignore-block[invalid_states_unrepresentable] `node` is the `String` every
     // neighbouring variant spells a node id with, narrowed where it is judged —
     // `compile_settle` refuses a node the graph does not hold and one that has already
-    // settled — and `evidence` is refused blank there too, and `landing` is held to
-    // `vcs::usable`, the same check every commit and branch this crate records crosses.
-    // `outcome` is not a string at all: it is the closed `SettleOutcome`, so a record this
-    // build did not write carrying a fourth word is refused by its own deserialization.
+    // settled — and `evidence` is refused blank there too. `outcome` is not a string at
+    // all: it is the closed `SettleOutcome`, so a record this build did not write carrying
+    // a fourth word is refused by its own deserialization.
     /// A node was settled at what an operator could see it had reached, from
     /// evidence this run never observed.
     ///
@@ -172,6 +171,7 @@ pub enum Operation {
         /// What the operator saw, journalled as the reason for the state.
         evidence: String,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] both fields are the `String`
     // every neighbouring variant spells a node id and a reference with, and both are
     // narrowed where they are judged: `compile_settle` writes this only for a node it has
