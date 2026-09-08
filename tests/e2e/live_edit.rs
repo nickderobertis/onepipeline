@@ -1995,7 +1995,23 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     }
 
     // The planner's settle is applied to a node the run recorded **failed** —
-    // the case this op exists for — and the node is left exactly as it was.
+    // the case this op exists for — and the node is left exactly as it was. Its
+    // own identity on the board is what replacing it with a stand-in destroys:
+    // the same task, under the same qualified id.
+    let identified = |world: &World| {
+        world
+            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
+            .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
+    };
+    // Read once the run has projected, so what is compared either side of the
+    // settle is the projection rather than the items the plan store was authored
+    // with: the copy is a whole-project write, so the node this waits for
+    // arriving means every node of the run has.
+    world.until_store("the run to be projected", |world| {
+        identified(world).is_some_and(|node| node["title"] == json!("publish"))
+    });
     let announce = world
         .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
         .into_iter()
@@ -2009,22 +2025,6 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .store_deps(announce["id"].as_str().expect("a qualified task id"))
         .len();
     assert_eq!(wired, 1, "the fixture's dependent is not wired to anything");
-    // And the node's own identity on the board, which is what replacing it with
-    // a stand-in destroys: the same task, under the same qualified id.
-    let identified = |world: &World| {
-        world
-            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
-            .into_iter()
-            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
-            .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
-    };
-    // Read once the projection has reached the board, so what is compared either
-    // side of the settle is the projected item rather than the one the plan store
-    // was authored with: this node carries no title of its own, and the
-    // projection writes its id.
-    world.until_store("the settled node to be projected", |world| {
-        identified(world).is_some_and(|node| node["title"] == json!("publish"))
-    });
     let was = identified(&world).expect("the settled node is on the board");
 
     world
