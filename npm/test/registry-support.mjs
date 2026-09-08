@@ -6,9 +6,11 @@
 // not publish there, and the behaviour under test is one it exhibits only
 // sometimes.
 //
-// `lagFor` is the one non-standard power: a package whose publish is
-// acknowledged at once and whose version becomes resolvable later. Why that is
-// the shape to reproduce is in `scripts/publish-npm.sh`.
+// `lagFor` and `holdUntilRead` are the two non-standard powers, and both make
+// one shape: a package whose publish is acknowledged at once and whose version
+// becomes resolvable later. Why that is the shape to reproduce is in
+// `scripts/publish-npm.sh`. They differ in what ends the lag — a clock, or the
+// reader's own polling — and a journey picks whichever its assertion is about.
 //
 // Not a `*.test.mjs`, so the suite glob does not run it.
 
@@ -37,6 +39,9 @@ export class Registry {
     this.packages = new Map();
     /// package name -> milliseconds between accepting a publish and serving it.
     this.lag = new Map();
+    /// package name -> how many more packument reads must find this package's
+    /// versions unserved before they are served. See `holdUntilRead`.
+    this.reads = new Map();
     /// Every accepted publish and every version becoming visible, in order.
     /// This is what a test reads to say the launcher was not offered early.
     this.timeline = [];
@@ -47,8 +52,33 @@ export class Registry {
   }
 
   /// Acknowledge publishes of `name` at once but serve them `ms` later.
+  ///
+  /// The lag a journey uses when what it asserts on is an *order* — that the
+  /// launcher was not offered before a package it pins was resolvable — because
+  /// that comparison is between two instants and needs instants to compare.
   lagFor(name, ms) {
     this.lag.set(name, ms);
+  }
+
+  /// The same held publish, ended by the reader rather than by a clock: `name`'s
+  /// versions are unserved for the next `reads` packument reads that find them,
+  /// and served from the one after.
+  ///
+  /// The lag a journey uses when what it asserts on is that the caller *waited*.
+  /// Measured against the real npm CLI: `npm view --prefer-online` is exactly one
+  /// packument read, and every read `npm publish` makes precedes its own PUT — so
+  /// `holdUntilRead(name, 1)` means the poll after the publish finds nothing and
+  /// the next one finds it, whatever else the host is running. Said with a clock
+  /// instead, the same journey asserts that npm answered faster than the lag, and
+  /// on a loaded machine it does not: a 1000ms lag left `publish-npm.sh` finding
+  /// the version already served, waiting for nothing, and printing no propagation
+  /// warning for this to match.
+  ///
+  /// One or the other per package. A held package ignores any `lagFor` on it,
+  /// because two answers to "when does this become visible" is not a registry
+  /// anything can reason about.
+  holdUntilRead(name, reads) {
+    this.reads.set(name, reads);
   }
 
   /// Answer every request with `status` instead of serving. A registry that is
@@ -125,6 +155,7 @@ export class Registry {
   #packument(name) {
     const entry = this.packages.get(name);
     if (!entry) return null;
+    this.#spendRead(name, entry);
     const versions = {};
     for (const version of this.visible(name)) {
       versions[version] = entry.versions.get(version).manifest;
@@ -211,6 +242,33 @@ export class Registry {
     return answer(200, packument);
   }
 
+  /// One packument read against a read-held package. While there are reads left
+  /// this only spends one and serves nothing; the read after the last one serves
+  /// every version that was being held, and records each becoming visible at the
+  /// instant it did.
+  ///
+  /// Counted here rather than in `visible` so that only reads that came over the
+  /// wire count — a test asking this registry what it holds is not the reader the
+  /// hold is about.
+  #spendRead(name, entry) {
+    const left = this.reads.get(name);
+    if (left === undefined) return;
+    const waiting = [...entry.versions.entries()].filter(
+      ([, version]) => !Number.isFinite(version.visibleAt),
+    );
+    if (waiting.length === 0) return;
+    if (left > 0) {
+      this.reads.set(name, left - 1);
+      return;
+    }
+    const at = Date.now();
+    for (const [version, held] of waiting) {
+      held.visibleAt = at;
+      this.timeline.push({ kind: "visible", identity: `${name}@${version}`, at });
+    }
+    this.reads.delete(name);
+  }
+
   #publish(name, body) {
     // Everything read below comes off the wire, so its shape is checked here
     // rather than assumed: a body that is not an object, or whose `versions` or
@@ -256,7 +314,10 @@ export class Registry {
       const tarball = Buffer.from(attached.data, "base64");
       if (tarball.length === 0) refuse(`the tarball attached for ${version} is empty`);
       const identity = `${name}@${version}`;
-      const lag = this.lag.get(name) ?? 0;
+      // A read-held package has no clock at all, so it is filed at a `visibleAt`
+      // no `Date.now()` reaches and `#packument` moves it when the reads run out.
+      const held = this.reads.has(name);
+      const lag = held ? Number.POSITIVE_INFINITY : (this.lag.get(name) ?? 0);
       const at = Date.now();
       entry.versions.set(version, {
         manifest: {
@@ -276,7 +337,7 @@ export class Registry {
       // so a reader before then gets `undefined` rather than a future time.
       if (lag === 0) {
         this.timeline.push({ kind: "visible", identity, at });
-      } else {
+      } else if (Number.isFinite(lag)) {
         setTimeout(() => {
           this.timeline.push({ kind: "visible", identity, at: at + lag });
         }, lag).unref();

@@ -327,10 +327,17 @@ describe("the npm publish order", () => {
     //
     // The first run is made to wait once, with a leading-zero interval. The
     // digits check accepts `08`, and the only line that does arithmetic on it is
-    // inside the wait, where bash read it as octal and refused it — so a lag is
-    // what reaches that line at all, and the propagation warning below is this
-    // journey's evidence that it did.
-    reg.lagFor([...platforms.values()][0].name, 1000);
+    // inside the wait, where bash read it as octal and refused it — so a held
+    // publish is what reaches that line at all, and the propagation warning below
+    // is this journey's evidence that it did.
+    //
+    // Held by the reader's own polling rather than by a clock, because what this
+    // asserts is that the publish *waited*. `registry-support.mjs` records what a
+    // clock cost here: a 1000ms lag is a bet that npm answers the first poll in
+    // under a second, and on a loaded host it does not — the version is already
+    // served, nothing waits, and this fails on the machine rather than on the
+    // code. One read is one poll, so this holds for exactly one.
+    reg.holdUntilRead([...platforms.values()][0].name, 1);
     const first = await publishAsTheReleaseDoes({
       PUBLISH_NPM_AWAIT_BUDGET: "80",
       PUBLISH_NPM_AWAIT_INTERVAL: "08",
