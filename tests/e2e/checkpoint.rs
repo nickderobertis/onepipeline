@@ -107,10 +107,8 @@ fn parsed(document: &[u8]) -> Value {
 /// A read through a usable checkpoint reports the state a full fold reports, and
 /// gets there by folding only the records the checkpoint does not account for.
 ///
-/// Two claims and two reads, because one read cannot carry both: the first holds
-/// the state equal to a full fold's, and the second — over a document whose account
-/// of its covered records the journal contradicts — shows those records were not
-/// folded again. The journal is not touched by either.
+/// Two reads, because one cannot carry both claims. The journal is not touched by
+/// either.
 // llmlint: ignore-block[tests_mirror_real_usage] no verb edits the cache beside a run's
 // journal, and which records a reader *consumed* is reported by no user-facing surface.
 #[test]
@@ -327,6 +325,25 @@ fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
                 let mut document = parsed(usable);
                 document["state"]["sessions"] =
                     json!({"build": {"token": "../somewhere-else", "branch": "work"}});
+                write_checkpoint(world, &document);
+            },
+        ),
+        (
+            "carrying a session branch this crate refuses",
+            |world, usable| {
+                let mut document = parsed(usable);
+                document["state"]["sessions"] =
+                    json!({"build": {"token": "s-abc", "branch": "   "}});
+                write_checkpoint(world, &document);
+            },
+        ),
+        // A field this build does not know, which is what a *later* build's document
+        // looks like from here once its version has been accepted by hand.
+        (
+            "carrying a field this build does not know",
+            |world, usable| {
+                let mut document = parsed(usable);
+                document["what_a_later_build_added"] = json!("something");
                 write_checkpoint(world, &document);
             },
         ),

@@ -1063,18 +1063,32 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
 /// private fields: a checkpoint is a file, so the values in it arrive from
 /// outside exactly as a stream's record does, and a token or a branch this crate
 /// would have refused off a stream is one it refuses off a document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchSession {
     token: SessionToken,
     branch: BranchName,
 }
 
 /// A session as a checkpoint carries it, before the checks that make it one.
-#[derive(Deserialize)]
+///
+/// **One type for both directions**, so the wire is declared once: a second
+/// declaration is a shape that drifts, and a document the writer produced that the
+/// reader refuses would take a run's sessions away on the quiet.
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionAsWritten {
     token: String,
     branch: String,
+}
+
+impl Serialize for DispatchSession {
+    fn serialize<S: serde::Serializer>(&self, writer: S) -> std::result::Result<S::Ok, S::Error> {
+        SessionAsWritten {
+            token: self.token.0.clone(),
+            branch: self.branch.0.clone(),
+        }
+        .serialize(writer)
+    }
 }
 
 impl<'de> Deserialize<'de> for DispatchSession {
@@ -1095,8 +1109,7 @@ impl<'de> Deserialize<'de> for DispatchSession {
 /// Deliberately **not** a claim that git would accept the name: that parser is
 /// git's, and asking it would mean this crate running git, which no path of it
 /// ever has.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchName(String);
 
 impl BranchName {

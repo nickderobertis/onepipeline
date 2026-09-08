@@ -18,16 +18,12 @@
 //! the landing non-breaking both ways — nothing but this module reads the file, and
 //! a predecessor's run root simply has none.
 //!
-//! The fourth condition is two questions of the file, and the second is what makes
-//! the journal authoritative rather than the document. **How much** is covered is
-//! corroborated by the store being at least that long, by the marker ending where
-//! a record ends, and by nothing past it sorting in front of it. **That it is still
-//! the same journal** is corroborated by a digest of the covered bytes, because
-//! none of the counts can see a covered record rewritten in place at identical
-//! length: no byte count moves, no record count moves, no ordering maximum moves,
-//! and a reader without the digest would go on serving a state folded from bytes
-//! the file no longer holds. A prefix truncated or edited — at any length — takes a
-//! full fold.
+//! The fourth condition is asked of the **file**: it is at least as long as the
+//! marker claims, the marker ends where a record ends, and the covered bytes
+//! together with the marker's own claims seal to what the document carries. The
+//! seal is what makes the journal outrank the cache — no count can see a covered
+//! record rewritten in place at identical length — and it is
+//! [`Coverage::corroborated_by`].
 //!
 //! # The hazard the coverage marker answers
 //!
@@ -36,11 +32,10 @@
 //! of the *file* could account for a record a later read places **behind** one it
 //! also accounts for.
 //!
-//! The marker chosen is one a reordering **cannot** invalidate. Beside the byte
+//! The marker chosen is one a reordering **cannot** invalidate: beside the byte
 //! count it carries the record count, the greatest `(ts, stream)` covered and the
 //! greatest `seq` per stream, and a prefix stays covered only while every record
-//! past it sorts at or after all three — asked again of the grown store on every
-//! read.
+//! past it sorts at or after all three.
 //!
 //! Why that suffices: write `P` for the covered records and `T` for the rest. The
 //! merge queues each stream in its own `seq` and takes the head with the least
@@ -52,18 +47,14 @@
 //! store folds to; extending the marker over the front of `T` is that statement
 //! again with `P` grown.
 //!
-//! **The covered records are a prefix of the merge order, not of the file's own**,
-//! and that is the difference between a marker that grows and one that stops. A
-//! run's store has several appenders — the loop's writer, and the relay carrying
+//! **The covered records are a prefix of the merge order, not of the file's own.**
+//! A run's store has several appenders — the loop's writer, and the relay carrying
 //! its dispatches' streams — so a relayed record stamped a millisecond before the
 //! record appended in front of it is ordinary. A marker held to the file order
 //! stopped at the first of those and never passed it: 6 records of a settled run's
-//! store, against 18 for this one.
-//!
-//! A record the marker cannot be extended over — a producer whose clock runs
-//! behind this host's by more than the store's own tail, an `oneharness-session`
-//! published out of band — discards the checkpoint, and the marker written after
-//! the whole-store fold covers it.
+//! store, against 18 for this one. A record the marker cannot be extended over
+//! discards the checkpoint, and the marker written after the whole-store fold
+//! covers it.
 //!
 //! # One order, for both readers
 //!
@@ -152,18 +143,18 @@ pub(crate) struct Coverage {
     /// The greatest `seq` folded per stream.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) streams: BTreeMap<String, u64>,
-    /// **The digest of the exact journal bytes this state accounts for.**
+    /// **The seal: this marker, over the journal bytes it claims.**
     ///
-    /// What makes the journal the authoritative record rather than the document:
-    /// every field above says how *much* of the journal is covered, and none of
-    /// them says it is still the same journal. A covered record rewritten in place
-    /// at identical length moves no byte count, no record count and no ordering
-    /// maximum, so without this a reader would go on serving a state folded from
-    /// bytes the file no longer holds. Verified against the file before the
-    /// document is accepted, and a mismatch is a full fold.
+    /// What makes the journal authoritative rather than the document. Every field
+    /// above says something a reader would otherwise have to take on trust — how
+    /// many bytes, how many records, how far the order reached — and none of them
+    /// can see a covered record rewritten in place at identical length. This is
+    /// FNV-1a over the covered bytes and then over those fields, so a reader
+    /// recomputes it from the file plus the claims in front of it and refuses a
+    /// prefix or a claim that has moved. See [`sealed_with`](Self::sealed_with).
     ///
-    /// Written as hex rather than as a number because a persisted 128-bit integer
-    /// is a value a consumer reading JSON numbers as doubles silently rounds.
+    /// Hex, because a persisted 128-bit integer is one a consumer reading JSON
+    /// numbers as doubles rounds.
     #[serde(serialize_with = "as_hex", deserialize_with = "of_hex")]
     pub(crate) digest: u128,
 }
@@ -175,29 +166,26 @@ const NOTHING_DIGESTED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
 /// as a constant nobody can check by eye.
 const FNV_PRIME: u128 = (1 << 88) | 0x13b;
 
-/// The journal's own bytes, digested — continuing from a digest already taken.
+/// Digest more bytes, continuing from a digest already taken.
 ///
-/// **FNV-1a, whose state is its output**, which is the property this is chosen
-/// for rather than an incidental one: a marker is *extended* every time the store
-/// grows, so the digest of a longer prefix has to be reachable from the digest
-/// already written plus the bytes that arrived. A digest whose streaming state
-/// could not be persisted would have to re-read and re-hash the whole prefix on
-/// every applied command, which is the cost this document exists to remove.
+/// **FNV-1a is chosen because its state is its output**: a marker is extended
+/// every time the store grows, so the digest of a longer prefix has to be reachable
+/// from the one already taken plus the bytes that arrived. One whose streaming state
+/// could not be carried would re-hash the whole prefix per applied command, which is
+/// the cost this document removes.
 ///
-/// It is an **integrity check and not a security boundary**: what it is asked to
-/// catch is a covered record truncated or rewritten — by a heal, a copy, or a
-/// person with an editor — inside the run's own directory. A cryptographic digest
-/// would need a dependency this crate does not carry, and `AGENTS.md` guards
-/// that; the fallback either way is a full fold, so nothing rests on the
-/// difference beyond a forged preimage nobody here can act on.
+/// An **integrity check and not a security boundary** — what it catches is a covered
+/// record truncated or rewritten by a heal, a copy, or an editor. A cryptographic
+/// digest would need a dependency `AGENTS.md` guards, and the fallback either way is
+/// a full fold.
 fn digested(from: u128, bytes: &[u8]) -> u128 {
     bytes.iter().fold(from, |digest, byte| {
         (digest ^ u128::from(*byte)).wrapping_mul(FNV_PRIME)
     })
 }
 
-/// The digest of a journal's first `bytes` bytes, or `None` where the file does
-/// not hold them.
+/// The digest of a journal's first `bytes` bytes, or `None` where the file does not
+/// hold them.
 fn digest_of_prefix(journal: &std::path::Path, bytes: u64) -> Option<u128> {
     ledger::read_range(journal, 0, bytes).map(|prefix| digested(NOTHING_DIGESTED, &prefix))
 }
@@ -206,12 +194,17 @@ fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Er
     writer.serialize_str(&format!("{digest:032x}"))
 }
 
-/// Read a digest, refusing anything that is not one this build could have
-/// written: a value that does not parse is a document that cannot be corroborated.
+/// Read a digest, refusing anything [`as_hex`] would not have written — the fixed
+/// 32 digits included, so a truncated value is a document nobody here produced
+/// rather than a smaller number.
 fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
     let written = String::deserialize(reader)?;
-    u128::from_str_radix(&written, 16)
-        .map_err(|e| serde::de::Error::custom(format!("checkpoint digest '{written}': {e}")))
+    let refuse =
+        |why: &str| serde::de::Error::custom(format!("checkpoint digest '{written}': {why}"));
+    if written.len() != 32 {
+        return Err(refuse("not 32 hex digits"));
+    }
+    u128::from_str_radix(&written, 16).map_err(|e| refuse(&e.to_string()))
 }
 
 /// A marker over nothing, which is what a fold with no checkpoint starts from.
@@ -260,32 +253,53 @@ impl Coverage {
             .all(|event| self.is_in_front_of(event))
     }
 
-    /// Whether the journal still holds the bytes this marker accounts for.
+    /// This marker's seal, over a digest of the journal bytes it covers.
     ///
-    /// **The corroboration that makes the journal authoritative.** Three questions
-    /// of the file rather than of the document: it is at least as long as the
-    /// marker claims, the marker ends where a record ends, and the bytes in front
-    /// of it digest to what the marker says they did. The third is the one nothing
-    /// else here can answer — a covered record rewritten in place at the same
-    /// length moves no count and no maximum — and it is why a truncated or edited
-    /// prefix takes a full fold rather than being served.
+    /// Every claim the marker makes goes in, in a fixed order, so a claim edited
+    /// without the bytes changing is a claim that no longer seals to what the
+    /// document carries. [`digest`](Self::digest) itself does not, which is what
+    /// stops it sealing over itself.
+    fn sealed_with(&self, digested_bytes: u128) -> u128 {
+        let mut sealed = digested(digested_bytes, &self.bytes.to_le_bytes());
+        sealed = digested(sealed, &self.records.to_le_bytes());
+        if let Some(at) = &self.at {
+            sealed = digested(sealed, at.ts.as_bytes());
+            sealed = digested(sealed, at.stream.as_bytes());
+        }
+        for (stream, reached) in &self.streams {
+            sealed = digested(sealed, stream.as_bytes());
+            sealed = digested(sealed, &reached.to_le_bytes());
+        }
+        sealed
+    }
+
+    /// Whether the journal corroborates every claim this marker makes.
     ///
-    /// Asked where a marker arrives **from a document**, which is the boundary it
-    /// is about. A marker this process established by folding those very bytes,
-    /// under the run's single-writer lock over an append-only file, has no document
-    /// to corroborate; re-digesting the prefix per applied command would put back a
+    /// **What makes the journal authoritative.** Three questions of the file rather
+    /// than of the document: it is at least as long as the marker claims, the marker
+    /// ends where a record ends, and the covered bytes plus the marker's own claims
+    /// seal to what the document carries. The third is the one nothing else can
+    /// answer — a covered record rewritten in place at the same length moves no
+    /// count and no maximum — and it is why a truncated or edited prefix, or an
+    /// edited claim about one, takes a full fold.
+    ///
+    /// Asked where a marker arrives **from a document**, which is the boundary it is
+    /// about. A marker this process established by folding those very bytes, under
+    /// the run's single-writer lock over an append-only file, has no document to
+    /// corroborate — and re-digesting the prefix per applied command would put back a
     /// cost that grows with the run.
-    fn covers_the_journal_it_claims(&self, journal: &std::path::Path) -> bool {
+    fn corroborated_by(&self, journal: &std::path::Path) -> Option<u128> {
         if length_of(journal) < self.bytes {
-            return false;
+            return None;
         }
         // A marker inside a line loses the record it lands in for every reader
         // afterwards. Asked of the byte in front of it, which is the terminator the
         // appender wrote.
         if self.bytes > 0 && !ends_a_record(journal, self.bytes) {
-            return false;
+            return None;
         }
-        digest_of_prefix(journal, self.bytes) == Some(self.digest)
+        digest_of_prefix(journal, self.bytes)
+            .filter(|digested_bytes| self.sealed_with(*digested_bytes) == self.digest)
     }
 
     /// Account for one more record.
@@ -355,6 +369,13 @@ pub(crate) struct Projected {
     /// also reports to, so a check can hold one fold to what the store grew by
     /// without a fold running beside it moving the number.
     took: u64,
+    /// The digest of the covered bytes alone, which the marker's seal is taken over.
+    ///
+    /// In memory rather than on the wire: a reader that verified a seal read those
+    /// bytes to do it and so has this already, and one that folded them has it by
+    /// construction. Persisting it beside the seal would be one fact twice, with an
+    /// edit to either making the pair disagree.
+    digested_bytes: u128,
 }
 
 impl std::ops::Deref for Projected {
@@ -376,17 +397,17 @@ impl Projected {
     // llmlint: ignore[boundary_inputs_validated] the reason is on [`readable`], which
     // decided this document.
     pub(crate) fn open(paths: &RunPaths) -> Self {
-        let resumed = readable(paths).filter(|checkpoint| {
-            checkpoint
-                .coverage
-                .covers_the_journal_it_claims(&paths.journal())
+        let resumed = readable(paths).and_then(|checkpoint| {
+            let digested_bytes = checkpoint.coverage.corroborated_by(&paths.journal())?;
+            Some((checkpoint, digested_bytes))
         });
         let mut projected = match resumed {
-            Some(checkpoint) => Self {
+            Some((checkpoint, digested_bytes)) => Self {
                 state: checkpoint.state.clone(),
                 covered: checkpoint.state,
                 coverage: checkpoint.coverage,
                 took: 0,
+                digested_bytes,
             },
             None => Self::empty(),
         };
@@ -440,6 +461,7 @@ impl Projected {
             covered: empty,
             coverage: Coverage::default(),
             took: 0,
+            digested_bytes: NOTHING_DIGESTED,
         }
     }
 
@@ -454,14 +476,12 @@ impl Projected {
     /// is chosen by.
     fn take(&mut self, paths: &RunPaths, grown: &[(Option<Envelope>, u64)]) {
         crate::loopstats::records_folded(grown.len() as u64);
-        // What the marker may take in, and the bytes of the journal that is — read
-        // **raw and before anything is folded**, because the digest has to equal
-        // what a later reader takes off the file rather than what these records
-        // decoded to, and because a marker whose digest did not cover what it
-        // claims is the one thing this document must never carry. Where those bytes
-        // cannot be read the marker takes in nothing this pass; the state is folded
-        // either way, so what that costs is the next reader's saving and never an
-        // answer.
+        // Read **raw and before anything is folded**: the digest has to equal what a
+        // later reader takes off the file rather than what these records decoded to,
+        // and a marker whose seal did not cover what it claims is the one thing this
+        // document must never carry. Where those bytes cannot be read the marker
+        // takes in nothing this pass, which costs the next reader's saving and never
+        // an answer.
         let accountable = extent(&self.coverage, grown);
         let taking: u64 = grown[..accountable].iter().map(|(_, bytes)| bytes).sum();
         let taken = match taking {
@@ -479,7 +499,8 @@ impl Projected {
         // document on every read, and a reader that saved nothing would pay a
         // write to say so.
         if let Some(taken) = taken.filter(|taken| !taken.is_empty()) {
-            self.coverage.digest = digested(self.coverage.digest, &taken);
+            self.digested_bytes = digested(self.digested_bytes, &taken);
+            self.coverage.digest = self.coverage.sealed_with(self.digested_bytes);
             self.write(paths);
         }
         self.state = self.covered.clone();
@@ -520,17 +541,20 @@ fn fold_in_merge_order(state: &mut RunState, records: &[(Option<Envelope>, u64)]
 }
 
 /// Resume a run's fold from its checkpoint, and **leave the checkpoint where this
-/// fold reached**.
-///
-/// What a caller that folds a run once takes — every view — spelled as one call so
-/// it reads where `projection::fold(&journal::read(..))` used to. Named for
-/// resuming rather than for folding because the second half is not incidental: a
-/// reader that folded and wrote nothing would leave the next reader paying what
-/// this one just paid.
+/// fold reached** — named for the second half because a reader that wrote nothing
+/// would leave the next one paying what this one just paid.
 pub(crate) fn resume(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
+// llmlint: ignore[changed_behavior_has_e2e] one thing this boundary does has no journey
+// through the binary and cannot have one: a park reason that says nothing is *normalized*
+// rather than refused, and no read surface renders a park reason — it reaches a person only
+// in the refusal an edit earns, which is a `reply` against a park a checkpoint happens to
+// carry. The normalization is driven over a real document by
+// `a_state_read_back_goes_through_the_checks_that_made_it`; every path here that a reader
+// can observe — the version, the run, the seal, the session values, a field this build does
+// not know — has one in `tests/e2e/checkpoint.rs`.
 /// The checkpoint document, where the run root holds one **this build can read as
 /// this run's**.
 ///
@@ -1305,6 +1329,9 @@ mod tests {
     /// into a number, or the version moving without anyone deciding to move it.
     const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v1.json");
 
+    /// The digest of the journal bytes the golden's marker covers.
+    const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
+
     /// The document the golden pins, built through the types.
     ///
     /// A marker over a real prefix — a byte count, a record count, both ordering
@@ -1318,19 +1345,24 @@ mod tests {
             task: Some("## What\ndo it".into()),
             ..Node::default()
         });
+        // Sealed as a writer seals it, so the golden is a document a reader would
+        // accept over a journal whose covered bytes are those — rather than a shape
+        // with a plausible number where its seal goes.
+        let mut coverage = Coverage {
+            bytes: 8_192,
+            records: 42,
+            at: Some(Placed {
+                ts: "2026-09-08T12:00:00.000Z".into(),
+                stream: "golden-host-1".into(),
+            }),
+            streams: BTreeMap::from([("golden-host-1".to_string(), 41)]),
+            digest: 0,
+        };
+        coverage.digest = coverage.sealed_with(GOLDEN_BYTES_DIGESTED);
         Checkpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             run_id: "golden".into(),
-            coverage: Coverage {
-                bytes: 8_192,
-                records: 42,
-                at: Some(Placed {
-                    ts: "2026-09-08T12:00:00.000Z".into(),
-                    stream: "golden-host-1".into(),
-                }),
-                streams: BTreeMap::from([("golden-host-1".to_string(), 41)]),
-                digest: digested(NOTHING_DIGESTED, b"the journal's covered bytes"),
-            },
+            coverage,
             state: RunState {
                 graph,
                 recorded: BTreeMap::from([(
@@ -1367,11 +1399,13 @@ mod tests {
             "a document this build wrote does not read back as itself"
         );
         assert_eq!(read.coverage, a_checkpoint().coverage);
-        // The digest is a 128-bit value and the wire is hex, so this is the one
-        // field a JSON number would have quietly rounded.
+        // The seal is a 128-bit value and the wire is hex, so this is the one field a
+        // JSON number would have quietly rounded — and it seals over the marker's own
+        // claims, so a claim read back differently would not seal to this.
         assert_eq!(
             read.coverage.digest,
-            digested(NOTHING_DIGESTED, b"the journal's covered bytes")
+            read.coverage.sealed_with(GOLDEN_BYTES_DIGESTED),
+            "the marker read back does not seal to what the document carries"
         );
 
         let mut later: serde_json::Value = serde_json::from_str(GOLDEN).expect("it parses");
@@ -1388,6 +1422,36 @@ mod tests {
         let mut mangled: serde_json::Value = serde_json::from_str(GOLDEN).expect("it parses");
         mangled["coverage"]["digest"] = json!("not a digest");
         assert!(serde_json::from_value::<Checkpoint>(mangled).is_err());
+    }
+
+    /// A populated session survives the document, through the checks that make one.
+    ///
+    /// The drift gate over `vcs::DispatchSession`'s two directions: they go through
+    /// one declaration, and this is what fails if they ever stop — a document the
+    /// writer produced that the reader refuses would take a run's sessions away
+    /// without saying so.
+    #[test]
+    fn a_session_the_writer_produced_is_one_the_reader_accepts() {
+        let written = json!({"token": "s-abc", "branch": "work/build"});
+        let read: crate::vcs::DispatchSession =
+            serde_json::from_value(written.clone()).expect("a session this crate accepts");
+        assert_eq!(
+            serde_json::to_value(&read).expect("it serialises"),
+            written,
+            "a session does not read back as the document it was written as"
+        );
+        // And the two values the checks are about, refused from a document exactly
+        // as they are off a stream.
+        for refused in [
+            json!({"token": "../somewhere-else", "branch": "work"}),
+            json!({"token": "s-abc", "branch": "   "}),
+            json!({"token": "s-abc", "branch": "work", "extra": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<crate::vcs::DispatchSession>(refused.clone()).is_err(),
+                "{refused} was accepted as a session"
+            );
+        }
     }
 
     /// A run that has recorded nothing folds to the empty state and leaves no
