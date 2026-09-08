@@ -368,17 +368,20 @@ fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
 #[test]
 fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal() {
     let world = World::new("checkpoint-loop").with_env(LOOP_STATS_ENV, "1");
-    // A chain rather than six independent nodes, so the run records its
-    // settlements across passes as a real run does instead of bursting them into
-    // one instant. How far the marker trails is decided by how far apart in time
-    // the records are, so a burst is the one shape this claim would not be about.
-    let nodes: Vec<Value> = (0..6)
-        .map(|nth| {
-            let before = format!("step{:02}", nth - 1);
-            let deps: Vec<&str> = if nth == 0 { vec![] } else { vec![&before] };
-            agent(&format!("step{nth:02}"), &deps)
-        })
-        .collect();
+    // A chain rather than six independent nodes, so the run records its settlements
+    // across passes as a real run does instead of bursting them into one instant. How
+    // far the marker trails is decided by how far apart in time the records are, so a
+    // burst is the one shape this claim would not be about.
+    //
+    // Built by carrying the node before rather than by naming it from an index: the
+    // arithmetic form has nothing to subtract at the head of the chain.
+    let ids: Vec<String> = (0..6).map(|nth| format!("step{nth:02}")).collect();
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut before: Option<&str> = None;
+    for id in &ids {
+        nodes.push(agent(id, &before.map_or_else(Vec::new, |one| vec![one])));
+        before = Some(id);
+    }
     settled(&world, "loop", nodes);
     reporting(&world, "loop");
 
