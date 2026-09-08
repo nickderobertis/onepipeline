@@ -2309,7 +2309,6 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
         "the dependent of an unverified publication is not reported waiting on it:\n{}",
         waiting.stdout
     );
-    // And nothing has been asked of it: it has not been dispatched.
     assert!(
         dispatches_of(&world, &run, "announce").is_empty(),
         "the held dependent was dispatched before the verdict was decidable\n{}",

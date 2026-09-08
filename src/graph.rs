@@ -867,24 +867,29 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
 /// change that had in fact merged.
 ///
 /// **Cases and not fields**, because these facts are correlated: only a `failed`
-/// node can have reached the origin, and only a node that reached the origin has
-/// a landing this decision reads. Three fields beside each other would make a
-/// `ready` node whose failed publication both reached the origin and landed a
-/// value somebody could construct.
+/// node can have reached the origin, and only one that reached the origin can
+/// have been shown reaching its base. Fields beside each other would make a
+/// `ready` node whose failed publication landed a value somebody could
+/// construct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     /// Where the node got to, and nothing else this decision turns on.
     At(NodeStatus),
     /// It settled `failed` because its publishing push **reached the origin** and
     /// the merge path behind it could not be read —
-    /// [`Failure::UNREAD`](crate::vcs::Failure::UNREAD).
+    /// [`Failure::UNREAD`](crate::vcs::Failure::UNREAD) — and the verdict on it is
+    /// still outstanding.
     ///
     /// Not the branch being turned down: the work is on the origin and only the
     /// verdict about it is outstanding.
-    ReachedTheOrigin {
-        /// Whether the change has since been observed reaching its base.
-        landed: bool,
-    },
+    ReachedTheOrigin,
+    /// The same settlement, after `onevcs` has been asked again and has **shown
+    /// the change reaching its base**.
+    ///
+    /// Its own case rather than a qualifier on the one above, because the two
+    /// differ in the one thing every reader of this acts on: a dependent waits on
+    /// the first and starts on the second.
+    ReachedItsBase,
 }
 
 impl Settled {
@@ -892,8 +897,10 @@ impl Settled {
     /// caller carries that word any further than the boundary it arrives at.
     pub fn of(status: NodeStatus, outcome: Option<&str>, landing: Option<Landing>) -> Self {
         if status == NodeStatus::Failed && outcome == Some(crate::vcs::Failure::UNREAD) {
-            return Self::ReachedTheOrigin {
-                landed: landing == Some(Landing::Landed),
+            return if landing == Some(Landing::Landed) {
+                Self::ReachedItsBase
+            } else {
+                Self::ReachedTheOrigin
             };
         }
         Self::At(status)
@@ -910,8 +917,8 @@ impl Settled {
     pub fn status(self) -> NodeStatus {
         match self {
             Self::At(status) => status,
-            // The one status this case can be, which is what makes it a case.
-            Self::ReachedTheOrigin { .. } => NodeStatus::Failed,
+            // The one status these two can be, which is what makes them cases.
+            Self::ReachedTheOrigin | Self::ReachedItsBase => NodeStatus::Failed,
         }
     }
 }
@@ -1007,15 +1014,11 @@ fn eligibility(
             }
         } else if graph.contains(dep) {
             match statuses.get(dep) {
-                // The status as this pass derived it, and the settlement's own
-                // word from the record it was derived from: `blocked` and
-                // `skipped` are re-derived every pass and carry no word, and
-                // every other status is the one the settlement wrote.
                 // The status as this pass derived it is authoritative — `blocked`
-                // and `skipped` are re-derived every pass — and the settlement's
-                // own case stands only where that derivation still agrees with it.
+                // and `skipped` are re-derived every pass — so the settlement's
+                // own case stands only where that derivation still agrees.
                 Some(status) => match settled.get(dep) {
-                    Some(reached @ Settled::ReachedTheOrigin { .. })
+                    Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
                         if *status == NodeStatus::Failed =>
                     {
                         *reached
@@ -1108,7 +1111,7 @@ fn skips_dependents(settled: &Settled) -> bool {
 /// not a skip: a skip is permanent and this is not, because the same run goes on
 /// asking whether the verdict has become decidable.
 fn holds_dependents(settled: &Settled) -> bool {
-    matches!(settled, Settled::ReachedTheOrigin { landed: false })
+    matches!(settled, Settled::ReachedTheOrigin)
 }
 
 /// Whether that verdict has since been decided, and decided in the work's favour.
@@ -1119,7 +1122,7 @@ fn holds_dependents(settled: &Settled) -> bool {
 /// is on the branch it will be cut from — so it starts, while the node keeps the
 /// word its own publication earned.
 fn reached_its_base(settled: &Settled) -> bool {
-    matches!(settled, Settled::ReachedTheOrigin { landed: true })
+    matches!(settled, Settled::ReachedItsBase)
 }
 
 /// The dependencies whose own failure or skip is why `id` derived
@@ -1147,7 +1150,7 @@ pub fn skipped_by(
         .filter_map(|dep| {
             let status = *statuses.get(dep)?;
             let reached = match settled.get(dep) {
-                Some(reached @ Settled::ReachedTheOrigin { .. })
+                Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
                     if status == NodeStatus::Failed =>
                 {
                     *reached
