@@ -186,8 +186,8 @@ fn consumer(adoption: Option<&str>) -> Value {
     node
 }
 
-/// Give a node the release targets it consumes, and the publication policy that
-/// carrying one obliges.
+/// Give a node the release targets it consumes **and** the publication policy
+/// that carrying one obliges.
 ///
 /// A `consumes` says this node's work is pinned to a release, and every mechanism
 /// that holds such a pin back — the draft `onevcs` opens, and the change request
@@ -195,7 +195,7 @@ fn consumer(adoption: Option<&str>) -> Value {
 /// refuses the pair on an identity that opens none, and these worlds publish
 /// `local-direct` by default: a node that consumes states the policy it publishes
 /// under, exactly as a planner writing one for such a repository has to.
-fn consumes(node: &mut Value, targets: Value) {
+fn consumes_publishing_a_change(node: &mut Value, targets: Value) {
     node["consumes"] = targets;
     node["merge_policy"] = json!("change-open");
 }
@@ -267,7 +267,7 @@ fn the_three_release_kinds_reach_a_planner_through_the_shipped_profile() {
     waiter["id"] = json!("waiter");
     waiter["repo"] = json!("tool");
     waiter["title"] = json!("feat: ship waiter");
-    consumes(&mut waiter, json!({"engine": "wheel"}));
+    consumes_publishing_a_change(&mut waiter, json!({"engine": "wheel"}));
     let run = start(
         &world,
         "adoption-profile",
@@ -449,7 +449,7 @@ fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_sessio
     world.script("consumer.turn-open", "");
     world.script("consumer.wait", "hold");
     let mut waiting = consumer(Some("published"));
-    consumes(&mut waiting, json!({"engine": "wheel"}));
+    consumes_publishing_a_change(&mut waiting, json!({"engine": "wheel"}));
     let run = start(&world, "adoption-relayed-releases", vec![engine(), waiting]);
     world.until("the engine to settle", |world| {
         world
@@ -800,7 +800,7 @@ fn a_launch_that_excludes_the_release_kinds_relays_none_of_them() {
     world.script("consumer.turn-open", "");
     world.script("consumer.wait", "hold");
     let mut waiting = consumer(Some("published"));
-    consumes(&mut waiting, json!({"engine": "wheel"}));
+    consumes_publishing_a_change(&mut waiting, json!({"engine": "wheel"}));
     let run = start_with(
         &world,
         "adoption-relay-excluded",
@@ -947,7 +947,7 @@ fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
     releases_at(&answer, "9.9.9");
 
     let mut node = consumer(Some("published"));
-    consumes(&mut node, json!({"engine": "wheel"}));
+    consumes_publishing_a_change(&mut node, json!({"engine": "wheel"}));
     let run = start(&world, "adoption-unanswerable", vec![engine(), node]);
     // Waited for on the **record**, which is what this reads, rather than on the
     // surface beside it. `release::Waits::report` raises the surface first and
@@ -2815,7 +2815,7 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
     on_the_wheel["id"] = json!("packager");
     on_the_wheel["repo"] = json!("tool");
     on_the_wheel["title"] = json!("feat: ship packager");
-    consumes(&mut on_the_wheel, json!({"engine": "wheel"}));
+    consumes_publishing_a_change(&mut on_the_wheel, json!({"engine": "wheel"}));
     let run = start(
         &world,
         "adoption-styles",
