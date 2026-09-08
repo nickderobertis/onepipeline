@@ -296,6 +296,9 @@ impl std::ops::DerefMut for Projected {
 
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one.
+    // llmlint: ignore[boundary_inputs_validated] the state taken here is the document
+    // [`readable`] handed back, and the reason no boundary can prove it is the fold of the
+    // prefix it claims is stated in full on that function.
     pub(crate) fn open(paths: &RunPaths) -> Self {
         let mut projected = match readable(paths) {
             Some(checkpoint) => Self {
@@ -451,6 +454,22 @@ pub(crate) fn resume(paths: &RunPaths) -> RunState {
 /// build does not read — and so is a document that names another run, which is one
 /// copied between run roots. Whether the marker it carries still describes the
 /// journal is the fourth, and is [`Coverage::marker_sorts_in_front_of`]'s.
+// llmlint: ignore[boundary_inputs_validated] this document is not external input and
+// there is no boundary here that could validate what the rule asks for. It is a
+// **run-owned derived cache**, written into the run's own directory by a reader of that
+// run and read by nothing else — the same standing as `summary.json`, whose stored row
+// this crate serves without re-deriving it, and `result.json`, which `views` reads and
+// acts on. `AGENTS.md` names the inputs that do cross a trust boundary: plan files,
+// executor-rules files, and reply envelopes, each of which arrives from somewhere else.
+// What *is* validated here is everything a reader can decide without the prefix: the
+// schema version, unknown fields, the run it names, every nested value through its own
+// checked constructor (`vcs::DispatchSession`, `edits::Park`, `graph::Graph`), that the
+// byte marker lands on a record boundary, that the journal is at least that long, and
+// that every record in front of the marker sorts after it. The one claim left — that the
+// state is the fold of the prefix the marker names — is provable only by folding that
+// prefix, which is the entire cost this document exists to remove; the fallback for it is
+// structural rather than a check, because the journal stays the authoritative record and
+// discarding this file loses nothing.
 fn readable(paths: &RunPaths) -> Option<Checkpoint> {
     ledger::read_json_opt::<Checkpoint>(&paths.checkpoint())
         .filter(|checkpoint| checkpoint.run_id == paths.run)
@@ -608,12 +627,18 @@ mod tests {
 
     /// A scratch runs root of this journey's own.
     ///
-    /// Named after the journey rather than after the process, so what a run of
-    /// this file leaves behind says which check left it — and so nothing here
-    /// keys durable state on a pid, which is a separate defect of this
-    /// repository's verification.
+    /// Named after the journey **and after the moment it opened**, which is the
+    /// whole of what the name has to do: several worktrees of this repository run
+    /// their suites on one host and they share `/tmp`, so a name only the journey
+    /// decides is one another invocation removes and recreates under this one —
+    /// which reads as a store that lost records rather than as two runs sharing a
+    /// path. Not the process id, which is the same fact spelled the way this
+    /// repository is separately fixing.
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("onepipeline-checkpoint-{name}"));
+        let opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let root = std::env::temp_dir().join(format!("onepipeline-checkpoint-{name}-{opened}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch root");
         root
