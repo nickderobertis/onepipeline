@@ -421,14 +421,15 @@ pub(crate) fn resume(paths: &RunPaths) -> RunState {
 /// build does not read — and so is a document that names another run, which is one
 /// copied between run roots. Whether the marker it carries still describes the
 /// journal is the fourth, and is [`Coverage::marker_sorts_in_front_of`]'s.
-// llmlint: ignore[boundary_inputs_validated] a run-owned derived cache rather than one of
-// the external inputs `AGENTS.md` names, and read on `summary.json`'s terms. The one claim
-// left unchecked — that the state is the fold of the prefix the marker names — is provable
-// only by folding that prefix, which is the cost this removes.
+// llmlint: ignore-block[boundary_inputs_validated] a run-owned derived cache rather than
+// one of the external inputs `AGENTS.md` names, and read on `summary.json`'s terms. The one
+// claim left unchecked — that the state is the fold of the prefix the marker names — is
+// provable only by folding that prefix, which is the cost this removes.
 fn readable(paths: &RunPaths) -> Option<Checkpoint> {
     ledger::read_json_opt::<Checkpoint>(&paths.checkpoint())
         .filter(|checkpoint| checkpoint.run_id == paths.run)
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// Whether a byte offset sits just past a record's own terminator.
 ///

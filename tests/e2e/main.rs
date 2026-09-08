@@ -26,6 +26,10 @@ mod amend;
 mod boundary;
 mod cancellation;
 mod channel;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] two journeys, about 20s
+// together, and what they exercise is the fold every view and the reconcile loop read
+// through — `checkpoint`, `views` and `engine` — so a project edged narrower than the crate
+// could not honestly run them, and any change under `src/` can put the cost back.
 mod checkpoint;
 mod concurrency;
 mod criteria;
