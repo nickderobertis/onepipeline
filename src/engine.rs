@@ -900,11 +900,7 @@ fn converge(
         }
 
         // A verdict the publication could not read may have become readable, and
-        // a run holding dependents on one has to be the thing that finds out —
-        // the alternative is what happened: two closing nodes reported never
-        // attempted while the work they waited on had merged, until a person
-        // settled the node by hand. Paced, and asked only about a node actually
-        // holding a dependent, so a run with none of these asks nothing at all.
+        // the run holding dependents on it is what has to find out.
         let statuses = statuses_of(&mut derived, state);
         let mut watching_merge_paths = unread.watching(state, &statuses);
         if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {

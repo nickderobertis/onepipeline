@@ -858,41 +858,68 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
     None
 }
 
+/// Where a settlement left the node's work, as far as scheduling has to know.
+///
+/// Two cases and not a word, deliberately: this is a scheduling fact, and the
+/// vocabulary a settlement is written in belongs to [`crate::vcs`]. Carried as
+/// the outcome string, every spelling of every word in that vocabulary would be
+/// constructible here — and one that matched nothing would silently mean the
+/// first case, which is the reading this exists to stop being taken by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Published {
+    /// Nothing this decision turns on: every settlement but the one below.
+    Unremarkable,
+    /// The publishing push **reached the origin** and the merge path behind it
+    /// could not be read, which settles `failed` under
+    /// [`Failure::UNREAD`](crate::vcs::Failure::UNREAD).
+    ///
+    /// Not the branch being turned down: the work is on the origin and only the
+    /// verdict about it is outstanding.
+    ReachedTheOrigin,
+}
+
 /// What a node's settlement said, as far as scheduling has to know it.
 ///
 /// [`NodeStatus`] alone is what the derivation used to read, and it is a
-/// projection that deliberately discards the word the node settled under — which
-/// is right for eight of the nine settlements and wrong for one. A publication
-/// whose push **reached the origin** with the merge path unread settles `failed`
-/// under [`Failure::UNREAD`](crate::vcs::Failure::UNREAD), and that is not the
-/// branch being turned down: the work is on the origin and only the verdict about
-/// it is outstanding. Read as a bare `failed`, it skipped every dependent of a
-/// change that had in fact merged.
+/// projection that deliberately discards where the work got to. Read as a bare
+/// `failed`, [`Published::ReachedTheOrigin`] skipped every dependent of a change
+/// that had in fact merged.
 ///
-/// So the decision is given the outcome and the landing beside the status. Three
-/// fields on one value rather than three maps threaded past each other, because
-/// they are one node's one settlement and a caller holding two of them for one
-/// node and the third for another is the state this must not have.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Three fields on one value rather than three maps threaded past each other,
+/// because they are one node's one settlement: a caller holding two of them for
+/// one node and the third for another is the state this must not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settled {
     /// Where the node got to.
     pub status: NodeStatus,
-    /// The word its settlement named, where it named one.
-    pub outcome: Option<String>,
+    /// Where the settlement left its work.
+    pub published: Published,
     /// Whether the change it published has been observed reaching its base.
     pub landing: Option<Landing>,
 }
 
 impl Settled {
+    /// One settlement, reading the word it settled under **once**, here, so no
+    /// caller carries that word any further than the boundary it arrives at.
+    pub fn of(status: NodeStatus, outcome: Option<&str>, landing: Option<Landing>) -> Self {
+        let published =
+            if status == NodeStatus::Failed && outcome == Some(crate::vcs::Failure::UNREAD) {
+                Published::ReachedTheOrigin
+            } else {
+                Published::Unremarkable
+            };
+        Self {
+            status,
+            published,
+            landing,
+        }
+    }
+
     /// A settlement known only by its status, which is every node whose word
     /// nothing here has — a cross-DAG upstream, and every caller that asks about
     /// a status alone.
     pub fn at(status: NodeStatus) -> Self {
-        Self {
-            status,
-            outcome: None,
-            landing: None,
-        }
+        Self::of(status, None, None)
     }
 }
 
@@ -993,8 +1020,7 @@ fn eligibility(
                 // every other status is the one the settlement wrote.
                 Some(status) => Settled {
                     status: *status,
-                    outcome: settled.get(dep).and_then(|it| it.outcome.clone()),
-                    landing: settled.get(dep).and_then(|it| it.landing),
+                    ..settled.get(dep).copied().unwrap_or(Settled::at(*status))
                 },
                 None => {
                     all_done = false;
@@ -1097,13 +1123,10 @@ fn reached_its_base(settled: &Settled) -> bool {
 /// Whether this settlement is the one publication failure whose work reached the
 /// origin: the push landed and the merge path behind it could not be read.
 ///
-/// Asked of the outcome because the status cannot say it — `failed` is what the
-/// node settles as and rightly so — and of [`crate::vcs::Failure::UNREAD`] rather
-/// than a spelling here, so the word this turns on is the one the settlement was
-/// written with.
+/// Read off [`Published`] rather than off the status, because the status cannot
+/// say it: `failed` is what the node settles as, and rightly so.
 fn unread_merge_path(settled: &Settled) -> bool {
-    settled.status == NodeStatus::Failed
-        && settled.outcome.as_deref() == Some(crate::vcs::Failure::UNREAD)
+    settled.published == Published::ReachedTheOrigin
 }
 
 /// The dependencies whose own failure or skip is why `id` derived
@@ -1132,8 +1155,7 @@ pub fn skipped_by(
             let status = *statuses.get(dep)?;
             let reached = Settled {
                 status,
-                outcome: settled.get(dep).and_then(|it| it.outcome.clone()),
-                landing: settled.get(dep).and_then(|it| it.landing),
+                ..settled.get(dep).copied().unwrap_or(Settled::at(status))
             };
             skips_dependents(&reached).then(|| (dep.clone(), status))
         })
@@ -1882,11 +1904,11 @@ mod tests {
         let unread = |landing| {
             BTreeMap::from([(
                 "publish".to_string(),
-                Settled {
-                    status: NodeStatus::Failed,
-                    outcome: Some(crate::vcs::Failure::UNREAD.to_string()),
+                Settled::of(
+                    NodeStatus::Failed,
+                    Some(crate::vcs::Failure::UNREAD),
                     landing,
-                },
+                ),
             )])
         };
 
@@ -1907,11 +1929,7 @@ mod tests {
         // other word skips its dependents exactly as it always did.
         let task_failed = BTreeMap::from([(
             "publish".to_string(),
-            Settled {
-                status: NodeStatus::Failed,
-                outcome: Some(crate::engine::TASK_FAILED.to_string()),
-                landing: None,
-            },
+            Settled::of(NodeStatus::Failed, Some(crate::engine::TASK_FAILED), None),
         )]);
         let skipped = derive(&graph, &task_failed, &no_cross_dag);
         assert_eq!(skipped["announce"], NodeStatus::Skipped);

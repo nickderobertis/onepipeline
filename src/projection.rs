@@ -625,23 +625,22 @@ impl RunState {
         crate::graph::derive(&self.graph, &self.settled(), upstream)
     }
 
-    /// What each node's settlement said, as the derivation reads it: the status,
-    /// and the two things the status is a projection *of* — the word it settled
-    /// under and whether its change has been observed reaching its base.
+    /// What each node's settlement said, as the derivation reads it.
     ///
-    /// Both of the second two matter to exactly one scheduling decision and are
-    /// carried for it; see [`crate::graph::Settled`].
+    /// The status is a projection, and this is what it is a projection *of*; see
+    /// [`crate::graph::Settled`], which is where the settlement's own word is
+    /// read and where it stops being one.
     pub(crate) fn settled(&self) -> BTreeMap<String, crate::graph::Settled> {
         self.recorded
             .iter()
             .map(|(id, recorded)| {
                 (
                     id.clone(),
-                    crate::graph::Settled {
-                        status: recorded.status(),
-                        outcome: self.outcomes.get(id).cloned(),
-                        landing: self.landings.get(id).copied(),
-                    },
+                    crate::graph::Settled::of(
+                        recorded.status(),
+                        self.outcomes.get(id).map(String::as_str),
+                        self.landings.get(id).copied(),
+                    ),
                 )
             })
             .collect()

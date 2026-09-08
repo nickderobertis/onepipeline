@@ -106,15 +106,11 @@ pub fn execute(
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
-        // The tree this attempt published is the tree the last one published, so
-        // whatever turned it down was not turned down *by the branch* — and no
-        // number of further attempts on it can answer differently. The budget is
-        // for a tree a worker can still change, so this one is handed back rather
-        // than spent, and the node settles here.
-        // Where this attempt left the branch. `onevcs` commits a session's
+        // Where this attempt left the branch: `onevcs` commits a session's
         // worktree only where it holds something to commit, so an attempt that
-        // recorded no commit *added* nothing: the branch stands exactly where
-        // the attempt before it left it, and that is the tip this one published.
+        // recorded no commit added nothing and the branch stands where the last
+        // one left it. Republishing that tree is a refusal the branch did not
+        // cause, so the attempt is handed back rather than spent.
         let tip = preserved.head.clone().or_else(|| published.clone());
         if let Some(same) = unchanged_tree(published.as_deref(), tip.as_deref()) {
             return published_an_unchanged_tree(&node.id, &preserved, &endings, &same, attempt);
@@ -851,21 +847,12 @@ fn unchanged_tree(published: Option<&str>, now: Option<&str>) -> Option<String> 
 /// The settlement of a node whose attempt published the tree its previous attempt
 /// published.
 ///
-/// **The residual and not the failure's own word**, which is the whole point of
-/// telling this ending apart. Every one of the four preserving words says
-/// something about the *branch* — a check its tree failed, a merge path its tree
-/// could not pass — and none of that is true here: the tree is the one that was
-/// already refused, so what turned this attempt down is something the branch did
-/// not cause and cannot fix. The residual is the ending whose own meaning covers
-/// it exactly — a refusal that "ran on the tree as it stands" and would "answer
-/// the same way however many times [it is] asked", which is [`Failure::Terminal`]
-/// in [`crate::vcs`] — and it is neither a success nor a task the agent failed.
+/// **The residual and not the failure's own word.** Each of the four preserving
+/// words says something about the branch, and the branch is not what refused
+/// this; [`Failure::Terminal`] is the ending whose meaning covers it.
 ///
-/// The attempt that ended here is **handed back** rather than spent: `attempt`
-/// counts the one that has just run, and everything from it on is still the
-/// node's to use if a person changes what refused it. The settlement says how
-/// much, because a reader deciding whether to intervene is deciding against a
-/// budget.
+/// The attempt is **handed back** rather than spent, and the settlement says how
+/// much is left: a reader deciding whether to intervene decides against a budget.
 ///
 /// [`Failure::Terminal`]: crate::vcs::Failure::Terminal
 fn published_an_unchanged_tree(

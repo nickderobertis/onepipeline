@@ -2244,22 +2244,10 @@ fn a_merge_path_that_never_answers_settles_the_node_saying_where_the_work_is() {
 /// A node whose work reached the origin with its verdict outstanding **holds**
 /// its dependents, and they run once that verdict becomes decidable.
 ///
-/// The incident: a node settled `pushed-unverified` with its branch on the origin
-/// and its change request open, and both dependents — the two closing nodes of a
-/// fifteen-node plan — went to `never attempted`. The engine says in three places
-/// that this failure is not the tree being turned down, and none of it reached the
-/// one decision it should have changed, because the scheduler read a status that
-/// deliberately discards the word.
-///
-/// So the run holds them instead, and goes on asking `onevcs` whether the verdict
-/// has become readable — which is the half that makes it a hold rather than a
-/// stall. Nothing here states a landing to the binary: the branch is taken onto
-/// its base by this test, with git, exactly as a merge does it, and what the run
-/// then reads is that repository.
-///
-/// The node itself keeps the word its publication earned, because that word is
-/// true and an operator reading it acts on it. What changed is only what may run
-/// next.
+/// Nothing here states a landing to the binary: the branch is taken onto its base
+/// by this test, with git, exactly as a merge does it, and what the run then
+/// reads is that repository. Both halves are asserted, because either alone
+/// proves nothing — a hold nothing lifts stops the run as surely as a skip.
 #[test]
 fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decidable() {
     let world = World::new("lifecycle-heldunverified")
@@ -2384,19 +2372,81 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
     );
 }
 
+/// A verdict that stays readable and says the work has **not** landed leaves the
+/// dependents held, and the run settles rather than asking for good.
+///
+/// The other end of the hold. The host answers every time it is asked here — the
+/// branch really is on the origin and its change really has not reached the base
+/// — so what bounds the asking is the budget rather than an outage ending. When
+/// it is gone the dependents stay held, which is what they are: work waiting on a
+/// merge nobody in this run can perform, rather than work a failure made unsafe.
+#[test]
+fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
+    let world = World::new("lifecycle-heldforever")
+        .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1")
+        // Two asks after the settlement, so the run stops on the budget rather
+        // than on a clock this journey would have to wait out.
+        .with_env("ONEPIPELINE_UNREAD_MERGE_PATH_ASKS", "2");
+    world.repository("change-auto", &[]);
+    world.script("publish.work", "the worker wrote this\n");
+    world.script("announce.work", "and this announces it\n");
+    // Out for one call, which is the read behind this node's push. Nothing lands
+    // the branch afterwards, so every ask that follows is answered and answered
+    // negatively.
+    world.script("gh.outage", "1");
+
+    let run = settle(
+        &world,
+        "heldforever",
+        vec![
+            lifecycle("publish", &[]),
+            lifecycle("announce", &["publish"]),
+        ],
+    );
+    let result = world.run_json(&run, "result.json");
+    let nodes: std::collections::BTreeMap<String, serde_json::Value> = result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .map(|node| (node["id"].as_str().expect("an id").to_owned(), node.clone()))
+        .collect();
+    assert_eq!(
+        nodes["publish"]["outcome"],
+        "pushed-unverified",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    // Held, not skipped, and never attempted on its own account either: the run
+    // stopped asking, and stopping asking is not a verdict about the branch.
+    assert_eq!(
+        nodes["announce"]["status"],
+        "blocked",
+        "a verdict that never came back turned a hold into something else: {result}\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatches_of(&world, &run, "announce").is_empty(),
+        "a node held on an undecidable verdict was dispatched anyway\n{}",
+        why(&world, &run)
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("pushed-unverified");
+}
+
 /// Two nodes against one repository with no edge between them still run at the
 /// same time.
 ///
-/// What must **not** be inferred from the hold above, held so the tree cannot
-/// start implying it: nothing here serialises same-repository work. Three of the
-/// four repositories in the run this came from ran two or more nodes in parallel
-/// with no trouble, and serialising them would have cost hours.
+/// What must not be inferred from the hold above: nothing here serialises
+/// same-repository work.
 ///
-/// Observed rather than inferred. Both workers arrive at a barrier that releases
-/// only when both are inside their own dispatch, so a run that started the second
-/// after the first had finished never releases it and this fails in the double —
-/// which is a stronger fact than two records neither of which says it was waiting
-/// on the other.
+/// Observed rather than inferred, twice over. Both workers arrive at a barrier
+/// that releases only when both are inside their own dispatch, so a run that
+/// started the second after the first had finished never releases it and settles
+/// nothing; and the run's own record is then read for the overlap, which is both
+/// dispatches on the record before either settlement.
 #[test]
 fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
     let world = World::new("lifecycle-sidebyside");
@@ -2427,31 +2477,33 @@ fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
         );
     }
 
-    // The barrier released, so both dispatches really were in flight together,
-    // and the arrivals are which two they were.
-    let arrived = std::fs::read_to_string(world.fakes.join("concurrent.arrived"))
-        .unwrap_or_else(|error| panic!("no barrier was reached: {error}\n{}", world.dump()));
-    let live: std::collections::BTreeSet<&str> = arrived
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    assert_eq!(
-        live,
-        std::collections::BTreeSet::from(["left", "right"]),
-        "the two dispatches that overlapped were not this plan's two nodes: {arrived:?}\n{}",
-        why(&world, &run)
-    );
+    // The overlap, off the run's own record: both dispatches are on it before
+    // either settlement, which is the two of them alive at one instant. The
+    // barrier is what makes that a fact rather than a coincidence of scheduling —
+    // neither worker returns until the other has started — and a run that
+    // serialised them would not have settled at all.
+    let journal = world.journal(&run);
+    let at = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("no {kind} for {node}\n{}", why(&world, &run)))
+    };
+    let first_settlement = at("node-settled", "left").min(at("node-settled", "right"));
+    for node in ["left", "right"] {
+        assert!(
+            at("node-dispatched", node) < first_settlement,
+            "'{node}' was not dispatched until something else had settled\n{}",
+            why(&world, &run)
+        );
+    }
 }
 
 /// And a failure no further attempt could answer skips its dependents exactly as
 /// it always did.
 ///
-/// The scope of the change above, held from the other side: what moved is the one
+/// The scope of the change above, from the other side: what moved is the one
 /// outcome whose work reached the origin, and nothing about skipping in general.
-/// A node whose agent failed its task leaves nothing on any base for a dependent
-/// to build on, so the dependent is not attempted — and the view says which
-/// dependency answered for it.
 #[test]
 fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
     let world = World::new("lifecycle-skippedstill");
@@ -2696,19 +2748,11 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
 /// the conflict a session **open** meets is not it.
 ///
 /// Both conditions in one run, because one word covers them and only one is
-/// retryable. The conflict is real and it is made the way one happens: the base
-/// takes a change to the same file while the node's worker is still working, and
-/// the publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
-/// reports that as a publication failure, hands the branch back, and this crate
-/// dispatches the node again on it — the retry that must go on happening.
-///
-/// What the second dispatch then meets is the other condition: opening a session
-/// on a branch its base conflicts with is a refusal `onevcs` makes before any
-/// work begins, and no attempt converges on it, because neither the branch nor
-/// the base changes on its own. So the dispatch budget is not spent reproducing
-/// it. A decision goes to the supervisor instead, naming the conflict in the
-/// sibling's own words and the move that answers it — and answering it puts the
-/// node back on the branch that now carries the resolution, where it settles.
+/// retryable. The conflict is real and made the way one happens: the base takes a
+/// change to the same file while the worker is still working, and the
+/// publication's resolve-and-requeue cannot merge the two. The second dispatch
+/// then meets the other condition, at session open, where no attempt converges
+/// because neither side changes on its own.
 #[test]
 fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries() {
     let world = World::new("lifecycle-syncconflict")
@@ -2998,19 +3042,10 @@ fn a_publication_budget_that_is_not_a_number_spends_the_same_default() {
 /// The budget is for a tree a worker can still change, and an attempt that
 /// republished the last one's tree did not change it.
 ///
-/// Both halves of that, against one refusal that never clears, because the
+/// Both halves of that against one refusal that never clears, because the
 /// distinction is between them rather than in either: a worker that writes the
-/// same thing every dispatch leaves the branch exactly where it was, and one that
-/// writes something new moves it. The first is the observed incident — two
-/// publications refused for a browser the host did not have, each one spending an
-/// attempt on a condition no attempt could change — and the second is every
-/// ordinary retry, which must go on happening.
-///
-/// What the first settles as matters as much as that it settles: none of the four
-/// preserving words is true of it, because each one says something about the
-/// branch and the branch is not what refused. The residual is, and it is the
-/// ending whose own meaning covers exactly this — a refusal that ran on the tree
-/// as it stands and answers the same way however many times it is asked.
+/// same thing every dispatch leaves the branch where it was, and one that writes
+/// something new moves it. Retrying must go on happening for the second.
 #[test]
 fn a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget() {
     let unchanged = World::new("lifecycle-sametree")

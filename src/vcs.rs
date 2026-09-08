@@ -496,26 +496,17 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// The nodes whose publication left its work on the origin with the merge path
 /// unread, and how many times this run has asked again about each.
 ///
-/// Their dependents are **held** rather than skipped — `crate::graph`'s
-/// `holds_dependents` is where that is decided — which is only half an answer on
-/// its own:
-/// a hold nothing ever lifts is a run that stops short of its goal just as surely
-/// as a skip, and it took a person settling the node from landing evidence to
-/// move it. This is the other half. The verdict the publication could not read is
-/// a verdict about the *host*, and a host that was briefly unreachable comes
-/// back, so the run asks the same question the publication asked — through
-/// `onevcs`, off the branch — until it is answered or the budget for asking is
-/// spent.
+/// `crate::graph` holds their dependents rather than skipping them; a hold
+/// nothing lifts stops a run just as surely, so this is what lifts it. The
+/// verdict the publication could not read is a verdict about the *host*, and a
+/// host that was briefly unreachable comes back.
 ///
-/// **Bounded**, by [`crate::engine::unread_merge_path_asks`], for the reason the
-/// publication's own re-read is: a run that polled somebody else's API for good
-/// would be worse than one that reported honestly. When the budget is gone the
-/// dependents stay held, which is what they are: work waiting on a merge nobody
-/// in this run can perform, rather than work a failure made unsafe.
+/// **Bounded**, by [`crate::engine::unread_merge_path_asks`]: a run that polled
+/// somebody else's API for good would be worse than one that reported honestly.
+/// When the budget is gone the dependents stay held, which is what they are.
 ///
-/// Asked only about a node that is actually **holding** something. A
-/// `pushed-unverified` leaf has no dependent waiting on it, so nothing about it
-/// changes what the run does next and the reads would buy nothing.
+/// Asked only about a node actually holding something, so a `pushed-unverified`
+/// leaf costs nothing.
 #[derive(Debug, Default)]
 pub(crate) struct UnreadMergePaths {
     asked: BTreeMap<String, u32>,
