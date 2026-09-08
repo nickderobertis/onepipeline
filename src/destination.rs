@@ -402,13 +402,32 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
     ))
 }
 
+/// How a process ended, which for a hook is two answers and not one.
+///
+/// A status and a signal are mutually exclusive and a `String` could hold both or
+/// neither, which is how a report comes to name an exit status a hook never
+/// reached. `Display` is the one place either is spelled.
+#[derive(Debug, PartialEq, Eq)]
+enum Termination {
+    /// It ran to the end and answered with this status.
+    Exit(i32),
+    /// A signal stopped it before it reached one, so there is no status to name.
+    Signal,
+}
+
+impl std::fmt::Display for Termination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exit(status) => write!(f, "exit {status}"),
+            Self::Signal => f.write_str("killed by a signal"),
+        }
+    }
+}
+
 /// What a repository's own hook said when it turned a subject down.
 #[derive(Debug)]
 struct Rejected {
-    /// How the hook ended — an exit status, or the signal that stopped it before
-    /// it reached one. Both are answers a report has to be able to give, and only
-    /// one of them is an exit.
-    termination: String,
+    termination: Termination,
     said: String,
 }
 
@@ -452,10 +471,10 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
     );
     let said = said.trim();
     Ok(Some(Rejected {
-        termination: match ran.status.code() {
-            Some(code) => format!("exit {code}"),
-            None => "killed by a signal".to_owned(),
-        },
+        termination: ran
+            .status
+            .code()
+            .map_or(Termination::Signal, Termination::Exit),
         said: if said.is_empty() {
             "<no output>".to_owned()
         } else {
@@ -504,17 +523,18 @@ fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
 #[cfg(unix)]
 fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
     use std::os::unix::ffi::OsStrExt;
-    let trimmed = printed
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .map_or(&[][..], |start| {
-            let end = printed
-                .iter()
-                .rposition(|byte| !byte.is_ascii_whitespace())
-                .unwrap_or(start);
-            &printed[start..=end]
-        });
-    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(trimmed)))
+    // Only the record terminator git ends the line with. A space and a tab are
+    // legal in a path, so trimming whitespace would quietly rename a directory
+    // that has one at either end into one that does not exist.
+    let named = printed
+        .strip_suffix(b"\n")
+        .unwrap_or(printed)
+        .strip_suffix(b"\r")
+        .unwrap_or_else(|| printed.strip_suffix(b"\n").unwrap_or(printed));
+    if named.is_empty() {
+        return Err("git named no path at all".to_owned());
+    }
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(named)))
 }
 
 /// A path git printed, on a platform whose paths this build can only read as text.
@@ -561,6 +581,12 @@ fn runnable(path: &Path) -> Result<bool, String> {
 ///
 /// Windows carries no executable bit, so presence is the test — which is what Git
 /// for Windows does too.
+// llmlint: ignore[changed_behavior_has_e2e] the presence arm is driven on that platform by
+// every journey here that installs a hook; what has no journey is the metadata error
+// beside it, and it is the same case as `os_path`'s Windows arm above — a filesystem that
+// answers neither "here" nor "not found" is not a state a test can arrange, and the arm
+// exists so that one is never read as the hook being absent, which is how a repository
+// that does state a policy would have none applied.
 #[cfg(not(unix))]
 fn runnable(path: &Path) -> Result<bool, String> {
     match std::fs::metadata(path) {
@@ -905,7 +931,7 @@ mod tests {
         let rejected = ask_the_hook(&checkout, "refactor(x): y")
             .expect("the hook runs")
             .expect("a title this repository does not release from is turned down");
-        assert_eq!(rejected.termination, "exit 3");
+        assert_eq!(rejected.termination, Termination::Exit(3));
         assert_eq!(rejected.said, "only feat: here");
 
         // A hook that refuses and says nothing has still refused.
@@ -913,7 +939,7 @@ mod tests {
         let silent = ask_the_hook(&checkout, "feat: ship it")
             .expect("the hook runs")
             .expect("a silent refusal is still a refusal");
-        assert_eq!(silent.termination, "exit 1");
+        assert_eq!(silent.termination, Termination::Exit(1));
         assert_eq!(
             silent.said, "<no output>",
             "a refusal nobody can read must say that it said nothing"

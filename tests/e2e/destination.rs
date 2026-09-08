@@ -400,6 +400,11 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
             r#"{"identity": "  ", "workflow": "remote", "publication_checkout": "/tmp/x"}"#,
             "states a blank identity",
         ),
+        (
+            "a checkout that names no place on this host",
+            r#"{"identity": "i", "workflow": "remote", "publication_checkout": "service"}"#,
+            "publication checkout that is not an absolute path",
+        ),
     ];
 
     for (why, resolve, said) in cases {
