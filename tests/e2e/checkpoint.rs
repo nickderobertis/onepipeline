@@ -1,13 +1,7 @@
-//! The fold checkpoint: what a reader resumes from instead of replaying a run's
-//! whole journal.
+//! The fold checkpoint, through the compiled binary against a real run store.
 //!
-//! Both journeys drive the compiled binary against a real run store, and neither
-//! is stated in seconds: what a supervisory read costs is **work**, and a loaded
-//! host hands out time as it likes. So the claim "only the records the checkpoint
-//! does not account for were folded" is held by *observing which records the
-//! reader consumed* — one it accounts for is made unreadable, so a reader that
-//! folded it again says something different — and the loop's half is held by the
-//! driver's own count of the records it folded.
+//! Neither claim is stated in seconds: a loaded host hands out time as it likes,
+//! so both are stated as work.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven here as
@@ -70,16 +64,10 @@ fn blank_a_settlement_within(world: &World, run: &str, within: usize) -> usize {
 }
 
 /// A read through a usable checkpoint folds only the records it does not account
-/// for, and the same read without one folds them all.
-///
-/// The control is the same store read twice: the only difference between the two
-/// answers is whether the checkpoint was there, which is what makes this a
-/// comparison rather than an observation.
-// llmlint: ignore-block[tests_mirror_real_usage] no verb blanks a record inside a run's
-// own journal or removes the cache beside it, and there is no interface that would: what
-// this journey holds is which records a reader *consumed*, which no user-facing surface
-// reports and which shows up otherwise only as a read that costs more the longer the run
-// has been going.
+/// for; every state that makes one unusable folds them all.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb blanks a record inside a run's own
+// journal or edits the cache beside it, and which records a reader *consumed* is reported by
+// no user-facing surface.
 #[test]
 fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() {
     let world = World::new("checkpoint-tail");
@@ -111,10 +99,8 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
         "the record this journey blanked was not one the checkpoint accounted for"
     );
 
-    // And every state that makes a checkpoint unusable, over the same store: each
-    // one has to answer out of the journal, which is the answer with no checkpoint
-    // there at all. The blanked record is what makes the two distinguishable —
-    // without it a document that was wrongly trusted would fold to the same line.
+    // And every state that makes a checkpoint unusable, over the same store. The
+    // blanked record is what makes the two answers distinguishable at all.
     let usable = std::fs::read(world.run_file("tail", "checkpoint.json"))
         .expect("the checkpoint this read wrote");
     let store = world.run_file("tail", "events.jsonl");
@@ -132,12 +118,8 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
     }
 }
 
-/// Every state the module note says makes a checkpoint unusable, each left on a
-/// run root the compiled binary is then asked to read.
-///
-/// A list rather than a journey each, because what every one of them asserts is
-/// the same sentence — the reader answers out of the journal — and the difference
-/// between them is only which byte of the run root is wrong.
+/// Every state that makes a checkpoint unusable. A list rather than a journey each,
+/// because they assert one sentence and differ only in which byte is wrong.
 type LeaveUnusable = fn(&World, &[u8]);
 
 fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
@@ -213,17 +195,12 @@ fn write_checkpoint(world: &World, document: &Value) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The reconcile loop folds about one record per record the run wrote, rather
-/// than the whole journal per change it recorded.
-///
-/// Stated as a controlled comparison rather than as an absolute: the driver's own
-/// count is held against what the tree before this change would have folded — a
-/// full re-fold of the store on every state-changing record — over the same run.
-// llmlint: ignore-block[tests_mirror_real_usage] what this compares is how many records a
-// real driver folded out of a real run store, which no CLI output reports: the cost it
-// holds off is invisible to every user-facing surface and shows only as a run that gets
-// slower at everything the longer it has been running. The run, the plan and the
-// dispatches are all the real ones.
+/// The reconcile loop folds far fewer records than a re-fold of the whole store per
+/// change it recorded would have.
+// llmlint: ignore-block[tests_mirror_real_usage] how many records a real driver folded out
+// of a real run store is reported by no CLI output, and the cost it holds off shows only as
+// a run that gets slower the longer it runs. The run, plan and dispatches are the real
+// ones.
 #[test]
 fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal() {
     let world = World::new("checkpoint-loop").with_env(LOOP_STATS_ENV, "1");
@@ -235,8 +212,7 @@ fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal
 
     let did = counts(&world, "loop");
     let records = world.journal("loop").len() as u64;
-    // Every record this loop wrote that changes what the graph is, which is what
-    // it re-folded on before this change.
+    // What the loop re-folded the whole store on before this change.
     let changes = world
         .journal("loop")
         .iter()
@@ -253,12 +229,9 @@ fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal
         "the run recorded no changes to fold on: {did:?}"
     );
 
-    // Held against what a re-fold per recorded change would have cost over the
-    // same store, with a margin, rather than against an absolute: how far the
-    // marker trails depends on how far apart in time the run's records are, and
-    // this run records fifty of them inside a few seconds — which is the
-    // *hardest* shape for it and the cheapest one to fold anyway. The run this
-    // change is for recorded 22 MB over hours.
+    // A margin rather than an absolute: how far the marker trails depends on how far
+    // apart in time the records are, and fifty inside a few seconds is the hardest
+    // shape for it — and the cheapest to fold anyway.
     assert!(
         did.records_folded * 2 < changes * records,
         "a driver folded {} records where a re-fold per change would have folded \

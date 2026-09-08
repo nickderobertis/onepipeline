@@ -3,90 +3,70 @@
 //!
 //! One `checkpoint.json` beside each run's `plan.json` and `summary.json`, holding
 //! a fold of a prefix of the journal and a marker saying how much of the journal
-//! that fold accounts for. It exists because [`RunState`] is *derived* rather than
-//! maintained: every view folded the whole merged store on every invocation and
-//! the reconcile loop re-folded it after every applied command, so the cost of
-//! knowing where a run had got to was the cost of its whole history. One run here
-//! answered `status` in 0.35 s at 860 B and in 17.47 s at 22 MB.
+//! that fold accounts for. [`RunState`] is *derived* rather than maintained, so
+//! before this every view folded the whole merged store per invocation and the
+//! reconcile loop re-folded it per applied command: one run here answered `status`
+//! in 0.35 s at 860 B and 17.47 s at 22 MB.
 //!
 //! # The journal stays the authoritative record
 //!
-//! A checkpoint caches a prefix of the journal and nothing is lost by throwing one
-//! away. Four conditions make one unusable, and each falls back to folding the
-//! whole store, which is the answer every run had before this document existed: it
-//! is **absent**; it cannot be **read or parsed**; its **format version** is not
-//! the one this build writes; or its **coverage marker is not corroborated** by
-//! the journal in front of it.
-//!
-//! That is what makes the landing non-breaking both ways. A build that writes no
-//! checkpoint reads a run root exactly as it always did whether or not one is
-//! sitting there — nothing reads the file but this module — and a build that
-//! writes one finds none in a predecessor's run root and folds.
+//! Nothing is lost by throwing a checkpoint away. Four conditions make one
+//! unusable and each falls back to folding the whole store, which is the answer
+//! every run had before this document existed: **absent**; unreadable or
+//! **unparseable**; at a **format version** this build does not write; or carrying
+//! a **coverage marker the journal in front of it does not corroborate**. That is
+//! also what makes the landing non-breaking both ways — nothing but this module
+//! reads the file, and a predecessor's run root simply has none.
 //!
 //! # The hazard the coverage marker answers
 //!
 //! [`journal::merge_order`] reorders the store before the fold — each stream in
 //! its own `seq`, streams interleaved by `ts` — so a marker naming a byte prefix
-//! of the *file* would let a checkpoint account for a record a later read places
-//! **behind** one it also accounts for.
+//! of the *file* could account for a record a later read places **behind** one it
+//! also accounts for.
 //!
-//! The marker chosen is one a reordering **cannot** invalidate rather than one
-//! discarded whenever a reordering could have happened. Beside the byte count it
-//! carries how many records those bytes hold, the greatest `(ts, stream)` among
-//! them, and the greatest `seq` per stream; a prefix is covered only while **every
-//! record past it sorts at or after all three**, asked again of the grown store on
-//! every read.
+//! The marker chosen is one a reordering **cannot** invalidate. Beside the byte
+//! count it carries the record count, the greatest `(ts, stream)` covered and the
+//! greatest `seq` per stream, and a prefix stays covered only while every record
+//! past it sorts at or after all three — asked again of the grown store on every
+//! read.
 //!
-//! That is the whole proof. Write `P` for the covered records and `T` for the
-//! rest. The merge is a k-way one: each stream is queued in its own `seq`, and
-//! each pass takes the head with the least `(ts, stream)`. Every record of `T`
-//! sorts at or after every record of `P`, so while any record of `P` is queued no
-//! head belonging to `T` can win — except at a tie, which is one stream, where the
-//! `seq` condition puts `P`'s record first. So
-//! `merge_order(P ∪ T) = merge_order(P) ++ merge_order(T)`: folding the
+//! Why that suffices: write `P` for the covered records and `T` for the rest. The
+//! merge queues each stream in its own `seq` and takes the head with the least
+//! `(ts, stream)`. Every record of `T` sorts at or after every record of `P`, so
+//! while any of `P` is queued no `T` head can win — except at a tie, which is one
+//! stream, where the `seq` condition puts `P`'s record first. Hence
+//! `merge_order(P ∪ T) = merge_order(P) ++ merge_order(T)`, so folding the
 //! checkpoint's state and then what the store grew by lands on the state the whole
-//! store folds to, and extending the marker over the front of `T` is that
-//! statement again with `P` grown.
+//! store folds to; extending the marker over the front of `T` is that statement
+//! again with `P` grown.
 //!
-//! **The covered records are not a prefix of the file's own order**, and that is
-//! the difference between a marker that grows and one that stops. A run's store
-//! has several appenders — the loop's writer, and the relay carrying its
-//! dispatches' streams — so a relayed record stamped a millisecond before the
-//! record appended in front of it is ordinary, and the merge moves it. A marker
-//! held to the file order stopped at the first of those and never passed it: 6
-//! records of a settled run's store, against 18 for this one. So the covered
-//! records are folded **in the merge order**, and what the marker asks of them is
-//! only that nothing past them sorts in front — which the inverted record itself
-//! satisfies as soon as it is inside `P` rather than in front of it.
+//! **The covered records are a prefix of the merge order, not of the file's own**,
+//! and that is the difference between a marker that grows and one that stops. A
+//! run's store has several appenders — the loop's writer, and the relay carrying
+//! its dispatches' streams — so a relayed record stamped a millisecond before the
+//! record appended in front of it is ordinary. A marker held to the file order
+//! stopped at the first of those and never passed it: 6 records of a settled run's
+//! store, against 18 for this one.
 //!
-//! Where a record does arrive that the marker cannot be extended over — a producer
-//! whose clock runs behind this host's by more than the store's own tail, an
-//! `oneharness-session` published out of band and stamped when its session opened
-//! — the checkpoint is discarded, the store folded whole, and the marker written
-//! afterwards covers the record that discarded it.
+//! A record the marker cannot be extended over — a producer whose clock runs
+//! behind this host's by more than the store's own tail, an `oneharness-session`
+//! published out of band — discards the checkpoint, and the marker written after
+//! the whole-store fold covers it.
 //!
 //! # One order, for both readers
 //!
-//! A checkpoint is one document holding one fold, so the two readers of a run fold
-//! in one order: [`journal::merge_order`], which [`crate::views`],
-//! [`crate::summary`] and [`crate::telemetry`] already read the store in and which
-//! is the only ordering promise an envelope carries. The reconcile loop folded the
-//! file as appended before this document existed; what moves is only where a
-//! relayed record sits against its own, since the merge keeps a stream in its own
+//! One document holding one fold means one order: [`journal::merge_order`], which
+//! [`crate::views`], [`crate::summary`] and [`crate::telemetry`] already read the
+//! store in and which is the only ordering promise an envelope carries. The
+//! reconcile loop folded the file as appended before this; what moves is only where
+//! a relayed record sits against its own, since the merge keeps a stream in its own
 //! `seq` whatever the stamps say.
 
-// llmlint: ignore-file[invalid_states_unrepresentable] this document is `src/summary.rs`'s
-// records read back, and it carries that file's own file-level suppression for the same
-// reason `src/ledger.rs` states: a timestamp, a stream id and a run id are *serialized*
-// fields an older build wrote and a person can edit, so every reader here has to accept
-// what is there rather than what this build would mint, and `docs/contract.md` names no
-// timestamp type and no `RunId`. The two shapes a type could not exclude either — a
-// `Coverage` whose counts disagree with each other, and a `Checkpoint` whose state is not
-// the fold of the prefix it claims — are unrepresentable only by a type nothing can
-// deserialize, because the proof is *the fold of that prefix* and folding it is the cost
-// this document exists to remove. What stands in for it is the four conditions the module
-// note names, every one of which discards the document and folds the journal: the journal
-// is the authoritative record and nothing is lost by throwing a checkpoint away.
+// llmlint: ignore-file[invalid_states_unrepresentable] serialized fields an older build
+// wrote, on `src/summary.rs`'s terms and carrying that file's own suppression. The shape a
+// type could not exclude either — a state that is not the fold of the prefix it claims — is
+// excluded only by folding that prefix, which is the cost this removes.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -96,13 +76,9 @@ use crate::journal;
 use crate::ledger::{self, RunPaths};
 use crate::projection::{self, RunState};
 
-/// The schema version of the checkpoint document.
-///
-/// The whole compatibility statement, and it is [`crate::summary`]'s: a reader
-/// that met a document it does not understand and folded from it anyway would
-/// report a run's state out of fields that mean something else. A version this
-/// build does not write is **refused**, and a refused checkpoint is not an error
-/// — it is a run that folds.
+/// The schema version of the checkpoint document, refused where it is not this
+/// one: a reader that folded from fields meaning something else would report a
+/// state nobody recorded. See [`crate::summary`], which states the same.
 pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
 /// Read the version, refusing a document this build cannot honestly read.
@@ -296,9 +272,8 @@ impl std::ops::DerefMut for Projected {
 
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one.
-    // llmlint: ignore[boundary_inputs_validated] the state taken here is the document
-    // [`readable`] handed back, and the reason no boundary can prove it is the fold of the
-    // prefix it claims is stated in full on that function.
+    // llmlint: ignore[boundary_inputs_validated] the reason is on [`readable`], which
+    // decided this document.
     pub(crate) fn open(paths: &RunPaths) -> Self {
         let mut projected = match readable(paths) {
             Some(checkpoint) => Self {
@@ -313,14 +288,8 @@ impl Projected {
         projected
     }
 
-    /// Fold what the run's journal has grown by since this state last accounted
-    /// for it.
-    ///
-    /// The state this leaves is the state a fold of the whole store leaves. Where
-    /// the store cannot be placed against what is already folded — it is shorter
-    /// than the marker, or it has grown by a record the marker's own records do
-    /// not all sort in front of — the whole store is folded again, which is the
-    /// same answer more slowly.
+    /// Fold what the run's journal has grown by, leaving the state a fold of the
+    /// whole store leaves.
     pub(crate) fn refresh(&mut self, paths: &RunPaths) {
         let journal = paths.journal();
         let mut grown = journal::finished_records_after(&journal, self.coverage.bytes);
@@ -454,22 +423,10 @@ pub(crate) fn resume(paths: &RunPaths) -> RunState {
 /// build does not read — and so is a document that names another run, which is one
 /// copied between run roots. Whether the marker it carries still describes the
 /// journal is the fourth, and is [`Coverage::marker_sorts_in_front_of`]'s.
-// llmlint: ignore[boundary_inputs_validated] this document is not external input and
-// there is no boundary here that could validate what the rule asks for. It is a
-// **run-owned derived cache**, written into the run's own directory by a reader of that
-// run and read by nothing else — the same standing as `summary.json`, whose stored row
-// this crate serves without re-deriving it, and `result.json`, which `views` reads and
-// acts on. `AGENTS.md` names the inputs that do cross a trust boundary: plan files,
-// executor-rules files, and reply envelopes, each of which arrives from somewhere else.
-// What *is* validated here is everything a reader can decide without the prefix: the
-// schema version, unknown fields, the run it names, every nested value through its own
-// checked constructor (`vcs::DispatchSession`, `edits::Park`, `graph::Graph`), that the
-// byte marker lands on a record boundary, that the journal is at least that long, and
-// that every record in front of the marker sorts after it. The one claim left — that the
-// state is the fold of the prefix the marker names — is provable only by folding that
-// prefix, which is the entire cost this document exists to remove; the fallback for it is
-// structural rather than a check, because the journal stays the authoritative record and
-// discarding this file loses nothing.
+// llmlint: ignore[boundary_inputs_validated] a run-owned derived cache rather than one of
+// the external inputs `AGENTS.md` names, and read on `summary.json`'s terms. The one claim
+// left unchecked — that the state is the fold of the prefix the marker names — is provable
+// only by folding that prefix, which is the cost this removes.
 fn readable(paths: &RunPaths) -> Option<Checkpoint> {
     ledger::read_json_opt::<Checkpoint>(&paths.checkpoint())
         .filter(|checkpoint| checkpoint.run_id == paths.run)
@@ -504,28 +461,21 @@ fn length_of(journal: &std::path::Path) -> u64 {
 
 /// **How many of the records a store has grown by a coverage may account for.**
 ///
-/// The **largest** prefix nothing past it sorts in front of, which is the one
-/// condition the module note's proof needs — and it is the largest rather than
-/// the first, because a prefix that stopped at the first record the file and the
-/// merge disagree about is a marker that never passes it. A relayed record
-/// stamped a millisecond behind the record appended in front of it is inside the
-/// prefix and sorts wherever the merge puts it; what disqualifies a boundary is
-/// only a record **past** it that sorts in front of one inside it.
+/// The **largest** prefix nothing past it sorts in front of, which is the module
+/// note's condition — largest rather than first, because a marker that stopped at
+/// the first inversion never passes it.
 ///
-/// Read as spans. Each record that sorts in front of an earlier one — by
-/// `(ts, stream)`, or by `seq` within its own stream — rules out every boundary
-/// that would separate the two, and that is a *range* of boundaries rather than
-/// one. So each record contributes at most one span, found by binary search
-/// against the running maxima in front of it, and the answer is the largest
-/// boundary no span covers. Linear in the store but for those searches, which is
-/// what it has to be: this runs over the whole journal on the fold that has no
-/// checkpoint to resume from.
+/// Read as spans: a record sorting in front of an earlier one rules out the
+/// boundaries *between* the two, so each contributes one span, found by binary
+/// search against the running maxima in front of it, and the answer is the largest
+/// boundary no span covers. Linear but for those searches, which the whole-store
+/// fold needs.
 ///
-/// The trailing records sharing the store's last timestamp are held back and
-/// never covered — [`crate::summary`]'s own maintainer holds the same run open
-/// for the same reason. A record arriving next is stamped at or after that
-/// instant, so leaving it uncovered is what lets an ordinary arrival sort in
-/// front of something without making the marker unusable.
+/// The trailing records sharing the store's last timestamp are held back, as
+/// [`crate::summary`]'s maintainer holds the same run open and for the same
+/// reason: the next arrival is stamped at or after that instant, so leaving it
+/// uncovered is what lets an ordinary one sort in front of something without
+/// making the marker unusable.
 fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
     let cap = held_open(grown);
     // One more than the boundaries there are, so a span ending at the last of
