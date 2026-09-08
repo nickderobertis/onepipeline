@@ -105,8 +105,14 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
         .expect("the checkpoint this read wrote");
     let store = world.run_file("tail", "events.jsonl");
     let whole = std::fs::read(&store).expect("the run's journal");
+    let at = world.run_file("tail", "checkpoint.json");
     for (unusable, leave) in unusable_states() {
+        // Back to the store and the document each state is a departure from, so no
+        // state inherits the one before it.
         std::fs::write(&store, &whole).expect("the journal is put back");
+        let _ = std::fs::remove_file(&at);
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::write(&at, &usable).expect("the usable checkpoint is put back");
         leave(&world, &usable);
         let read = world.run(&["status", "tail"]);
         read.exited(0);
@@ -173,6 +179,24 @@ fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
             },
         ),
         (
+            "carrying a session token this crate refuses",
+            |world, usable| {
+                let mut document: Value =
+                    serde_json::from_slice(usable).expect("the checkpoint parses");
+                document["state"]["sessions"] =
+                    json!({"build": {"token": "../somewhere-else", "branch": "work"}});
+                write_checkpoint(world, &document);
+            },
+        ),
+        // A directory where the document goes: unreadable, and a write that cannot
+        // land either — so this is the one state that also holds the write to being
+        // best effort, which a reader may not fail over.
+        ("a directory rather than a document", |world, _| {
+            let at = world.run_file("tail", "checkpoint.json");
+            let _ = std::fs::remove_file(&at);
+            std::fs::create_dir(&at).expect("a directory where the document goes");
+        }),
+        (
             "marking more bytes than the journal holds",
             |world, usable| {
                 let mut document: Value =
@@ -212,7 +236,6 @@ fn the_reconcile_loop_folds_what_the_store_grew_by_rather_than_the_whole_journal
 
     let did = counts(&world, "loop");
     let records = world.journal("loop").len() as u64;
-    // What the loop re-folded the whole store on before this change.
     let changes = world
         .journal("loop")
         .iter()

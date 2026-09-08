@@ -349,8 +349,6 @@ impl Projected {
     /// nothing past it sorts in front of — which is the same statement the marker
     /// is chosen by.
     fn take(&mut self, paths: &RunPaths, grown: &[(Option<Envelope>, u64)]) {
-        // What this fold cost, in the unit the saving is stated in: the records
-        // the store has grown by, rather than every record the run has written.
         crate::loopstats::records_folded(grown.len() as u64);
         let accountable = extent(&self.coverage, grown);
         let accounted_before = self.coverage.bytes;
@@ -1047,6 +1045,47 @@ mod tests {
             covered.records
         );
         assert_eq!(state, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every value the state carries goes back through the check that made it,
+    /// rather than straight into the field.
+    ///
+    /// A checkpoint is a file, so a value in it arrives from outside exactly as a
+    /// stream's record does: a session handle this crate would have refused off a
+    /// stream is refused off a document, which is one more full fold — and a park
+    /// reason that says nothing reads as no reason at all, which is what
+    /// `edits::Park::of` does with the same value.
+    #[test]
+    fn a_state_read_back_goes_through_the_checks_that_made_it() {
+        let root = scratch("checked-on-the-way-back");
+        let paths = a_recorded_run(&root, "r-checked");
+        settle(&paths, "build", "done");
+        let _ = resume(&paths);
+        let whole = without_a_checkpoint(&paths);
+
+        let mut document: Value =
+            crate::ledger::read_json_opt(&paths.checkpoint()).expect("a checkpoint");
+        // A blank reason is the one state `Park` must not hold, and a document can
+        // carry one however the boundary that writes a park refuses it.
+        document["state"]["parks"] = json!({"build": {"by": "planner", "reason": "   "}});
+        crate::ledger::write_json(&paths.checkpoint(), &document).expect("written");
+        let read = resume(&paths);
+        assert_eq!(
+            read.parks.get("build"),
+            Some(&crate::edits::Park::of(
+                crate::channel::Author::Planner,
+                None
+            )),
+            "a reason that says nothing was carried as a reason"
+        );
+
+        // And a session handle this crate refuses off a stream: refused here too,
+        // which is one more unusable checkpoint.
+        document["state"]["sessions"] =
+            json!({"build": {"token": "../somewhere-else", "branch": "work"}});
+        crate::ledger::write_json(&paths.checkpoint(), &document).expect("written");
+        assert_eq!(folded_as(&resume(&paths)), whole);
         let _ = std::fs::remove_dir_all(&root);
     }
 
