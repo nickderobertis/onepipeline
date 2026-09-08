@@ -2027,6 +2027,18 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         vec![json!({"kind": "settled-from-evidence", "node": "publish",
                     "outcome": "done", "evidence": evidence})]
     );
+    // A settle naming no landing attributes none: the status, the outcome and
+    // the evidence are what such a settlement has always recorded, and there is
+    // no fourth fact beside them. The field is optional, so every caller written
+    // before it is unaffected — and the run says nothing about where work it was
+    // never told about went.
+    assert!(
+        operations(&world, &run)
+            .iter()
+            .all(|operation| operation["kind"] != "landing-from-evidence"),
+        "a settle that named no landing recorded one: {:?}",
+        operations(&world, &run)
+    );
     assert!(
         operations(&world, &run).iter().all(|operation| {
             !["edge-added", "edge-removed", "node-dropped", "node-added"]

@@ -1499,6 +1499,33 @@ commit sitting on the base alone is none of them. So the branch is what is asked
 about and the landing commit is what the reference block *shows*, which is the
 cell a worker actually wants.
 
+Ahead of both, from entry 57's `settle`: a **landing an operator stated**. A
+settle is a correction of this run's own record, and the branch is the part of
+that record it corrects — a node whose dispatch died before its change merged
+recorded a branch that never landed, so a question put about that branch answers
+`not-landed` for ever about work that has been on its base for hours, and holds
+every consumer of it indefinitely. What the operator read is the merge, and what
+they name is a change request's URL or the commit the work is at, both of which
+are spellings the sibling resolves. It is **re-read while a dependency has none**
+rather than frozen with the rest of the dependency's description, because a
+landing nobody observed arrives after the fact by definition: a change request
+open when its node settled is merged outside every session, where nothing relays
+it back to this run.
+
+*A release that has been observed is **latched***. Every answer but one holds a
+node and each is a statement about *now* — a probe that failed, a target awaiting
+a person, a version that has not moved — so writing any of them over an answer
+that carried a version un-releases a hold the run has already acted on. Measured:
+a hold was satisfied and its node dispatched, and fifty-two minutes later the
+same run raised a wait surface about that node reporting 4394 seconds waited with
+a last answer of `not-answered`, for a node fifty minutes into its dispatch. The
+rule that "not answered" is not "not released" was honoured for holding and
+inverted for releasing. So the first version to arrive stands, no question is put
+about that dependency again, and the clock the wait was measured on is dropped
+when it arrives rather than left running under a later hold. Held end to end by
+`tests/e2e/adoption.rs`'s
+`a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+
 **One thing that is held by a fold test rather than by a journey, and why.** A
 fresh driver takes up what its predecessor already said, out of the journal,
 before it starts watching — so a node it finds still running is not told its
