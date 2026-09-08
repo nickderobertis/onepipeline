@@ -149,7 +149,15 @@ pinned_optional_deps() {
     let input = "";
     process.stdin.on("data", chunk => input += chunk).on("end", () => {
       const manifest = JSON.parse(input);
-      for (const [name, pin] of Object.entries(manifest.optionalDependencies || {})) {
+      // A manifest is external input, and `Object.entries` walks a string or an
+      // array as happily as a map — a package whose optionalDependencies is
+      // either would have its pins read as nonsense and waited for, or not read
+      // at all. Neither is a package this will publish.
+      const pins = manifest.optionalDependencies;
+      if (pins !== undefined && (typeof pins !== "object" || pins === null || Array.isArray(pins))) {
+        throw new Error("optionalDependencies is not an object");
+      }
+      for (const [name, pin] of Object.entries(pins || {})) {
         if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pin)) {
           process.stdout.write(`${name}@${pin}\n`);
         }

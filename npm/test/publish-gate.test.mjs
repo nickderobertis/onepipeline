@@ -50,11 +50,18 @@ async function run(command, args, options = {}) {
   return stdout;
 }
 
-/// Run and return the failure instead of throwing it, for the journeys whose
-/// subject is a refusal.
+/// Run and return the outcome instead of throwing it, for the journeys whose
+/// subject is a refusal — and for the ones whose subject is what a *successful*
+/// run said on stderr, which `run` above discards.
 async function attempt(command, args, options = {}) {
   try {
-    return { code: 0, stdout: await run(command, args, options), stderr: "" };
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      ...options,
+    });
+    return { code: 0, stdout, stderr };
   } catch (error) {
     return {
       code: error.code ?? error.status ?? 1,
@@ -213,12 +220,22 @@ describe("the npm publish order", () => {
   /// The publish step `release.yml` runs, verbatim in shape: every platform
   /// tarball, then the launcher.
   async function publishAsTheReleaseDoes(extraEnv = {}) {
+    const said = [];
     for (const { tgz } of platforms.values()) {
-      await run("bash", ["scripts/publish-npm.sh", tgz], { env: { ...env, ...extraEnv } });
+      said.push(
+        await attempt("bash", ["scripts/publish-npm.sh", tgz], { env: { ...env, ...extraEnv } }),
+      );
     }
-    return attempt("bash", ["scripts/publish-npm.sh", launcherTgz], {
-      env: { ...env, ...extraEnv },
-    });
+    said.push(
+      await attempt("bash", ["scripts/publish-npm.sh", launcherTgz], {
+        env: { ...env, ...extraEnv },
+      }),
+    );
+    return {
+      steps: said,
+      code: said.find((step) => step.code !== 0)?.code ?? 0,
+      stderr: said.map((step) => step.stderr).join(""),
+    };
   }
 
   /// Install the launcher from the registry into a throwaway project and run it.
@@ -273,6 +290,16 @@ describe("the npm publish order", () => {
 
     const published = await publishAsTheReleaseDoes();
     assert.equal(published.code, 0, published.stderr);
+    // A stalled publish is otherwise silent for as long as it stalls, and this
+    // line is the only warning anybody gets before the run that exhausts the
+    // budget. It names which package stalled and for how long.
+    assert.match(
+      published.stderr,
+      new RegExp(
+        `the registry took \\d+s to serve ${order.at(-1)}@${version.replace(/\./g, "\\.")}`,
+      ),
+      "a publish that waited on the registry said nothing about it",
+    );
 
     const offered = reg.acceptedAt(`onepipeline-cli@${version}`);
     assert.ok(offered, "the launcher never reached the registry");
@@ -332,13 +359,11 @@ describe("the npm publish order", () => {
   it("refuses a package it cannot read before anything reaches the registry", async () => {
     const reg = await freshRegistry();
 
-    // Nothing to publish at all.
     const nothing = await attempt("bash", ["scripts/publish-npm.sh"], { env });
     assert.equal(nothing.code, 2, nothing.stderr);
     assert.match(nothing.stderr, /pass at least one package directory or tarball/);
     assert.match(nothing.stderr, /^ACTION: /m);
 
-    // Not a package.
     const corrupt = join(work, "not-a-package.tgz");
     writeFileSync(corrupt, "this is not a gzipped tarball\n");
     const unreadable = await attempt("bash", ["scripts/publish-npm.sh", corrupt], { env });
@@ -409,6 +434,26 @@ describe("the npm publish order", () => {
     assert.ok(
       reg.acceptedAt(`onepipeline-cli@${version}`),
       "a launcher pinning nothing exactly was held for a version nobody named",
+    );
+  });
+
+  it("refuses after publishing when the registry will not serve what it took", async () => {
+    const reg = await freshRegistry();
+    const host = platforms.get(hostTarget());
+    reg.lagFor(host.name, 60_000);
+    // The upload is accepted and the version stays unresolvable. Returning 0
+    // here is the whole defect: the caller would publish the launcher next.
+    const refused = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
+      env: { ...env, PUBLISH_NPM_AWAIT_BUDGET: "2", PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, new RegExp(`does not serve '${host.name}@${version}'`));
+    assert.match(refused.stderr, /whatever this release publishes next/);
+    assert.ok(reg.acceptedAt(`${host.name}@${version}`), "it refused without publishing at all");
+    assert.equal(
+      reg.visibleAt(`${host.name}@${version}`),
+      undefined,
+      "the registry served it after all",
     );
   });
 
