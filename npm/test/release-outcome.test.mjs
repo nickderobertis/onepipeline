@@ -313,6 +313,31 @@ describe("the release outcome record", () => {
       ],
       [["--version", "1.2.3"], /no --target was given/],
     ];
+    // The pairs that cannot both be true. A verify job `needs:` its publish job
+    // and carries no `if: always()`, so a publish that did not succeed leaves it
+    // `skipped`; anything else is a workflow this no longer describes, and the
+    // record it would compose says `nothing-shipped` beside a verification that
+    // succeeded. The first pair is that contradiction exactly.
+    for (const [published, verified] of [
+      ["skipped", "success"],
+      ["skipped", "failure"],
+      ["failure", "success"],
+      ["cancelled", "cancelled"],
+    ]) {
+      refusals.push([
+        [
+          "--version",
+          "1.2.3",
+          "--target",
+          "npm:onepipeline-cli",
+          "--published",
+          published,
+          "--verified",
+          verified,
+        ],
+        new RegExp(`reports --published '${published}' and --verified '${verified}'`),
+      ]);
+    }
     for (const [args, says] of refusals) {
       const refused = await compose(args);
       // 2 rather than 1: a caller error is a different thing from a release

@@ -202,6 +202,20 @@ function compose(argv) {
         `pass one of: ${RESULTS.join(", ")} — every target has a verification job, so there is always a result to pass`,
       );
     }
+    // The two results are not independent. A verify job `needs:` its publish job
+    // and carries no `if: always()`, so a publish that did not succeed leaves it
+    // nothing to run and GitHub reports it `skipped`. Any other pairing means
+    // this is being called by a workflow it no longer describes — a `needs:` edge
+    // dropped, an `if: always()` added, a job renamed — and the record it would
+    // compose contradicts itself: a target whose verification *succeeded*, filed
+    // under an outcome that says nothing was published for it to verify. A
+    // consumer cannot act on that, so it is refused rather than written.
+    if (target.published !== "success" && target.verified !== "skipped") {
+      die(
+        `${target.id} reports --published '${target.published}' and --verified '${target.verified}'`,
+        "a verify job `needs:` its publish job, so it is `skipped` whenever that job is not `success` — check that job's `needs:` and `if:` in release.yml, or pass the results the run actually reported",
+      );
+    }
     return {
       id: target.id,
       outcome: stateOf(target),
