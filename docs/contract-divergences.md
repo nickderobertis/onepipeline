@@ -1499,6 +1499,33 @@ commit sitting on the base alone is none of them. So the branch is what is asked
 about and the landing commit is what the reference block *shows*, which is the
 cell a worker actually wants.
 
+Ahead of both, from entry 57's `settle`: a **landing an operator stated**. A
+settle is a correction of this run's own record, and the branch is the part of
+that record it corrects — a node whose dispatch died before its change merged
+recorded a branch that never landed, so a question put about that branch answers
+`not-landed` for ever about work that has been on its base for hours, and holds
+every consumer of it indefinitely. What the operator read is the merge, and what
+they name is a change request's URL or the commit the work is at, both of which
+are spellings the sibling resolves. It is **re-read while a dependency has none**
+rather than frozen with the rest of the dependency's description, because a
+landing nobody observed arrives after the fact by definition: a change request
+open when its node settled is merged outside every session, where nothing relays
+it back to this run.
+
+*A release that has been observed is **latched***. Every answer but one holds a
+node and each is a statement about *now* — a probe that failed, a target awaiting
+a person, a version that has not moved — so writing any of them over an answer
+that carried a version un-releases a hold the run has already acted on. Measured:
+a hold was satisfied and its node dispatched, and fifty-two minutes later the
+same run raised a wait surface about that node reporting 4394 seconds waited with
+a last answer of `not-answered`, for a node fifty minutes into its dispatch. The
+rule that "not answered" is not "not released" was honoured for holding and
+inverted for releasing. So the first version to arrive stands, no question is put
+about that dependency again, and the clock the wait was measured on is dropped
+when it arrives rather than left running under a later hold. Held end to end by
+`tests/e2e/adoption.rs`'s
+`a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+
 **One thing that is held by a fold test rather than by a journey, and why.** A
 fresh driver takes up what its predecessor already said, out of the journal,
 before it starts watching — so a node it finds still running is not told its
@@ -3146,6 +3173,56 @@ folding the store — sees one settlement shape rather than one it has to know t
 go looking for in an operation list. What tells the two apart is the outcome
 word, `settled-from-evidence`, and the evidence is the settlement's `detail`.
 
+**`settle` also takes an optional `landing`, and the reason is that a settlement
+this op writes was missing a field the run's own path always writes.** A
+run-produced settlement records a status, an outcome, a branch **and** a landing;
+this one recorded a node, an outcome and the evidence, and no landing at all.
+Release adoption correlates a release to work through the landing, so a node
+settled from evidence was, to that machinery, work that never landed: three
+dependencies of one node answered `not-landed` after all three of their change
+requests had merged, and a node held on a release has no timeout, no retry
+budget and no degrade. The operator correcting the record from evidence is
+usually holding the very thing that closes the gap — they read the merge — and
+had nowhere to put it.
+
+So the field names **where the work landed**, in either of the two spellings
+`onevcs` resolves work by: the commit the change reached its base at, or the
+change request a person reads it in. It is **optional**, and an envelope that
+does not name it is accepted and records exactly what such a settlement records
+today — the same node status, the same outcome, the same evidence, and no
+landing attributed to the node — so every caller written before it is unaffected.
+Present and unusable is **refused** rather than recorded, as blank evidence is:
+the value is handed straight back to `onevcs` as the reference a release is
+measured against and rendered into the views beside it, so a landing carrying
+whitespace or a control character asks an unanswerable question and forges a line
+where it is printed. What it means is the node's landing, joined on by release
+correlation exactly as a run-produced settlement's landing is — and correlation
+**re-reads it** rather than trusting the snapshot it froze when the node settled,
+because a change request open at the moment its node settled is merged
+afterwards.
+
+**What reads it today is release correlation, and that is the whole of it.** The
+reference is recorded as its own operation — `settle_landing_operation` in the
+block below, which is where this document and the type are reconciled — on the
+`edit-committed` the settle compiles to, and the release watch reads it from
+there — so the machinery the missing landing was breaking is served, and the
+views, `results` and the status write-back are not: none of them learns a stated
+landing, and a `settle` still leaves them exactly as they were. **Proposal:
+surface it where a run-produced settlement's landing is surfaced** — a
+change request's URL beside `change_urls` and a commit beside `landing_commits`,
+so a manager can trace a release decision back to the change that justified it in
+the views they already read. That is a fold and a result field rather than an op,
+so it belongs to whoever owns `src/projection.rs` and `src/engine.rs`; this entry
+records the gap so it is not lost.
+
+What is **not** proposed is writing the `landing` *word* from a settle. `Landed`
+is defined as a landing this run saw happen and `Unlanded` as a change of this
+node's that has not reached its base; a settle saw neither, and an operator who
+names an open change request as where the work is would have the run report it
+`landed` at a moment when the correlation reading the same reference answers
+`not-landed`. The word stays the run's own observation, and the reference stays
+the operator's.
+
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
 wait had been done by dropping and re-adding it and its dependent, purely because
@@ -3173,8 +3250,16 @@ accepts.
       "op": "settle",
       "id": "publish",
       "outcome": "done",
-      "evidence": "the change merged at 3f9a1c2 while the node's dispatch was dying; the run recorded the death and never the merge"
+      "evidence": "the change merged at 3f9a1c2 while the node's dispatch was dying; the run recorded the death and never the merge",
+      "landing": "https://github.com/owner/engine/pull/12"
     }
+  ],
+  "envelope_version": 3,
+  "envelope_versions_read": [3, 2],
+  "settle_landing_operation": "landing-from-evidence",
+  "settle_landings": [
+    "https://github.com/owner/engine/pull/12",
+    "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"
   ],
   "monitor_may_issue": [],
   "cancel": {
@@ -3187,10 +3272,49 @@ accepts.
 }
 ```
 
+**The envelope version moves to 3 for it, and the move is additive.** A field
+added to a serialized contract moves that contract's version — entry 60 is where
+this one last moved, *"bump the reply envelope to version 2, because this is a
+breaking change to a serialized contract"* — and the question a bump has to
+answer is what becomes of the envelopes already written. There, an op was removed
+outright and a `deliver` value dropped, so version 1 stopped being readable. Here
+nothing is taken away: version 3 adds one optional field, so **an envelope
+written against 2 is a complete envelope at 3**, and this build reads it as one.
+[`REPLY_ENVELOPE_VERSIONS_READ`](crate::channel::REPLY_ENVELOPE_VERSIONS_READ) is
+the set — `[3, 2]` — and it is the same shape the plan schema's own additive bump
+took, where *"this build reads 3, 2, and 1"*. A number outside the set is refused
+where an edit envelope's version has always been checked, naming the version an
+edit requires; version 1 is refused today and goes on being refused.
+
+So every caller sending 2 — this repository's own journeys, the shipped monitor
+persona, and the orchestration repository's reply wrapper, which passes an
+operator's envelope through — sends a document this build still reads, and a
+caller that names no landing behaves exactly as it did. The **landing is accepted
+at either version** rather than keyed to 3 the way a plan's `body` is keyed to
+its schema: the envelope is typed by a person through a wrapper that stamps no
+version of its own, and a correction from evidence refused over the number its
+author happened to type is a refusal about nothing the correction got wrong.
+What the version says is which shape this build wrote the envelope at, and the
+read set is what it promises to go on reading.
+
+The versions are **checked in** rather than described:
+`tests/golden/reply-envelope-v3.json` is the envelope this build writes, carrying
+a settle at each value the landing takes — both spellings and the absence — and
+`tests/golden/reply-envelope-v2.json` is an envelope at the version before it,
+carrying none. `src/channel.rs` pins the shape against the first, round-trips it,
+holds that a settle naming no landing writes no key, and holds that the second
+still reads — at the version this build reads it at, with no landing on either
+settle. `tests/contract.rs` holds both goldens, the constant and the read set
+against the `envelope_version`, `envelope_versions_read` and `settle_landings`
+this entry names, so the document, the goldens and the types cannot drift apart.
+
 `reason` is optional on `cancel` and a `cancel` stating none still parks, so
 every park written before this field existed is exactly the park it was; present
 and blank is refused rather than recorded, as `amend`'s ruling and a `finding`'s
-message already are. On `settle`, `id`, `outcome` and `evidence` are all
+message already are. `landing` is optional on `settle` the same way, and
+`settle_landings` above is both spellings of one it takes — the block's own
+statement that a change request's URL and a commit are one field rather than two
+ops. On `settle`, `id`, `outcome` and `evidence` are all
 required, and the outcome vocabulary is the two settled statuses a node can be
 **put** at. It is deliberately not every status a node can be *in*: `pending`,
 `ready`, `blocked` and `skipped` are derived from the graph on every reconcile

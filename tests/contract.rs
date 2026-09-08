@@ -1661,6 +1661,130 @@ fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
         "a park stating no reason gained one"
     );
 
+    // The optional field `settle` gains, in both spellings of it the entry names.
+    // It rides that op rather than a new one, so what is proved is that the op is
+    // still `settle`, that either spelling round-trips, and that an envelope
+    // naming none is accepted and writes none back — which is what makes it
+    // additive for every caller that predates it.
+    let landings: Vec<String> = serde_json::from_value(block["settle_landings"].clone())
+        .expect("entry 57 names the landings a settle takes");
+    assert_eq!(landings.len(), 2, "{block}");
+    let settling = fixtures
+        .iter()
+        .find(|fixture| fixture["op"] == "settle")
+        .expect("entry 57's op is the settle")
+        .clone();
+    assert_eq!(
+        settling["landing"], landings[0],
+        "the settle fixture does not carry the first landing the entry names"
+    );
+    for landing in &landings {
+        let mut written = settling.clone();
+        written["landing"] = json!(landing);
+        let settle: Edit = serde_json::from_value(written.clone())
+            .unwrap_or_else(|e| panic!("a settle landing at `{landing}` parses: {e}"));
+        assert_eq!(
+            op_of(&settle),
+            "settle",
+            "the landing moved `settle` off its op"
+        );
+        assert_eq!(
+            serde_json::to_value(&settle).expect("serializes"),
+            written,
+            "a settle's landing at `{landing}` does not round-trip"
+        );
+    }
+    // The version this field moves the envelope to, and the versions this build
+    // goes on reading. A field added to a serialized contract moves its version;
+    // this one is **additive**, so the version it leaves behind is still read and
+    // every envelope written against it still works. The entry names both, and
+    // the build is held to both here.
+    let version = block["envelope_version"]
+        .as_u64()
+        .expect("entry 57 names the envelope version the landing moves it to")
+        as u32;
+    assert_eq!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSION,
+        version,
+        "the build's envelope version is not the one entry 57 declares"
+    );
+    let read: Vec<u32> = serde_json::from_value(block["envelope_versions_read"].clone())
+        .expect("entry 57 names the envelope versions this build reads");
+    assert_eq!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSIONS_READ,
+        read.as_slice(),
+        "the build reads a different set of envelope versions from the one entry 57 names"
+    );
+    assert!(
+        read.contains(&version) && read.len() > 1,
+        "entry 57 declares a bump that leaves the version before it unread: {block}"
+    );
+
+    // The golden is the envelope a person types and this build parses, and these
+    // are the landings it carries: the entry, the golden and the types are held
+    // against each other so no two of them can drift.
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v3.json"))
+            .expect("the reply envelope golden ships"),
+    )
+    .expect("the golden is JSON");
+    assert_eq!(
+        golden["version"],
+        json!(onepipeline::channel::REPLY_ENVELOPE_VERSION),
+        "the golden envelope is not at the version this build writes"
+    );
+    // And the golden for the version this build no longer writes: it is checked
+    // in beside the current one, it is at a version the entry says is still read,
+    // and what it carries is what a caller written before the landing sent.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v2.json"))
+            .expect("the envelope golden for the version before this one ships"),
+    )
+    .expect("the older golden is JSON");
+    let older_version = older["version"].as_u64().expect("it names its version") as u32;
+    assert!(
+        older_version < version && read.contains(&older_version),
+        "the golden for the version before this one is not a version this build still reads"
+    );
+    assert!(
+        older["commands"]
+            .as_array()
+            .expect("the older golden carries commands")
+            .iter()
+            .all(|command| command.get("landing").is_none()),
+        "the golden for the version before the landing existed names one: {older}"
+    );
+    let carried: Vec<String> = golden["commands"]
+        .as_array()
+        .expect("the golden carries commands")
+        .iter()
+        .filter_map(|command| command.get("landing")?.as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        carried, landings,
+        "the golden envelope does not carry the landings entry 57 names"
+    );
+    assert!(
+        golden["commands"]
+            .as_array()
+            .expect("the golden carries commands")
+            .iter()
+            .any(|command| command["op"] == json!("settle") && command.get("landing").is_none()),
+        "the golden envelope pins no settle that names a landing at all: {golden}"
+    );
+
+    let mut unnamed = settling.clone();
+    unnamed
+        .as_object_mut()
+        .expect("the fixture is an object")
+        .remove("landing");
+    let bare: Edit = serde_json::from_value(unnamed.clone()).expect("it parses");
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        unnamed,
+        "a settle naming no landing gained one"
+    );
+
     // The outcome vocabulary a `settle` accepts, held against the type: the
     // entry's list is the set, and a fourth word is refused rather than guessed
     // at.
@@ -3463,6 +3587,7 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             id: "x".into(),
             outcome: SettleOutcome::Done,
             evidence: "it merged".into(),
+            landing: Some("https://github.com/owner/engine/pull/12".into()),
         },
     ];
     assert_eq!(
@@ -4583,10 +4708,13 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     let version = block["envelope_version"]
         .as_u64()
         .expect("entry 60 names the envelope version") as u32;
-    assert_eq!(
-        onepipeline::channel::REPLY_ENVELOPE_VERSION,
-        version,
-        "the build's envelope version is not the one entry 60 declares"
+    assert!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSIONS_READ.contains(&version),
+        "the build no longer reads the envelope version entry 60 declares"
+    );
+    assert!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSION >= version,
+        "the build writes an envelope version older than the one entry 60 moved it to"
     );
     assert!(
         CONTRACT.contains(r#"{"version": 1, "commands": [...]}"#),
