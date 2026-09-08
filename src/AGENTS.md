@@ -22,6 +22,13 @@ Rules:
   of its own, so a role stated there is stated to members whose job it is not.
   Roles belong to the consuming graph: a member's persona, or its own `task`
   composed from `{task}`.
+- **A check the loader could not run says so; it never passes quietly.** Two of
+  `destination.rs`'s refusals are the destination repository's own rules — its
+  `commit-msg` hook, and the policy `onevcs` resolves it to — so a repository this
+  host cannot answer for leaves them unasked. That is a node reported on stderr as
+  **not checked** and a plan that loads, never an accept: refusing an unregistered
+  repository would refuse plans that launch correctly today, and loading in
+  silence would let one look as though it had cleared a bar nobody applied.
 - **Exit codes are spent.** `0` / `1` / `2` are `reply`'s applied / queued /
   refused verdicts, `3` is "nothing is driving the run", and a driver carries `0`
   for a complete graph and `1` for one that settled unfinished. Do not mint a
@@ -32,8 +39,9 @@ Rules:
 - `plan.rs` is the plan **schema**; `taskgraph.rs` reads one project of a
   `onetaskgraph` store as a plan of that shape, driving that binary as a
   subprocess; `graph.rs` decides whether the graph it describes is legal and
-  what may run now. All of "is this input acceptable" is there, at the trust
-  boundary a project crosses.
+  what may run now; `destination.rs` asks each lifecycle node's repository what
+  *it* says about the node, which is the part no document can answer. All of "is
+  this input acceptable" is there, at the trust boundary a project crosses.
 - `engine.rs` is the one continuous reconcile loop — the **single writer**,
   holding the run's ownership lock for as long as it drives. There are no
   rounds: a node dispatches on the pass that observed its last dependency

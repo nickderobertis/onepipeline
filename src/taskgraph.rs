@@ -16,11 +16,15 @@
 //! launch, naming the path it resolved, the version it found, the minimum it
 //! needs, and how to install one.
 //!
-//! What this module produces is a [`Plan`] value, which the graph module then
-//! validates exactly as it validated one read out of a file: the shape rules,
-//! the reference rules, acyclicity, the required title on a lifecycle node, and
-//! the named refusal for each retired field all apply at the point a project is
-//! read.
+//! What this module produces is a [`Plan`] value, held to the graph module's own
+//! rules exactly as one read out of a file was: the shape rules, the reference
+//! rules, acyclicity, the required title on a lifecycle node, and the named
+//! refusal for each retired field all apply at the point a project is read.
+//!
+//! Two of the refusals cannot be decided from the document alone, because what
+//! decides them belongs to the repository a lifecycle node publishes into — so
+//! [`crate::destination`] asks it, here, after the graph's own rules and before
+//! anything is dispatched.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -305,6 +309,17 @@ impl Store {
                 ),
             )
         })?;
+        // The graph's own rules, and then what each lifecycle node's destination
+        // repository says about it — in that order, and the order is the point.
+        // A node whose shape is wrong is refused for being wrong rather than for
+        // what a repository would have said about a node no dispatch could have
+        // run, and `consumes` naming something this node does not depend on is
+        // still answered by the sentence that names the key. Both are the same
+        // refusals `onepipeline start` and `onepipeline plan check` already make
+        // here; running them at the read is what puts the second set of them
+        // before anything is dispatched.
+        crate::graph::check(&plan)?;
+        crate::destination::check(&plan)?;
         // Keyed by node id, which the walk above has already established is
         // unique within the project: a plan that got this far has one task per
         // node and one node per task.
