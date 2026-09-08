@@ -503,6 +503,9 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
+    /// A node's session would not open because its branch and its base conflict,
+    /// which is the one refusal at that boundary no further attempt converges on.
+    SessionConflicted(Box<SessionConflict>),
     /// A configured drafting dispatch produced no change request body.
     BodyNotDrafted(Box<UndraftedBody>),
     /// One acceptance criterion was compared against the branch its node is
@@ -1034,6 +1037,11 @@ fn converge(
                 // because a planner reading its own updates is who decides what to
                 // do next, and what to do next is not the same for the two.
                 Message::Cancelling(step) => raise(paths, journal, cancelling_surface(&step))?,
+                // A decision rather than a report, so it is raised blocking and
+                // the subtree below the node waits on the person answering it.
+                Message::SessionConflicted(conflict) => {
+                    raise(paths, journal, session_conflict_surface(&conflict))?
+                }
                 // Emitted rather than relayed: it is this crate's own kind, so it
                 // belongs in this crate's own stream, numbered by the writer that
                 // owns it.
@@ -2505,6 +2513,22 @@ pub(crate) fn attempt(
         {
             return drained;
         }
+        // The one refusal at this boundary that another attempt provably cannot
+        // answer: the session met a **base conflict** when it opened. Nothing
+        // about it changes between attempts — the branch and its base disagree
+        // about a file, and no dispatch of this node's ever gets far enough to
+        // touch either — so the whole budget is spent reproducing one refusal and
+        // the node then reads as an infrastructure wobble that was tried three
+        // times. It is put to the supervisor instead, who resolves the merge and
+        // says so in one move, which is the only thing that makes the next
+        // attempt different from this one.
+        if conflicted_at_session_open(&drained.settlement) {
+            let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
+                node: node.to_string(),
+                because: drained.settlement.detail.clone().unwrap_or_default(),
+            })));
+            return drained;
+        }
         last = drained;
         if attempt == attempts.get() {
             // The budget was spent without the agent producing anything.
@@ -2533,6 +2557,75 @@ pub(crate) fn attempt(
         })));
     }
     last
+}
+
+/// Whether this settlement is a dispatch the sibling refused because the session
+/// it needed met a base conflict when it opened.
+///
+/// Both halves, because either alone is the wrong question. It has to be a
+/// dispatch the layer refused *before any work began* — [`INFRASTRUCTURE_FAILURE`]
+/// is exactly that word and no other reaches this — and the refusal has to be the
+/// conflict, which [`crate::vcs::session_open_conflicted`] decides off the text
+/// that module composed for the purpose.
+fn conflicted_at_session_open(settlement: &Settlement) -> bool {
+    settlement.outcome.as_deref() == Some(INFRASTRUCTURE_FAILURE)
+        && settlement
+            .detail
+            .as_deref()
+            .is_some_and(crate::vcs::session_open_conflicted)
+}
+
+/// A node whose session would not open because its branch and its base conflict.
+///
+/// Handed to the single writer rather than surfaced where it is found, for
+/// [`UndraftedBody`]'s reason: the loop owns this crate's own stream and the
+/// planner's queue, and a dispatch thread reporting into either beside it is a
+/// second writer.
+pub(crate) struct SessionConflict {
+    /// The node whose session was refused.
+    pub node: String,
+    /// `onevcs`'s own account of the conflict, which names the files, the copy
+    /// of the branch to resolve it on, and the command that lands it as it
+    /// stands.
+    pub because: String,
+}
+
+/// The decision a session-open conflict puts to the supervisor.
+///
+/// **Blocking**, because it is a decision rather than a report: nothing in this
+/// run can converge on it, and the subtree below the node is waiting on work that
+/// cannot start until somebody merges two branches by hand. That is the same
+/// shape as a release hold — a wait no retry resolves, answered by a person in
+/// one move — and it is what the node had instead: a retry budget spent
+/// reproducing one refusal, and then a settlement a `retry` met again because
+/// nothing about the conflict had changed.
+///
+/// It names both halves a supervisor needs: the conflict, in the sibling's own
+/// words — which carry the conflicting files and the checkout to resolve them in
+/// — and the move that answers it here.
+fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: format!(
+            "node '{node}' cannot open a session: its branch and the base it would be \
+             published into conflict, and no further attempt converges on that — opening \
+             the session again reproduces this exact refusal, because neither side of it \
+             changes on its own.\n\
+             onevcs: {because}\n\
+             Resolve the merge on the branch as onevcs describes above, then answer this \
+             with a `retry` of '{node}': the replacement continues that same branch, so it \
+             starts from the resolution rather than from the conflict.",
+            node = conflict.node,
+            because = bounded(&crate::views::one_line(&conflict.because)),
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: true,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(conflict.node.clone()),
+    }
 }
 
 /// Relay a dispatch's events into the merged stream and settle on its outcome.

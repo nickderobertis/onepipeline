@@ -166,7 +166,11 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
 fn a_merge_path_that_refuses_the_publishing_push_fails_the_node_and_leaves_the_base_alone() {
     let world = World::new("real-vcs-refused");
     let repo = world.repository("local-direct", &["false"]);
-    world.script("service.work", "the worker wrote this\n");
+    // Something new on every dispatch. The hook refuses whatever it is handed, so
+    // the node is re-dispatched until its budget is spent — and a worker that
+    // rewrote one fixed tree would be settled at the second attempt as a refusal
+    // the branch did not cause, which is a different journey from this one.
+    world.script("service.work-anew", "the worker wrote this\n");
 
     let path = world.plan("refused", &plan_of("refused", vec![node(&repo.checkout)]));
     world.run(&["start", &path, "--attach"]).settled();

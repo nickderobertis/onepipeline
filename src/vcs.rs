@@ -63,12 +63,54 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// How a refusal this module composed says a session open met a **base
+/// conflict**, so the one reader of it can tell that refusal from every other.
+///
+/// Written here and read by [`session_open_conflicted`] here, which is what
+/// keeps it a convention of this module rather than a reading of somebody else's
+/// sentence: the classification is made off `onevcs`'s own typed
+/// [`SyncConflict`](onevcs::Error::SyncConflict) at the moment the library
+/// answers, and this phrase only carries that decision across the executor
+/// seam — whose refusal is [`Error::Sibling`], a shape `docs/contract.md` fixes
+/// and this crate may not widen with a variant of its own.
+const SESSION_OPEN_CONFLICT: &str = "the base conflicts with this branch";
+
 /// Open a session over a per-run clone and worktree.
 pub fn session_open(request: &SessionRequest) -> Result<Session> {
     providers()
         .vcs
         .open_session(request.clone())
-        .map_err(refusal)
+        .map_err(session_refusal)
+}
+
+/// A session open `onevcs` refused, as this crate's own error — with the one
+/// refusal no further attempt converges on **named**.
+///
+/// A sync conflict is two conditions sharing one word. During a publication the
+/// base moved under work that was already going and the bounded resolve-and-
+/// requeue lost the race, which another attempt can win — that one is
+/// [`Preserving::SyncConflict`]. At *session open* it is a merge nobody has
+/// performed: the branch and its base disagree about a file, and opening the
+/// session again reproduces the identical refusal because neither side has
+/// changed. Asking again is the whole of what the dispatch boundary would do
+/// with it, so the two must not arrive at that boundary looking alike.
+fn session_refusal(error: onevcs::Error) -> Error {
+    match &error {
+        onevcs::Error::SyncConflict { .. } => sibling(format!("{SESSION_OPEN_CONFLICT}: {error}")),
+        _ => refusal(error),
+    }
+}
+
+/// Whether a dispatch was refused because the session it needed met a base
+/// conflict when it opened.
+///
+/// Asked of the refusal's own text because that is the whole of what crosses the
+/// executor seam — see [`SESSION_OPEN_CONFLICT`] for why the seam carries no
+/// narrower shape — and the text was composed by [`session_refusal`] a few lines
+/// above rather than by the sibling, so what is matched here is this module's own
+/// word and not a sentence somebody else is free to reword.
+pub(crate) fn session_open_conflicted(detail: &str) -> bool {
+    detail.contains(SESSION_OPEN_CONFLICT)
 }
 
 /// Verify a session's work and publish it under its policy.

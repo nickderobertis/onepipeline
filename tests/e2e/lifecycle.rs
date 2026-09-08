@@ -2436,33 +2436,31 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
     let _ = world;
 }
 
-/// A base that moves under a publication is the third preserving failure, and it
-/// is the one whose continuation currently cannot get started.
+/// A base that moves under a publication is the third preserving failure — and
+/// the conflict a session **open** meets is not it.
 ///
-/// The conflict is real and it is made the way one happens: the base takes a
-/// change to the same file while the node's worker is still working, and the
-/// publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
-/// reports `sync-conflict`, hands the branch back, and this crate dispatches the
-/// node again on it — which is what this journey is here to pin.
+/// Both conditions in one run, because one word covers them and only one is
+/// retryable. The conflict is real and it is made the way one happens: the base
+/// takes a change to the same file while the node's worker is still working, and
+/// the publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
+/// reports that as a publication failure, hands the branch back, and this crate
+/// dispatches the node again on it — the retry that must go on happening.
 ///
-/// What that second dispatch then meets is pinned too, and deliberately: opening
-/// a session on a branch that conflicts with its integration target is a refusal
-/// `onevcs` makes at session open, so the continuation never reaches a worker and
-/// the node settles `infrastructure-failure` carrying the sibling's own sentence.
-/// That is the behaviour today rather than the behaviour anybody wants, and a
-/// journey that asserted a happier ending would be describing a stack this one is
-/// not. When the sibling learns to open a session into a conflict for a worker to
-/// resolve, this is the test that says so by failing.
+/// What the second dispatch then meets is the other condition: opening a session
+/// on a branch its base conflicts with is a refusal `onevcs` makes before any
+/// work begins, and no attempt converges on it, because neither the branch nor
+/// the base changes on its own. So the dispatch budget is not spent reproducing
+/// it. A decision goes to the supervisor instead, naming the conflict in the
+/// sibling's own words and the move that answers it — and answering it puts the
+/// node back on the branch that now carries the resolution, where it settles.
 #[test]
-fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preserved() {
+fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries() {
     let world = World::new("lifecycle-syncconflict")
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
-        // The continuation's session refuses to open, which is a dispatch that
-        // produced nothing — and the *dispatch* boundary re-asks one of those
-        // three times over. That retry is not what this journey is about, and
-        // three of it would make the count below say nothing about the loop that
-        // is.
-        .with_env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "1");
+        // The default, deliberately: the dispatch boundary re-asks a dispatch
+        // that produced nothing three times over, and that those three are *not*
+        // spent on a conflict nothing converges on is half of what is held here.
+        .with_env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "3");
     let repo = world.repository("local-direct", &[]);
     // The worker holds until this test releases it, which is the window the base
     // moves in. What it writes is the file the base is about to take a different
@@ -2509,15 +2507,9 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
     let node = result["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
 
-    // The routing, which is what this crate owns: the conflict was named, and
-    // the node was asked again on the branch that carries the work.
+    // The publication conflict is retryable, and was retried on the branch that
+    // carries the work.
     let dispatched = dispatches_of(&world, &run, "service");
-    assert_eq!(
-        dispatched.len(),
-        2,
-        "a base that moved settled the node instead of sending it back to the branch\n{}",
-        why(&world, &run)
-    );
     let reason = dispatched[1]["payload"]["reason"]
         .as_str()
         .expect("the re-dispatch says what the last attempt ended with");
@@ -2525,18 +2517,118 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
         reason.starts_with("sync-conflict:"),
         "the re-dispatch does not name the failure it answers: {reason}"
     );
-    // The branch is in the checkout, which is the whole reason the failure is
-    // one a further attempt could answer at all.
-    let branch = node["branch"].as_str().expect("the node names its branch");
+    // And the session-open conflict is not: exactly two dispatches, which is the
+    // first attempt and the retry the publication earned. A third and a fourth
+    // would be the dispatch boundary asking again for a session that refuses to
+    // open for the same reason every time.
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "a conflict at session open spent the dispatch budget on itself\n{}",
+        why(&world, &run)
+    );
+    // The branch is in the checkout, which is the whole reason the publication
+    // failure is one a further attempt could answer at all.
+    let branch = node["branch"]
+        .as_str()
+        .expect("the node names its branch")
+        .to_string();
     assert!(
-        repo.has_branch(&world, branch),
+        repo.has_branch(&world, &branch),
         "the branch the conflict was on was not handed back"
     );
     // And the sibling recorded the conflict, with the hunks beside it.
-    let conflicts = world.events_of(&run, "sync-conflict");
     assert!(
-        !conflicts.is_empty(),
+        !world.events_of(&run, "sync-conflict").is_empty(),
         "the conflict reached no record a reader can find it in\n{}",
+        why(&world, &run)
+    );
+
+    // What replaces the spent budget: a decision, blocking, naming the conflict
+    // and the move that answers it. Blocking because nothing in the run converges
+    // on it — a person merges two branches or nobody does.
+    let queued = world.events_of(&run, "planner-surface-queued");
+    let decision = queued
+        .iter()
+        .find(|event| event["payload"]["blocking"] == json!(true))
+        .unwrap_or_else(|| {
+            panic!(
+                "the session-open conflict raised no decision: {queued:#?}\n{}",
+                why(&world, &run)
+            )
+        });
+    let said = decision["payload"]["message"]
+        .as_str()
+        .expect("the decision says something")
+        .to_string();
+    for names in [
+        "cannot open a session",
+        "no further attempt converges",
+        "service.md",
+        "retry",
+    ] {
+        assert!(
+            said.contains(names),
+            "the decision does not name {names:?}: {said}"
+        );
+    }
+    // The planner reads it off the queue, which is where a decision is answered
+    // from.
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("cannot open a session");
+
+    // Answering it. The merge is the person's — nothing in this run can do it,
+    // which is exactly why it is a decision — and the `retry` the decision names
+    // is what puts the node back on the branch once it carries the resolution.
+    crate::harness::git(&world, &repo.checkout, &["checkout", &branch]);
+    // A real merge of the base into the branch, resolved the way a person would
+    // have to resolve it — and *on top of* what the branch already carries,
+    // because the session's own clone still holds that copy and a resolution
+    // that rewrote it would be two checkouts disagreeing rather than one
+    // conflict answered.
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["merge", "--no-edit", "-X", "ours", "main"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["checkout", "main"]);
+    world.script("service-again.work", "the worker wrote this\n");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 2,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {
+                        "id": "service-again",
+                        "repo": "service",
+                        "persona": "engineer",
+                        "title": "feat: ship service",
+                        "task": "## What\nShip service.\n\n## Why\nUsers need it.\n\n\
+                                 ## Acceptance criteria\n- service is published.",
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    // And the run resumes from there: a driver takes the intact ledger up and the
+    // replacement continues the branch the resolution is on rather than returning
+    // to the conflict.
+    world.run(&["adopt", &run]).settled();
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service-again")
+        .unwrap_or_else(|| panic!("the replacement never settled\n{}", why(&world, &run)));
+    assert_eq!(
+        settled["payload"]["status"],
+        "done",
+        "the answered decision did not let the node reach a settled outcome: {settled}\n{}",
         why(&world, &run)
     );
 }
