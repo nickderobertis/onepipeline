@@ -51,6 +51,28 @@ so an unqualified command fails with `multiple packages with binaries found`.
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every release, with `sha256` checksums.
 
+## How the npm launcher is published
+
+`npm install -g onepipeline-cli` installs a launcher that carries no binary. The
+binary lives in a per-platform package the launcher pins to an exact version and
+npm installs as an *optional* dependency — and **an install silently skips an
+optional dependency it cannot resolve**, leaving an `onepipeline` on `PATH` with
+nothing to exec.
+
+**`npm publish` exiting 0 means the registry accepted the upload, not that it
+serves the version.** The gap was measured at 75 seconds on one release and
+around eight minutes on another. So the order a release publishes in is not the
+order the registry becomes able to answer in, and offering the launcher on the
+strength of five exit codes is what put a broken install in front of users for a
+window after each release.
+
+`scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
+it does not return until the version it just published is served, and it refuses
+to publish any package before the exact versions that package's own manifest
+pins are served. `verify-npm` then installs and starts the launcher on every
+platform the manifest declares a package for, so a release that would ship that
+window is red rather than green.
+
 ## Release outcome
 
 Every release attaches **`release-outcome.json`** to its GitHub Release. It

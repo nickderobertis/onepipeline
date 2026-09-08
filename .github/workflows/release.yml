@@ -626,23 +626,12 @@ jobs:
             --expect-version "$ver" \
             --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH"
 
-  # What this release actually did, as an artifact rather than as a conclusion
-  # somebody has to reconstruct from twenty-nine job squares.
+  # What this release did, as an artifact rather than as a conclusion somebody
+  # reconstructs from thirty job squares. README.md's "Release outcome" is where
+  # it is documented and where a consumer is told how to fetch it.
   #
-  # Three states, because two cannot say the thing that matters here: **nothing
-  # shipped**, **shipped but unverified**, and **shipped and verified**. A
-  # release that published every artifact and then failed to install one is the
-  # middle state, and it is the state this repository was in for months while its
-  # aggregate red was read as noise.
-  #
-  # `if: always()` and `needs` on every publish and verify job, so this answers
-  # for a release that failed exactly as readily as for one that did not — an
-  # outcome record that only exists when everything worked answers the one
-  # question nobody needs to ask.
-  #
-  # It is attached to the GitHub Release, which is a public URL any consumer can
-  # fetch with no credential and without reading a job log. README.md's "Release
-  # outcome" section is where that URL is written down.
+  # `if: always()`, and `needs` every publish and verify job: a record that only
+  # exists when everything worked answers the one question nobody needs to ask.
   outcome:
     name: record the release outcome
     needs: [publish-crate, verify-crate, publish-pypi, verify-pypi, publish-npm, verify-npm]

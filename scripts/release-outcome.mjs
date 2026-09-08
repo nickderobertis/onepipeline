@@ -1,18 +1,11 @@
 #!/usr/bin/env node
-// Compose the machine-readable record of what a release actually did.
-//
-// A release has three outcomes, not two: **nothing shipped**, **shipped but
-// unverified**, and **shipped and verified**. A boolean collapses the middle
-// into whichever neighbour the reader guesses, and the middle is the one that
-// matters — see README.md's "Release outcome" section, which is also where a
-// consumer is told how to ask for the result.
+// Compose the machine-readable record of what a release actually did, which
+// `release.yml` attaches to the GitHub Release. What the three outcomes mean and
+// how a consumer asks for the file are in README.md's "Release outcome".
 //
 // **Every target names a verification job, and there is no way to say it has
-// none.** An artifact a release publishes and no release installs is the defect
-// this file exists downstream of, not a state to record. A `skipped` publish is
-// a target the operator switched off and takes no part in the outcome; a
-// `failure` or `cancelled` one was meant to ship and holds the release out of
-// the top state.
+// none**: an artifact a release publishes and no release installs is a defect
+// rather than a state to record.
 //
 // Usage:
 //   node scripts/release-outcome.mjs --version <X.Y.Z> [--run-url <url>] \

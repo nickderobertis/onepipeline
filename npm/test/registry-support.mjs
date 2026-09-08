@@ -178,7 +178,6 @@ export class Registry {
       return answer(405, { error: "method not allowed" });
     }
 
-    // `<name>/-/<file>.tgz` is the tarball; anything else is a packument.
     const tarball = path.match(/^(.+)\/-\/([^/]+\.tgz)$/);
     if (tarball) {
       const entry = this.packages.get(tarball[1]);

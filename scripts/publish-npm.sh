@@ -1,35 +1,22 @@
 #!/usr/bin/env bash
 # Publish npm package directories/tarballs idempotently, and do not return until
-# the registry actually serves what was published.
+# the registry serves what was published.
 #
-# A release job can be re-run — after a flaky sibling job, or to finish a partial
-# publish — and an npm version is immutable, so a second `npm publish` of a
-# version already live would red-fail a release that actually succeeded. This
-# asks the registry first: `npm pack --dry-run --json` validates each manifest and
-# yields its canonical name@version, and only a registry 404 permits publication.
-# Auth, network, and server errors fail closed rather than being mistaken for
-# "not published yet".
-#
-# **`npm publish` exiting 0 does not mean the registry serves the version.** It
-# means the upload was accepted; the registry completes the version write
-# afterwards, and until it does an install cannot resolve that version. Measured,
-# not supposed: on v0.23.0 this job published all five platform packages and then
-# the launcher, in that order, and three of the five became resolvable 75 seconds
-# after the job had already ended. `verify-npm` installed 4 seconds after it
-# ended, npm silently skipped the optional dependencies it could not resolve, and
-# the launcher could not start.
-#
-# So the loop's ordering was never the problem; its steps did not mean what they
-# said. Two rules close it, and neither is a fixed wait:
+# Why the registry is asked rather than the exit code is in README.md's "How the
+# npm launcher is published". Two rules follow from it, and neither is a fixed
+# wait:
 #
 #   * nothing is published before every exact version its own manifest pins is
-#     served — which is the launcher's whole relationship to its platform
-#     packages; and
-#   * this does not return until the registry serves what it just published,
-#     so a caller sequencing publishes gets the ordering it wrote.
+#     served; and
+#   * this does not return until the registry serves what it just published, so
+#     a caller sequencing publishes gets the ordering it wrote.
 #
-# The wait is bounded and it is a *refusal*, not a shrug: a launcher offered
-# against a platform package the registry cannot serve is the outage itself.
+# Exhausting the bounded wait is a refusal, not a shrug.
+#
+# Publication is idempotent because an npm version is immutable and a release
+# job can be re-run: `npm pack --dry-run --json` yields each package's canonical
+# name@version, and only a registry 404 permits publication. Auth, network, and
+# server errors fail closed rather than being read as "not published yet".
 #
 # Exits 0 having published or skipped every package it was handed; 2 on a caller
 # error — a missing argument, an unreadable package — refused before anything is
@@ -130,7 +117,6 @@ await_served() {
   done
 }
 
-# A package is either a directory or the tarball it packs to.
 manifest_of() {
   case "$1" in
     *.tgz | *.tar.gz) tar -xzOf "$1" package/package.json ;;
