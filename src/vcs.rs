@@ -2021,6 +2021,118 @@ mod tests {
         assert_eq!(event.payload["landing"], serde_json::Value::Null);
     }
 
+    /// The three answers [`session_tip`] gives, against three real streams.
+    ///
+    /// The distinction is the whole of why the type has three cases: a session
+    /// that committed nothing left its branch where it stood, and a stream
+    /// nothing could read says nothing about where the branch stands — so
+    /// `crate::lifecycle` hands an attempt back for the first and spends it for
+    /// the second. Driven through the sibling's own reader over files on disk,
+    /// because "the reader refuses this batch" is a fact about that reader.
+    ///
+    /// It takes [`scratch_home_held`] for the reason the journey below states:
+    /// `ONEVCS_HOME` is process-global and this crate's unit tests share one
+    /// process.
+    #[test]
+    fn a_session_tip_tells_a_branch_that_did_not_move_from_one_nothing_could_read() {
+        let _home = super::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-tip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let record = |token: &str, seq: u64, kind: &str, payload: serde_json::Value| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": payload,
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let write = |token: &str, body: String| {
+            std::fs::write(root.join("streams").join(format!("{token}.ndjson")), body)
+                .expect("the stream is written");
+        };
+        let opened = |token: &str| record(token, 1, "session-opened", serde_json::json!({}));
+        let committed = |token: &str, sha: &str| {
+            record(
+                token,
+                2,
+                "commit-preserved",
+                serde_json::json!({"branch": "b", "sha": sha}),
+            )
+        };
+
+        // A session that committed: the branch stands at what it recorded.
+        let at = "s-tip-committed";
+        write(at, format!("{}\n{}\n", opened(at), committed(at, "c0ffee")));
+        assert_eq!(
+            session_tip(&SessionToken(at.into())),
+            SessionTip::At("c0ffee".into())
+        );
+
+        // A session that committed nothing: `onevcs` commits a worktree only
+        // where it holds something to commit, so the branch stands where it
+        // stood — which is evidence, and not the absence of it.
+        let unmoved = "s-tip-nothing";
+        write(unmoved, format!("{}\n", opened(unmoved)));
+        assert_eq!(
+            session_tip(&SessionToken(unmoved.into())),
+            SessionTip::Unmoved
+        );
+
+        // A stream cut mid-record: the sibling's typed reader refuses the whole
+        // batch, so the commit that *is* in it is one this crate never saw.
+        let torn = "s-tip-torn";
+        let whole = committed(torn, "decaf");
+        write(torn, format!("{}\n{}", opened(torn), &whole[..20]));
+        assert_eq!(
+            session_tip(&SessionToken(torn.into())),
+            SessionTip::Unknown,
+            "a batch the reader refused was read as a session that committed nothing"
+        );
+
+        // A stream nothing wrote at all: refused by name, and equally unknown.
+        assert_eq!(
+            session_tip(&SessionToken("s-tip-neverwritten".into())),
+            SessionTip::Unknown
+        );
+
+        // And a recorded commit this crate will not carry. The session did
+        // commit, whatever the value is, so this is not the branch standing
+        // still either.
+        let forged = "s-tip-forged";
+        write(
+            forged,
+            format!(
+                "{}\n{}\n",
+                opened(forged),
+                committed(forged, "c0ffee\u{7}bad")
+            ),
+        );
+        assert_eq!(
+            session_tip(&SessionToken(forged.into())),
+            SessionTip::Unknown,
+            "a commit that would forge a row was read as a session that committed nothing"
+        );
+
+        // The `Option` the older reader answers with is this, collapsed.
+        assert_eq!(
+            branch_head_in(&SessionToken(at.into())),
+            Some("c0ffee".to_string())
+        );
+        assert_eq!(branch_head_in(&SessionToken(unmoved.into())), None);
+        assert_eq!(branch_head_in(&SessionToken(torn.into())), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// What this crate reads from a session stream that is not whole.
     ///
     /// `onevcs` appends a record as *two* writes — the line, then its newline —
