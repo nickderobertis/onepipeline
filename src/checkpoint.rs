@@ -1090,6 +1090,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A store this build can read **nothing** in holds no instant open: there is
+    /// no arrival that could sort in front of a record that folds to nothing, so
+    /// every line of it is accounted for.
+    #[test]
+    fn a_store_with_nothing_readable_in_it_holds_no_instant_open() {
+        let root = scratch("nothing-readable");
+        let paths = a_run(&root, "r-illegible");
+        for line in ["not a record", "nor is this"] {
+            crate::ledger::append_line(&paths.journal(), line).expect("appended");
+        }
+        let state = folded_as(&resume(&paths));
+        let covered = super::readable(&paths).expect("a checkpoint").coverage;
+        assert_eq!(
+            covered.records, 2,
+            "a line the fold skipped was left unaccounted"
+        );
+        assert_eq!(covered.at, None, "a line this build cannot read was placed");
+        assert_eq!(state, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A run that has recorded nothing folds to the empty state and leaves no
     /// checkpoint: there is no prefix to cache and nothing to save by caching it.
     #[test]
