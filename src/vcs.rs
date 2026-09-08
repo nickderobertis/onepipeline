@@ -494,7 +494,10 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// by [`HOLD_ASKS`], and asked only about a node actually holding something.
 #[derive(Debug, Default)]
 pub(crate) struct UnreadMergePaths {
-    asking: BTreeMap<String, Asking>,
+    /// Keyed by the type that *is* a node identity rather than by the string one
+    /// spells: every key here came from a node in this run's graph, and
+    /// [`crate::graph::NodeRef`] is what carries that past the boundary.
+    asking: BTreeMap<crate::graph::NodeRef, Asking>,
 }
 
 /// How many times one node's unread merge path is asked about again.
@@ -549,23 +552,28 @@ impl UnreadMergePaths {
         state
             .graph
             .iter()
+            // A node identity leaving the graph's own scope is carried as one
+            // rather than as a field anybody could put anything in.
+            .filter_map(crate::graph::NodeRef::of)
             .filter(|node| {
-                statuses.get(&node.id) == Some(&crate::graph::NodeStatus::Failed)
-                    && state.outcomes.get(&node.id).map(String::as_str) == Some(Failure::UNREAD)
-                    && match self.asking.get(&node.id) {
+                statuses.get(node.as_str()) == Some(&crate::graph::NodeStatus::Failed)
+                    && state.outcomes.get(node.as_str()).map(String::as_str)
+                        == Some(Failure::UNREAD)
+                    && match self.asking.get(node) {
                         None => true,
                         Some(Asking::Unanswered(asks)) => asks.get() < budget,
                         Some(Asking::Landed(_)) => false,
                     }
             })
             .filter(|node| {
-                state.graph.dependents_of(&node.id).iter().any(|dependent| {
-                    statuses.get(dependent) == Some(&crate::graph::NodeStatus::Blocked)
-                })
+                state
+                    .graph
+                    .dependents_of(node.as_str())
+                    .iter()
+                    .any(|dependent| {
+                        statuses.get(dependent) == Some(&crate::graph::NodeStatus::Blocked)
+                    })
             })
-            // A node identity leaving the graph's own scope is carried as one
-            // rather than as a field anybody could put anything in.
-            .filter_map(crate::graph::NodeRef::of)
             .collect()
     }
 
@@ -584,7 +592,7 @@ impl UnreadMergePaths {
         {
             let already = state
                 .landings
-                .insert(node.clone(), crate::graph::Landing::Landed);
+                .insert(node.as_str().to_owned(), crate::graph::Landing::Landed);
             restored |= already != Some(crate::graph::Landing::Landed);
         }
         restored
@@ -611,11 +619,11 @@ impl UnreadMergePaths {
             // is bounded by the same number a host that does is.
             let asks = self
                 .asking
-                .get(id)
+                .get(node)
                 .map_or(std::num::NonZeroU32::MIN, |asking| {
                     asking.asks().saturating_add(1)
                 });
-            self.asking.insert(id.to_owned(), Asking::Unanswered(asks));
+            self.asking.insert(node.clone(), Asking::Unanswered(asks));
             let Some(branch) = state.branches.get(id).cloned() else {
                 continue;
             };
@@ -623,7 +631,7 @@ impl UnreadMergePaths {
             // hold is asked about the one this run's work is in.
             let repo = state.graph.get(id).and_then(|node| node.repo.clone());
             if proved_landed(&branch, repo.as_deref()) {
-                self.asking.insert(id.to_owned(), Asking::Landed(asks));
+                self.asking.insert(node.clone(), Asking::Landed(asks));
                 lifted = true;
             }
         }
@@ -707,20 +715,82 @@ pub fn session_close(token: &SessionToken) -> Result<Session> {
 /// `None` when nothing recorded one, when the record names no usable commit, and
 /// equally when the stream cannot be read — the caller settles exactly as it
 /// would have, because an unreadable record is not evidence of a branch nobody
-/// committed to. The value is checked where it enters, by [`usable`], for the
-/// reason [`landing_commit_of`] is: a commit is rendered into a settlement, a
-/// view, and an event payload, and one carrying a control character forges a row
-/// wherever it lands.
+/// committed to. A caller that has to tell those apart asks [`session_tip`],
+/// which is what this reads and collapses.
 pub fn branch_head_in(token: &SessionToken) -> Option<String> {
+    match session_tip(token) {
+        SessionTip::At(commit) => Some(commit),
+        SessionTip::Unmoved | SessionTip::Unknown => None,
+    }
+}
+
+/// Where a session left the branch that outlives it, as far as its own stream
+/// says.
+///
+/// Three cases and not an `Option`, because the absence [`branch_head_in`]
+/// answers with is two facts that a caller comparing one attempt with the next
+/// must not read as one: a session that committed nothing left the branch
+/// exactly where it stood, and a stream nothing could read says nothing about
+/// where the branch stands at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTip {
+    /// `commit-preserved` named this commit, so the branch stands at it.
+    At(String),
+    /// The stream was read and carries no commit this session made. `onevcs`
+    /// commits a session's worktree only where it holds something to commit, so
+    /// the session added nothing and the branch stands where it stood.
+    Unmoved,
+    /// Nothing is known: the stream could not be read, or the commit it named is
+    /// not one this crate will carry. **Never** read as
+    /// [`Unmoved`](Self::Unmoved) — an unreadable record is not evidence of a
+    /// branch nobody committed to.
+    Unknown,
+}
+
+/// Read that off the session's stream.
+///
+/// The stream is opened **and read** here rather than through [`events`], which
+/// answers a read it could not perform with the empty batch a readable and empty
+/// stream also gives: telling those two apart is the whole of what this adds.
+/// Both refusals count — a stream that would not open, and a batch
+/// [`EventStream::read`] turned down over one line it could not parse.
+///
+/// The commit is checked where it enters, by [`usable`], for the reason
+/// [`landing_commit_of`] is: a commit is rendered into a settlement, a view, and
+/// an event payload, and one carrying a control character forges a row wherever
+/// it lands. One that fails that check is [`Unknown`](SessionTip::Unknown) and
+/// not [`Unmoved`](SessionTip::Unmoved) — a session that recorded a commit did
+/// commit, whatever this crate can do with the value.
+pub fn session_tip(token: &SessionToken) -> SessionTip {
+    let Some(mut stream) = opened(token, None) else {
+        return SessionTip::Unknown;
+    };
+    let batch = match stream.read() {
+        Ok(batch) => batch,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: cannot read session {}'s events: {error}",
+                token.0
+            );
+            return SessionTip::Unknown;
+        }
+    };
     let preserved = kind_of(onevcs::EventKind::CommitPreserved);
     // The last one wins: a session that committed twice was left at the second.
-    events(token, None)
-        .iter()
+    let Some(envelope) = batch
+        .into_iter()
         .rev()
+        .map(relayed)
         .find(|envelope| envelope.kind == preserved)
-        .and_then(|envelope| envelope.payload.get("sha"))
+    else {
+        return SessionTip::Unmoved;
+    };
+    envelope
+        .payload
+        .get("sha")
         .and_then(|sha| sha.as_str())
         .and_then(usable)
+        .map_or(SessionTip::Unknown, SessionTip::At)
 }
 
 /// The change request one session's work reached, when it reached one.

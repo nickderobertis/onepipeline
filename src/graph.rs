@@ -37,7 +37,9 @@ pub const STEP_SEPARATOR: char = '/';
 /// be carried rather than borrowed: a message from a dispatch thread, which is
 /// exactly where an unvalidated string would arrive at the single writer with
 /// nothing left to check it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Ordered, so a map this crate keys by node identity can be keyed by the type
+/// that *is* one rather than by the string it spells.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NodeRef(String);
 
 impl NodeRef {
@@ -869,6 +871,13 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
 /// Cases and not fields, because these facts are correlated and fields beside
 /// each other would make a `ready` node whose failed publication landed a value
 /// somebody could construct.
+// llmlint: ignore-block[invalid_states_unrepresentable] `At` takes every `NodeStatus`
+// because every one of them is an inhabitant here: this is what scheduling knows about a
+// node, not what a journal recorded for one. `crate::crossdag` answers an upstream
+// reference with `Done` **or `Blocked`** — a derived status, by construction, since the
+// consumer's run never settles the other run's node — and `Settled::at` is the constructor
+// that carries it in. Narrowing the payload would make that legitimate value
+// unrepresentable rather than an illegitimate one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     /// Where the node got to, and nothing else this decision turns on.
@@ -910,6 +919,7 @@ impl Settled {
     pub fn at(status: NodeStatus) -> Self {
         Self::At(status)
     }
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 
     /// Where the node got to.
     pub fn status(self) -> NodeStatus {
