@@ -172,6 +172,26 @@ pub enum Operation {
         evidence: String,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] both fields are the `String`
+    // every neighbouring variant spells a node id and a reference with, and both are
+    // narrowed where they are judged: `compile_settle` writes this only for a node it has
+    // already established the graph holds, and only for a landing `vcs::usable` accepted —
+    // the same check every branch, session token and commit this crate records crosses.
+    /// Where a node's work landed, as the operator settling it from evidence
+    /// stated it: the commit the change reached its base at, or the change
+    /// request a person reads it in.
+    ///
+    /// **Its own operation beside [`SettledFromEvidence`](Self::SettledFromEvidence)
+    /// rather than a field on it**, so a settlement stays byte for byte the
+    /// settlement it was: a build that predates this variant folds the record it
+    /// already understood, and a settle naming no landing writes nothing here.
+    LandingFromEvidence {
+        /// The node.
+        node: String,
+        /// Where its work landed.
+        landing: String,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] both fields are spelled as the
     // wire spells them, as every neighbouring variant is, and the narrowable one is
     // narrowed where it is judged: `compile_amend` refuses a node the graph does not have
@@ -992,7 +1012,8 @@ fn compile_into(
             id,
             outcome,
             evidence,
-        } => compile_settle(graph, frontier, id, *outcome, evidence),
+            landing,
+        } => compile_settle(graph, frontier, id, *outcome, evidence, landing.as_deref()),
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -1456,6 +1477,51 @@ fn compile_requeue(
     }])
 }
 
+/// The widths a stated landing's commit may be spelled at: git's own floor for
+/// `--abbrev`, and the full object name of the widest hash git names one with.
+///
+/// Shorter than the floor is not a commit anybody could have read off a merge —
+/// it is a word that happens to be hexadecimal — and longer than the ceiling is
+/// not an object name at all, whichever hash the repository uses.
+const OBJECT_NAME_WIDTHS: std::ops::RangeInclusive<usize> = 7..=64;
+
+// llmlint: ignore[boundary_inputs_validated] what this checks is the whole of what can be
+// checked here, and the rest is not this boundary's to answer. Whether a URL names a change
+// request `onevcs` can resolve is that library's question, asked against host state that
+// changes *while a run waits*: the case this op exists for is a change request that has not
+// merged yet, and the run goes on asking about it until it does — so a boundary that refused
+// a reference the host cannot resolve yet would refuse exactly the settlement this field was
+// added for. The sibling answers an unresolvable reference itself, by name.
+/// Whether a stated landing is spelled as a **URL**, which is how a change
+/// request is named.
+///
+/// Asked through `onevcs`'s own URL parser — re-exported by that library for
+/// exactly this, so a caller validating a change-request URL needs no parser of
+/// its own — and narrowed to the two schemes a change request is served over. It
+/// says what it asks: a landing that is a URL. Which *kind* of change one names
+/// is the sibling's to resolve.
+fn landing_is_a_url(landing: &str) -> bool {
+    onevcs::Url::parse(landing).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Whether a stated landing is spelled as a **commit**: an object name, within
+/// the widths git names one at.
+fn landing_is_an_object_name(landing: &str) -> bool {
+    OBJECT_NAME_WIDTHS.contains(&landing.len()) && landing.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// One stated landing, where it is one of the two spellings the op takes.
+///
+/// The check both boundaries the value crosses make, so they cannot come to
+/// disagree: the reply envelope, where a person types it, and the journal it is
+/// read back out of — a file another build wrote and a person can edit. What a
+/// value that is neither spelling costs is the same on both sides: a release
+/// question `onevcs` cannot be asked, about work nothing can read.
+pub(crate) fn stated_landing(landing: &str) -> Option<String> {
+    crate::vcs::usable(landing)
+        .filter(|landing| landing_is_a_url(landing) || landing_is_an_object_name(landing))
+}
+
 /// The status a `settle` puts a node's record at.
 ///
 /// Exhaustive over the outcome the wire carries, so a fourth word cannot arrive
@@ -1477,8 +1543,11 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// all — only the record of what became of the node moves, and the node keeps
 /// its id and its lineage by construction rather than by care.
 ///
-/// Four refusals, and each one is a different thing to do next. Blank evidence:
-/// the journal would record the reason for a state as nothing. A node the graph
+/// Five refusals, and each one is a different thing to do next. Blank evidence:
+/// the journal would record the reason for a state as nothing. A landing that is
+/// not one word naming a commit or a change request: it is asked of `onevcs` as
+/// the reference a release is measured against and printed into the views, so
+/// there is nothing to be done with one nothing can resolve. A node the graph
 /// does not hold: the settlement would be about no work at all, so the ids it
 /// does hold are named. A node whose record **already says what the settle
 /// states**: it is named as having settled that way, because a settle that
@@ -1500,6 +1569,7 @@ fn compile_settle(
     id: &str,
     outcome: SettleOutcome,
     evidence: &str,
+    landing: Option<&str>,
 ) -> Result<Vec<Operation>> {
     if evidence.trim().is_empty() {
         return Err(refuse(format!(
@@ -1529,11 +1599,30 @@ fn compile_settle(
             live.named()
         )));
     }
-    Ok(vec![Operation::SettledFromEvidence {
+    let landing = match landing {
+        Some(named) => Some(stated_landing(named).ok_or_else(|| {
+            refuse(format!(
+                "settle: node '{id}' would be settled at a landing of {named:?}, which is neither \
+                 the commit the change reached its base at — {floor} to {ceiling} hexadecimal \
+                 characters — nor the change request's URL; state one of those, or omit the field",
+                floor = OBJECT_NAME_WIDTHS.start(),
+                ceiling = OBJECT_NAME_WIDTHS.end()
+            ))
+        })?),
+        None => None,
+    };
+    let mut operations = vec![Operation::SettledFromEvidence {
         node: id.to_string(),
         outcome,
         evidence: evidence.to_string(),
-    }])
+    }];
+    if let Some(landing) = landing {
+        operations.push(Operation::LandingFromEvidence {
+            node: id.to_string(),
+            landing,
+        });
+    }
+    Ok(operations)
 }
 
 /// Validate one finding: it changes nothing, so all there is to judge is
@@ -1748,6 +1837,10 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         // reconstructs it by changing nothing here, exactly as the reconciler
         // did. What moves is folded where the recorded statuses are.
         Operation::SettledFromEvidence { .. } => {}
+        // Nor does the landing beside it: where a node's work *is* was never a
+        // property of the graph, so replay reconstructs it by reading the record
+        // rather than by moving a node.
+        Operation::LandingFromEvidence { .. } => {}
         Operation::NodeRequeued { node, amend } => {
             let Some(existing) = graph.get(node).cloned() else {
                 return;
@@ -2517,6 +2610,7 @@ mod tests {
                 id: "publish".into(),
                 outcome: crate::channel::SettleOutcome::Done,
                 evidence: evidence.into(),
+                landing: None,
             },
         )
         .expect("a node the graph holds settles from evidence");
@@ -2546,6 +2640,131 @@ mod tests {
         assert_eq!(replayed, before);
     }
 
+    /// The operation a stated landing is persisted as is the one the divergence
+    /// record names.
+    ///
+    /// The record is the document a planner rules on and the journal is what a
+    /// consumer folds, so a kind renamed on one side and not the other is a
+    /// record nobody can join to the run it describes. Read out of that document
+    /// rather than restated here, in the same way `src/release.rs` reconciles the
+    /// probe interval it states.
+    #[test]
+    fn the_operation_a_stated_landing_is_recorded_as_is_the_one_the_record_names() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let key = "\"settle_landing_operation\": \"";
+        let at = record.find(key).expect(
+            "docs/contract-divergences.md names the operation a stated landing is recorded as",
+        ) + key.len();
+        let named = &record[at..][..record[at..].find('"').expect("the name is quoted")];
+        let written = serde_json::to_value(Operation::LandingFromEvidence {
+            node: "publish".into(),
+            landing: "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d".into(),
+        })
+        .expect("the operation serializes");
+        assert_eq!(
+            written["kind"],
+            serde_json::json!(named),
+            "the divergence record tells a planner a stated landing is recorded as \
+             `{named}`, and this build writes {}",
+            written["kind"]
+        );
+    }
+
+    /// A settle records where the work landed, in either spelling of a landing —
+    /// and records none where the operator named none.
+    ///
+    /// Both spellings are one field, because both are references `onevcs`
+    /// resolves work by, and neither changes the settlement beside it: that is
+    /// what makes the field additive for callers that predate it.
+    #[test]
+    fn a_settle_records_the_landing_it_was_given_and_none_where_it_was_given_none() {
+        let evidence = "the change merged while the dispatch was dying";
+        let settled = Operation::SettledFromEvidence {
+            node: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: evidence.into(),
+        };
+        let settle = |landing: Option<&str>| Command::Settle {
+            id: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: evidence.into(),
+            landing: landing.map(str::to_owned),
+        };
+        let compiled = |landing: Option<&str>| {
+            compile(
+                &mut graph_of(vec![agent("publish", &[])]),
+                &frontier(&[("publish", NodeStatus::Failed)]),
+                &settle(landing),
+            )
+            .expect("a node the run recorded failed settles from evidence")
+        };
+
+        // Named none: exactly the settlement this op recorded before the field
+        // existed, and nothing beside it.
+        assert_eq!(compiled(None), vec![settled.clone()]);
+
+        // Both spellings the contract admits — the commit the change reached its
+        // base at, and the change request a person reads it in.
+        for landing in [
+            "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d",
+            "https://github.com/owner/engine/pull/12",
+        ] {
+            assert_eq!(
+                compiled(Some(landing)),
+                vec![
+                    settled.clone(),
+                    Operation::LandingFromEvidence {
+                        node: "publish".into(),
+                        landing: landing.into(),
+                    }
+                ],
+                "the settlement or the landing beside it moved for {landing}"
+            );
+        }
+
+        // A landing nothing could resolve is refused rather than recorded: it is
+        // handed straight back to `onevcs` as the reference a release is measured
+        // against, and printed into the views beside it.
+        // Neither spelling the op admits: nothing at all, something that is not
+        // one value, a word that is not an object name, a hexadecimal one too
+        // short to be a commit anybody abbreviated, and a URL of no scheme a
+        // change request is served over.
+        let too_wide = "f".repeat(65);
+        for unusable in [
+            "",
+            "  ",
+            "3f9a1c2 and the one before it",
+            "one\nline\nper\nlanding",
+            "the-change-that-merged",
+            "3f9a1c",
+            "ftp://example.invalid/pull/12",
+            too_wide.as_str(),
+        ] {
+            let message = compile(
+                &mut graph_of(vec![agent("publish", &[])]),
+                &frontier(&[("publish", NodeStatus::Failed)]),
+                &settle(Some(unusable)),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                message.contains("neither the commit the change reached its base at")
+                    && message.contains("nor the change request's URL")
+                    && message.contains("omit the field"),
+                "{unusable:?} was accepted as a landing, or refused without saying what to do: \
+                 {message}"
+            );
+        }
+
+        // And the landing touches the graph no more than the settlement does.
+        let mut graph = graph_of(vec![agent("publish", &[]), agent("announce", &["publish"])]);
+        let before = graph.clone();
+        for operation in compiled(Some("3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d")) {
+            apply(&mut graph, &operation);
+        }
+        assert_eq!(graph, before, "the landing moved the graph");
+    }
+
     /// The four ways a settle is refused, each naming a different next step.
     #[test]
     fn a_settle_is_refused_without_evidence_a_node_or_a_state_left_to_settle() {
@@ -2553,6 +2772,7 @@ mod tests {
             id: id.into(),
             outcome: crate::channel::SettleOutcome::Done,
             evidence: evidence.into(),
+            landing: None,
         };
         let mut graph = graph_of(vec![agent("publish", &[])]);
 
