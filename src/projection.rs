@@ -950,7 +950,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                     // ahead of the branch this settle is correcting.
                     Operation::LandingFromEvidence { node, landing } => {
                         state.stated_landings.insert(node.clone(), landing.clone());
-                        if edits::landing_is_a_change_request(landing) {
+                        if edits::landing_is_a_url(landing) {
                             state.change_urls.insert(node.clone(), landing.clone());
                         } else {
                             state.landing_commits.insert(node.clone(), landing.clone());

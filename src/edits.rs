@@ -1477,16 +1477,32 @@ fn compile_requeue(
     }])
 }
 
-/// Which of the two spellings a stated landing is, so the fold that records it
-/// puts it where a run-produced settlement puts the same fact.
+/// The shortest abbreviated object name git will print, which is the shortest
+/// commit a stated landing may name.
 ///
-/// A change request is named by its **URL** and nothing else this op takes is
-/// one, which is the whole of the test: `onevcs` resolves a URL to the change it
-/// opened, and every other spelling the op admits — a commit — is resolved
-/// against the branches this host holds. A value that is neither was refused at
-/// the envelope, by [`compile_settle`].
-pub(crate) fn landing_is_a_change_request(landing: &str) -> bool {
-    landing.starts_with("http://") || landing.starts_with("https://")
+/// Git's own floor for `--abbrev`, and the width `rev-parse --short` prints by
+/// default. Shorter than this is not a commit anybody could have read off a merge
+/// — it is a word that happens to be hexadecimal.
+const ABBREVIATED_OBJECT_NAME: usize = 7;
+
+/// Whether a stated landing is spelled as a **URL**, which is how a change
+/// request is named.
+///
+/// Asked through `onevcs`'s own URL parser — re-exported by that library for
+/// exactly this, so a caller validating a change-request URL needs no parser of
+/// its own — and narrowed to the two schemes a change request is served over. It
+/// says what it asks: a landing that is a URL. Which *kind* of change a URL names
+/// is the sibling's to resolve, and [`compile_settle`] has already refused a
+/// landing that is neither this nor an object name, so the two spellings the op
+/// admits are told apart by this one question.
+pub(crate) fn landing_is_a_url(landing: &str) -> bool {
+    onevcs::Url::parse(landing).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Whether a stated landing is spelled as a **commit**: an object name, at or
+/// above the width git abbreviates one to.
+fn landing_is_an_object_name(landing: &str) -> bool {
+    landing.len() >= ABBREVIATED_OBJECT_NAME && landing.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The status a `settle` puts a node's record at.
@@ -1566,20 +1582,26 @@ fn compile_settle(
             live.named()
         )));
     }
-    // A landing nobody can resolve is refused rather than recorded. It is handed
-    // straight back to `onevcs` as the reference a release is measured against
-    // and rendered into the views beside it, so a value carrying whitespace or a
-    // control character asks an unanswerable question and forges a line where it
-    // is printed — and a settlement recording one would report work as landed
-    // somewhere nothing can be read.
+    // A landing this op does not admit is refused rather than recorded. It is
+    // handed straight back to `onevcs` as the reference a release is measured
+    // against and rendered into the views beside it, so a value that is neither
+    // of the two spellings asks an unanswerable question — and a settlement
+    // recording one would report work as landed somewhere nothing can be read.
+    // Both halves are checked: whole and on one line, as every reference this
+    // crate records is, and then one of the two things the op says it takes.
     let landing = match landing {
-        Some(named) => Some(crate::vcs::usable(named).ok_or_else(|| {
-            refuse(format!(
-                "settle: node '{id}' would be settled at a landing of {named:?}, which is not one \
-                 word naming a commit or a change request; state the commit the change reached \
-                 its base at, or the change request's URL, or omit the field"
-            ))
-        })?),
+        Some(named) => Some(
+            crate::vcs::usable(named)
+                .filter(|landing| landing_is_a_url(landing) || landing_is_an_object_name(landing))
+                .ok_or_else(|| {
+                    refuse(format!(
+                        "settle: node '{id}' would be settled at a landing of {named:?}, which is \
+                         neither the commit the change reached its base at — an object name of at \
+                         least {ABBREVIATED_OBJECT_NAME} hexadecimal characters — nor the change \
+                         request's URL; state one of those, or omit the field"
+                    ))
+                })?,
+        ),
         None => None,
     };
     let mut operations = vec![Operation::SettledFromEvidence {
@@ -2666,11 +2688,18 @@ mod tests {
         // A landing nothing could resolve is refused rather than recorded: it is
         // handed straight back to `onevcs` as the reference a release is measured
         // against, and printed into the views beside it.
+        // Neither spelling the op admits: nothing at all, something that is not
+        // one value, a word that is not an object name, a hexadecimal one too
+        // short to be a commit anybody abbreviated, and a URL of no scheme a
+        // change request is served over.
         for unusable in [
             "",
             "  ",
             "3f9a1c2 and the one before it",
             "one\nline\nper\nlanding",
+            "the-change-that-merged",
+            "3f9a1c",
+            "ftp://example.invalid/pull/12",
         ] {
             let message = compile(
                 &mut graph_of(vec![agent("publish", &[])]),
@@ -2680,7 +2709,8 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(
-                message.contains("not one word naming a commit or a change request")
+                message.contains("neither the commit the change reached its base at")
+                    && message.contains("nor the change request's URL")
                     && message.contains("omit the field"),
                 "{unusable:?} was accepted as a landing, or refused without saying what to do: \
                  {message}"

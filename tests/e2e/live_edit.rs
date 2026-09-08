@@ -1976,13 +1976,18 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     // reference a release is measured against and printed into the views, so a
     // value carrying whitespace or a control character asks an unanswerable
     // question and forges a line where it lands.
-    for unusable in ["", "3f9a1c2 and the one before it"] {
+    for unusable in [
+        "",
+        "3f9a1c2 and the one before it",
+        "the-change-that-merged",
+    ] {
         let mut named = settle("publish", evidence);
         named["landing"] = json!(unusable);
         world
             .run_with_stdin(&["reply", &run], &envelope(json!([named])))
             .exited(REFUSED)
-            .err_has("not one word naming a commit or a change request")
+            .err_has("neither the commit the change reached its base at")
+            .err_has("nor the change request's URL")
             .err_has("omit the field");
     }
 
