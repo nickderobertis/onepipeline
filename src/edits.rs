@@ -1477,13 +1477,13 @@ fn compile_requeue(
     }])
 }
 
-/// The shortest abbreviated object name git will print, which is the shortest
-/// commit a stated landing may name.
+/// The widths a stated landing's commit may be spelled at: git's own floor for
+/// `--abbrev`, and the full object name of the widest hash git names one with.
 ///
-/// Git's own floor for `--abbrev`, and the width `rev-parse --short` prints by
-/// default. Shorter than this is not a commit anybody could have read off a merge
-/// — it is a word that happens to be hexadecimal.
-const ABBREVIATED_OBJECT_NAME: usize = 7;
+/// Shorter than the floor is not a commit anybody could have read off a merge —
+/// it is a word that happens to be hexadecimal — and longer than the ceiling is
+/// not an object name at all, whichever hash the repository uses.
+const OBJECT_NAME_WIDTHS: std::ops::RangeInclusive<usize> = 7..=64;
 
 /// Whether a stated landing is spelled as a **URL**, which is how a change
 /// request is named.
@@ -1502,7 +1502,7 @@ pub(crate) fn landing_is_a_url(landing: &str) -> bool {
 /// Whether a stated landing is spelled as a **commit**: an object name, at or
 /// above the width git abbreviates one to.
 fn landing_is_an_object_name(landing: &str) -> bool {
-    landing.len() >= ABBREVIATED_OBJECT_NAME && landing.chars().all(|c| c.is_ascii_hexdigit())
+    OBJECT_NAME_WIDTHS.contains(&landing.len()) && landing.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The status a `settle` puts a node's record at.
@@ -1596,9 +1596,11 @@ fn compile_settle(
                 .ok_or_else(|| {
                     refuse(format!(
                         "settle: node '{id}' would be settled at a landing of {named:?}, which is \
-                         neither the commit the change reached its base at — an object name of at \
-                         least {ABBREVIATED_OBJECT_NAME} hexadecimal characters — nor the change \
-                         request's URL; state one of those, or omit the field"
+                         neither the commit the change reached its base at — {floor} to {ceiling} \
+                         hexadecimal characters — nor the change request's URL; state one of \
+                         those, or omit the field",
+                        floor = OBJECT_NAME_WIDTHS.start(),
+                        ceiling = OBJECT_NAME_WIDTHS.end()
                     ))
                 })?,
         ),
@@ -2692,6 +2694,7 @@ mod tests {
         // one value, a word that is not an object name, a hexadecimal one too
         // short to be a commit anybody abbreviated, and a URL of no scheme a
         // change request is served over.
+        let too_wide = "f".repeat(65);
         for unusable in [
             "",
             "  ",
@@ -2700,6 +2703,7 @@ mod tests {
             "the-change-that-merged",
             "3f9a1c",
             "ftp://example.invalid/pull/12",
+            too_wide.as_str(),
         ] {
             let message = compile(
                 &mut graph_of(vec![agent("publish", &[])]),

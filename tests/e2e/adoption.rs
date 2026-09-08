@@ -3984,15 +3984,28 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     });
     let raised = waits_of(&world, &run, "consumer").len();
     let surfaced = wait_surfaces_of(&world, &run, "consumer").len();
+    let asked_before = world.probe_runs(ENGINE);
 
-    // Then that probe stops answering. `not-answered` is a statement about the
-    // probe and never about the release, and the release has happened.
+    // Then that probe answers **no release**, and then stops answering at all.
+    // Both are statements about the probe's own moment and neither is about the
+    // release, which has happened: what the run does with either is the same,
+    // because the question is not put again.
+    std::fs::remove_file(&engine_answer).expect("the probe's answer is taken away");
+    world.until("a wait raised after the answer went", |world| {
+        waits_of(world, &run, "consumer").len() > raised
+    });
     stops_answering(&engine_answer);
     // Past whatever question was already in flight when the release arrived, so
     // what the tally below counts is asks made *after* it.
     world.until("the run to go on waiting for the other release", |world| {
-        waits_of(world, &run, "consumer").len() >= raised + 2
+        waits_of(world, &run, "consumer").len() >= raised + 3
     });
+    assert_eq!(
+        world.probe_runs(ENGINE),
+        asked_before,
+        "the release that arrived was asked about again, so neither answer above \
+         reached the run through a question it put"
+    );
     let asked = world.probe_runs(ENGINE);
     world.until("several more waits to be raised", |world| {
         waits_of(world, &run, "consumer").len() >= raised + 5

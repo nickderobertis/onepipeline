@@ -97,12 +97,7 @@ pub struct RunState {
     /// person stated it. Release correlation asks about a stated landing ahead of
     /// the branch the run recorded, for the reason `docs/contract-divergences.md`
     /// entry 40 gives: the branch is the part of the record the settle corrects.
-    //
-    // llmlint: ignore[invalid_states_unrepresentable] a node id and a landing reference are
-    // the plain strings this crate spells them as, for the reason `landing_commits` records
-    // beside it. Neither is unchecked: `edits::compile_settle` refuses a landing that is not
-    // one usable word and a node the graph does not hold, which is the boundary the value
-    // crosses.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a landing reference are the plain strings this crate spells them as, for the reason `landing_commits` records beside it — and neither is unchecked: `edits::compile_settle` refuses a node the graph does not hold and a landing that is neither an object name nor a change request's URL, which is the boundary the value crosses.
     pub stated_landings: BTreeMap<String, String>,
     /// Why each dispatch that ended for a reason other than the agent's verdict
     /// ended, in the words its producer classified it with.
