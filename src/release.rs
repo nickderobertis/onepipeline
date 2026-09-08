@@ -68,6 +68,23 @@ pub const DEFAULT_POLL_SECONDS: u64 = 60;
 /// The environment variable bounding how often a held node's wait is surfaced.
 pub const SURFACE_ENV: &str = "ONEPIPELINE_RELEASE_SURFACE_SECONDS";
 
+/// The environment variable holding how long the asker goes on asking a question
+/// the loop has **withdrawn**. Zero, and unset, is every build in the field.
+///
+/// What a value here models is the question that was already in flight when a
+/// release arrived: its probe had been started, the loop took up an answer
+/// carrying the version and withdrew the question, and the answer of the run
+/// already begun landed *after* that. An answer with no version following one
+/// that carried it, for the same key, is the whole of what
+/// [`Watch::take_up`](Watch::take_up)'s latch is for — and it is the one ordering
+/// a journey cannot otherwise schedule from outside, because the asker takes up
+/// the loop's newest question set at the top of every iteration, so a key the
+/// loop has answered is out of the set before the probe's interval comes round
+/// again. `tests/e2e/adoption.rs` sets it to drive that ordering through the
+/// compiled binary; nothing else in this crate reads it, and unset it changes
+/// neither what is asked nor when.
+pub const WITHDRAWN_ASK_ENV: &str = "ONEPIPELINE_RELEASE_WITHDRAWN_ASK_SECONDS";
+
 /// How often a held node's wait is surfaced to the planner when nothing
 /// overrides it.
 ///
@@ -412,11 +429,18 @@ impl Asker {
 
 /// The asker's own loop.
 fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered>, poll: Duration) {
+    // Zero everywhere but a journey that needs the one ordering it cannot
+    // otherwise schedule; see [`WITHDRAWN_ASK_ENV`]. Read once, because the
+    // environment a thread was started under is what it runs under.
+    let linger = withdrawn_ask();
     let mut questions: Vec<Question> = Vec::new();
+    // Questions the loop has withdrawn and that are still being asked, with when
+    // each was withdrawn. Always empty unless `linger` is set.
+    let mut withdrawn: Vec<(Question, Instant)> = Vec::new();
     let mut probed: Option<Instant> = None;
     loop {
         match asked.recv_timeout(TICK) {
-            Ok(fresh) => questions = fresh,
+            Ok(fresh) => questions = retire(&questions, fresh, linger, &mut withdrawn),
             Err(RecvTimeoutError::Timeout) => {}
             // The reconcile loop has gone, so there is nobody to answer.
             Err(RecvTimeoutError::Disconnected) => return,
@@ -425,11 +449,15 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
         // a slow probe leaves the asker working from the newest set rather than
         // from a backlog of stale ones.
         while let Ok(fresh) = asked.try_recv() {
-            questions = fresh;
+            questions = retire(&questions, fresh, linger, &mut withdrawn);
         }
+        withdrawn.retain(|(_, since)| since.elapsed() < linger);
         let due = probed.is_none_or(|last| last.elapsed() >= poll);
         let mut ran_a_probe = false;
-        for question in &questions {
+        for question in questions
+            .iter()
+            .chain(withdrawn.iter().map(|(held, _)| held))
+        {
             if question.style == ReleaseStyle::Automated {
                 if !due {
                     continue;
@@ -1751,6 +1779,49 @@ fn poll_seconds() -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0)
         .unwrap_or(DEFAULT_POLL_SECONDS)
+}
+
+/// How long the asker goes on asking a question the loop has withdrawn.
+///
+/// Zero for an unset, unusable or negative value — which is the behaviour every
+/// build in the field has: a withdrawn question is asked no more.
+fn withdrawn_ask() -> Duration {
+    Duration::from_secs(
+        std::env::var(WITHDRAWN_ASK_ENV)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+    )
+}
+
+/// Take up a fresh question set, keeping for `linger` the questions it no longer
+/// names.
+///
+/// With `linger` zero — every build in the field — the fresh set simply replaces
+/// the one before it and nothing is kept, which is what this did before there was
+/// anything to keep.
+fn retire(
+    current: &[Question],
+    fresh: Vec<Question>,
+    linger: Duration,
+    withdrawn: &mut Vec<(Question, Instant)>,
+) -> Vec<Question> {
+    if !linger.is_zero() {
+        let now = Instant::now();
+        // A question is the one it is by what it asks about, so a set that names
+        // the same release with a different wait behind it has withdrawn nothing.
+        let names = |question: &Question, other: &Question| {
+            question.reference == other.reference && question.target == other.target
+        };
+        for question in current {
+            if !fresh.iter().any(|other| names(question, other))
+                && !withdrawn.iter().any(|(held, _)| names(question, held))
+            {
+                withdrawn.push((question.clone(), now));
+            }
+        }
+    }
+    fresh
 }
 
 /// How often a held node's wait is surfaced.
