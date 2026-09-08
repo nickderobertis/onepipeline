@@ -4042,7 +4042,18 @@ const OLD_ENOUGH_TO_SEE: u64 = 4;
 /// journey takes its probe's answer away, so the answer that carries no version
 /// reaches the loop *after* the one that carried one — the ordering the latch
 /// exists for, and the one thing about it a journey cannot schedule from outside.
-const WITHDRAWN_ASK_SECONDS: &str = "8";
+///
+/// The window opens at the **withdrawal**, which is an event this journey learns
+/// about only at the next wait raised — so it has to cover that latency and two
+/// more probe cycles on top, and a value that merely covers them on this host is
+/// a bet against the slowest one. Measured on the Windows runner: taking a
+/// release up adds a probe subprocess to every poll, which stretched the wait
+/// cadence from ~1.5s to ~3.5s, so the journey read the withdrawal 4.3s late and
+/// then needed ~7s more for its two cycles — ~11s of work inside an 8s window,
+/// which reached `asked + 1` and stalled there until the harness deadline. A
+/// minute is several times the whole of that stretch and still well inside the
+/// bound the build itself puts on this seam.
+const WITHDRAWN_ASK_SECONDS: &str = "60";
 
 /// One awaited entry off the last wait raised about a node.
 fn awaited_entry(world: &World, run: &str, node: &str, dep: &str) -> Option<Value> {
