@@ -3772,13 +3772,24 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
         Spelling::ChangeRequest => change_url_of(&world, &run, "landed"),
     };
 
+    // Both envelope versions this build reads are driven through the real binary
+    // here, one on each spelling: the version this build writes, and the version
+    // before it — which is what every caller written before the landing existed
+    // still sends, this repository's own journeys and the orchestration
+    // repository's pass-through wrapper included. Neither the settle nor the
+    // correlation may notice which of the two arrived.
+    let version = match spelling {
+        Spelling::Commit => onepipeline::channel::REPLY_ENVELOPE_VERSION,
+        Spelling::ChangeRequest => 2,
+    };
+
     // Settled at what an operator can see it reached, naming where the work is.
     // Everything the run itself recorded about `broken` still points at a branch
     // of its own that never landed and never will.
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "commands": [{
+            &json!({"version": version, "commands": [{
                 "op": "settle", "id": "broken", "outcome": "done",
                 "evidence": "the change carrying this work is open; the dispatch died before \
                              it merged, and the run recorded the death and never the change",

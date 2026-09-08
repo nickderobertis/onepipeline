@@ -1694,20 +1694,65 @@ fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
             "a settle's landing at `{landing}` does not round-trip"
         );
     }
+    // The version this field moves the envelope to, and the versions this build
+    // goes on reading. A field added to a serialized contract moves its version;
+    // this one is **additive**, so the version it leaves behind is still read and
+    // every envelope written against it still works. The entry names both, and
+    // the build is held to both here.
+    let version = block["envelope_version"]
+        .as_u64()
+        .expect("entry 57 names the envelope version the landing moves it to")
+        as u32;
+    assert_eq!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSION,
+        version,
+        "the build's envelope version is not the one entry 57 declares"
+    );
+    let read: Vec<u32> = serde_json::from_value(block["envelope_versions_read"].clone())
+        .expect("entry 57 names the envelope versions this build reads");
+    assert_eq!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSIONS_READ,
+        read.as_slice(),
+        "the build reads a different set of envelope versions from the one entry 57 names"
+    );
+    assert!(
+        read.contains(&version) && read.len() > 1,
+        "entry 57 declares a bump that leaves the version before it unread: {block}"
+    );
+
     // The golden is the envelope a person types and this build parses, and these
     // are the landings it carries: the entry, the golden and the types are held
-    // against each other so no two of them can drift. The envelope version does
-    // not move for an optional field — this entry says why, and entry 60 is where
-    // it last moved and states the rule.
+    // against each other so no two of them can drift.
     let golden: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v2.json"))
+        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v3.json"))
             .expect("the reply envelope golden ships"),
     )
     .expect("the golden is JSON");
     assert_eq!(
         golden["version"],
         json!(onepipeline::channel::REPLY_ENVELOPE_VERSION),
-        "the golden envelope is not at the version this build reads and writes"
+        "the golden envelope is not at the version this build writes"
+    );
+    // And the golden for the version this build no longer writes: it is checked
+    // in beside the current one, it is at a version the entry says is still read,
+    // and what it carries is what a caller written before the landing sent.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v2.json"))
+            .expect("the envelope golden for the version before this one ships"),
+    )
+    .expect("the older golden is JSON");
+    let older_version = older["version"].as_u64().expect("it names its version") as u32;
+    assert!(
+        older_version < version && read.contains(&older_version),
+        "the golden for the version before this one is not a version this build still reads"
+    );
+    assert!(
+        older["commands"]
+            .as_array()
+            .expect("the older golden carries commands")
+            .iter()
+            .all(|command| command.get("landing").is_none()),
+        "the golden for the version before the landing existed names one: {older}"
     );
     let carried: Vec<String> = golden["commands"]
         .as_array()
@@ -4663,10 +4708,13 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     let version = block["envelope_version"]
         .as_u64()
         .expect("entry 60 names the envelope version") as u32;
-    assert_eq!(
-        onepipeline::channel::REPLY_ENVELOPE_VERSION,
-        version,
-        "the build's envelope version is not the one entry 60 declares"
+    assert!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSIONS_READ.contains(&version),
+        "the build no longer reads the envelope version entry 60 declares"
+    );
+    assert!(
+        onepipeline::channel::REPLY_ENVELOPE_VERSION >= version,
+        "the build writes an envelope version older than the one entry 60 moved it to"
     );
     assert!(
         CONTRACT.contains(r#"{"version": 1, "commands": [...]}"#),

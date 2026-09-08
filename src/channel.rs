@@ -38,8 +38,47 @@ use serde_json::{Map, Value};
 use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
 
-/// The reply envelope version this crate reads and writes.
-pub const REPLY_ENVELOPE_VERSION: u32 = 2;
+/// The reply envelope version this crate **writes**, and the newest it reads.
+pub const REPLY_ENVELOPE_VERSION: u32 = 3;
+
+/// Every envelope version this crate **reads**, newest first.
+///
+/// The bump to 3 is additive the way the plan schema's and the launch config's
+/// are: version 3 adds one optional field — a `settle`'s `landing` — and takes
+/// nothing away, so an envelope written against 2 is a complete envelope at 3 and
+/// this build reads it as one. Entry 57 of `docs/contract-divergences.md` records
+/// it, and `tests/golden/reply-envelope-v2.json` is an envelope at the older
+/// version, kept beside the current one so what this build reads is checked in
+/// rather than asserted.
+///
+/// A number outside this set is refused where an edit envelope's version has
+/// always been checked, naming the version an edit requires.
+pub const REPLY_ENVELOPE_VERSIONS_READ: &[u32] = &[REPLY_ENVELOPE_VERSION, 2];
+
+/// Carry an envelope written against a version this build still reads forward to
+/// the version it is read **at**.
+///
+/// The number an envelope declares is the version its author wrote it against;
+/// what every reader downstream asks is whether this build reads that envelope,
+/// and across the read set there is one answer. A number this build does not read
+/// is left exactly as it was declared, so the caller meets the refusal that names
+/// the version an edit envelope requires, made where it has always been made —
+/// refusing here instead would turn it into a parse error, and would refuse a
+/// legacy verdict-only envelope naming an old version and carrying no commands at
+/// all, which is accepted today and stays accepted.
+fn read_at_a_version_this_build_reads<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let declared = Option::<u32>::deserialize(deserializer)?;
+    Ok(declared.map(|version| {
+        if REPLY_ENVELOPE_VERSIONS_READ.contains(&version) {
+            REPLY_ENVELOPE_VERSION
+        } else {
+            version
+        }
+    }))
+}
 
 /// Who wrote a reply, and therefore which ops it may carry.
 ///
@@ -203,8 +242,13 @@ pub fn target_of(command: &Command) -> Option<String> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reply {
-    /// [`REPLY_ENVELOPE_VERSION`] when the envelope carries commands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A version this build reads when the envelope carries commands — one of
+    /// [`REPLY_ENVELOPE_VERSIONS_READ`], read at [`REPLY_ENVELOPE_VERSION`].
+    #[serde(
+        default,
+        deserialize_with = "read_at_a_version_this_build_reads",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub version: Option<u32>,
     /// Who wrote it. Omitted, [`Author::Planner`].
     #[serde(default, skip_serializing_if = "Author::is_planner")]
@@ -1317,14 +1361,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The checked-in shape of the envelope this build reads and writes.
+    /// The checked-in shape of the envelope this build writes.
     ///
     /// Read rather than restated, for the reason `src/filter.rs`'s launch-config
     /// golden is: this is the document a *person types* and this build parses, so
     /// it is the only thing that stops a field being renamed, an optional one
     /// becoming an explicit null, or the version moving without anyone deciding
     /// to move it.
-    const ENVELOPE_GOLDEN: &str = include_str!("../tests/golden/reply-envelope-v2.json");
+    const ENVELOPE_GOLDEN: &str = include_str!("../tests/golden/reply-envelope-v3.json");
+
+    /// The checked-in envelope at the version before this one.
+    ///
+    /// A bump is only additive if the envelopes written against the version it
+    /// leaves behind are still read, so the one this build has to go on reading
+    /// is checked in beside the one it writes rather than described.
+    const ENVELOPE_GOLDEN_BEFORE: &str = include_str!("../tests/golden/reply-envelope-v2.json");
 
     /// The envelope the golden pins, as the types hold it.
     ///
@@ -1372,15 +1423,14 @@ mod tests {
         }
     }
 
-    /// The envelope is the shape the golden pins, and the version is the one this
-    /// build declares.
+    /// The envelope is the shape the golden pins, at the version this build
+    /// writes.
     ///
-    /// The version moves when a change to this serialized contract **breaks** a
-    /// caller — `docs/contract-divergences.md` entry 60 moved it to 2 for that
-    /// reason, and `tests/contract.rs` holds the constant against the number that
-    /// entry names. An optional field a caller may omit breaks nobody, so what
-    /// stands in for a bump is this: the shape is pinned, at every value the new
-    /// field takes.
+    /// A change to this serialized contract moves the version and brings its own
+    /// golden — `docs/contract-divergences.md` entry 60 moved it to 2 and entry
+    /// 57 moves it to 3 for the `landing` this file carries, and
+    /// `tests/contract.rs` holds the constant and the read set against the
+    /// numbers those entries name.
     #[test]
     fn the_reply_envelope_is_the_shape_the_golden_pins() {
         let rendered =
@@ -1388,9 +1438,70 @@ mod tests {
         assert_eq!(
             rendered.trim(),
             ENVELOPE_GOLDEN.trim(),
-            "the reply envelope changed shape. If that change breaks a caller, bump \
-             REPLY_ENVELOPE_VERSION and add the golden for the new version beside this one; \
-             if it does not, update tests/golden/reply-envelope-v2.json with it"
+            "the reply envelope changed shape. Bump REPLY_ENVELOPE_VERSION, add the golden \
+             for the new version beside this one, keep this one as the version the build goes \
+             on reading, and say so in entry 57"
+        );
+    }
+
+    /// An envelope written against the version before this one is still read, and
+    /// is read at the version this build reads it at.
+    ///
+    /// This is the whole of what makes the bump additive: version 3 added an
+    /// optional field and took nothing away, so every caller still typing 2 —
+    /// this crate's own journeys, the shipped monitor persona, and the
+    /// orchestration repository's reply wrapper, which passes an operator's
+    /// envelope through — sends a document this build reads unchanged. The number
+    /// it declares is what it was written against; the number it is read at is
+    /// the one every reader downstream asks about.
+    #[test]
+    fn an_envelope_at_the_version_before_this_one_is_still_read() {
+        let before: Reply =
+            serde_json::from_str(ENVELOPE_GOLDEN_BEFORE).expect("the older envelope still reads");
+        let declared: Value =
+            serde_json::from_str(ENVELOPE_GOLDEN_BEFORE).expect("the golden is JSON");
+        assert_eq!(
+            declared["version"],
+            json!(2),
+            "the golden for the version before this one is not at that version"
+        );
+        assert_eq!(
+            before.version,
+            Some(REPLY_ENVELOPE_VERSION),
+            "an envelope at a version this build reads was not read at the version it reads"
+        );
+        assert!(
+            REPLY_ENVELOPE_VERSIONS_READ.contains(&2),
+            "the version that golden was written against is no longer read"
+        );
+        assert_eq!(
+            before.commands.len(),
+            2,
+            "the older envelope's commands did not survive: {before:?}"
+        );
+        for command in &before.commands {
+            let Command::Settle { landing, .. } = command else {
+                panic!("the older envelope carries something other than a settle: {command:?}");
+            };
+            assert_eq!(
+                landing.as_deref(),
+                None,
+                "a settle written before the landing existed came back carrying one"
+            );
+        }
+
+        // A number this build does not read is left as the envelope declared it,
+        // so the refusal a caller meets is the one the driver has always made
+        // about an edit envelope's version rather than a parse error here.
+        let ancient: Reply = serde_json::from_value(json!({
+            "version": 1,
+            "commands": [{"op": "cancel", "id": "build"}],
+        }))
+        .expect("an unreadable version is not a parse failure");
+        assert_eq!(
+            ancient.version,
+            Some(1),
+            "a version this build does not read was carried forward as one it does"
         );
     }
 
