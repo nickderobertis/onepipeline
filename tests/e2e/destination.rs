@@ -924,7 +924,19 @@ fn a_hook_is_quoted_whole_whichever_stream_it_wrote_on() {
 /// names a directory that does not exist, so the repository's policy would go
 /// unread and the node would load as one whose repository stated none. Nothing
 /// else in the suite can tell the two implementations apart.
-#[cfg(unix)]
+///
+/// Gated on a filesystem that will *store* such a name, which is a narrower thing
+/// than a Unix host. Apple's filesystems validate a filename as UTF-8 and refuse
+/// one that is not, so the name this journey is about cannot be created there at
+/// all: `create_dir_all` comes back `EILSEQ`, which is a fact about the
+/// filesystem rather than anything the loader did. It was observed as
+/// `Os { code: 92, kind: Uncategorized, message: "Illegal byte sequence" }` on
+/// the `cross (macos-latest)` leg, one level down from the reason every hook
+/// journey here is already off Windows. The byte-preserving arm the journey
+/// exists to hold is `os_path`'s, which is compiled and driven on Linux — where
+/// `just check` and the coverage bar run — so nothing goes unproven by narrowing
+/// the platform that cannot host the input.
+#[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
 fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
     use std::ffi::OsStr;
