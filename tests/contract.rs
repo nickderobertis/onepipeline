@@ -1661,6 +1661,51 @@ fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
         "a park stating no reason gained one"
     );
 
+    // The optional field `settle` gains, in both spellings of it the entry names.
+    // It rides that op rather than a new one, so what is proved is that the op is
+    // still `settle`, that either spelling round-trips, and that an envelope
+    // naming none is accepted and writes none back — which is what makes it
+    // additive for every caller that predates it.
+    let landings: Vec<String> = serde_json::from_value(block["settle_landings"].clone())
+        .expect("entry 57 names the landings a settle takes");
+    assert_eq!(landings.len(), 2, "{block}");
+    let settling = fixtures
+        .iter()
+        .find(|fixture| fixture["op"] == "settle")
+        .expect("entry 57's op is the settle")
+        .clone();
+    assert_eq!(
+        settling["landing"], landings[0],
+        "the settle fixture does not carry the first landing the entry names"
+    );
+    for landing in &landings {
+        let mut written = settling.clone();
+        written["landing"] = json!(landing);
+        let settle: Edit = serde_json::from_value(written.clone())
+            .unwrap_or_else(|e| panic!("a settle landing at `{landing}` parses: {e}"));
+        assert_eq!(
+            op_of(&settle),
+            "settle",
+            "the landing moved `settle` off its op"
+        );
+        assert_eq!(
+            serde_json::to_value(&settle).expect("serializes"),
+            written,
+            "a settle's landing at `{landing}` does not round-trip"
+        );
+    }
+    let mut unnamed = settling.clone();
+    unnamed
+        .as_object_mut()
+        .expect("the fixture is an object")
+        .remove("landing");
+    let bare: Edit = serde_json::from_value(unnamed.clone()).expect("it parses");
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        unnamed,
+        "a settle naming no landing gained one"
+    );
+
     // The outcome vocabulary a `settle` accepts, held against the type: the
     // entry's list is the set, and a fourth word is refused rather than guessed
     // at.
@@ -3463,6 +3508,7 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             id: "x".into(),
             outcome: SettleOutcome::Done,
             evidence: "it merged".into(),
+            landing: Some("https://github.com/owner/engine/pull/12".into()),
         },
     ];
     assert_eq!(

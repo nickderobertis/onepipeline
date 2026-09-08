@@ -568,6 +568,26 @@ pub enum Command {
         /// a settlement nothing accounts for is the record this op exists to
         /// stop writing.
         evidence: String,
+        /// Where the node's work landed: the commit it reached its base at, or
+        /// the change request a person reads it in.
+        ///
+        /// Optional, and the whole of what it adds. A run-produced settlement
+        /// writes a status, an outcome, a branch **and** a landing, and release
+        /// correlation joins a release to work through that landing — so a node
+        /// settled from evidence with none is, to that machinery, work that
+        /// never landed, and a dependent held on its release is held with no
+        /// timeout, no retry budget and no degrade. The operator correcting the
+        /// record from evidence is usually holding the very thing that would
+        /// close that gap: they read the merge.
+        ///
+        /// Omitted, the settlement is exactly the settlement it was before this
+        /// field existed — the same status, outcome and evidence, and no landing
+        /// attributed to the node — so every caller written before it is
+        /// unaffected. Present and unusable is refused rather than recorded, as
+        /// blank evidence is: it is handed back to `onevcs` as the reference a
+        /// release is measured against, and rendered into views beside it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        landing: Option<String>,
     },
 }
 

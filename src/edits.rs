@@ -152,9 +152,10 @@ pub enum Operation {
     // llmlint: ignore-block[invalid_states_unrepresentable] `node` is the `String` every
     // neighbouring variant spells a node id with, narrowed where it is judged —
     // `compile_settle` refuses a node the graph does not hold and one that has already
-    // settled — and `evidence` is refused blank there too. `outcome` is not a string at
-    // all: it is the closed `SettleOutcome`, so a record this build did not write carrying
-    // a fourth word is refused by its own deserialization.
+    // settled — and `evidence` is refused blank there too, and `landing` is held to
+    // `vcs::usable`, the same check every commit and branch this crate records crosses.
+    // `outcome` is not a string at all: it is the closed `SettleOutcome`, so a record this
+    // build did not write carrying a fourth word is refused by its own deserialization.
     /// A node was settled at what an operator could see it had reached, from
     /// evidence this run never observed.
     ///
@@ -170,6 +171,30 @@ pub enum Operation {
         outcome: SettleOutcome,
         /// What the operator saw, journalled as the reason for the state.
         evidence: String,
+    },
+    // llmlint: ignore-block[invalid_states_unrepresentable] both fields are the `String`
+    // every neighbouring variant spells a node id and a reference with, and both are
+    // narrowed where they are judged: `compile_settle` writes this only for a node it has
+    // already established the graph holds, and only for a landing `vcs::usable` accepted —
+    // the same check every branch, session token and commit this crate records crosses.
+    /// Where a node's work landed, as the operator settling it from evidence
+    /// stated it: the commit the change reached its base at, or the change
+    /// request a person reads it in.
+    ///
+    /// **Its own operation beside [`SettledFromEvidence`](Self::SettledFromEvidence)
+    /// rather than a field on it**, so the settlement a `settle` records is byte
+    /// for byte the settlement it recorded before this existed: a build that
+    /// predates this variant folds a record carrying it as the settlement it
+    /// already understood, and one that carries no landing writes nothing here at
+    /// all. What it says is a fact about *where the work is*, which the record was
+    /// missing — the run never observed a landing for a node it never watched
+    /// land, and release correlation joins a release to work through exactly
+    /// that.
+    LandingFromEvidence {
+        /// The node.
+        node: String,
+        /// Where its work landed.
+        landing: String,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] both fields are spelled as the
@@ -992,7 +1017,8 @@ fn compile_into(
             id,
             outcome,
             evidence,
-        } => compile_settle(graph, frontier, id, *outcome, evidence),
+            landing,
+        } => compile_settle(graph, frontier, id, *outcome, evidence, landing.as_deref()),
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -1477,8 +1503,11 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// all — only the record of what became of the node moves, and the node keeps
 /// its id and its lineage by construction rather than by care.
 ///
-/// Four refusals, and each one is a different thing to do next. Blank evidence:
-/// the journal would record the reason for a state as nothing. A node the graph
+/// Five refusals, and each one is a different thing to do next. Blank evidence:
+/// the journal would record the reason for a state as nothing. A landing that is
+/// not one word naming a commit or a change request: it is asked of `onevcs` as
+/// the reference a release is measured against and printed into the views, so
+/// there is nothing to be done with one nothing can resolve. A node the graph
 /// does not hold: the settlement would be about no work at all, so the ids it
 /// does hold are named. A node whose record **already says what the settle
 /// states**: it is named as having settled that way, because a settle that
@@ -1500,6 +1529,7 @@ fn compile_settle(
     id: &str,
     outcome: SettleOutcome,
     evidence: &str,
+    landing: Option<&str>,
 ) -> Result<Vec<Operation>> {
     if evidence.trim().is_empty() {
         return Err(refuse(format!(
@@ -1529,11 +1559,34 @@ fn compile_settle(
             live.named()
         )));
     }
-    Ok(vec![Operation::SettledFromEvidence {
+    // A landing nobody can resolve is refused rather than recorded. It is handed
+    // straight back to `onevcs` as the reference a release is measured against
+    // and rendered into the views beside it, so a value carrying whitespace or a
+    // control character asks an unanswerable question and forges a line where it
+    // is printed — and a settlement recording one would report work as landed
+    // somewhere nothing can be read.
+    let landing = match landing {
+        Some(named) => Some(crate::vcs::usable(named).ok_or_else(|| {
+            refuse(format!(
+                "settle: node '{id}' would be settled at a landing of {named:?}, which is not one \
+                 word naming a commit or a change request; state the commit the change reached \
+                 its base at, or the change request's URL, or omit the field"
+            ))
+        })?),
+        None => None,
+    };
+    let mut operations = vec![Operation::SettledFromEvidence {
         node: id.to_string(),
         outcome,
         evidence: evidence.to_string(),
-    }])
+    }];
+    if let Some(landing) = landing {
+        operations.push(Operation::LandingFromEvidence {
+            node: id.to_string(),
+            landing,
+        });
+    }
+    Ok(operations)
 }
 
 /// Validate one finding: it changes nothing, so all there is to judge is
@@ -1748,6 +1801,10 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         // reconstructs it by changing nothing here, exactly as the reconciler
         // did. What moves is folded where the recorded statuses are.
         Operation::SettledFromEvidence { .. } => {}
+        // Nor does the landing beside it: where a node's work *is* was never a
+        // property of the graph, so replay reconstructs it by reading the record
+        // rather than by moving a node.
+        Operation::LandingFromEvidence { .. } => {}
         Operation::NodeRequeued { node, amend } => {
             let Some(existing) = graph.get(node).cloned() else {
                 return;
@@ -2517,6 +2574,7 @@ mod tests {
                 id: "publish".into(),
                 outcome: crate::channel::SettleOutcome::Done,
                 evidence: evidence.into(),
+                landing: None,
             },
         )
         .expect("a node the graph holds settles from evidence");
@@ -2546,6 +2604,99 @@ mod tests {
         assert_eq!(replayed, before);
     }
 
+    /// A settle records where the work landed, in either spelling of a landing —
+    /// and records none where the operator named none.
+    ///
+    /// The gap it closes: release correlation joins a release to work through the
+    /// landing, so a node settled from evidence with none is, to that machinery,
+    /// work that never landed — and a dependent held on its release is held with
+    /// no timeout, no retry budget and no degrade. What an operator correcting a
+    /// wrong record is holding is usually the very thing that closes it: they
+    /// read the merge.
+    ///
+    /// Both spellings are the same field, because both are references `onevcs`
+    /// resolves work by. The settlement itself is unchanged by either, which is
+    /// what makes the field additive: the same node, the same outcome, the same
+    /// evidence.
+    #[test]
+    fn a_settle_records_the_landing_it_was_given_and_none_where_it_was_given_none() {
+        let evidence = "the change merged while the dispatch was dying";
+        let settled = Operation::SettledFromEvidence {
+            node: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: evidence.into(),
+        };
+        let settle = |landing: Option<&str>| Command::Settle {
+            id: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: evidence.into(),
+            landing: landing.map(str::to_owned),
+        };
+        let compiled = |landing: Option<&str>| {
+            compile(
+                &mut graph_of(vec![agent("publish", &[])]),
+                &frontier(&[("publish", NodeStatus::Failed)]),
+                &settle(landing),
+            )
+            .expect("a node the run recorded failed settles from evidence")
+        };
+
+        // Named none: exactly the settlement this op recorded before the field
+        // existed, and nothing beside it.
+        assert_eq!(compiled(None), vec![settled.clone()]);
+
+        // Both spellings the contract admits — the commit the change reached its
+        // base at, and the change request a person reads it in.
+        for landing in [
+            "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d",
+            "https://github.com/owner/engine/pull/12",
+        ] {
+            assert_eq!(
+                compiled(Some(landing)),
+                vec![
+                    settled.clone(),
+                    Operation::LandingFromEvidence {
+                        node: "publish".into(),
+                        landing: landing.into(),
+                    }
+                ],
+                "the settlement or the landing beside it moved for {landing}"
+            );
+        }
+
+        // A landing nothing could resolve is refused rather than recorded: it is
+        // handed straight back to `onevcs` as the reference a release is measured
+        // against, and printed into the views beside it.
+        for unusable in [
+            "",
+            "  ",
+            "3f9a1c2 and the one before it",
+            "one\nline\nper\nlanding",
+        ] {
+            let message = compile(
+                &mut graph_of(vec![agent("publish", &[])]),
+                &frontier(&[("publish", NodeStatus::Failed)]),
+                &settle(Some(unusable)),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                message.contains("not one word naming a commit or a change request")
+                    && message.contains("omit the field"),
+                "{unusable:?} was accepted as a landing, or refused without saying what to do: \
+                 {message}"
+            );
+        }
+
+        // And the landing touches the graph no more than the settlement does.
+        let mut graph = graph_of(vec![agent("publish", &[]), agent("announce", &["publish"])]);
+        let before = graph.clone();
+        for operation in compiled(Some("3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d")) {
+            apply(&mut graph, &operation);
+        }
+        assert_eq!(graph, before, "the landing moved the graph");
+    }
+
     /// The four ways a settle is refused, each naming a different next step.
     #[test]
     fn a_settle_is_refused_without_evidence_a_node_or_a_state_left_to_settle() {
@@ -2553,6 +2704,7 @@ mod tests {
             id: id.into(),
             outcome: crate::channel::SettleOutcome::Done,
             evidence: evidence.into(),
+            landing: None,
         };
         let mut graph = graph_of(vec![agent("publish", &[])]);
 

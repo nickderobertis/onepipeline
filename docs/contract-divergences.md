@@ -3146,6 +3146,34 @@ folding the store — sees one settlement shape rather than one it has to know t
 go looking for in an operation list. What tells the two apart is the outcome
 word, `settled-from-evidence`, and the evidence is the settlement's `detail`.
 
+**`settle` also takes an optional `landing`, and the reason is that a settlement
+this op writes was missing a field the run's own path always writes.** A
+run-produced settlement records a status, an outcome, a branch **and** a landing;
+this one recorded a node, an outcome and the evidence, and no landing at all.
+Release adoption correlates a release to work through the landing, so a node
+settled from evidence was, to that machinery, work that never landed: three
+dependencies of one node answered `not-landed` after all three of their change
+requests had merged, and a node held on a release has no timeout, no retry
+budget and no degrade. The operator correcting the record from evidence is
+usually holding the very thing that closes the gap — they read the merge — and
+had nowhere to put it.
+
+So the field names **where the work landed**, in either of the two spellings
+`onevcs` resolves work by: the commit the change reached its base at, or the
+change request a person reads it in. It is **optional**, and an envelope that
+does not name it is accepted and records exactly what such a settlement records
+today — the same node status, the same outcome, the same evidence, and no
+landing attributed to the node — so every caller written before it is unaffected.
+Present and unusable is **refused** rather than recorded, as blank evidence is:
+the value is handed straight back to `onevcs` as the reference a release is
+measured against and rendered into the views beside it, so a landing carrying
+whitespace or a control character asks an unanswerable question and forges a line
+where it is printed. What it means is the node's landing, joined on by release
+correlation exactly as a run-produced settlement's landing is — and correlation
+**re-reads it** rather than trusting the snapshot it froze when the node settled,
+because a change request open at the moment its node settled is merged
+afterwards.
+
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
 wait had been done by dropping and re-adding it and its dependent, purely because
@@ -3173,8 +3201,13 @@ accepts.
       "op": "settle",
       "id": "publish",
       "outcome": "done",
-      "evidence": "the change merged at 3f9a1c2 while the node's dispatch was dying; the run recorded the death and never the merge"
+      "evidence": "the change merged at 3f9a1c2 while the node's dispatch was dying; the run recorded the death and never the merge",
+      "landing": "https://github.com/owner/engine/pull/12"
     }
+  ],
+  "settle_landings": [
+    "https://github.com/owner/engine/pull/12",
+    "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"
   ],
   "monitor_may_issue": [],
   "cancel": {
@@ -3190,7 +3223,10 @@ accepts.
 `reason` is optional on `cancel` and a `cancel` stating none still parks, so
 every park written before this field existed is exactly the park it was; present
 and blank is refused rather than recorded, as `amend`'s ruling and a `finding`'s
-message already are. On `settle`, `id`, `outcome` and `evidence` are all
+message already are. `landing` is optional on `settle` the same way, and
+`settle_landings` above is both spellings of one it takes — the block's own
+statement that a change request's URL and a commit are one field rather than two
+ops. On `settle`, `id`, `outcome` and `evidence` are all
 required, and the outcome vocabulary is the two settled statuses a node can be
 **put** at. It is deliberately not every status a node can be *in*: `pending`,
 `ready`, `blocked` and `skipped` are derived from the graph on every reconcile
