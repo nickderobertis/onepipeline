@@ -10,9 +10,9 @@
 //! * a `title` the destination repository's own `commit-msg` hook turns down, so
 //!   the publication is refused after the work is finished and passed; and
 //! * a non-empty [`consumes`](crate::plan::Node::consumes) on an identity that
-//!   publishes without opening a change request, where the draft that holds a
-//!   `fast` adoption's temporary pin has nothing to hold — which `onevcs` refuses
-//!   outright at the last step of the node.
+//!   publishes without opening a change request, where the draft that holds such
+//!   a node to its release has no change request to be a state of — which
+//!   `onevcs` refuses outright at the last step of the node.
 //!
 //! **The rules are the repository's, read where it states them.** The subject
 //! policy is that repository's own hook file, run the way git runs it, rather
@@ -54,7 +54,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use onevcs::{Adoption, MergePolicy};
+use onevcs::MergePolicy;
 
 use crate::plan::{Node, Plan};
 use crate::refusal::Refusal;
@@ -291,17 +291,16 @@ fn publication(repo: &str, reported: &str) -> Result<MergePolicy, String> {
     })
 }
 
-/// The refusal a node earns for consuming releases it can never be held for.
+/// The refusal a node earns for consuming releases on an identity that can never
+/// hold them.
 ///
-/// Two conditions, and both are needed. The repository has to publish without
-/// opening a change request, because the draft `onevcs` refuses is a *state of a
-/// change request*. And the node's adoption has to be one that can still be
-/// holding a temporary pin when it publishes: a `published` node is not started
-/// until every release it consumes has arrived, so its reference rows all carry a
-/// version, [`crate::release::draft_reason`] asks for no draft, and it publishes
-/// here exactly as it publishes anywhere. That arm is why the sentence below
-/// names the adoption it resolved: the absence of this refusal is not a promise
-/// that any `consumes` on such an identity is safe.
+/// One condition, and it is about the repository rather than about the node: it
+/// has to publish without opening a change request. A `consumes` says this node's
+/// work is pinned to a release, and every mechanism that holds such a pin back —
+/// the draft `onevcs` opens, and the change request that draft is a *state of* —
+/// requires a change request to exist. Where none is opened there is nothing to
+/// hold, whatever the node's adoption says about *when* it starts, so the pair is
+/// refused outright rather than at a publication that has already been paid for.
 fn consumes_refusal(
     node: &Node,
     destination: &Destination,
@@ -318,10 +317,6 @@ fn consumes_refusal(
     if opens_a_change_request(publication) {
         return Ok(None);
     }
-    let adoption = crate::release::adoption_of(node);
-    if adoption == Adoption::Published {
-        return Ok(None);
-    }
     let consumed = node
         .consumes
         .iter()
@@ -334,16 +329,13 @@ fn consumes_refusal(
             format!(
                 "it consumes the release targets {consumed}, and its repository {identity} \
                  (workflow: {workflow}) publishes with {publication}, which opens no change \
-                 request at all — so there is nothing for the draft that holds this node's \
-                 temporary pin to be a state of, and `onevcs` refuses the publication outright \
-                 at the last step of the node. Its adoption resolves to `{adoption}`; a node \
-                 whose adoption resolves to `published` is not started until every release it \
-                 consumes has arrived, holds no temporary pin, and publishes here unrefused. \
-                 Adopt `published`, publish under a change-* policy, or drop `consumes`",
+                 request at all — so there is nothing for the draft that holds this node to a \
+                 release to be a state of, and `onevcs` refuses the publication outright at \
+                 the last step of the node. Publish it under a change-* policy, on this node \
+                 or in that repository's own rules, or drop `consumes`",
                 identity = destination.resolved.identity,
                 workflow = spell(destination.resolved.workflow),
                 publication = spell(publication),
-                adoption = spell(adoption),
             ),
         )
         .field("consumes"),
@@ -706,8 +698,8 @@ mod tests {
     fn a_policy_and_an_adoption_are_spelled_by_the_types_that_own_them() {
         assert_eq!(spell(MergePolicy::LocalDirect), "local-direct");
         assert_eq!(spell(MergePolicy::ChangeAuto), "change-auto");
-        assert_eq!(spell(Adoption::Published), "published");
-        assert_eq!(spell(Adoption::Fast), "fast");
+        assert_eq!(spell(onevcs::Adoption::Published), "published");
+        assert_eq!(spell(onevcs::Adoption::Fast), "fast");
     }
 
     /// A destination this journey states, so the two refusal rules can be asked
@@ -728,7 +720,7 @@ mod tests {
         }
     }
 
-    fn consuming(adoption: Option<Adoption>) -> Node {
+    fn consuming(adoption: Option<onevcs::Adoption>) -> Node {
         let mut node = Node {
             id: "consumer".to_owned(),
             repo: Some("service".to_owned()),
@@ -741,14 +733,15 @@ mod tests {
         node
     }
 
-    /// The rule the `consumes` refusal actually applies, in its four arms.
+    /// The rule the `consumes` refusal actually applies, in each of its arms.
     ///
-    /// The two that refuse and the two that must not: a node with nothing to
-    /// consume has no pin to hold, and a repository that opens a change request has
-    /// something to draft. The `published` arm is the one worth stating — it is not
-    /// an oversight that it loads, and the sentence says so.
+    /// It turns on the **repository** and on nothing else: where no change request
+    /// is opened there is nothing for a draft to be a state of, so every `consumes`
+    /// on such an identity is refused whatever its adoption says about when the
+    /// node starts. What loads is a node with nothing to consume, and one whose
+    /// publication opens a change request — its repository's, or its own.
     #[test]
-    fn a_consumes_is_refused_only_where_the_pin_it_holds_could_never_be_drafted() {
+    fn a_consumes_is_refused_wherever_its_publication_opens_no_change_request() {
         let refusal = consumes_refusal(&consuming(None), &destination(MergePolicy::LocalDirect))
             .expect("the policy is known, so the rule is answerable")
             .expect("a fast node consuming on a local-direct repository is refused");
@@ -760,7 +753,6 @@ mod tests {
             "github.com/owner/service",
             "workflow: remote",
             "local-direct",
-            "adoption resolves to `fast`",
         ] {
             assert!(
                 refusal.message.contains(named),
@@ -777,11 +769,20 @@ mod tests {
                 "{why}"
             );
         };
-        loads(
-            "a published node holds no temporary pin, so it has nothing to draft and publishes",
-            &consuming(Some(Adoption::Published)),
-            &destination(MergePolicy::LocalDirect),
-        );
+        // Adoption decides when a node starts, not whether its publication opens a
+        // change request — so it does not enter this rule at all.
+        for adoption in [onevcs::Adoption::Fast, onevcs::Adoption::Published] {
+            assert!(
+                consumes_refusal(
+                    &consuming(Some(adoption)),
+                    &destination(MergePolicy::LocalDirect)
+                )
+                .expect("the rule is answerable")
+                .is_some(),
+                "a `{}` node consuming on a local-direct repository was not refused",
+                spell(adoption)
+            );
+        }
         loads(
             "a repository that opens a change request has something to draft",
             &consuming(None),

@@ -170,9 +170,9 @@ fn a_repository_with_no_commit_msg_hook_refuses_no_title() {
 /// where the plan is read — naming the node, the identity, the workflow, the
 /// policy and the targets — and nothing is dispatched.
 ///
-/// The structural one: the draft that holds this node's temporary pin is a state
-/// of a change request, and a `local-direct` publication opens none, so `onevcs`
-/// refuses the publication outright at the last step of the node.
+/// The structural one: the draft that holds this node to the release it consumes
+/// is a state of a change request, and a `local-direct` publication opens none, so
+/// `onevcs` refuses the publication outright at the last step of the node.
 #[test]
 fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
     let world = World::new("destination-consumes");
@@ -206,23 +206,44 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any
     assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
 }
 
-/// The **`published`** arm of the same repository loads, and that is not an
-/// oversight.
+/// A **`published`** node is refused on that same repository, in the same words.
 ///
-/// A `published` node is not started until every release it consumes has arrived,
-/// so it holds no temporary pin, asks for no draft, and publishes under
-/// `local-direct` exactly as it publishes anywhere. Refusing it would take a
-/// working capability away.
+/// The rule turns on the repository and not on the node's adoption. Adoption
+/// decides *when* a node starts; whether its publication opens a change request
+/// for a draft to be a state of is the repository's own answer, and where none is
+/// opened there is nothing to hold this node to the release it consumes. So the
+/// pair is refused however the node adopts — and the refusal names the same four
+/// things, because a planner correcting it acts on the same four.
 #[test]
-fn a_published_node_consuming_on_that_same_repository_still_loads() {
+fn a_published_node_consuming_on_that_same_repository_is_refused_in_the_same_words() {
     let world = World::new("destination-consumes-published");
     two_repositories(&world, "local-direct");
-
     let project = world.plan(
         "consuming",
         &plan_of("consuming", vec![engine(), consumer(Some("published"))]),
     );
-    world.run(&["plan", "check", &project]).exited(0);
+
+    let refused = world.run(&["start", &project, "--detach"]);
+    refused
+        .exited(REFUSED)
+        .err_has("node 'consumer'")
+        .err_has("github.com/owner/service")
+        .err_has("workflow: remote")
+        .err_has("local-direct")
+        .err_has("engine=crate");
+    assert!(
+        world.invocations().is_empty(),
+        "a plan refused at load dispatched something anyway: {:?}",
+        world.invocations()
+    );
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answered = answer(&checked);
+    let refusals = engine_refusals(&answered);
+    assert_eq!(refusals.len(), 1, "{answered}");
+    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
+    assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
 }
 
 /// A repository that **does** open a change request has something to draft, so
