@@ -15,7 +15,15 @@
 //!
 //! * **A task's title, body, status, dependency edges and engine metadata are declared** —
 //!   by the node the plan holds and the graph the run folded — so the projection replaces
-//!   them. That is the whole point of the projection.
+//!   them. That is the whole point of the projection. A node carrying no title is written
+//!   under its **id**, which every node has: a title is a human label and a destination
+//!   refuses an item with none, so a projection that passed the absence through refused —
+//!   and it refuses the *whole* write, so six untitled nodes stopped twenty-five items
+//!   reaching the board. Untitled nodes are not a malformed plan either: a plan at an
+//!   earlier schema version declared no title on a lifecycle node, and a node a live
+//!   `retry` or `add` created is exempt from the requirement deliberately (see
+//!   `graph::check_declared_version`), because a `retry` clones the node it supersedes and
+//!   requiring one there would refuse every later edit to a run launched then.
 //! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
 //!   never the board's own heading, so the destination's title is read and written back. In
 //!   particular it is *not* the project's native identifier: on a store where those two
@@ -894,7 +902,8 @@ fn write_shadow(
         let title = wire
             .remove("title")
             .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
         let content = wire
             .remove("task")
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -1738,6 +1747,50 @@ mod tests {
         let (design, _) = fixture.task_document("design");
         assert_eq!(design["title"], "feat: design it");
         assert_eq!(design["metadata"]["onepipeline.id"], "design");
+    }
+
+    /// A node carrying no title is written under its **id**, and the projection
+    /// that carries it goes through rather than refusing.
+    ///
+    /// Untitled nodes are ordinary rather than malformed. A plan at an earlier
+    /// schema version declared no title on a lifecycle node, and a node a live
+    /// `retry` or `add` created is exempt from the requirement deliberately —
+    /// `graph::check_declared_version` says why: a `retry` clones the node it
+    /// supersedes, so requiring one there would refuse every later edit to a run
+    /// launched at that version. What is not ordinary is what the absence cost:
+    /// a destination that requires a title refuses the item, and the copy is a
+    /// whole-project write, so six untitled nodes stopped all twenty-five items
+    /// of one run reaching the board.
+    ///
+    /// The id is always there and is what every other view of the run names the
+    /// node by, so it is the label a reader already recognises. A blank title is
+    /// the same absence spelled differently and gets the same answer.
+    #[test]
+    fn a_node_with_no_title_is_projected_under_its_id() {
+        let mut fixture = Fixture::new("untitled");
+        for (id, title) in [("build", Value::Null), ("design", json!("   "))] {
+            let node = fixture
+                .snapshot
+                .nodes
+                .get_mut(id)
+                .expect("the fixture holds it");
+            node.title = title.as_str().map(str::to_owned);
+        }
+        fixture.project();
+
+        for id in ["build", "design"] {
+            let (front, _) = fixture.task_document(id);
+            assert_eq!(
+                front["title"],
+                json!(id),
+                "an untitled node reached the board with no label a destination would take"
+            );
+            assert_eq!(
+                front["metadata"]["onepipeline.id"],
+                json!(id),
+                "the derived title moved which node this item is"
+            );
+        }
     }
 
     /// The rule's second, third and fourth consequences at once, as one
