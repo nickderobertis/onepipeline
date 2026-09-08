@@ -149,15 +149,15 @@ fn report_unchecked(node: &str, repo: &str, why: &str) {
 /// on reading.
 #[derive(serde::Deserialize)]
 struct Resolved {
-    // llmlint: ignore[invalid_states_unrepresentable] a repository identity is a `String`
-    // on every surface `onevcs` publishes — `registry::Identity::origin`,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a repository identity is a
+    // `String` on every surface `onevcs` publishes — `registry::Identity::origin`,
     // `SessionHolder::identity`, `RepositoryReleases::identity` — and this crate already
     // carries one as a `String` beside them, in `release::CrossRepoReference::repository`.
     // A newtype here would be *this* crate minting a second vocabulary for a value the
-    // sibling owns and hands back, which is the identity chain AGENTS.md says stays in
-    // that crate. What is checkable here is that the sibling stated one at all, and
+    // sibling owns and hands back, which is the identity chain `src/AGENTS.md` says stays
+    // in that crate. What is checkable here is that the sibling stated one at all, and
     // `resolve` refuses a blank.
-    identity: String,
+    identity: String, // llmlint: ignore-end[invalid_states_unrepresentable]
     workflow: onevcs::registry::Workflow,
     /// Where this repository's own hooks are, which is the whole of what it is
     /// read for here.
@@ -234,8 +234,8 @@ fn resolve(repo: &str) -> Result<Destination, String> {
     // it would resolve against whatever directory this process happens to have been
     // started in, so the hook that answered would be some other repository's.
     //
-    // llmlint: ignore[boundary_inputs_validated] that the checkout is *the* one for this
-    // identity is not checkable here without re-deriving the registry lookup that
+    // llmlint: ignore-block[boundary_inputs_validated] that the checkout is *the* one for
+    // this identity is not checkable here without re-deriving the registry lookup that
     // answered it, which is the identity chain `src/AGENTS.md` keeps in `onevcs`. It is
     // that crate's own answer for the repository this loader asked it about, obtained by
     // running the verb the rest of this stack already trusts, and the hook reached
@@ -254,7 +254,7 @@ fn resolve(repo: &str) -> Result<Destination, String> {
         publication: ask(&["rules", "check"], repo)
             .and_then(|reported| publication(repo, &reported)),
     })
-}
+} // llmlint: ignore-end[boundary_inputs_validated]
 
 /// The publication policy `onevcs rules check` reported, off the line it states
 /// it on.

@@ -18,9 +18,7 @@ resolver = "2"
 # says what it needs them for and why it is not its own project.
 #
 # llmlint: ignore[new_command_or_client_gets_its_own_project] there is nothing to split
-# this into: `docs/contract.md` fixes this repository as one library plus one binary,
-# which is one Rust build unit. The rest of the reasoning is where the delegation above
-# points.
+# this into: this repository is one Rust build unit.
 #
 # `oneagentgraph`'s floor is a **requirement**, and it is one about *this* build
 # rather than about any install: the dispatch path links the crate, so raising a
