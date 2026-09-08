@@ -269,6 +269,42 @@ pub struct Graph {
     pub concurrency: u32,
 }
 
+/// A graph as a checkpoint of the fold carries it: the concurrency, and the
+/// nodes in the order the plan wrote them.
+///
+/// The two private fields are **not** written side by side, because they are one
+/// fact held twice — `order` is the keys of `nodes` — and a document carrying
+/// both is a document an editor can make disagree. Written through
+/// [`Graph::iter`] and read back through [`Graph::insert`], which is the one
+/// constructor that keeps them agreeing.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsWritten {
+    concurrency: u32,
+    nodes: Vec<Node>,
+}
+
+impl Serialize for Graph {
+    fn serialize<S: serde::Serializer>(&self, writer: S) -> std::result::Result<S::Ok, S::Error> {
+        AsWritten {
+            concurrency: self.concurrency,
+            nodes: self.iter().cloned().collect(),
+        }
+        .serialize(writer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Graph {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<Self, D::Error> {
+        let written = AsWritten::deserialize(reader)?;
+        let mut graph = Self::with_concurrency(written.concurrency);
+        for node in written.nodes {
+            graph.insert(node);
+        }
+        Ok(graph)
+    }
+}
+
 impl Graph {
     /// An empty graph that will dispatch at most `concurrency` nodes at once.
     pub fn with_concurrency(concurrency: u32) -> Self {

@@ -235,6 +235,21 @@ impl RunPaths {
         self.dir.join("summary.json")
     }
 
+    /// The run's fold checkpoint: what a reader resumes a fold from instead of
+    /// replaying this run's whole journal.
+    ///
+    /// Beside [`summary`](Self::summary) and for the same reason: it is a derived
+    /// record of the run, kept where the run's own state is kept, so a run thrown
+    /// away takes it with it. See [`checkpoint`](crate::checkpoint).
+    ///
+    /// Crate-visible, unlike its neighbours here: `docs/contract.md` names six
+    /// members of this type and says nothing else on it is contracted, and this
+    /// document is read and written by one private module — so publishing the
+    /// path would be a promise nobody asked for about a cache.
+    pub(crate) fn checkpoint(&self) -> PathBuf {
+        self.dir.join("checkpoint.json")
+    }
+
     /// The single-writer ownership lock the engine verbs hold.
     pub fn lock(&self) -> PathBuf {
         self.dir.join("owner.lock")

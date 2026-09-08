@@ -314,9 +314,16 @@ pub struct Frontier {
 /// The two facts a park carrying only a node id could not state: who decided,
 /// and why. Its [`Default`] is the planner's park with no reason, which is what
 /// every park recorded before this existed was.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// A checkpoint of the fold carries this value, so it is read back through the
+/// same normalization [`Park::of`] applies rather than straight into the field:
+/// a checkpoint is a file, and a file is something an editor can put a blank
+/// reason into.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Park {
     /// The envelope author that issued it.
+    #[serde(default)]
     pub by: Author,
     /// Why, when it stated one and that one says something.
     ///
@@ -326,7 +333,21 @@ pub struct Park {
     /// durable record that an older build — or a person with an editor — can have
     /// written one into, and a refusal reading "whose reason was:" with nothing
     /// after it is worse than one that says the park carried none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "stated"
+    )]
     reason: Option<String>,
+}
+
+/// A reason read back off a checkpoint, with one that says nothing read as no
+/// reason at all — which is what [`Park::of`] does with the same value.
+fn stated<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<String>::deserialize(reader)?.filter(|reason| !reason.trim().is_empty()))
 }
 
 impl Park {

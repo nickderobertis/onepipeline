@@ -4780,6 +4780,13 @@ pub struct Counts {
     pub upstream_reads: u64,
     pub release_asks: u64,
     pub store_bytes: u64,
+    /// Journal records the loop folded into the run's state.
+    ///
+    /// What the fold checkpoint is measured by: a loop that re-folds a run's
+    /// whole journal per applied command counts every record the run has ever
+    /// written, and one resuming from a checkpoint counts what the store has
+    /// grown by since.
+    pub records_folded: u64,
 }
 
 impl Counts {
@@ -4792,6 +4799,7 @@ impl Counts {
             upstream_reads: self.upstream_reads - before.upstream_reads,
             release_asks: self.release_asks - before.release_asks,
             store_bytes: self.store_bytes - before.store_bytes,
+            records_folded: self.records_folded - before.records_folded,
         }
     }
 }
@@ -4822,6 +4830,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         upstream_reads: count("upstream_reads"),
         release_asks: count("release_asks"),
         store_bytes: count("store_bytes"),
+        records_folded: count("records_folded"),
     }
 }
 
