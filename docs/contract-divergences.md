@@ -3201,19 +3201,21 @@ correlation exactly as a run-produced settlement's landing is — and correlatio
 because a change request open at the moment its node settled is merged
 afterwards.
 
-**It reaches the run's record where a run-produced settlement's landing reaches
-it**, so a manager can trace a release decision back to the change that justified
-it in the views they already read rather than in the correlation that acted on
-it. The fold routes it by its spelling into the map that already holds that fact:
-a change request's URL joins `change_urls`, which is what `results`, the run's
-own `result.json` and the board's `onepipeline.change_url` all read, and a commit
-joins `landing_commits`, which is the board's `onepipeline.landing_commit` and
-what a release is measured against. It is kept beside them as a **stated**
-landing as well, because correlation asks about one ahead of the branch the run
-recorded — the branch is the part of the record the settle is correcting.
+**What reads it today is release correlation, and that is the whole of it.** The
+reference is recorded as its own `landing-from-evidence` operation on the
+`edit-committed` the settle compiles to, and the release watch reads it from
+there — so the machinery the missing landing was breaking is served, and the
+views, `results` and the status write-back are not: none of them learns a stated
+landing, and a `settle` still leaves them exactly as they were. **Proposal:
+surface it where a run-produced settlement's landing is surfaced** — a
+change request's URL beside `change_urls` and a commit beside `landing_commits`,
+so a manager can trace a release decision back to the change that justified it in
+the views they already read. That is a fold and a result field rather than an op,
+so it belongs to whoever owns `src/projection.rs` and `src/engine.rs`; this entry
+records the gap so it is not lost.
 
-What it deliberately does **not** write is the `landing` *word*. `Landed` is
-defined as a landing this run saw happen and `Unlanded` as a change of this
+What is **not** proposed is writing the `landing` *word* from a settle. `Landed`
+is defined as a landing this run saw happen and `Unlanded` as a change of this
 node's that has not reached its base; a settle saw neither, and an operator who
 names an open change request as where the work is would have the run report it
 `landed` at a moment when the correlation reading the same reference answers

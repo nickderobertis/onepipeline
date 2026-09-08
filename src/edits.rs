@@ -1498,11 +1498,9 @@ const OBJECT_NAME_WIDTHS: std::ops::RangeInclusive<usize> = 7..=64;
 /// Asked through `onevcs`'s own URL parser — re-exported by that library for
 /// exactly this, so a caller validating a change-request URL needs no parser of
 /// its own — and narrowed to the two schemes a change request is served over. It
-/// says what it asks: a landing that is a URL. Which *kind* of change a URL names
-/// is the sibling's to resolve, and [`compile_settle`] has already refused a
-/// landing that is neither this nor an object name, so the two spellings the op
-/// admits are told apart by this one question.
-pub(crate) fn landing_is_a_url(landing: &str) -> bool {
+/// says what it asks: a landing that is a URL. Which *kind* of change one names
+/// is the sibling's to resolve.
+fn landing_is_a_url(landing: &str) -> bool {
     onevcs::Url::parse(landing).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
