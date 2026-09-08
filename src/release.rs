@@ -1710,16 +1710,27 @@ fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String
         {
             continue;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] an operation list this build
+        // cannot read whole needs a journal a *newer build* wrote, which no invocation a
+        // user can type produces — the same half `src/projection.rs` suppresses on its own
+        // fold of this record, and for the same reason. What a user can reach is driven end
+        // to end by `tests/e2e/adoption.rs`'s settled-landing journeys; this module's own
+        // test drives the record shapes.
         let operations = event
             .payload
             .get("operations")
             .and_then(|value| {
                 serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
             })
-            .unwrap_or_default();
+            .unwrap_or_default(); // llmlint: ignore-end[changed_behavior_has_e2e]
         for operation in operations {
             if let crate::edits::Operation::LandingFromEvidence { node, landing } = operation {
-                let (Some(node), Some(landing)) = (renderable(&node), renderable(&landing)) else {
+                // Held to what a `settle` may state, on this side too: the journal is a
+                // file another build wrote and a person can edit, and a value that is
+                // neither spelling is a release question `onevcs` cannot be asked.
+                let (Some(node), Some(landing)) =
+                    (renderable(&node), crate::edits::stated_landing(&landing))
+                else {
                     continue;
                 };
                 stated.insert(node, landing);
@@ -1964,17 +1975,17 @@ mod tests {
         let stated = |node: &str, landing: &str| json!([{"kind": "landing-from-evidence", "node": node, "landing": landing}]);
         assert_eq!(
             stated_landings(&[
-                edit(stated("publish", "3f9a1c2")),
+                edit(stated("publish", "3f9a1c2ab")),
                 edit(stated("other", "https://example.invalid/pull/1")),
                 // A record corrected twice: the newest correction is the one.
-                edit(stated("publish", "9d8c7b6")),
+                edit(stated("publish", "9d8c7b6ef")),
             ]),
             [
                 (
                     "other".to_owned(),
                     "https://example.invalid/pull/1".to_owned()
                 ),
-                ("publish".to_owned(), "9d8c7b6".to_owned()),
+                ("publish".to_owned(), "9d8c7b6ef".to_owned()),
             ]
             .into_iter()
             .collect::<BTreeMap<String, String>>()
@@ -1989,6 +2000,12 @@ mod tests {
             stated("publish", ""),
             stated("publish", "3f9a1c2 and the one before it"),
             stated("", "3f9a1c2"),
+            // Neither spelling a `settle` may state, so neither is a question
+            // this run puts: the journal is a file another build wrote and a
+            // person can edit, and it is held to what the op admits on this side
+            // too.
+            stated("publish", "the-change-that-merged"),
+            stated("publish", "3f9a1c"),
         ] {
             assert!(
                 stated_landings(&[edit(unreadable.clone())]).is_empty(),

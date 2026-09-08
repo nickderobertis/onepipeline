@@ -3202,7 +3202,8 @@ because a change request open at the moment its node settled is merged
 afterwards.
 
 **What reads it today is release correlation, and that is the whole of it.** The
-reference is recorded as its own `landing-from-evidence` operation on the
+reference is recorded as its own operation — `settle_landing_operation` in the
+block below, which is where this document and the type are reconciled — on the
 `edit-committed` the settle compiles to, and the release watch reads it from
 there — so the machinery the missing landing was breaking is served, and the
 views, `results` and the status write-back are not: none of them learns a stated
@@ -3253,6 +3254,7 @@ accepts.
       "landing": "https://github.com/owner/engine/pull/12"
     }
   ],
+  "settle_landing_operation": "landing-from-evidence",
   "settle_landings": [
     "https://github.com/owner/engine/pull/12",
     "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"

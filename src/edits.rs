@@ -1504,10 +1504,22 @@ fn landing_is_a_url(landing: &str) -> bool {
     onevcs::Url::parse(landing).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
-/// Whether a stated landing is spelled as a **commit**: an object name, at or
-/// above the width git abbreviates one to.
+/// Whether a stated landing is spelled as a **commit**: an object name, within
+/// the widths git names one at.
 fn landing_is_an_object_name(landing: &str) -> bool {
     OBJECT_NAME_WIDTHS.contains(&landing.len()) && landing.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// One stated landing, where it is one of the two spellings the op takes.
+///
+/// The check both boundaries the value crosses make, so they cannot come to
+/// disagree: the reply envelope, where a person types it, and the journal it is
+/// read back out of — a file another build wrote and a person can edit. What a
+/// value that is neither spelling costs is the same on both sides: a release
+/// question `onevcs` cannot be asked, about work nothing can read.
+pub(crate) fn stated_landing(landing: &str) -> Option<String> {
+    crate::vcs::usable(landing)
+        .filter(|landing| landing_is_a_url(landing) || landing_is_an_object_name(landing))
 }
 
 /// The status a `settle` puts a node's record at.
@@ -1587,28 +1599,16 @@ fn compile_settle(
             live.named()
         )));
     }
-    // A landing this op does not admit is refused rather than recorded. It is
-    // handed straight back to `onevcs` as the reference a release is measured
-    // against and rendered into the views beside it, so a value that is neither
-    // of the two spellings asks an unanswerable question — and a settlement
-    // recording one would report work as landed somewhere nothing can be read.
-    // Both halves are checked: whole and on one line, as every reference this
-    // crate records is, and then one of the two things the op says it takes.
     let landing = match landing {
-        Some(named) => Some(
-            crate::vcs::usable(named)
-                .filter(|landing| landing_is_a_url(landing) || landing_is_an_object_name(landing))
-                .ok_or_else(|| {
-                    refuse(format!(
-                        "settle: node '{id}' would be settled at a landing of {named:?}, which is \
-                         neither the commit the change reached its base at — {floor} to {ceiling} \
-                         hexadecimal characters — nor the change request's URL; state one of \
-                         those, or omit the field",
-                        floor = OBJECT_NAME_WIDTHS.start(),
-                        ceiling = OBJECT_NAME_WIDTHS.end()
-                    ))
-                })?,
-        ),
+        Some(named) => Some(stated_landing(named).ok_or_else(|| {
+            refuse(format!(
+                "settle: node '{id}' would be settled at a landing of {named:?}, which is neither \
+                 the commit the change reached its base at — {floor} to {ceiling} hexadecimal \
+                 characters — nor the change request's URL; state one of those, or omit the field",
+                floor = OBJECT_NAME_WIDTHS.start(),
+                ceiling = OBJECT_NAME_WIDTHS.end()
+            ))
+        })?),
         None => None,
     };
     let mut operations = vec![Operation::SettledFromEvidence {
@@ -2638,6 +2638,36 @@ mod tests {
         let mut replayed = before.clone();
         apply(&mut replayed, &operations[0]);
         assert_eq!(replayed, before);
+    }
+
+    /// The operation a stated landing is persisted as is the one the divergence
+    /// record names.
+    ///
+    /// The record is the document a planner rules on and the journal is what a
+    /// consumer folds, so a kind renamed on one side and not the other is a
+    /// record nobody can join to the run it describes. Read out of that document
+    /// rather than restated here, in the same way `src/release.rs` reconciles the
+    /// probe interval it states.
+    #[test]
+    fn the_operation_a_stated_landing_is_recorded_as_is_the_one_the_record_names() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let key = "\"settle_landing_operation\": \"";
+        let at = record.find(key).expect(
+            "docs/contract-divergences.md names the operation a stated landing is recorded as",
+        ) + key.len();
+        let named = &record[at..][..record[at..].find('"').expect("the name is quoted")];
+        let written = serde_json::to_value(Operation::LandingFromEvidence {
+            node: "publish".into(),
+            landing: "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d".into(),
+        })
+        .expect("the operation serializes");
+        assert_eq!(
+            written["kind"],
+            serde_json::json!(named),
+            "the divergence record tells a planner a stated landing is recorded as \
+             `{named}`, and this build writes {}",
+            written["kind"]
+        );
     }
 
     /// A settle records where the work landed, in either spelling of a landing —
