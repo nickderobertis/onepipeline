@@ -546,6 +546,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // The same, except that every dispatch writes something the one before it
+    // did not: the body carries which dispatch wrote it. A journey about
+    // *re-dispatching* needs a worker that really changes the tree, because
+    // `<key>.work` writing one fixed body leaves a continued branch with nothing
+    // to commit — which is a different thing for the engine than a worker that
+    // tried again and produced a new tree.
+    if let Some(body) = fake::node_script(dir, &key, "work-anew") {
+        let nth = fake::count(dir, &format!("{key}.work-anew"));
+        write_work(
+            args,
+            &fake::segment(&key),
+            &format!("{body}\ndispatch {nth}\n"),
+        );
+    }
+
     // A worker that stops and puts a question to its manager, which is what the
     // operator's `ask-manager` wrapper is for. Scripted here because it is the
     // *agent's* behaviour, and an agent is what this program stands in for: every

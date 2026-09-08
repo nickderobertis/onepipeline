@@ -95,12 +95,31 @@ pub fn execute(
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
+    // The commit the branch stood at when the previous attempt published it, so
+    // this one's tip can be compared against it. `None` until an attempt has
+    // published one — an unknown tip is not evidence that two trees are the
+    // same, and is never read as it.
+    let mut published: Option<String> = None;
     loop {
         let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
             Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
+        // The tree this attempt published is the tree the last one published, so
+        // whatever turned it down was not turned down *by the branch* — and no
+        // number of further attempts on it can answer differently. The budget is
+        // for a tree a worker can still change, so this one is handed back rather
+        // than spent, and the node settles here.
+        // Where this attempt left the branch. `onevcs` commits a session's
+        // worktree only where it holds something to commit, so an attempt that
+        // recorded no commit *added* nothing: the branch stands exactly where
+        // the attempt before it left it, and that is the tip this one published.
+        let tip = preserved.head.clone().or_else(|| published.clone());
+        if let Some(same) = unchanged_tree(published.as_deref(), tip.as_deref()) {
+            return published_an_unchanged_tree(&node.id, &preserved, &endings, &same, attempt);
+        }
+        published = tip;
         // Two reasons to stop, and one settlement for both: the budget is spent,
         // or the run is being stopped. A cancelled run must not be given another
         // dispatch — the teardown is on its way to reap it, and the node would
@@ -730,6 +749,15 @@ struct Preserved {
     /// a spent budget writes says it exactly as one that settled straight away
     /// does.
     undrafted: Option<String>,
+    /// The commit the session left this branch at, which is *the tree that was
+    /// refused*.
+    ///
+    /// Read off `onevcs`'s own record of the session — the library that made the
+    /// commit is the one that knows what it is at — so comparing two attempts is
+    /// comparing two of its answers rather than a second account of a branch
+    /// grown here. `None` where nothing recorded one, which is not evidence that
+    /// two attempts published the same tree and is never read as it.
+    head: Option<String>,
 }
 
 /// Settle or continue one failed publication.
@@ -790,6 +818,7 @@ fn failed_publication(
                 reason: engine::bounded(&crate::views::one_line(reason)),
                 evidence: crate::vcs::evidence_in(token),
                 undrafted,
+                head: crate::vcs::branch_head_in(token),
             }))
         }
         _ => settled(),
@@ -804,6 +833,79 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
     match undrafted {
         Some(why) => format!("{detail}. {why}"),
         None => detail.to_owned(),
+    }
+}
+
+/// The commit two consecutive attempts both published, where they published one.
+///
+/// `None` — "these are not the same tree" — for every other reading, and for the
+/// unknown most of all: the first attempt has nothing before it to be identical
+/// to, and a run that has never seen a tip has no evidence either way. Guessing
+/// would either spend a budget on a tree that had changed or stop retrying one
+/// that had not, and only one of those is recoverable by hand.
+fn unchanged_tree(published: Option<&str>, now: Option<&str>) -> Option<String> {
+    let published = published?;
+    (now == Some(published)).then(|| published.to_owned())
+}
+
+/// The settlement of a node whose attempt published the tree its previous attempt
+/// published.
+///
+/// **The residual and not the failure's own word**, which is the whole point of
+/// telling this ending apart. Every one of the four preserving words says
+/// something about the *branch* — a check its tree failed, a merge path its tree
+/// could not pass — and none of that is true here: the tree is the one that was
+/// already refused, so what turned this attempt down is something the branch did
+/// not cause and cannot fix. The residual is the ending whose own meaning covers
+/// it exactly — a refusal that "ran on the tree as it stands" and would "answer
+/// the same way however many times [it is] asked", which is [`Failure::Terminal`]
+/// in [`crate::vcs`] — and it is neither a success nor a task the agent failed.
+///
+/// The attempt that ended here is **handed back** rather than spent: `attempt`
+/// counts the one that has just run, and everything from it on is still the
+/// node's to use if a person changes what refused it. The settlement says how
+/// much, because a reader deciding whether to intervene is deciding against a
+/// budget.
+///
+/// [`Failure::Terminal`]: crate::vcs::Failure::Terminal
+fn published_an_unchanged_tree(
+    node: &str,
+    preserved: &Preserved,
+    endings: &[crate::vcs::Preserving],
+    head: &str,
+    attempt: std::num::NonZeroU32,
+) -> Settlement {
+    let attempts = engine::publication_attempts();
+    // The attempt this settles on is given back, so what it cost the budget is
+    // every attempt *before* it.
+    let unspent = attempts
+        .get()
+        .saturating_sub(attempt.get().saturating_sub(1));
+    let roll_up = format!(
+        "{count} publication attempt{plural} on {branch} published the same tree, {head}, and \
+         ended {endings}: the refusal is not about the branch, so no further attempt on it \
+         could answer differently. {unspent} of {attempts} publication attempts are unspent",
+        count = endings.len(),
+        plural = if endings.len() == 1 { "" } else { "s" },
+        branch = preserved.branch,
+        endings = endings
+            .iter()
+            .map(|ending| ending.outcome())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    Settlement {
+        branch: Some(preserved.branch.clone()),
+        head: Some(head.to_owned()),
+        detail: Some(compose(
+            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            preserved.undrafted.as_deref(),
+        )),
+        ..Settlement::plain(
+            node,
+            NodeStatus::Failed,
+            Some(crate::vcs::Failure::RESIDUAL),
+        )
     }
 }
 

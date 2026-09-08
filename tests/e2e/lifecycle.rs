@@ -1814,7 +1814,10 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     let world =
         World::new("lifecycle-pushrejected").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let repo = world.repository("change-auto", &[]);
-    world.script("service.work", "the worker wrote this\n");
+    // Something new on every dispatch: the re-dispatch is the point of this
+    // journey, and a worker that rewrote the same tree would be settled where it
+    // stood rather than asked again.
+    world.script("service.work-anew", "the worker wrote this\n");
     refuse_pushed_branches(&world, &repo);
 
     let run = settle(&world, "pushrejected", vec![lifecycle("service", &[])]);
@@ -1956,7 +1959,10 @@ fn a_verdict_that_arrives_on_a_later_read_routes_exactly_as_it_always_has() {
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "0");
     let repo = world.repository("change-auto", &[]);
-    world.script("service.work", "the worker wrote this\n");
+    // Something new on every dispatch, because what this journey is about is the
+    // second attempt happening at all: a worker that rewrote the same tree would
+    // be settled where it stood, which is a different journey.
+    world.script("service.work-anew", "the worker wrote this\n");
     // The host is out for one call — so the first publication ends with its push
     // on the origin and the path behind it unread — and reports the check red
     // once it is back.
@@ -2539,9 +2545,15 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
 ///
 /// Every change request this host is handed and not just the first: the check is
 /// red and stays red, which is the loop the budget exists to bound.
+/// The worker writes something **new** on every dispatch, which is what makes the
+/// budget the thing being spent: an attempt that republishes the tree the last one
+/// published is handed its attempt back rather than spending it — see
+/// `a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget` —
+/// so a journey about a spent budget needs a tree that really moves between
+/// attempts.
 fn publishing_into_checks_that_stay_red(world: &World, name: &str) -> (String, Repository) {
     let repo = world.repository("change-auto", &[]);
-    world.script("service.work", "the worker wrote this\n");
+    world.script("service.work-anew", "the worker wrote this\n");
     world.script("gh.checks", RED);
     let run = settle(world, name, vec![lifecycle("service", &[])]);
     (run, repo)
@@ -2632,6 +2644,104 @@ fn a_publication_budget_that_is_not_a_number_spends_the_same_default() {
     assert!(
         detail.contains("3 publication attempts"),
         "the spent budget does not name the attempts it made: {detail}"
+    );
+}
+
+/// The budget is for a tree a worker can still change, and an attempt that
+/// republished the last one's tree did not change it.
+///
+/// Both halves of that, against one refusal that never clears, because the
+/// distinction is between them rather than in either: a worker that writes the
+/// same thing every dispatch leaves the branch exactly where it was, and one that
+/// writes something new moves it. The first is the observed incident — two
+/// publications refused for a browser the host did not have, each one spending an
+/// attempt on a condition no attempt could change — and the second is every
+/// ordinary retry, which must go on happening.
+///
+/// What the first settles as matters as much as that it settles: none of the four
+/// preserving words is true of it, because each one says something about the
+/// branch and the branch is not what refused. The residual is, and it is the
+/// ending whose own meaning covers exactly this — a refusal that ran on the tree
+/// as it stands and answers the same way however many times it is asked.
+#[test]
+fn a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget() {
+    let unchanged = World::new("lifecycle-sametree")
+        // Three, so there is a budget left to observe unspent.
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "3");
+    unchanged.repository("change-auto", &[]);
+    // One fixed body: the second dispatch writes what the branch already holds,
+    // so its session has nothing to commit and the branch does not move.
+    unchanged.script("service.work", "the worker wrote this\n");
+    unchanged.script("gh.checks", RED);
+
+    let run = settle(&unchanged, "sametree", vec![lifecycle("service", &[])]);
+    let result = unchanged.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(
+        node["status"],
+        "failed",
+        "{result}\n{}",
+        why(&unchanged, &run)
+    );
+    // None of: a success, a task the agent failed, or the word documented to mean
+    // the branch carries a tree the merge path would not pass.
+    assert_eq!(
+        node["outcome"], "publication-failed",
+        "an unchanged tree settled under a word that says the branch caused it: {result}"
+    );
+    // The attempt that ended here was handed back, so the run stopped with budget
+    // in hand rather than having spent all three on one tree.
+    let dispatched = dispatches_of(&unchanged, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "an unchanged tree went on spending the publication budget\n{}",
+        why(&unchanged, &run)
+    );
+    let detail = unchanged.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    let head = node["head"]
+        .as_str()
+        .expect("the settlement names the commit both attempts published");
+    for said in [
+        "published the same tree",
+        "the refusal is not about the branch",
+        "2 of 3 publication attempts are unspent",
+        head,
+    ] {
+        assert!(
+            detail.contains(said),
+            "the settlement does not say {said:?}: {detail}"
+        );
+    }
+    // And an operator reads the word without opening the store.
+    unchanged
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("publication-failed");
+
+    // The other half, and the reason this is not a licence to stop retrying: a
+    // worker that writes something new each dispatch moves the branch, so every
+    // attempt is one another attempt could still answer and the budget is spent
+    // as it always was.
+    let changed = World::new("lifecycle-newtree").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "3");
+    changed.repository("change-auto", &[]);
+    changed.script("service.work-anew", "the worker wrote this\n");
+    changed.script("gh.checks", RED);
+
+    let run = settle(&changed, "newtree", vec![lifecycle("service", &[])]);
+    let node = changed.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["outcome"], "checks-failed",
+        "a changed tree was settled as though nothing about it had moved: {node}"
+    );
+    assert_eq!(
+        dispatches_of(&changed, &run, "service").len(),
+        3,
+        "a changed tree stopped consuming the budget it is for\n{}",
+        why(&changed, &run)
     );
 }
 
@@ -2944,7 +3054,9 @@ fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
     let world =
         World::new("lifecycle-unsettledagain").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let repo = world.repository("change-auto", &[]);
-    world.script("service.work", "the worker wrote this\n");
+    // Something new on every dispatch, so the second attempt is one this loop
+    // makes rather than one a repeated tree would have stopped.
+    world.script("service.work-anew", "the worker wrote this\n");
     // No `gh.merged`, on either attempt: this host takes the change and holds it.
     let run = settle(&world, "unsettledagain", vec![lifecycle("service", &[])]);
 
