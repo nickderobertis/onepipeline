@@ -178,35 +178,46 @@ struct Destination {
 }
 
 /// The executable this process asks.
-fn binary() -> String {
-    std::env::var(BINARY_ENV)
-        .ok()
+///
+/// Read as an `OsString`, because a path is one: a value this platform allows and
+/// Unicode does not would be *lost* by a `String` read, and the loader would then
+/// ask an executable the operator never named while believing they named none.
+fn binary() -> std::ffi::OsString {
+    std::env::var_os(BINARY_ENV)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_BINARY.to_owned())
+        .unwrap_or_else(|| DEFAULT_BINARY.into())
 }
 
 /// Run one resolution verb and answer with its stdout, or why there is none.
+///
+/// The stdout of a subprocess is bytes, and this build reads it as UTF-8 or not at
+/// all: a lossy decode would put replacement characters into the JSON a shape is
+/// read from and into the line a policy is read off, and either could parse as
+/// something nobody said. The **stderr** it quotes back is lossy on purpose — that
+/// one is a sentence for a person, and refusing to relay a diagnostic because a
+/// byte in it was not UTF-8 loses the only thing that failure had to say.
 fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
     let binary = binary();
+    let named = || format!("`{} {} {repo}`", binary.to_string_lossy(), verb.join(" "));
     let output = Command::new(&binary)
         .args(verb)
         .arg(repo)
         .output()
         .map_err(|error| {
             format!(
-                "`{binary} {} {repo}` could not be run: {error} (set {BINARY_ENV} to an \
-                 executable one)",
-                verb.join(" ")
+                "{} could not be run: {error} (set {BINARY_ENV} to an executable one)",
+                named()
             )
         })?;
     if !output.status.success() {
         return Err(format!(
-            "`{binary} {} {repo}` refused: {}",
-            verb.join(" "),
+            "{} refused: {}",
+            named(),
             one_line(&String::from_utf8_lossy(&output.stderr))
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("{} answered bytes that are not UTF-8: {error}", named()))
 }
 
 /// One repository, as `onevcs`'s own resolution verbs answer for it.
@@ -446,12 +457,46 @@ fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
             one_line(&String::from_utf8_lossy(&output.stderr))
         ));
     }
-    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    let path = os_path(&output.stdout)?;
     Ok(if path.is_absolute() {
         path
     } else {
         checkout.join(path)
     })
+}
+
+/// A path git printed, as the bytes it printed.
+///
+/// A filesystem path is not text on this platform, so git's answer is kept in the
+/// platform's own encoding: decoding it as UTF-8 — lossily above all — would turn
+/// a hooks directory whose name is not valid Unicode into one that does not exist,
+/// and the repository's own policy would go unread with nothing said about why.
+#[cfg(unix)]
+fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let trimmed = printed
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map_or(&[][..], |start| {
+            let end = printed
+                .iter()
+                .rposition(|byte| !byte.is_ascii_whitespace())
+                .unwrap_or(start);
+            &printed[start..=end]
+        });
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(trimmed)))
+}
+
+/// A path git printed, on a platform whose paths this build can only read as text.
+///
+/// Windows paths are UTF-16 and a `Command`'s pipe hands back bytes, so there is
+/// no lossless way across; an answer that is not UTF-8 is refused rather than
+/// mangled into a path that names something else.
+#[cfg(not(unix))]
+fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
+    std::str::from_utf8(printed)
+        .map(|path| PathBuf::from(path.trim()))
+        .map_err(|error| format!("git printed a path that is not UTF-8: {error}"))
 }
 
 /// Whether git would run this file as a hook.

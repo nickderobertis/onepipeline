@@ -190,8 +190,6 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any
     refused
         .exited(REFUSED)
         .err_has("node 'consumer'")
-        // The identity, the workflow, the policy, and the targets it asked to
-        // consume.
         .err_has("github.com/owner/service")
         .err_has("workflow: remote")
         .err_has("local-direct")
@@ -312,12 +310,29 @@ fn onevcs_answering(world: &World) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let path = world.root.join("onevcs-answering");
+    // Shell builtins only — no `cat`, no `sed` — because one journey runs this
+    // with an empty `PATH` to be a host without git. The `|| [ -n "$line" ]`
+    // is what carries a file whose last line has no newline, which every JSON
+    // answer below is.
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\ncase \"$1 $2\" in\n'resolve '*) cat '{fakes}/onevcs.resolve' ;;\n'rules \
-             check') cat '{fakes}/onevcs.rules-check' ;;\n*) echo \"no such verb: $*\" >&2; exit \
-             1 ;;\nesac\n",
+            r#"#!/bin/sh
+answer() {{
+  body=''
+  while IFS= read -r line || [ -n "$line" ]; do body="$body$line
+"; done < "$1"
+  case "$body" in
+    '!refuse '*) printf '%s' "${{body#!refuse }}" >&2; exit 1 ;;
+  esac
+  printf '%s' "$body"
+}}
+case "$1 $2" in
+  'resolve '*) answer '{fakes}/onevcs.resolve' ;;
+  'rules check') answer '{fakes}/onevcs.rules-check' ;;
+  *) printf 'no such verb: %s\n' "$*" >&2; exit 1 ;;
+esac
+"#,
             fakes = world.fakes.display()
         ),
     )
@@ -326,6 +341,10 @@ fn onevcs_answering(world: &World) -> std::path::PathBuf {
         .expect("it is executable");
     path
 }
+
+/// A `rules check` that resolves and then refuses.
+#[cfg(unix)]
+const RULES_CHECK_REFUSES: &str = "!refuse this host has no rules file";
 
 /// The answers that world gives, for one arm.
 #[cfg(unix)]
@@ -427,7 +446,6 @@ fn a_policy_this_build_cannot_read_still_lets_the_repositorys_own_hook_answer() 
             "publication_checkout": service.checkout.to_string_lossy(),
         })
         .to_string(),
-        // Every other line a real report carries, and no policy on any of them.
         "repo: service\napprovals: none (from the default)\n",
     );
     let world = world.with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy());
@@ -435,10 +453,8 @@ fn a_policy_this_build_cannot_read_still_lets_the_repositorys_own_hook_answer() 
     let asked = world.run(&["plan", "check", &project, "--json"]);
     asked
         .exited(HAS_REFUSALS)
-        // The rule that needed the policy said it could not be answered...
         .err_has("states no `publication:` line")
         .err_has("the plan loaded without that check having run");
-    // ...and the one that did not still refused, out of the repository's own hook.
     let answered = answer(&asked);
     let refusals = engine_refusals(&answered);
     assert_eq!(refusals.len(), 1, "{answered}");
@@ -544,4 +560,170 @@ fn a_node_that_names_its_own_change_policy_consumes_without_being_refused() {
     node["merge_policy"] = json!("change-open");
     let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
     world.run(&["plan", "check", &project]).exited(0);
+}
+
+/// The **other** two ways a policy can fail to arrive, driven through the binary.
+///
+/// A verb that refuses after resolving, and one that states a policy the sibling's
+/// own type does not know: neither is a repository that opens a change request, so
+/// neither may pass the `consumes` rule. The plan is the one the `consumes`
+/// journey refuses, so what each of these costs is exactly that refusal.
+#[cfg(unix)]
+#[test]
+fn a_rules_check_that_refuses_or_names_an_unknown_policy_leaves_the_node_unchecked() {
+    let world = World::new("destination-policy-arms");
+    let service = consuming(&world, "local-direct");
+    let project = world.plan(
+        "consuming",
+        &plan_of("consuming", vec![engine(), consumer(None)]),
+    );
+    let stand_in = onevcs_answering(&world);
+    let resolved = json!({
+        "identity": "github.com/owner/service",
+        "workflow": "remote",
+        "publication_checkout": service.checkout.to_string_lossy(),
+    })
+    .to_string();
+    let world = world.with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy());
+
+    for (rules_check, said) in [
+        (RULES_CHECK_REFUSES, "refused: this host has no rules file"),
+        (
+            "publication: sideways (from rule 1)\n",
+            "states a publication policy this build does not know, 'sideways'",
+        ),
+    ] {
+        answering(&world, &resolved, rules_check);
+        let asked = world.run(&["plan", "check", &project]);
+        asked
+            .exited(0)
+            .err_has("node 'consumer'")
+            .err_has("the plan loaded without that check having run");
+        assert!(
+            asked.stderr.contains(said),
+            "the arm did not say what went wrong — looked for {said:?} in:\n{}",
+            asked.stderr
+        );
+    }
+}
+
+/// A host with no `git` cannot be asked where a repository keeps its hooks, so the
+/// title is one this build could not check.
+///
+/// Where the hook lives is git's own answer — `core.hooksPath` and all — so a host
+/// that cannot start git has no way to reach the file that states the policy. The
+/// `PATH` this journey runs under holds nothing, which is the only honest way to
+/// be a host without one; every other program the run needs is named absolutely.
+#[cfg(unix)]
+#[test]
+fn a_host_that_cannot_start_git_leaves_the_title_unchecked() {
+    let world = World::new("destination-no-git");
+    let service = world.repository("change-auto", &[]);
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+    let stand_in = onevcs_answering(&world);
+    answering(
+        &world,
+        &json!({
+            "identity": "github.com/owner/service",
+            "workflow": "remote",
+            "publication_checkout": service.checkout.to_string_lossy(),
+        })
+        .to_string(),
+        "publication: change-auto (from the default)\n",
+    );
+    world
+        .with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy())
+        .with_env("PATH", "")
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("the plan loaded without that check having run")
+        .err_has("git could not be run in the publication checkout");
+}
+
+/// A hook the filesystem will not answer for is not a hook that is absent.
+///
+/// The distinction that decides whether a repository's policy is applied at all:
+/// read as "no hook", a repository that does state one would have none applied and
+/// nobody would be told. A hooks directory this process may not look inside is the
+/// state that separates them.
+#[cfg(unix)]
+#[test]
+fn a_hook_the_filesystem_will_not_answer_for_is_not_one_that_is_absent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("destination-hook-unreadable");
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+    let hooks = crate::harness::commit_msg_hook(&world)
+        .parent()
+        .expect("the hook has a directory")
+        .to_path_buf();
+
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000))
+        .expect("the hooks directory is closed");
+    let asked = world.run(&["plan", "check", &project]);
+    // Restored before the assertions, so a failure does not leave the world
+    // undeletable and bury this journey's own report under a cleanup panic.
+    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755))
+        .expect("the hooks directory is reopened");
+    asked
+        .exited(0)
+        .err_has("the plan loaded without that check having run")
+        .err_has("cannot be read");
+}
+
+/// A host with nowhere to write the message leaves the title unchecked.
+///
+/// git hands a `commit-msg` hook a *file*, so a host whose temporary directory
+/// cannot hold one has no way to ask the question at all.
+#[cfg(unix)]
+#[test]
+fn a_host_that_cannot_write_the_message_leaves_the_title_unchecked() {
+    let world = World::new("destination-no-tmpdir");
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+
+    let not_a_directory = world.root.join("tmp-is-a-file");
+    std::fs::write(&not_a_directory, "").expect("a file where a directory would go");
+    world
+        .with_env("TMPDIR", &not_a_directory.to_string_lossy())
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("the plan loaded without that check having run")
+        .err_has("could not be written to");
+}
+
+/// A hook a signal ended reports as that rather than as an exit status it never
+/// reached.
+///
+/// It refused the title — the publication would be refused too — and a report
+/// naming "exit 0" for it would be this build inventing a verdict the hook never
+/// gave.
+#[cfg(unix)]
+#[test]
+fn a_hook_a_signal_ended_is_reported_as_that_rather_than_as_an_exit_status() {
+    let world = World::new("destination-hook-signalled");
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+    std::fs::write(
+        crate::harness::commit_msg_hook(&world),
+        "#!/bin/sh\nkill -TERM $$\n",
+    )
+    .expect("the hook is rewritten to end on a signal");
+
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answered = answer(&checked);
+    let refusals = engine_refusals(&answered);
+    assert_eq!(refusals.len(), 1, "{answered}");
+    assert_eq!(refusals[0]["field"], json!("title"), "{answered}");
+    let reason = refusals[0]["reason"].as_str().expect("a reason");
+    assert!(reason.contains("killed by a signal"), "{reason}");
+    assert!(
+        !reason.contains("exit "),
+        "a hook a signal ended was reported as an exit status it never reached: {reason}"
+    );
 }
