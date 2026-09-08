@@ -792,3 +792,52 @@ fn a_verb_that_answers_bytes_that_are_not_utf8_leaves_the_node_unchecked() {
         .err_has("the plan loaded without that check having run")
         .err_has("answered bytes that are not UTF-8");
 }
+
+/// A `git` that answers a hooks path successfully and names nothing leaves the
+/// title unchecked.
+///
+/// The empty answer is its own case. Read as a path it would be the *checkout
+/// itself*, so the loader would look for a `commit-msg` in the repository root,
+/// find none, and report a repository that states no subject policy — which is
+/// the one wrong answer this arm exists to stop, because a repository that does
+/// state one would then have none applied and nobody would be told.
+///
+/// A real git cannot be asked to answer emptily, so this journey supplies one
+/// that does — the state under test rather than a stand-in for git, exactly as
+/// the `onevcs` above stands in for an install that answers wrongly.
+#[cfg(unix)]
+#[test]
+fn a_git_that_names_no_hooks_path_leaves_the_title_unchecked() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("destination-empty-git-path");
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+
+    let elsewhere = world.root.join("only-this-git");
+    std::fs::create_dir_all(&elsewhere).expect("a directory to lead the PATH with");
+    let git = elsewhere.join("git");
+    std::fs::write(&git, "#!/bin/sh\nexit 0\n").expect("a git that answers nothing");
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
+        .expect("it is executable");
+
+    let stand_in = onevcs_answering(&world);
+    script_the_answers(
+        &world,
+        &json!({
+            "identity": "github.com/owner/service",
+            "workflow": "remote",
+            "publication_checkout": service.checkout.to_string_lossy(),
+        })
+        .to_string(),
+        "publication: change-auto (from the default)\n",
+    );
+    world
+        .with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy())
+        .with_env("PATH", &elsewhere.to_string_lossy())
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("the plan loaded without that check having run")
+        .err_has("git named no path at all");
+}
