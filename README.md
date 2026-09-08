@@ -57,7 +57,9 @@ Every release attaches **`release-outcome.json`** to its GitHub Release. It
 answers one question in three states, so a consumer can tell a publication that
 was verified from one that was not without opening a job log:
 
-- `nothing-shipped` — no artifact reached a registry.
+- `nothing-shipped` — no publish job ran, so no artifact can have reached a
+  registry. A publish that *failed* does not say this: it may have published
+  part of what it was given, so it reads as `shipped-unverified`.
 - `shipped-unverified` — artifacts are public, and installing one of them was
   not proven to work.
 - `shipped-verified` — every artifact taking part in the release published *and*

@@ -180,8 +180,8 @@ describe("the release outcome record", () => {
     ]);
     assert.equal(JSON.parse(off.stdout).outcome, "shipped-verified");
 
-    // A publish that was meant to happen and failed is a different thing, and
-    // it holds the release out of the top state rather than disappearing.
+    // A publish that was meant to happen and failed is a different thing, and it
+    // holds the release out of the top state rather than disappearing.
     const broke = await compose([
       "--version",
       "1.2.3",
@@ -189,13 +189,18 @@ describe("the release outcome record", () => {
     ]);
     const failed = JSON.parse(broke.stdout);
     assert.equal(failed.outcome, "shipped-unverified");
+    // Not `nothing-shipped`: a publish job that failed may have published some
+    // of what it was given and then failed — awaiting propagation, or partway
+    // through a set of packages — so the record must not claim the registry was
+    // never written to. `shipped-unverified` is the honest reading, and the safe
+    // one for a consumer deciding whether anything is public.
     assert.equal(
       failed.targets.find((t) => t.id === "pypi:onepipeline-cli").outcome,
-      "nothing-shipped",
+      "shipped-unverified",
     );
 
-    // And when nothing shipped at all, no amount of green elsewhere invents one.
-    const nothing = await compose([
+    // A cancelled publish reads the same way, and for the same reason.
+    const stopped = await compose([
       "--version",
       "1.2.3",
       ...targetsFor({
@@ -204,6 +209,22 @@ describe("the release outcome record", () => {
         pypiPublished: "skipped",
         pypiVerified: "skipped",
         npmPublished: "cancelled",
+        npmVerified: "skipped",
+      }),
+    ]);
+    assert.equal(JSON.parse(stopped.stdout).outcome, "shipped-unverified");
+
+    // `nothing-shipped` is said only where it is provable: every publish job
+    // skipped is the one case in which no registry can have been written to.
+    const nothing = await compose([
+      "--version",
+      "1.2.3",
+      ...targetsFor({
+        cratePublished: "skipped",
+        crateVerified: "skipped",
+        pypiPublished: "skipped",
+        pypiVerified: "skipped",
+        npmPublished: "skipped",
         npmVerified: "skipped",
       }),
     ]);

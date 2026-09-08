@@ -33,9 +33,12 @@ import { writeFileSync } from "node:fs";
 /// with the golden files under `npm/test/golden/` in the same change.
 const SCHEMA_VERSION = 1;
 
-/// Every state a target, or the release, can be in. Ordered weakest first: the
-/// release's own state is the weakest of its targets'.
+/// Every state a target, or the release, can be in. This list is the vocabulary:
+/// README.md tells a consumer these three names and nothing else, and
+/// `npm/test/release-outcome.test.mjs` reads it back out of here to hold the two
+/// together.
 const STATES = ["nothing-shipped", "shipped-unverified", "shipped-verified"];
+const [NOTHING_SHIPPED, SHIPPED_UNVERIFIED, SHIPPED_VERIFIED] = STATES;
 
 const RESULTS = ["success", "failure", "cancelled", "skipped"];
 
@@ -118,9 +121,18 @@ function parseArgs(argv) {
   return out;
 }
 
+/// **`nothing-shipped` is only said when it can be proved.** A publish job that
+/// *failed* is not a job that published nothing: `scripts/publish-npm.sh` can
+/// take a package the registry accepts and then fail awaiting propagation, and
+/// a cancelled job can stop between two of five packages. Either leaves
+/// artifacts public that nothing verified, which is the middle state. Only a
+/// `skipped` publish — a job that never ran — proves the registry was never
+/// written to.
 function stateOf(target) {
-  if (target.published !== "success") return "nothing-shipped";
-  return target.verified === "success" ? "shipped-verified" : "shipped-unverified";
+  if (target.published === "success") {
+    return target.verified === "success" ? SHIPPED_VERIFIED : SHIPPED_UNVERIFIED;
+  }
+  return target.published === "skipped" ? NOTHING_SHIPPED : SHIPPED_UNVERIFIED;
 }
 
 function compose(argv) {
@@ -181,15 +193,15 @@ function compose(argv) {
   });
 
   // A target the operator switched off did not take part in this release, so it
-  // neither ships nor holds anything back; every other target does both.
+  // neither ships nor holds anything back; every other target does both. The
+  // release says `nothing-shipped` only when every target does — which, by the
+  // rule above, means every publish job was skipped.
   const taking_part = targets.filter((target) => target.published !== "skipped");
-  const shipped = targets.filter((target) => target.published === "success");
-  const outcome =
-    shipped.length === 0
-      ? STATES[0]
-      : taking_part.every((target) => target.outcome === "shipped-verified")
-        ? "shipped-verified"
-        : "shipped-unverified";
+  const outcome = targets.every((target) => target.outcome === NOTHING_SHIPPED)
+    ? NOTHING_SHIPPED
+    : taking_part.every((target) => target.outcome === SHIPPED_VERIFIED)
+      ? SHIPPED_VERIFIED
+      : SHIPPED_UNVERIFIED;
 
   // `out` is where to put the record rather than part of it, so it is returned
   // beside the record: the file's shape does not depend on how it was asked for.

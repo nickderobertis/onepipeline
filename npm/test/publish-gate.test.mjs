@@ -389,6 +389,24 @@ describe("the npm publish order", () => {
     assert.match(refused.stderr, /cannot read the manifest inside/);
     assert.match(refused.stderr, /^ACTION: /m);
 
+    // A manifest whose optionalDependencies is not a map of pins. `Object.entries`
+    // walks a string or an array as happily as an object, so this is the shape
+    // that would have had its pins read as nonsense — or not read at all, which
+    // is a launcher offered with nothing waited for.
+    for (const pins of ["onepipeline-cli-linux-x64", ["onepipeline-cli-linux-x64"], 7]) {
+      const bad = join(work, "bad-pins");
+      rmSync(bad, { recursive: true, force: true });
+      cpSync(launcherDir, bad, { recursive: true });
+      const manifest = JSON.parse(readFileSync(join(bad, "package.json"), "utf8"));
+      manifest.optionalDependencies = pins;
+      writeFileSync(join(bad, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+      const rejected = await attempt("bash", ["scripts/publish-npm.sh", bad], { env });
+      assert.equal(rejected.code, 2, rejected.stderr);
+      assert.match(rejected.stderr, /cannot read the manifest inside/);
+      assert.match(rejected.stderr, /^ACTION: /m);
+    }
+
     assert.equal(reg.timeline.length, 0, "a package it could not read still reached the registry");
   });
 
