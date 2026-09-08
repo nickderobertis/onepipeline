@@ -25,7 +25,8 @@ const HAS_REFUSALS: i32 = 1;
 /// Spelled here rather than reached for, because the module that declares it is
 /// private: `docs/contract.md` fixes what this crate publishes, and an
 /// implementation detail does not join that surface to be named by a test. The
-/// same reason `STORE_BINARY_ENV` is a literal in the harness beside it.
+/// copy that costs is held to the original by
+/// [`the_variable_this_suite_sets_is_the_one_the_loader_reads`].
 const ONEVCS_BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
 
 fn answer(run: &crate::harness::Run) -> Value {
@@ -364,11 +365,9 @@ esac
 #[cfg(unix)]
 const RULES_CHECK_REFUSES: &str = "!refuse this host has no rules file";
 
-/// A verb that succeeds and answers bytes that are not UTF-8.
 #[cfg(unix)]
 const ANSWERS_NOT_UTF8: &str = "!bytes";
 
-/// Write the two answers that world gives, for one arm.
 #[cfg(unix)]
 fn script_the_answers(world: &World, resolve: &str, rules_check: &str) {
     world.script("onevcs.resolve", resolve);
@@ -976,4 +975,30 @@ fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
         .run(&["plan", "check", &project])
         .exited(HAS_REFUSALS)
         .out_has("this repository does not release from 'refactor:'");
+}
+
+/// The variable this suite sets is the one the loader reads.
+///
+/// A private module cannot be named from an external test binary, so the spelling
+/// above is a second copy — and a second copy of a contract is a thing that goes
+/// stale silently. What it would cost is invisible: every could-not-check journey
+/// would go on passing while configuring a variable nothing reads, because a
+/// variable nothing reads and an executable that is absent produce the same
+/// answer. So the copy is held to the original by reading it.
+#[test]
+fn the_variable_this_suite_sets_is_the_one_the_loader_reads() {
+    let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/destination.rs");
+    let source = std::fs::read_to_string(&module)
+        .unwrap_or_else(|error| panic!("{} cannot be read: {error}", module.display()));
+    let declared = source
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pub const BINARY_ENV: &str = "))
+        .and_then(|rest| rest.trim().strip_suffix(';'))
+        .unwrap_or_else(|| panic!("{} declares no `BINARY_ENV`", module.display()));
+    assert_eq!(
+        declared.trim_matches('"'),
+        ONEVCS_BINARY_ENV,
+        "this suite sets a variable the loader does not read, so every could-not-check \
+         journey here is passing for the wrong reason"
+    );
 }

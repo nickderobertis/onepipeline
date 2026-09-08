@@ -146,7 +146,6 @@ fn report_unchecked(node: &str, repo: &str, why: &str) {
 /// on reading.
 #[derive(serde::Deserialize)]
 struct Resolved {
-    /// The identity key `onevcs` resolved the node's `repo` to.
     // llmlint: ignore[invalid_states_unrepresentable] a repository identity is a `String`
     // on every surface `onevcs` publishes — `registry::Identity::origin`,
     // `SessionHolder::identity`, `RepositoryReleases::identity` — and this crate already
@@ -156,15 +155,14 @@ struct Resolved {
     // that crate. What is checkable here is that the sibling stated one at all, and
     // `resolve` refuses a blank.
     identity: String,
-    /// Whether the identity's work publishes locally or through the remote host.
     workflow: onevcs::registry::Workflow,
-    /// The publication checkout, which is where this repository's own hooks are.
+    /// Where this repository's own hooks are, which is the whole of what it is
+    /// read for here.
     publication_checkout: PathBuf,
 }
 
 /// What one repository answered about itself.
 struct Destination {
-    /// What the resolution verb stated, at the shape it stated it in.
     resolved: Resolved,
     /// The policy its rules file resolves it to, or why this build has no answer.
     ///
@@ -424,7 +422,6 @@ impl std::fmt::Display for Termination {
     }
 }
 
-/// What a repository's own hook said when it turned a subject down.
 #[derive(Debug)]
 struct Rejected {
     termination: Termination,
