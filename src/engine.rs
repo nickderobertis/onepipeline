@@ -152,6 +152,31 @@ pub const DEFAULT_MERGE_PATH_READS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 /// two-minute ceiling every backoff in this crate doubles up to.
 pub const DEFAULT_MERGE_PATH_BACKOFF_SECONDS: u64 = 5;
 
+/// The environment variable setting how many times a **settled** node's unread
+/// merge path is asked about again while the run holds dependents on it.
+pub const UNREAD_MERGE_PATH_ASKS_ENV: &str = "ONEPIPELINE_UNREAD_MERGE_PATH_ASKS";
+
+/// How many times a run asks again about a merge path its publication could not
+/// read, while dependents are waiting on the verdict.
+///
+/// Its own budget and deliberately not [`DEFAULT_MERGE_PATH_READS`], which is the
+/// same question asked in a different situation: that one is a publication
+/// holding a session open, so it is small, while this is a run that has already
+/// settled the node and is holding dependents that cannot start. Nothing is
+/// occupied by waiting here, and what is being waited for is a **merge** — a
+/// host finishing a queue, or a person pressing a button — which is minutes
+/// rather than seconds.
+///
+/// Sixty asks at [`DEFAULT_MERGE_PATH_BACKOFF_SECONDS`] apart is five minutes of
+/// holding. Bounded at all for the reason the publication's re-read is bounded: a
+/// run that polled somebody else's merge path for good would be worse than one
+/// that reported honestly, and what the bound settles on is the dependents
+/// staying held — which is what they are.
+///
+/// A [`NonZeroU32`] for [`DEFAULT_PUBLICATION_ATTEMPTS`]'s reason: zero is not a
+/// smaller budget, it is a hold nothing ever asks about.
+pub const DEFAULT_UNREAD_MERGE_PATH_ASKS: NonZeroU32 = NonZeroU32::new(60).unwrap();
+
 /// The environment variable setting how long a cancelled dispatch has to stop
 /// itself before it is torn down.
 pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
@@ -755,6 +780,12 @@ fn converge(
     // edge is paid at most once per change to the folded state rather than once
     // per caller that wants it.
     let mut derived: Option<BTreeMap<String, NodeStatus>> = None;
+    // The nodes whose work reached the origin with the merge path unread. Their
+    // dependents are held rather than skipped, so this is what lifts the hold:
+    // the same question the publication could not get an answer to, asked again
+    // through `onevcs` while the run is still here to act on it.
+    let mut unread = crate::vcs::UnreadMergePaths::default();
+    let mut read_unread: Option<Instant> = None;
     // When each piece of paced work was last done. `None` is due now, which is
     // what makes the first pass do all of it.
     let mut read_upstreams: Option<Instant> = None;
@@ -782,6 +813,13 @@ fn converge(
         // reports `true` only for work it *consumed*, which bounds this at one
         // extra pass per change and leaves a converged run running none.
         let mut moved = false;
+        // Every landing this run has already been shown, put back before anything
+        // derives from the state: the fold a settlement triggers re-reads the
+        // journal, and a landing this run proved by asking `onevcs` is not in it.
+        if unread.apply(state) {
+            derived = None;
+            unpublished = true;
+        }
         if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
             derived = None;
             unpublished = true;
@@ -861,6 +899,24 @@ fn converge(
             moved = true;
         }
 
+        // A verdict the publication could not read may have become readable, and
+        // a run holding dependents on one has to be the thing that finds out —
+        // the alternative is what happened: two closing nodes reported never
+        // attempted while the work they waited on had merged, until a person
+        // settled the node by hand. Paced, and asked only about a node actually
+        // holding a dependent, so a run with none of these asks nothing at all.
+        let statuses = statuses_of(&mut derived, state);
+        let mut watching_merge_paths = unread.watching(state, &statuses);
+        if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {
+            read_unread = Some(Instant::now());
+            if unread.read_again(state, &watching_merge_paths) {
+                derived = None;
+                unpublished = true;
+                moved = true;
+            }
+            watching_merge_paths = unread.watching(state, &statuses_of(&mut derived, state));
+        }
+
         // Start what became actionable *before* asking whether the run is over.
         // A ready human action derives as `waiting`, which is a settled status —
         // so a check that ran first would call the graph terminal and leave that
@@ -905,9 +961,15 @@ fn converge(
             report_unprojected(paths, journal, writeback)?;
         }
 
-        if in_flight.is_empty() {
+        if in_flight.is_empty() && watching_merge_paths.is_empty() {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
+            //
+            // A merge path this run is still asking about is the exception, and
+            // it is why the condition above carries a second clause: a `blocked`
+            // dependent is a *settled* status, so a run holding one on a verdict
+            // it is about to be able to read would call itself converged and go,
+            // leaving the work it was holding for undone.
             if graph::is_terminal(&statuses) {
                 break;
             }
@@ -938,6 +1000,11 @@ fn converge(
                 Duration::MAX
             },
             next_quiet(&in_flight, stall_after),
+            if watching_merge_paths.is_empty() {
+                Duration::MAX
+            } else {
+                until_due(read_unread, unread.every())
+            },
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -3398,6 +3465,18 @@ pub(crate) fn merge_path_reads() -> NonZeroU32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_MERGE_PATH_READS)
+}
+
+/// How many times a settled node's unread merge path is asked about again.
+///
+/// Read at the boundary the same way every other bound here is, so a value that
+/// is not a number — or is `0`, which would be a hold nothing ever lifts — takes
+/// the default rather than disabling the recovery it configures.
+pub(crate) fn unread_merge_path_asks() -> NonZeroU32 {
+    std::env::var(UNREAD_MERGE_PATH_ASKS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_UNREAD_MERGE_PATH_ASKS)
 }
 
 /// The first backoff between those reads. It doubles, to [`BOUNDARY_BACKOFF_CEILING`].

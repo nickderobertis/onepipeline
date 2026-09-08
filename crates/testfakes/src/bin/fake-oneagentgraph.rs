@@ -450,6 +450,22 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.ignores-the-ask")).exists() {
         fake::ignore_the_polite_ask();
     }
+    // `<key>.concurrent` holds this dispatch until the number of dispatches it
+    // names are all inside their own. A hold released from outside cannot say
+    // this — it proves only that one dispatch was somewhere — while a barrier
+    // releases exactly when every party is running, so a journey that reads the
+    // arrivals afterwards is reading the set that was live at one instant. It is
+    // how "two nodes ran at the same time" is *observed* rather than inferred
+    // from two records that never say what overlapped.
+    if let Some(parties) = fake::node_script(dir, &key, "concurrent") {
+        let parties = parties
+            .trim()
+            .parse::<std::num::NonZeroUsize>()
+            .unwrap_or_else(|error| {
+                fake::fail(&format!("{key}.concurrent is not a party count: {error}"))
+            });
+        fake::barrier(&dir.join("concurrent.arrived"), &key, parties);
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {

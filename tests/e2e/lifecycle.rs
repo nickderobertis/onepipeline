@@ -2241,6 +2241,262 @@ fn a_merge_path_that_never_answers_settles_the_node_saying_where_the_work_is() {
     }
 }
 
+/// A node whose work reached the origin with its verdict outstanding **holds**
+/// its dependents, and they run once that verdict becomes decidable.
+///
+/// The incident: a node settled `pushed-unverified` with its branch on the origin
+/// and its change request open, and both dependents — the two closing nodes of a
+/// fifteen-node plan — went to `never attempted`. The engine says in three places
+/// that this failure is not the tree being turned down, and none of it reached the
+/// one decision it should have changed, because the scheduler read a status that
+/// deliberately discards the word.
+///
+/// So the run holds them instead, and goes on asking `onevcs` whether the verdict
+/// has become readable — which is the half that makes it a hold rather than a
+/// stall. Nothing here states a landing to the binary: the branch is taken onto
+/// its base by this test, with git, exactly as a merge does it, and what the run
+/// then reads is that repository.
+///
+/// The node itself keeps the word its publication earned, because that word is
+/// true and an operator reading it acts on it. What changed is only what may run
+/// next.
+#[test]
+fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decidable() {
+    let world = World::new("lifecycle-heldunverified")
+        // One read inside the publication, so the node settles unverified on the
+        // host's single outage rather than re-reading past it.
+        .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
+        // And a second apart, which is this run's asking interval afterwards.
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
+    let repo = world.repository("change-auto", &[]);
+    world.script("publish.work", "the worker wrote this\n");
+    world.script("announce.work", "and this announces it\n");
+    // The host is out for exactly one call, which is the read behind the push
+    // this node makes. Everything after it — including the dependent's own
+    // publication, which this host merges — meets a host that answers.
+    world.script("gh.outage", "1");
+    world.script("gh.merged", "");
+
+    let path = world.plan(
+        "heldunverified",
+        &plan_of(
+            "heldunverified",
+            vec![
+                lifecycle("publish", &[]),
+                lifecycle("announce", &["publish"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "heldunverified".to_string();
+
+    world.until("the publication to settle unverified", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["payload"]["outcome"] == "pushed-unverified")
+    });
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "publish")
+        .expect("the publication settled");
+    let branch = settled["payload"]["branch"]
+        .as_str()
+        .expect("the settlement names the branch its push reached the origin with")
+        .to_string();
+
+    // What the dependent did *at this stage*: it is waiting, not skipped. Read
+    // off the view an operator reads, because `skipped` is derived on every read
+    // and never written — so the view is where the difference is visible at all.
+    let waiting = world.run(&["results", &run]);
+    waiting.exited(0);
+    assert!(
+        !waiting.stdout.contains("never attempted"),
+        "a change on the origin with its verdict outstanding skipped its dependent:\n{}",
+        waiting.stdout
+    );
+    assert!(
+        waiting.stdout.contains("blocked"),
+        "the dependent of an unverified publication is not reported waiting on it:\n{}",
+        waiting.stdout
+    );
+    // And nothing has been asked of it: it has not been dispatched.
+    assert!(
+        dispatches_of(&world, &run, "announce").is_empty(),
+        "the held dependent was dispatched before the verdict was decidable\n{}",
+        why(&world, &run)
+    );
+
+    // The verdict becomes decidable: the branch on the origin is taken onto its
+    // base, under the trailer a landing leaves — which is a merge, performed here
+    // with git, and not a claim made to the binary.
+    let tip = crate::harness::git(&world, &repo.checkout, &["rev-parse", &branch])
+        .trim()
+        .to_owned();
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+            &branch,
+        ],
+    );
+    // And onto the origin, which is the copy the landing is decided against: a
+    // base only this checkout carries is one the read is entitled to say nothing
+    // about.
+    crate::harness::git(&world, &repo.checkout, &["push", "origin", "main"]);
+
+    // The run finds that out for itself and starts what it was holding.
+    world.until("the held dependent to be dispatched", |world| {
+        !dispatches_of(world, &run, "announce").is_empty()
+    });
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let result = world.run_json(&run, "result.json");
+    let nodes: std::collections::BTreeMap<String, serde_json::Value> = result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .map(|node| (node["id"].as_str().expect("an id").to_owned(), node.clone()))
+        .collect();
+    assert_eq!(
+        nodes["announce"]["status"],
+        "done",
+        "the run did not reach its own goal without a manager settling anything: {result}\n{}",
+        why(&world, &run)
+    );
+    // And the node itself reads exactly as it did: the scheduling decision was
+    // wrong, the word was not.
+    assert_eq!(nodes["publish"]["status"], "failed", "{result}");
+    assert_eq!(nodes["publish"]["outcome"], "pushed-unverified", "{result}");
+    let rendered = world.run(&["results", &run]);
+    rendered.exited(0).out_has("pushed-unverified");
+    assert!(
+        rendered.stdout.contains("failed"),
+        "the node whose dependents waited no longer reads as failed:\n{}",
+        rendered.stdout
+    );
+}
+
+/// Two nodes against one repository with no edge between them still run at the
+/// same time.
+///
+/// What must **not** be inferred from the hold above, held so the tree cannot
+/// start implying it: nothing here serialises same-repository work. Three of the
+/// four repositories in the run this came from ran two or more nodes in parallel
+/// with no trouble, and serialising them would have cost hours.
+///
+/// Observed rather than inferred. Both workers arrive at a barrier that releases
+/// only when both are inside their own dispatch, so a run that started the second
+/// after the first had finished never releases it and this fails in the double —
+/// which is a stronger fact than two records neither of which says it was waiting
+/// on the other.
+#[test]
+fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
+    let world = World::new("lifecycle-sidebyside");
+    world.repository("change-auto", &[]);
+    world.script("gh.merged", "");
+    for node in ["left", "right"] {
+        world.script(&format!("{node}.work"), &format!("{node} wrote this\n"));
+        // Two parties: these two nodes, which have nothing between them and so
+        // are ready on the same pass.
+        world.script(&format!("{node}.concurrent"), "2");
+    }
+
+    let run = settle(
+        &world,
+        "sidebyside",
+        vec![lifecycle("left", &[]), lifecycle("right", &[])],
+    );
+    let result = world.run_json(&run, "result.json");
+    for node in result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+    {
+        assert_eq!(
+            node["status"],
+            "done",
+            "a node against a shared repository did not finish: {result}\n{}",
+            why(&world, &run)
+        );
+    }
+
+    // The barrier released, so both dispatches really were in flight together,
+    // and the arrivals are which two they were.
+    let arrived = std::fs::read_to_string(world.fakes.join("concurrent.arrived"))
+        .unwrap_or_else(|error| panic!("no barrier was reached: {error}\n{}", world.dump()));
+    let live: std::collections::BTreeSet<&str> = arrived
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        live,
+        std::collections::BTreeSet::from(["left", "right"]),
+        "the two dispatches that overlapped were not this plan's two nodes: {arrived:?}\n{}",
+        why(&world, &run)
+    );
+}
+
+/// And a failure no further attempt could answer skips its dependents exactly as
+/// it always did.
+///
+/// The scope of the change above, held from the other side: what moved is the one
+/// outcome whose work reached the origin, and nothing about skipping in general.
+/// A node whose agent failed its task leaves nothing on any base for a dependent
+/// to build on, so the dependent is not attempted — and the view says which
+/// dependency answered for it.
+#[test]
+fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
+    let world = World::new("lifecycle-skippedstill");
+    world.repository("change-auto", &[]);
+    world.script("publish.work", "the worker wrote this\n");
+    world.script("publish.fail", "1");
+
+    let run = settle(
+        &world,
+        "skippedstill",
+        vec![
+            lifecycle("publish", &[]),
+            lifecycle("announce", &["publish"]),
+        ],
+    );
+    let result = world.run_json(&run, "result.json");
+    let nodes: std::collections::BTreeMap<String, serde_json::Value> = result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .map(|node| (node["id"].as_str().expect("an id").to_owned(), node.clone()))
+        .collect();
+    assert_eq!(
+        nodes["publish"]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        nodes["announce"]["status"],
+        "skipped",
+        "a failure nothing could answer stopped skipping its dependents: {result}\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatches_of(&world, &run, "announce").is_empty(),
+        "a skipped node was dispatched\n{}",
+        why(&world, &run)
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("never attempted; skipped by: publish");
+}
+
 /// Work a worker committed onto a branch of its own survives the session that
 /// held it.
 ///

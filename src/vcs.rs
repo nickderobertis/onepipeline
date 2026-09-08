@@ -28,7 +28,7 @@
 //! misread that way: what the publication did is a case of [`PublishOutcome`],
 //! and the compiler checks every reader of it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -491,6 +491,131 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
         landing_now(branch, repo),
         LandingRead::Answered(landed) if landed.is_landed()
     )
+}
+
+/// The nodes whose publication left its work on the origin with the merge path
+/// unread, and how many times this run has asked again about each.
+///
+/// Their dependents are **held** rather than skipped — `crate::graph`'s
+/// `holds_dependents` is where that is decided — which is only half an answer on
+/// its own:
+/// a hold nothing ever lifts is a run that stops short of its goal just as surely
+/// as a skip, and it took a person settling the node from landing evidence to
+/// move it. This is the other half. The verdict the publication could not read is
+/// a verdict about the *host*, and a host that was briefly unreachable comes
+/// back, so the run asks the same question the publication asked — through
+/// `onevcs`, off the branch — until it is answered or the budget for asking is
+/// spent.
+///
+/// **Bounded**, by [`crate::engine::unread_merge_path_asks`], for the reason the
+/// publication's own re-read is: a run that polled somebody else's API for good
+/// would be worse than one that reported honestly. When the budget is gone the
+/// dependents stay held, which is what they are: work waiting on a merge nobody
+/// in this run can perform, rather than work a failure made unsafe.
+///
+/// Asked only about a node that is actually **holding** something. A
+/// `pushed-unverified` leaf has no dependent waiting on it, so nothing about it
+/// changes what the run does next and the reads would buy nothing.
+#[derive(Debug, Default)]
+pub(crate) struct UnreadMergePaths {
+    asked: BTreeMap<String, u32>,
+    shown: BTreeSet<String>,
+}
+
+impl UnreadMergePaths {
+    /// How long to leave between asks.
+    ///
+    /// The publication's own first backoff, because it is the same question about
+    /// the same host: a knob an operator turns to say how patient this run is with
+    /// a merge path should not need turning twice.
+    pub(crate) fn every(&self) -> Duration {
+        crate::engine::merge_path_backoff()
+    }
+
+    /// The nodes still worth asking about: settled with their work on the origin,
+    /// holding at least one dependent, and not yet asked the budget out.
+    pub(crate) fn watching(
+        &self,
+        state: &crate::projection::RunState,
+        statuses: &BTreeMap<String, crate::graph::NodeStatus>,
+    ) -> Vec<String> {
+        let budget = crate::engine::unread_merge_path_asks().get();
+        state
+            .graph
+            .iter()
+            .map(|node| node.id.clone())
+            .filter(|id| {
+                statuses.get(id) == Some(&crate::graph::NodeStatus::Failed)
+                    && state.outcomes.get(id).map(String::as_str) == Some(Failure::UNREAD)
+                    && state.landings.get(id) != Some(&crate::graph::Landing::Landed)
+                    && self.asked.get(id).copied().unwrap_or(0) < budget
+            })
+            .filter(|id| {
+                state.graph.dependents_of(id).iter().any(|dependent| {
+                    statuses.get(dependent) == Some(&crate::graph::NodeStatus::Blocked)
+                })
+            })
+            .collect()
+    }
+
+    /// Put every landing this run has been shown back onto the state it belongs
+    /// to.
+    ///
+    /// Every pass, rather than once where it was read, because the loop re-folds
+    /// the whole state from the journal each time a node settles — and this is a
+    /// read of something the journal does not record, so a fold that dropped it
+    /// would send a dependent this run had already started back to being skipped
+    /// by a node whose work is on its base.
+    /// Reports whether the state had lost one, which is what tells the loop its
+    /// derivation is stale.
+    pub(crate) fn apply(&self, state: &mut crate::projection::RunState) -> bool {
+        let mut restored = false;
+        for node in &self.shown {
+            let already = state
+                .landings
+                .insert(node.clone(), crate::graph::Landing::Landed);
+            restored |= already != Some(crate::graph::Landing::Landed);
+        }
+        restored
+    }
+
+    /// Ask `onevcs` again about each of them, and record every landing it can
+    /// show.
+    ///
+    /// The answer goes onto the run's own state rather than into its journal, for
+    /// the reason `crate::engine`'s cross-DAG resolution does the same: it is a
+    /// read of something this run does not write, re-taken by whatever is driving
+    /// the run, so a fresh driver re-derives it rather than inheriting a claim it
+    /// cannot check. What the journal keeps is the settlement, which is unchanged
+    /// — the node published, and the publication did not read a verdict.
+    ///
+    /// Reports whether anything became decidable, which is what tells the loop a
+    /// hold may have lifted.
+    pub(crate) fn read_again(
+        &mut self,
+        state: &mut crate::projection::RunState,
+        watching: &[String],
+    ) -> bool {
+        let mut lifted = false;
+        for node in watching {
+            // Every ask is counted, whatever it answers: the budget is on the
+            // asking rather than on the answers, so a host that never comes back
+            // is bounded by the same number a host that does is.
+            *self.asked.entry(node.clone()).or_default() += 1;
+            let Some(branch) = state.branches.get(node).cloned() else {
+                continue;
+            };
+            // The node's own repository, so a branch name two identities both
+            // hold is asked about the one this run's work is in.
+            let repo = state.graph.get(node).and_then(|node| node.repo.clone());
+            if proved_landed(&branch, repo.as_deref()) {
+                self.shown.insert(node.clone());
+                lifted = true;
+            }
+        }
+        let _ = self.apply(state);
+        lifted
+    }
 }
 
 /// Where a human reads the change a publication produced, when there is one.
