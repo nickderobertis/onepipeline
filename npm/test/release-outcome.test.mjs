@@ -240,7 +240,14 @@ describe("the release outcome record", () => {
         ["--version", "1.2.3", "--run-url", "http://example.invalid/x", ...base],
         /is not an https URL/,
       ],
+      // Matches an `^https://\\S+$` prefix test and is no URL at all, which is why
+      // this field is parsed rather than pattern-matched.
+      [["--version", "1.2.3", "--run-url", "https://%", ...base], /is not an https URL/],
+      [["--version", "1.2.3", "--run-url", "https://", ...base], /is not an https URL/],
       [["--version", "1.2.3", "--out", ...base], /--out needs a value/],
+      // An empty value is a caller error, not a path that later failed to be
+      // written — those carry different exit codes, and this is the first.
+      [["--version", "1.2.3", "--out", "", ...base], /--out needs a value/],
       [["--version", "1.2.3", "--nope", "x", ...base], /unexpected argument: --nope/],
       [
         ["--version", "1.2.3", "--published", "success", ...base],

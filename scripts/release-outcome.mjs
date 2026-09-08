@@ -64,8 +64,12 @@ function parseArgs(argv) {
   let current = null;
   const need = (i, flag) => {
     const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--"))
+    // An empty value is a caller error like any other, and refusing it here is
+    // what keeps `--out ""` from being reported later as an unwritable path —
+    // an operational failure it is not.
+    if (value === undefined || value === "" || value.startsWith("--")) {
       die(`${flag} needs a value`, `give ${flag} a value`);
+    }
     return value;
   };
   // Each of these names one thing about the whole record, so a second one is a
@@ -145,11 +149,22 @@ function compose(argv) {
       "pass the tag with its leading 'v' stripped, e.g. --version 1.2.3",
     );
   }
-  if (args.runUrl !== null && !/^https:\/\/[^\s]+$/.test(args.runUrl)) {
-    die(
-      `'${args.runUrl}' is not an https URL`,
-      "pass the release run's own URL, or omit --run-url",
-    );
+  // Parsed rather than pattern-matched: this is the one field that becomes a
+  // link somebody clicks out of the record, and `https://%` matches a prefix
+  // test while being no URL at all.
+  if (args.runUrl !== null) {
+    let parsed = null;
+    try {
+      parsed = new URL(args.runUrl);
+    } catch {
+      parsed = null;
+    }
+    if (parsed?.protocol !== "https:" || parsed.host === "") {
+      die(
+        `'${args.runUrl}' is not an https URL`,
+        "pass the release run's own URL, or omit --run-url",
+      );
+    }
   }
   if (args.targets.length === 0) {
     die(
