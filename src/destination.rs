@@ -107,11 +107,14 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
                 continue;
             }
         };
-        for asked in [
-            consumes_refusal(node, destination),
-            title_refusal(node, destination),
-        ] {
-            match asked {
+        // Each rule in turn, and no further once one has refused: the title rule
+        // runs the repository's own hook as a subprocess, and a node already being
+        // refused for its `consumes` has no use for a verdict on a title it will
+        // not publish under. A rule that could not be *asked* is not an answer, so
+        // that one is reported and the next is still put.
+        type Rule = fn(&Node, &Destination) -> std::result::Result<Option<Refusal>, String>;
+        for ask in [consumes_refusal as Rule, title_refusal as Rule] {
+            match ask(node, destination) {
                 Ok(Some(refusal)) => return Err(refusal),
                 Ok(None) => {}
                 Err(why) => report_unchecked(&node.id, repo, &why),
@@ -542,19 +545,19 @@ fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
 /// Windows paths are UTF-16 and a `Command`'s pipe hands back bytes, so there is
 /// no lossless way across; an answer that is not UTF-8 is refused rather than
 /// mangled into a path that names something else.
-// llmlint: ignore[changed_behavior_has_e2e] no journey can reach this arm, on this
+// llmlint: ignore-block[changed_behavior_has_e2e] no journey can reach this arm, on this
 // platform or the one it is written for: git for Windows prints its paths as UTF-8, so
 // producing the input is not something a test can arrange, and the arm exists precisely
 // because a caller must not be handed a path that names something else if it ever did.
-// The alternative — the lossy decode this replaced — is the defect it was written to
-// remove, and it is `from_utf8_lossy` on the Unix side that the suite does drive, through
-// `a_checkout_git_cannot_answer_for_leaves_the_title_unchecked`.
+// The byte-preserving Unix half beside it *is* driven, by
+// `a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers`, which
+// fails against the lossy decode this replaced.
 #[cfg(not(unix))]
 fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
     std::str::from_utf8(printed)
         .map(|path| PathBuf::from(path.trim()))
         .map_err(|error| format!("git printed a path that is not UTF-8: {error}"))
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Whether git would run this file as a hook.
 ///
@@ -581,11 +584,11 @@ fn runnable(path: &Path) -> Result<bool, String> {
 ///
 /// Windows carries no executable bit, so presence is the test — which is what Git
 /// for Windows does too.
-// llmlint: ignore[changed_behavior_has_e2e] the presence arm is driven on that platform by
-// every journey here that installs a hook; what has no journey is the metadata error
-// beside it, and it is the same case as `os_path`'s Windows arm above — a filesystem that
-// answers neither "here" nor "not found" is not a state a test can arrange, and the arm
-// exists so that one is never read as the hook being absent, which is how a repository
+// llmlint: ignore-block[changed_behavior_has_e2e] the presence arm is driven on that
+// platform by every journey here that installs a hook; what has no journey is the metadata
+// error beside it, and it is the same case as `os_path`'s Windows arm above — a filesystem
+// that answers neither "here" nor "not found" is not a state a test can arrange, and the
+// arm exists so that one is never read as the hook being absent, which is how a repository
 // that does state a policy would have none applied.
 #[cfg(not(unix))]
 fn runnable(path: &Path) -> Result<bool, String> {
@@ -597,7 +600,7 @@ fn runnable(path: &Path) -> Result<bool, String> {
             path.display()
         )),
     }
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The file the hook is handed, which is the single argument git hands it.
 ///

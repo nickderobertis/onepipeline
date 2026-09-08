@@ -985,6 +985,12 @@ fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
 /// would go on passing while configuring a variable nothing reads, because a
 /// variable nothing reads and an executable that is absent produce the same
 /// answer. So the copy is held to the original by reading it.
+// llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over this suite's
+// own scaffolding, not a journey — the same shape, and for the same reason, as the one
+// `harness.rs` keeps over the two hook scripts. What it holds is that a constant in this
+// file still equals a constant in another; there is no user-facing behaviour to drive,
+// and driving the binary could not detect the drift at all, because the wrong variable
+// and no variable answer identically.
 #[test]
 fn the_variable_this_suite_sets_is_the_one_the_loader_reads() {
     let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/destination.rs");
@@ -1001,4 +1007,4 @@ fn the_variable_this_suite_sets_is_the_one_the_loader_reads() {
         "this suite sets a variable the loader does not read, so every could-not-check \
          journey here is passing for the wrong reason"
     );
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]

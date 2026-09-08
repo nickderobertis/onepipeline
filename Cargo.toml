@@ -17,13 +17,10 @@ resolver = "2"
 # check`, which at this pin answer things its library does not. `src/destination.rs`
 # says what it needs them for and why it is not its own project.
 #
-# llmlint: ignore[new_command_or_client_gets_its_own_project] this adds no command the
-# tool exposes and no client of a live service: it is two offline reads of a sibling this
-# crate is already built around, made by the plan loader, so a change to the loader is
-# exactly the change that must re-run their journeys. A project of its own would have to
-# declare a dependency straight back on the one it was split from to stay in `nx
-# affected` at all, and there is nothing to split it into — `docs/contract.md` fixes this
-# repository as one library plus one binary, which is one Rust build unit.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] there is nothing to split
+# this into: `docs/contract.md` fixes this repository as one library plus one binary,
+# which is one Rust build unit. The rest of the reasoning is where the delegation above
+# points.
 #
 # `oneagentgraph`'s floor is a **requirement**, and it is one about *this* build
 # rather than about any install: the dispatch path links the crate, so raising a
