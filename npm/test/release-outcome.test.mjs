@@ -1,15 +1,10 @@
 // The three states a release can end in, driven through the real composer.
 //
-// `scripts/release-outcome.mjs` is what turns a release run's job results into
-// the `release-outcome.json` asset `release.yml` attaches to the GitHub Release.
-// A consumer outside this repository reads that file and nothing else, so its
-// shape is a contract: `schema_version` is bumped with the goldens beside this
-// file, in the same change.
-//
-// The three states exist because two cannot say what matters. **nothing
-// shipped** and **shipped and verified** are the easy ends; **shipped but
-// unverified** is the state every release from 0.16.4 onward was actually in,
-// and the state a boolean would have reported as one of its neighbours.
+// `scripts/release-outcome.mjs` turns a release run's job results into the
+// `release-outcome.json` asset `release.yml` attaches to the GitHub Release, so
+// its shape is a contract a consumer outside this repository reads:
+// `schema_version` is bumped with the goldens beside this file, in the same
+// change.
 
 import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -129,7 +124,10 @@ describe("the release outcome record", () => {
       ]);
       assert.equal(composed.code, 0, composed.stderr);
       const written = readFileSync(out, "utf8");
-      assert.equal(written, composed.stdout, "stdout and --out must be the same document");
+      // `--out` is the delivery, so stdout says where it went rather than
+      // repeating it — a release log carries one summary line, not the document.
+      assert.equal(composed.stdout, `release-outcome: 1.2.3 ${state} -> ${out}\n`);
+      assert.equal(JSON.parse(written).version, "1.2.3");
       assert.equal(
         written,
         readFileSync(join(GOLDEN, `release-outcome-${state}.json`), "utf8"),
@@ -206,6 +204,17 @@ describe("the release outcome record", () => {
     const base = targetsFor(ALL_GREEN);
     const refusals = [
       [["--version", "v1.2.3", ...base], /is not a version/],
+      [["--version", "1.2.3", "--version", "1.2.4", ...base], /--version was given twice/],
+      [
+        ["--version", "1.2.3", "--run-url", "http://example.invalid/x", ...base],
+        /is not an https URL/,
+      ],
+      [["--version", "1.2.3", "--out", ...base], /--out needs a value/],
+      [["--version", "1.2.3", "--nope", "x", ...base], /unexpected argument: --nope/],
+      [
+        ["--version", "1.2.3", "--published", "success", ...base],
+        /--published came before any --target/,
+      ],
       [
         [
           "--version",
@@ -269,10 +278,28 @@ describe("the release outcome record", () => {
     ];
     for (const [args, says] of refusals) {
       const refused = await compose(args);
-      assert.notEqual(refused.code, 0, `${args.join(" ")} was accepted`);
+      // 2 rather than 1: a caller error is a different thing from a release
+      // job's output directory being unwritable, and the exit code says which.
+      assert.equal(refused.code, 2, `${args.join(" ")} was accepted or misreported`);
       assert.match(refused.stderr, says);
       assert.match(refused.stderr, /^ACTION: /m, "every refusal names what to do next");
+      assert.equal(refused.stdout, "", "a refusal writes nothing to stdout");
     }
+  });
+
+  it("reports a record it could not write as its own failure, not as a caller error", async () => {
+    const nowhere = join(work, "no-such-directory", "release-outcome.json");
+    const failed = await compose([
+      "--version",
+      "1.2.3",
+      "--out",
+      nowhere,
+      ...targetsFor(ALL_GREEN),
+    ]);
+    assert.equal(failed.code, 1, "an unwritable --out is not a caller error");
+    assert.match(failed.stderr, /cannot write .*no-such-directory/);
+    assert.match(failed.stderr, /^ACTION: /m);
+    assert.equal(failed.stdout, "", "nothing claims a record that was never written");
   });
 
   it("names the targets release-targets.toml declares, and the ones release.yml passes", () => {

@@ -12,25 +12,15 @@
 #
 # **`npm publish` exiting 0 does not mean the registry serves the version.** It
 # means the upload was accepted; the registry completes the version write
-# afterwards, and until it does, an install cannot resolve that version. That is
-# not a theory — it is what made every macOS npm verification red. In v0.23.0 the
-# `publish-npm` job published all five platform packages and then the launcher,
-# in exactly that order, and the job log says so:
+# afterwards, and until it does an install cannot resolve that version. Measured,
+# not supposed: on v0.23.0 this job published all five platform packages and then
+# the launcher, in that order, and three of the five became resolvable 75 seconds
+# after the job had already ended. `verify-npm` installed 4 seconds after it
+# ended, npm silently skipped the optional dependencies it could not resolve, and
+# the launcher could not start.
 #
-#   17:31:52 published onepipeline-cli-darwin-arm64@0.23.0   registry: 17:33:07
-#   17:31:55 published onepipeline-cli-darwin-x64@0.23.0     registry: 17:33:10
-#   17:31:58 published onepipeline-cli-linux-arm64@0.23.0    registry: 17:33:13
-#   17:32:02 published onepipeline-cli-linux-x64@0.23.0      registry: 17:32:01
-#   17:32:06 published onepipeline-cli-win32-x64@0.23.0      registry: 17:32:06
-#   17:32:09 published onepipeline-cli@0.23.0                registry: 17:32:08
-#
-# — the job ended at 17:32:11, and three of the five became live seventy-five
-# seconds after that. So the loop's ordering was never the problem; the problem
-# is that the loop's steps did not mean what they said. `verify-npm` installed
-# the launcher at 17:32:27, npm silently skipped the two optional dependencies
-# the registry did not yet serve, and the launcher could not start.
-#
-# Two rules close it, and neither is a fixed wait:
+# So the loop's ordering was never the problem; its steps did not mean what they
+# said. Two rules close it, and neither is a fixed wait:
 #
 #   * nothing is published before every exact version its own manifest pins is
 #     served — which is the launcher's whole relationship to its platform
@@ -40,11 +30,26 @@
 #
 # The wait is bounded and it is a *refusal*, not a shrug: a launcher offered
 # against a platform package the registry cannot serve is the outage itself.
+#
+# Exits 0 having published or skipped every package it was handed; 2 on a caller
+# error — a missing argument, an unreadable package — refused before anything is
+# published; 1 when the registry did.
 set -euo pipefail
 
+# The registry, the publish, or the propagation went wrong: something outside
+# this invocation has to change before a re-run behaves differently.
 fail() {
   printf 'publish-npm: %s\n' "$1" >&2
   exit 1
+}
+
+# The caller asked for something this cannot do, and nothing has been published.
+# Its own exit code, so a release job's log separates "fix the call" from "ask
+# the registry again" — the same split scripts/retry-install.sh makes.
+refuse() {
+  printf 'publish-npm: %s\n' "$1" >&2
+  printf 'ACTION: %s\n' "$2" >&2
+  exit 2
 }
 
 # How long to keep asking the registry, and how often. Ten minutes is far past
@@ -55,7 +60,24 @@ fail() {
 await_budget="${PUBLISH_NPM_AWAIT_BUDGET:-600}"
 await_interval="${PUBLISH_NPM_AWAIT_INTERVAL:-3}"
 
-[ "$#" -gt 0 ] || fail "pass at least one package directory or tarball"
+# Both reach `sleep` and the arithmetic below, so they are checked here rather
+# than where a typo would become an infinite loop or a wait that never happens.
+case "$await_budget" in
+  "" | *[!0-9]*)
+    refuse "PUBLISH_NPM_AWAIT_BUDGET is '$await_budget', which is not a whole number of seconds" \
+      "unset it to take the default, or set it to a whole number of seconds" ;;
+esac
+case "$await_interval" in
+  "" | *[!0-9]*)
+    refuse "PUBLISH_NPM_AWAIT_INTERVAL is '$await_interval', which is not a whole number of seconds" \
+      "unset it to take the default, or set it to a whole number of seconds" ;;
+esac
+[ "$await_interval" -gt 0 ] || refuse \
+  "PUBLISH_NPM_AWAIT_INTERVAL is 0, so a wait would spin without ever pausing" \
+  "unset it to take the default, or set it to at least 1 second"
+
+[ "$#" -gt 0 ] || refuse "pass at least one package directory or tarball" \
+  "run 'publish-npm.sh <package-dir-or-tarball>...'"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -83,9 +105,16 @@ await_served() {
     registry_state "$identity" || state=$?
     case "$state" in
       0)
+        # llmlint: ignore-block[tool_output_is_signal] this line survives a later
+        # success on purpose, and it is printed only when the registry actually
+        # lagged — a healthy release prints none. It is the one warning anybody
+        # gets while a publish is stalled, before the run that exhausts the
+        # budget, and it names which package stalled. scripts/retry-install.sh
+        # carries the same directive for the same reason.
         if [ "$waited" -gt 0 ]; then
           printf 'publish-npm: the registry took %ss to serve %s\n' "$waited" "$identity" >&2
         fi
+        # llmlint: ignore-end[tool_output_is_signal]
         return 0
         ;;
       2)
@@ -135,7 +164,8 @@ skipped=""
 for package in "$@"; do
   if ! metadata="$(npm pack --dry-run --json "$package" 2>"$work/pack-error")"; then
     cat "$work/pack-error" >&2
-    fail "cannot read package metadata from '$package'; rebuild the npm artifact with scripts/npm-build.mjs"
+    refuse "cannot read package metadata from '$package'" \
+      "rebuild the npm artifact with scripts/npm-build.mjs, then re-run"
   fi
   # The single-quoted program is JavaScript; its template expression is not shell.
   # shellcheck disable=SC2016
@@ -151,7 +181,8 @@ for package in "$@"; do
     });
   ' 2>"$work/metadata-error")"; then
     cat "$work/metadata-error" >&2
-    fail "npm returned invalid metadata for '$package'; rebuild the npm artifact with scripts/npm-build.mjs"
+    refuse "npm returned invalid metadata for '$package'" \
+      "rebuild the npm artifact with scripts/npm-build.mjs, then re-run"
   fi
 
   # Nothing reaches the registry before the exact versions its own manifest pins
@@ -160,7 +191,8 @@ for package in "$@"; do
   # silently declined to fetch.
   if ! pinned="$(pinned_optional_deps "$package" 2>"$work/manifest-error")"; then
     cat "$work/manifest-error" >&2
-    fail "cannot read the manifest inside '$package'; rebuild the npm artifact with scripts/npm-build.mjs"
+    refuse "cannot read the manifest inside '$package'" \
+      "rebuild the npm artifact with scripts/npm-build.mjs, then re-run"
   fi
   while read -r pin; do
     [ -n "$pin" ] || continue

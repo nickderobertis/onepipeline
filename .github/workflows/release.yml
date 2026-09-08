@@ -44,14 +44,12 @@ name: Release
 #   * outcome       — attach `release-outcome.json` to the Release: what shipped
 #                     and whether anything verified it, in three states.
 #
-# **Verification is not a workflow of its own, on purpose.** Splitting the verify
-# jobs out would leave this workflow green whenever its publishing steps exited
-# 0 — and for every release from 0.16.4 onward that green would have been a lie:
-# the artifacts published, and the npm install of them could not start on the
-# platforms whose packages the registry had not yet made resolvable. The verify
-# jobs stay in the same run as the publish jobs so this workflow's own conclusion
-# is a claim about what a user can install, and `outcome` below makes that claim
-# readable without opening a job log.
+# **Verification stays in this workflow rather than a separate one**, so this
+# workflow's conclusion is a claim about what a user can install rather than
+# about whether the publish steps exited 0. A release has already shipped
+# artifacts that could not be installed; the second claim would have been green
+# for all of them. `outcome` below makes the distinction readable without
+# opening a job log.
 #
 # Every verify job runs the version at publish time only, and by exact version.
 # `published-smoke.yml` runs the identical script against whatever the registries
@@ -122,6 +120,14 @@ jobs:
 
   # Re-gate the release on the same checks CI enforces, so a release can never
   # publish an artifact that would not pass the gate.
+  #
+  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the
+  # tree this gates is not one this repository has necessarily gated. This workflow
+  # fires on a *published Release*, and creating a Release by hand from any tag is the
+  # documented manual fallback (see the header above) — that tag can name a commit CI
+  # never ran on, or one whose gate ran against different pinned engines. The rule's
+  # premise, that an identical tree was already gated on the way in, is what does not
+  # hold here; this is the only run that can refuse to publish an artifact.
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -137,6 +143,7 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - run: just bootstrap
       - run: just check
+  # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
 
   # Which version of each sibling engine this release links, in the notes rather
   # than only in the CycloneDX SBOM inside a published wheel — where nobody who

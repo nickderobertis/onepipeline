@@ -1,42 +1,31 @@
 #!/usr/bin/env node
 // Compose the machine-readable record of what a release actually did.
 //
-// A release has three outcomes, not two, and the third is the one that cost
-// this repository months: **nothing shipped**, **shipped but unverified**, and
-// **shipped and verified**. A boolean collapses the middle into whichever
-// neighbour the reader guesses — and the middle is exactly what every release
-// from 0.16.4 onward was, because the artifacts published and the npm
-// verification then failed on the platforms whose packages the registry had not
-// yet made resolvable.
-//
-// This turns each target's two job results into that three-state answer, and
-// `.github/workflows/release.yml` attaches the result to the GitHub Release as
-// `release-outcome.json`. A consumer outside this repository asks for it by
-// URL, with no credential and without reading a job log; README.md's "Release
-// outcome" section says how.
-//
-// The three states are per target *and* for the release as a whole, and the
-// whole is the weakest of its parts: a release is only `shipped-verified` when
-// every target it declares is.
+// A release has three outcomes, not two: **nothing shipped**, **shipped but
+// unverified**, and **shipped and verified**. A boolean collapses the middle
+// into whichever neighbour the reader guesses, and the middle is the one that
+// matters — see README.md's "Release outcome" section, which is also where a
+// consumer is told how to ask for the result.
 //
 // **Every target names a verification job, and there is no way to say it has
-// none.** That is deliberate: an artifact a release publishes and no release
-// installs is precisely the hole aarch64 Linux sat in on npm and crates.io sat
-// in until `verify-crate`. A target with nothing to verify it would have to be
-// recorded as permanently unverified, which would peg every release to the
-// middle state and make the record as unreadable as the red square it replaces.
-//
-// A `skipped` publish is a target the operator switched off, and it is not part
-// of this release's outcome; a `failure` or `cancelled` one is a target that was
-// meant to ship and did not, and it holds the release out of the top state.
+// none.** An artifact a release publishes and no release installs is the defect
+// this file exists downstream of, not a state to record. A `skipped` publish is
+// a target the operator switched off and takes no part in the outcome; a
+// `failure` or `cancelled` one was meant to ship and holds the release out of
+// the top state.
 //
 // Usage:
 //   node scripts/release-outcome.mjs --version <X.Y.Z> [--run-url <url>] \
+//     [--out <path>] \
 //     --target <registry:name> --published <result> --verified <result> \
 //     [--target ... --published ... --verified ...]
 //
 // `<result>` is a GitHub Actions job result: success, failure, cancelled or
 // skipped.
+//
+// Exits 0; 2 on a caller error, refused before anything is written; 1 when the
+// output file could not be written. With `--out` the document goes to that file
+// and stdout carries one summary line; without it, stdout carries the document.
 
 import { writeFileSync } from "node:fs";
 
@@ -51,11 +40,12 @@ const STATES = ["nothing-shipped", "shipped-unverified", "shipped-verified"];
 /// What GitHub Actions reports for a job.
 const RESULTS = ["success", "failure", "cancelled", "skipped"];
 
-/// Every failure names what to do next: this runs inside a release job, where
+/// The caller asked for something this cannot do, and nothing has been written.
+/// Every refusal names what to do next: this runs inside a release job, where
 /// the only diagnosis anyone gets is what it printed.
 function die(msg, action) {
   process.stderr.write(`release-outcome: ${msg}\nACTION: ${action}\n`);
-  process.exit(1);
+  process.exit(2);
 }
 
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -76,19 +66,25 @@ function parseArgs(argv) {
       die(`${flag} needs a value`, `give ${flag} a value`);
     return value;
   };
+  // Each of these names one thing about the whole record, so a second one is a
+  // caller that meant two records — never a value to quietly overwrite.
+  const once = (i, flag, key) => {
+    if (out[key] !== null) die(`${flag} was given twice`, `pass ${flag} once`);
+    return need(i, flag);
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     switch (flag) {
       case "--version":
-        out.version = need(i, flag);
+        out.version = once(i, flag, "version");
         i += 1;
         break;
       case "--run-url":
-        out.runUrl = need(i, flag);
+        out.runUrl = once(i, flag, "runUrl");
         i += 1;
         break;
       case "--out":
-        out.out = need(i, flag);
+        out.out = once(i, flag, "out");
         i += 1;
         break;
       case "--target":
@@ -197,27 +193,34 @@ function compose(argv) {
         ? "shipped-verified"
         : "shipped-unverified";
 
+  // `out` is where to put the record rather than part of it, so it is returned
+  // beside the record: the file's shape does not depend on how it was asked for.
   return {
-    schema_version: SCHEMA_VERSION,
-    version: args.version,
-    outcome,
-    run_url: args.runUrl,
-    targets,
+    out: args.out,
+    record: {
+      schema_version: SCHEMA_VERSION,
+      version: args.version,
+      outcome,
+      run_url: args.runUrl,
+      targets,
+    },
   };
 }
 
-const args = process.argv.slice(2);
-const document = compose(args);
-const rendered = `${JSON.stringify(document, null, 2)}\n`;
-const where = args[args.indexOf("--out") + 1];
-if (args.includes("--out")) {
+const { out, record } = compose(process.argv.slice(2));
+const rendered = `${JSON.stringify(record, null, 2)}\n`;
+
+// `--out` is the delivery, so stdout is a summary rather than a second copy of
+// what was just written; without it stdout *is* the delivery.
+if (out === null) {
+  process.stdout.write(rendered);
+} else {
   try {
-    writeFileSync(where, rendered);
+    writeFileSync(out, rendered);
   } catch (error) {
-    die(
-      `cannot write ${where}: ${error.message}`,
-      "check that --out names a path in a writable directory",
-    );
+    process.stderr.write(`release-outcome: cannot write ${out}: ${error.message}\n`);
+    process.stderr.write("ACTION: pass --out a path in a directory that exists and is writable\n");
+    process.exit(1);
   }
+  process.stdout.write(`release-outcome: ${record.version} ${record.outcome} -> ${out}\n`);
 }
-process.stdout.write(rendered);

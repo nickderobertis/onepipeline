@@ -1,19 +1,16 @@
 // A real npm registry, in this process, that can be told to lag.
 //
-// The journeys in `publish-gate.test.mjs` drive the *real* `npm` CLI, the *real*
-// `scripts/publish-npm.sh`, and the *real* packages `scripts/npm-build.mjs`
-// assembles. What they cannot drive is npmjs.org: a test may not publish there,
-// and the behaviour under test is one npmjs.org only exhibits sometimes. So the
-// registry — the environment, not the layer under test — is served here, over
-// HTTP, speaking the protocol npm speaks.
+// The registry is the *environment* for `publish-gate.test.mjs`, not the layer
+// under test: that suite drives the real `npm` CLI and the real
+// `scripts/publish-npm.sh` against this. npmjs.org cannot stand in — a test may
+// not publish there, and the behaviour under test is one it exhibits only
+// sometimes.
 //
-// Its one non-standard power is `lagFor`: a named package whose publish is
-// acknowledged immediately and whose version becomes *resolvable* later. That is
-// not an invention. It is what registry.npmjs.org did to every release since
-// 0.16.4 — see the log/registry pairing quoted in `scripts/publish-npm.sh`.
+// `lagFor` is the one non-standard power: a package whose publish is
+// acknowledged at once and whose version becomes resolvable later. Why that is
+// the shape to reproduce is in `scripts/publish-npm.sh`.
 //
-// This file is not a `*.test.mjs`, so `node --test npm/test/*.test.mjs` does not
-// run it as a suite; it is imported by the ones that do.
+// Not a `*.test.mjs`, so the suite glob does not run it.
 
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -40,11 +37,20 @@ export class Registry {
     this.timeline = [];
     this.server = null;
     this.port = 0;
+    /// An HTTP status to answer everything with, or null to serve normally.
+    this.refusing = null;
   }
 
   /// Acknowledge publishes of `name` at once but serve them `ms` later.
   lagFor(name, ms) {
     this.lag.set(name, ms);
+  }
+
+  /// Answer every request with `status` instead of serving. A registry that is
+  /// failing is not a registry saying "no such version", and a caller that
+  /// cannot tell them apart publishes over things.
+  refuseWith(status) {
+    this.refusing = status;
   }
 
   get url() {
@@ -61,7 +67,10 @@ export class Registry {
       .map(([version]) => version);
   }
 
-  /// When `identity` (`name@version`) first became visible, or undefined.
+  /// The instant `identity` (`name@version`) became resolvable, or undefined
+  /// while it still is not. The value is the entry's own `visibleAt`, not when
+  /// the timer that recorded it happened to run, so a caller comparing it
+  /// against another event compares two instants rather than two observations.
   visibleAt(identity) {
     return this.timeline.find((e) => e.kind === "visible" && e.identity === identity)?.at;
   }
@@ -128,8 +137,6 @@ export class Registry {
   }
 
   #handle(req, res) {
-    const url = new URL(req.url, this.url);
-    const path = decodeURIComponent(url.pathname).replace(/^\/+/, "");
     const answer = (code, body) => {
       const payload = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
       res.writeHead(code, {
@@ -138,6 +145,20 @@ export class Registry {
       });
       res.end(payload);
     };
+
+    // A request line is external input even here: npm is not the only thing that
+    // can reach this socket, and a path that is not valid percent-encoding must
+    // be an answer rather than an exception thrown past the response.
+    let path;
+    try {
+      path = decodeURIComponent(new URL(req.url, this.url).pathname).replace(/^\/+/, "");
+    } catch {
+      return answer(400, { error: "unreadable request path" });
+    }
+
+    if (this.refusing !== null) {
+      return answer(this.refusing, { error: "the registry is not answering" });
+    }
 
     if (req.method === "PUT") {
       const chunks = [];
@@ -175,14 +196,26 @@ export class Registry {
   }
 
   #publish(name, body) {
-    if (body.name !== name) {
-      throw Object.assign(new Error("name mismatch"), { status: 400 });
+    // Everything read below comes off the wire, so its shape is checked here
+    // rather than assumed: a body that is not an object, or whose `versions` or
+    // `_attachments` are not, is a 400 and not a TypeError.
+    const refuse = (why) => {
+      throw Object.assign(new Error(why), { status: 400 });
+    };
+    const isRecord = (value) =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    if (!isRecord(body)) refuse("publish body is not an object");
+    if (body.name !== name) refuse("name mismatch");
+    if (!isRecord(body.versions)) refuse("publish body has no `versions` object");
+    if (body._attachments !== undefined && !isRecord(body._attachments)) {
+      refuse("publish body's `_attachments` is not an object");
     }
     const entry = this.packages.get(name) ?? new Entry();
     this.packages.set(name, entry);
 
     const attachments = Object.entries(body._attachments ?? {});
-    for (const [version, manifest] of Object.entries(body.versions ?? {})) {
+    for (const [version, manifest] of Object.entries(body.versions)) {
+      if (!isRecord(manifest)) refuse(`the manifest for ${version} is not an object`);
       if (entry.versions.has(version)) {
         throw Object.assign(new Error("cannot publish over the previously published version"), {
           status: 403,
@@ -190,8 +223,8 @@ export class Registry {
       }
       const filename = `${name.replace(/^@[^/]+\//, "")}-${version}.tgz`;
       const attached = attachments.find(([key]) => key.endsWith(filename))?.[1];
-      if (!attached) {
-        throw Object.assign(new Error(`no tarball attached for ${version}`), { status: 400 });
+      if (!isRecord(attached) || typeof attached.data !== "string") {
+        refuse(`no tarball attached for ${version}`);
       }
       const tarball = Buffer.from(attached.data, "base64");
       const identity = `${name}@${version}`;
@@ -211,13 +244,13 @@ export class Registry {
       });
       entry.filenames.set(filename, version);
       this.timeline.push({ kind: "accepted", identity, at });
-      // The moment a reader could first resolve it, recorded when it happens so
-      // a test reads an observed ordering rather than an arithmetic one.
+      // Recorded only once it is true, and carrying the instant it became true,
+      // so a reader before then gets `undefined` rather than a future time.
       if (lag === 0) {
         this.timeline.push({ kind: "visible", identity, at });
       } else {
         setTimeout(() => {
-          this.timeline.push({ kind: "visible", identity, at: Date.now() });
+          this.timeline.push({ kind: "visible", identity, at: at + lag });
         }, lag).unref();
       }
     }

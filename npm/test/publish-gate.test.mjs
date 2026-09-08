@@ -1,33 +1,30 @@
 // The npm publish order, driven end to end against a registry that lags.
 //
-// `release.yml`'s publish job publishes the five platform packages and then the
-// launcher that pins them. That order was always written; what was missing is
-// that `npm publish` exiting 0 does not mean the registry *serves* the version.
-// On v0.23.0 three of the five became resolvable seventy-five seconds after the
-// publish job had already finished, `verify-npm` installed the launcher four
-// seconds after that job ended, npm silently skipped the optional dependencies
-// it could not resolve, and the launcher could not start. The evidence is quoted
-// in `scripts/publish-npm.sh`.
+// The property is not "the loop is in the right order" — it always was. It is
+// that **the launcher is not offered before every platform package its own
+// manifest pins is resolvable**; `scripts/publish-npm.sh` says why that came
+// apart. Reproducing it needs a registry that can acknowledge a publish and
+// serve it later, which is `npm/test/registry-support.mjs`.
 //
-// So the property under test is not "the loop is in the right order" — it always
-// was. It is: **the launcher is not offered before every platform package its
-// own manifest pins is resolvable**. That needs a registry that can acknowledge
-// a publish and serve it later, which is exactly what
-// `npm/test/registry-support.mjs` is.
+// Nothing here is stubbed except that registry, which is the environment rather
+// than the layer under test: real build script, real packages, real `npm` CLI,
+// real `scripts/publish-npm.sh`, and a real install whose launcher is run.
 //
-// Nothing here is stubbed except the registry itself, which is the environment
-// rather than the layer under test: the packages come from the real
-// `scripts/npm-build.mjs` around the real compiled binary, the publishing is the
-// real `scripts/publish-npm.sh` driving the real `npm` CLI, and the resolution
-// is a real `npm install` followed by running what it put on PATH.
-//
-// What can only be observed against npmjs.org itself — how long that registry
-// actually lags, and whether a given release's legs went green — is named in
-// README.md's "Release outcome" section and proven by `release.yml`'s own
-// verify jobs on every release.
+// What can only be observed against npmjs.org — how long it actually lags, and
+// whether a given release's legs went green — is what `release.yml`'s verify
+// jobs answer on every release, and what README.md's "Release outcome" section
+// makes readable afterwards.
 
 import { execFile } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -312,6 +309,80 @@ describe("the npm publish order", () => {
     const failed = await installAndLaunch(["--version"]);
     assert.notEqual(failed.code, 0, "the launcher started against a package npm never installed");
     assert.match(failed.stderr, new RegExp(`platform package ${host.name} is not installed`));
+  });
+
+  it("treats a registry that will not answer as unknown, not as absent", async () => {
+    const reg = await freshRegistry();
+    const host = platforms.get(hostTarget());
+    // A registry answering 403 is not a registry answering "no such version".
+    // Reading the first as the second is how a publish-over or a launcher
+    // offered against nothing would happen, so it is a refusal. 403 rather than
+    // a 5xx because npm retries a 5xx for a minute first, and what is under test
+    // here is the reading, not npm's backoff.
+    reg.refuseWith(403);
+    const refused = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], { env });
+    assert.equal(refused.code, 1, "a registry that did not answer was read as an answer");
+    assert.match(
+      refused.stderr,
+      /cannot query '.*'; re-run the release when the npm registry is reachable/,
+    );
+    assert.equal(reg.acceptedAt(`${host.name}@${version}`), undefined, "it published anyway");
+  });
+
+  it("refuses a package it cannot read before anything reaches the registry", async () => {
+    const reg = await freshRegistry();
+    const corrupt = join(work, "not-a-package.tgz");
+    writeFileSync(corrupt, "this is not a gzipped tarball\n");
+    const refused = await attempt("bash", ["scripts/publish-npm.sh", corrupt], { env });
+    // 2, not 1: the caller handed it something to fix, and the registry was
+    // never asked. A release log reads the two apart by the code alone.
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /cannot read package metadata from/);
+    assert.match(refused.stderr, /^ACTION: /m);
+    assert.equal(reg.timeline.length, 0, "a package it could not read still reached the registry");
+  });
+
+  it("refuses a wait it cannot make sense of rather than spinning on it", async () => {
+    await freshRegistry();
+    const host = platforms.get(hostTarget());
+    for (const [budget, interval] of [
+      ["not-a-number", "1"],
+      ["10", "0"],
+    ]) {
+      const refused = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
+        env: {
+          ...env,
+          PUBLISH_NPM_AWAIT_BUDGET: budget,
+          PUBLISH_NPM_AWAIT_INTERVAL: interval,
+        },
+      });
+      assert.equal(refused.code, 2, refused.stderr);
+      assert.match(refused.stderr, /^ACTION: /m);
+    }
+  });
+
+  it("waits only for the pins that name one version, and leaves a range to npm", async () => {
+    const reg = await freshRegistry();
+    // A range is not a pin: it names no single version to wait for. Everything
+    // `scripts/npm-build.mjs` stamps is exact, so this proves the distinction
+    // rather than a shape the release produces — and proves that a launcher
+    // carrying one is not held for a version that will never be asked about.
+    const ranged = join(work, "ranged-launcher");
+    cpSync(launcherDir, ranged, { recursive: true });
+    const manifest = JSON.parse(readFileSync(join(ranged, "package.json"), "utf8"));
+    for (const name of Object.keys(manifest.optionalDependencies)) {
+      manifest.optionalDependencies[name] = `^${version}`;
+    }
+    writeFileSync(join(ranged, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const published = await attempt("bash", ["scripts/publish-npm.sh", ranged], {
+      env: { ...env, PUBLISH_NPM_AWAIT_BUDGET: "2", PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(published.code, 0, published.stderr);
+    assert.ok(
+      reg.acceptedAt(`onepipeline-cli@${version}`),
+      "a launcher pinning nothing exactly was held for a version nobody named",
+    );
   });
 
   it("refuses rather than offering a launcher the registry cannot resolve", async () => {
