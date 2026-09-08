@@ -563,15 +563,17 @@ fn a_node_that_names_its_own_change_policy_consumes_without_being_refused() {
     world.run(&["plan", "check", &project]).exited(0);
 }
 
-/// The **other** two ways a policy can fail to arrive, driven through the binary.
+/// Every **other** way a policy can fail to arrive, driven through the binary.
 ///
-/// A verb that refuses after resolving, and one that states a policy the sibling's
-/// own type does not know: neither is a repository that opens a change request, so
-/// neither may pass the `consumes` rule. The plan is the one the `consumes`
-/// journey refuses, so what each of these costs is exactly that refusal.
+/// A verb that refuses after resolving, one that states a policy the sibling's own
+/// type does not know, one whose stdout is not UTF-8, and one whose line this
+/// build reads no policy off at all: none of them is a repository that opens a
+/// change request, so none may pass the `consumes` rule. The plan is the one the
+/// `consumes` journey refuses, so what each of these costs is exactly that
+/// refusal.
 #[cfg(unix)]
 #[test]
-fn a_rules_check_that_refuses_or_names_an_unknown_policy_leaves_the_node_unchecked() {
+fn a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked() {
     let world = World::new("destination-policy-arms");
     let service = two_repositories(&world, "local-direct");
     let project = world.plan(
@@ -592,6 +594,11 @@ fn a_rules_check_that_refuses_or_names_an_unknown_policy_leaves_the_node_uncheck
         (
             "publication: sideways (from rule 1)\n",
             "states a publication policy this build does not know, 'sideways'",
+        ),
+        (ANSWERS_NOT_UTF8, "answered bytes that are not UTF-8"),
+        (
+            "publication: local-direct, from rule 1\n",
+            "line this build does not read",
         ),
     ] {
         script_the_answers(&world, &resolved, rules_check);

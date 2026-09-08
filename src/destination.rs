@@ -224,10 +224,29 @@ fn resolve(repo: &str) -> Result<Destination, String> {
         serde_json::from_str(ask(&["resolve"], repo)?.trim()).map_err(|error| {
             format!("`onevcs resolve {repo}` did not answer the shape this build reads: {error}")
         })?;
-    // The one thing the shape cannot say: an identity is what every refusal below
+    // The two things the shape cannot say. An identity is what every refusal below
     // names the repository by, and a blank one names nothing.
     if resolved.identity.trim().is_empty() {
         return Err(format!("`onevcs resolve {repo}` states a blank identity"));
+    }
+    // And a checkout is a place on this host, which a relative path does not name:
+    // it would resolve against whatever directory this process happens to have been
+    // started in, so the hook that answered would be some other repository's.
+    //
+    // llmlint: ignore[boundary_inputs_validated] that the checkout is *the* one for this
+    // identity is not checkable here without re-deriving the registry lookup that
+    // answered it, which is the identity chain `src/AGENTS.md` keeps in `onevcs`. It is
+    // that crate's own answer for the repository this loader asked it about, obtained by
+    // running the verb the rest of this stack already trusts, and the hook reached
+    // through it is the same file `onevcs` runs from the same path at the publication —
+    // so a second opinion here could only disagree with the thing it is predicting.
+    // Absolute, and a directory git answers for, are what can be checked, and both are.
+    if !resolved.publication_checkout.is_absolute() {
+        return Err(format!(
+            "`onevcs resolve {repo}` states a publication checkout that is not an absolute \
+             path, {}",
+            resolved.publication_checkout.display()
+        ));
     }
     Ok(Destination {
         resolved,
@@ -245,14 +264,26 @@ fn resolve(repo: &str) -> Result<Destination, String> {
 /// word on it must be one the sibling's own type accepts — so a reworded report
 /// becomes a node this build could not check rather than a node it waved through.
 fn publication(repo: &str, reported: &str) -> Result<MergePolicy, String> {
-    let stated = reported
+    let line = reported
         .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix(PUBLICATION_LINE))
-        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::trim)
         .ok_or_else(|| {
             format!("`onevcs rules check {repo}` states no `{PUBLICATION_LINE}` line")
         })?;
+    // The whole line rather than its first word. The sibling prints the policy and
+    // then, in brackets, which rule decided it — so anything else on that line is a
+    // report this build is reading by luck, and reading it by luck is how a
+    // reworded one goes on being half-understood instead of saying it was not read.
+    let (stated, whence) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let whence = whence.trim();
+    if !(whence.is_empty() || (whence.starts_with('(') && whence.ends_with(')'))) {
+        return Err(format!(
+            "`onevcs rules check {repo}` states a `{PUBLICATION_LINE}` line this build does \
+             not read: {line:?}"
+        ));
+    }
     // Through the sibling's own type, so what may spell a policy is its list
     // rather than a second one here.
     serde_json::from_value(serde_json::Value::String(stated.to_owned())).map_err(|_| {
@@ -361,9 +392,9 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
                 "the repository {identity} turns this node's title down at its own \
                  {COMMIT_MSG_HOOK} hook, so the publication this node ends with would be \
                  refused with the whole dispatch already paid for. The title is {title:?}, and \
-                 the hook ({exit}) said:\n{said}",
+                 the hook ({termination}) said:\n{said}",
                 identity = destination.resolved.identity,
-                exit = rejection.exit,
+                termination = rejection.termination,
                 said = rejection.said,
             ),
         )
@@ -374,7 +405,10 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
 /// What a repository's own hook said when it turned a subject down.
 #[derive(Debug)]
 struct Rejected {
-    exit: String,
+    /// How the hook ended — an exit status, or the signal that stopped it before
+    /// it reached one. Both are answers a report has to be able to give, and only
+    /// one of them is an exit.
+    termination: String,
     said: String,
 }
 
@@ -418,7 +452,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
     );
     let said = said.trim();
     Ok(Some(Rejected {
-        exit: match ran.status.code() {
+        termination: match ran.status.code() {
             Some(code) => format!("exit {code}"),
             None => "killed by a signal".to_owned(),
         },
@@ -612,6 +646,21 @@ mod tests {
         let unknown = publication("service", "publication: none (from rule 1)\n")
             .expect_err("an unknown policy is not a policy");
         assert!(unknown.contains("does not know, 'none'"), "{unknown}");
+
+        // The whole line, not its first word: the sibling states the policy and
+        // then, in brackets, which rule decided it. Anything else on it is a
+        // report this build would be reading by luck.
+        let reworded = publication("service", "publication: local-direct, from rule 1\n")
+            .expect_err("a line this build does not read is not read anyway");
+        assert!(
+            reworded.contains("line this build does not read"),
+            "{reworded}"
+        );
+        assert_eq!(
+            publication("service", "publication: change-open\n").expect("a bare policy is read"),
+            MergePolicy::ChangeOpen,
+            "the bracketed provenance is optional, as a `--policy` override prints it"
+        );
     }
 
     /// A refusal that carries somebody else's output inline carries one line of
@@ -856,7 +905,7 @@ mod tests {
         let rejected = ask_the_hook(&checkout, "refactor(x): y")
             .expect("the hook runs")
             .expect("a title this repository does not release from is turned down");
-        assert_eq!(rejected.exit, "exit 3");
+        assert_eq!(rejected.termination, "exit 3");
         assert_eq!(rejected.said, "only feat: here");
 
         // A hook that refuses and says nothing has still refused.
@@ -864,7 +913,7 @@ mod tests {
         let silent = ask_the_hook(&checkout, "feat: ship it")
             .expect("the hook runs")
             .expect("a silent refusal is still a refusal");
-        assert_eq!(silent.exit, "exit 1");
+        assert_eq!(silent.termination, "exit 1");
         assert_eq!(
             silent.said, "<no output>",
             "a refusal nobody can read must say that it said nothing"
