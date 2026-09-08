@@ -3620,14 +3620,14 @@ fn a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft() {
     world.run(&["stop", &run]).exited(0);
 }
 
-/// Where the engine repository's own publications open a **change request** a
-/// person is left to merge, and everything else lands with git.
+/// Rule the engine repository's publications to **open a change request** a
+/// person is left to merge, and everything else to land with git.
 ///
 /// The dependency's work has to really reach a base branch for `onevcs` to
 /// resolve it as landed, and a `change-*` publication lands through the `gh`
 /// stand-in, which moves no git ref — so the merge is this journey's own, made
 /// the way a person's is: with git, carrying the trailer `onevcs` reads.
-fn the_engine_opens_a_change(world: &World) {
+fn the_engine_publishes_by_opening_a_change(world: &World) {
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
         format!(
@@ -3732,7 +3732,7 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
     let world = watching(name);
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
-    the_engine_opens_a_change(&world);
+    the_engine_publishes_by_opening_a_change(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&automated(&script));
     // No answer file at all: the target has no release yet, which is an answer
@@ -4091,6 +4091,15 @@ fn waited_seconds(entry: &Value) -> u64 {
 /// rather than passing on a question nobody put.
 #[test]
 fn the_elapsed_wait_a_supervisor_is_shown_counts_from_the_hold_that_is_running() {
+    // llmlint: ignore[tests_mirror_real_usage] the seam stands in for no layer of this
+    // journey: the binary, the release watch, the probe subprocess and both answers are the
+    // real ones, and what it sets is *when* the second real answer is asked for. The thing
+    // being reproduced is a race — an answer carrying no version taken up after one that
+    // carried it — and the ordinary interface cannot express an ordering, because the asker
+    // takes up the loop's newest question set at the top of every iteration. Measured: with
+    // no seam, this journey and the one below it both pass with the latch and the dropped
+    // clock reverted, so a journey that "reached the condition through realistic probe
+    // behaviour" is one that reaches it never.
     let world = watching("adoption-wait-clock").with_env(
         "ONEPIPELINE_RELEASE_WITHDRAWN_ASK_SECONDS",
         WITHDRAWN_ASK_SECONDS,
@@ -4258,7 +4267,7 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
     let world = watching("adoption-settled-crossdag");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
-    the_engine_opens_a_change(&world);
+    the_engine_publishes_by_opening_a_change(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&automated(&script));
 

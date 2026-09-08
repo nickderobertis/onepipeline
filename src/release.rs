@@ -1781,15 +1781,29 @@ fn poll_seconds() -> u64 {
         .unwrap_or(DEFAULT_POLL_SECONDS)
 }
 
+/// The longest a withdrawn question may go on being asked.
+///
+/// What the seam models is one probe run that was already in flight, so the
+/// bound is what one such run can cost: `onevcs` gives a probe its target's own
+/// timeout, and this crate's own fixtures give it thirty seconds. Five minutes is
+/// ten of those, and past it a question the loop has withdrawn is being asked for
+/// a reason no in-flight probe explains.
+const MAX_WITHDRAWN_ASK_SECONDS: u64 = 300;
+
 /// How long the asker goes on asking a question the loop has withdrawn.
 ///
-/// Zero for an unset, unusable or negative value — which is the behaviour every
-/// build in the field has: a withdrawn question is asked no more.
+/// Zero for an unset value, one this build cannot read, and one past
+/// [`MAX_WITHDRAWN_ASK_SECONDS`] — all three of which are the behaviour every
+/// build in the field has, a withdrawn question asked no more. Falling **off**
+/// rather than to the bound is the safe direction here for the reason
+/// [`poll_seconds`] falls back rather than to zero: a value nobody can have meant
+/// should leave the shipped behaviour alone rather than pick a number of its own.
 fn withdrawn_ask() -> Duration {
     Duration::from_secs(
         std::env::var(WITHDRAWN_ASK_ENV)
             .ok()
             .and_then(|value| value.parse().ok())
+            .filter(|seconds| *seconds <= MAX_WITHDRAWN_ASK_SECONDS)
             .unwrap_or(0),
     )
 }
