@@ -75,7 +75,6 @@ pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
 }
 
-/// Count the records one fold took out of a run's journal.
 pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }

@@ -15,9 +15,8 @@
 // same suppression and the full rationale.
 
 use crate::harness::{agent, counts, plan_of, reporting, World, LOOP_STATS_ENV};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-/// Launch a run through the CLI and wait for its result.
 fn settled(world: &World, run: &str, nodes: Vec<Value>) {
     let plan = world.plan(run, &plan_of(run, nodes));
     world.run(&["start", &plan, "--attach"]).settled();
@@ -26,7 +25,6 @@ fn settled(world: &World, run: &str, nodes: Vec<Value>) {
     });
 }
 
-/// How many journal records the run's checkpoint accounts for.
 fn accounted_for(world: &World, run: &str) -> usize {
     let document = world.run_json(run, "checkpoint.json");
     usize::try_from(
@@ -108,17 +106,110 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
         .out_has("2/2 done")
         .out_lacks("1/2 done");
 
-    std::fs::remove_file(world.run_file("tail", "checkpoint.json"))
-        .expect("the checkpoint goes away");
-    world
-        .run(&["status", "tail"])
-        .exited(0)
-        .out_has("1/2 done")
-        .out_lacks("2/2 done");
     assert!(
         blanked < accounted,
         "the record this journey blanked was not one the checkpoint accounted for"
     );
+
+    // And every state that makes a checkpoint unusable, over the same store: each
+    // one has to answer out of the journal, which is the answer with no checkpoint
+    // there at all. The blanked record is what makes the two distinguishable —
+    // without it a document that was wrongly trusted would fold to the same line.
+    let usable = std::fs::read(world.run_file("tail", "checkpoint.json"))
+        .expect("the checkpoint this read wrote");
+    let store = world.run_file("tail", "events.jsonl");
+    let whole = std::fs::read(&store).expect("the run's journal");
+    for (unusable, leave) in unusable_states() {
+        std::fs::write(&store, &whole).expect("the journal is put back");
+        leave(&world, &usable);
+        let read = world.run(&["status", "tail"]);
+        read.exited(0);
+        assert!(
+            read.stdout.contains("1/2 done") && !read.stdout.contains("2/2 done"),
+            "a checkpoint {unusable} was folded from anyway:\n{}",
+            read.stdout
+        );
+    }
+}
+
+/// Every state the module note says makes a checkpoint unusable, each left on a
+/// run root the compiled binary is then asked to read.
+///
+/// A list rather than a journey each, because what every one of them asserts is
+/// the same sentence — the reader answers out of the journal — and the difference
+/// between them is only which byte of the run root is wrong.
+type LeaveUnusable = fn(&World, &[u8]);
+
+fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
+    vec![
+        ("absent", |world, _| {
+            std::fs::remove_file(world.run_file("tail", "checkpoint.json"))
+                .expect("the checkpoint goes away");
+        }),
+        ("unreadable", |world, _| {
+            std::fs::write(
+                world.run_file("tail", "checkpoint.json"),
+                b"{ this is not a checkpoint",
+            )
+            .expect("the checkpoint is mangled");
+        }),
+        ("at a version this build does not write", |world, usable| {
+            let mut document: Value =
+                serde_json::from_slice(usable).expect("the checkpoint parses");
+            let version = document["schema_version"].as_u64().unwrap_or(0);
+            document["schema_version"] = json!(version + 1);
+            write_checkpoint(world, &document);
+        }),
+        ("naming another run", |world, usable| {
+            let mut document: Value =
+                serde_json::from_slice(usable).expect("the checkpoint parses");
+            document["run_id"] = json!("somebody-elses-run");
+            write_checkpoint(world, &document);
+        }),
+        (
+            "claiming coverage the journal does not corroborate",
+            |world, usable| {
+                let mut document: Value =
+                    serde_json::from_slice(usable).expect("the checkpoint parses");
+                // Everything covered claimed as written a century after the records the
+                // store holds in front of the marker.
+                document["coverage"]["at"] =
+                    json!({"ts": "2199-01-01T00:00:00.000Z", "stream": "zzzz"});
+                document["coverage"]["bytes"] =
+                    json!(document["coverage"]["bytes"].as_u64().unwrap_or(0) / 2);
+                write_checkpoint(world, &document);
+            },
+        ),
+        (
+            "marking a byte that is not a record boundary",
+            |world, usable| {
+                let mut document: Value =
+                    serde_json::from_slice(usable).expect("the checkpoint parses");
+                let bytes = document["coverage"]["bytes"].as_u64().unwrap_or(0);
+                document["coverage"]["bytes"] = json!(bytes - 1);
+                write_checkpoint(world, &document);
+            },
+        ),
+        (
+            "marking more bytes than the journal holds",
+            |world, usable| {
+                let mut document: Value =
+                    serde_json::from_slice(usable).expect("the checkpoint parses");
+                let store = world.run_file("tail", "events.jsonl");
+                let whole = std::fs::read(&store).expect("the run's journal");
+                document["coverage"]["bytes"] = json!(whole.len() as u64 + 1);
+                write_checkpoint(world, &document);
+            },
+        ),
+    ]
+}
+
+fn write_checkpoint(world: &World, document: &Value) {
+    std::fs::write(
+        world.run_file("tail", "checkpoint.json"),
+        serde_json::to_vec_pretty(document).expect("a checkpoint serializes"),
+    )
+    .expect("the checkpoint is written");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

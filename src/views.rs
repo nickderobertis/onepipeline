@@ -536,14 +536,11 @@ impl RunView {
         let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
-        // Folded from the run's checkpoint where there is a usable one, so what a
-        // supervisory look costs is the records recorded since the last one rather
-        // than the run's whole history. The events beside it are the merged store
-        // itself, which this view hands to its caller and which no checkpoint
-        // stands in for — what the checkpoint removes is the fold over them, which
-        // is the part that grew from 0.35 s to 17.47 s as one run's store grew to
-        // 22 MB. See [`crate::checkpoint`].
-        let mut state = crate::checkpoint::fold(paths);
+        // Resumed from the run's checkpoint rather than folded from nothing: the
+        // events above are the merged store this view hands to its caller, and what
+        // no longer grows with them is the fold over them. See
+        // [`crate::checkpoint`].
+        let mut state = crate::checkpoint::resume(paths);
         landings_the_run_re_read(&mut state, paths);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
