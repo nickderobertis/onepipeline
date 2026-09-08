@@ -34,6 +34,7 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
         "{workspaceRoot}/scripts/publish-npm.sh",
+        "{workspaceRoot}/scripts/release-outcome.mjs",
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/scripts/nx-affected.sh",
         "{workspaceRoot}/scripts/llmlint-diff.sh",

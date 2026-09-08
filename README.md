@@ -51,6 +51,51 @@ so an unqualified command fails with `multiple packages with binaries found`.
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every release, with `sha256` checksums.
 
+## Release outcome
+
+Every release attaches **`release-outcome.json`** to its GitHub Release. It
+answers one question in three states, so a consumer can tell a publication that
+was verified from one that was not without opening a job log:
+
+- `nothing-shipped` — no artifact reached a registry.
+- `shipped-unverified` — artifacts are public, and installing one of them was
+  not proven to work.
+- `shipped-verified` — every artifact taking part in the release published *and*
+  installed and ran on every platform it declares a package for.
+
+Ask for it by URL. No credential, and `latest` needs no version:
+
+```bash
+curl -fsSL https://github.com/nickderobertis/onepipeline/releases/latest/download/release-outcome.json
+curl -fsSL https://github.com/nickderobertis/onepipeline/releases/download/v1.2.3/release-outcome.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "version": "1.2.3",
+  "outcome": "shipped-unverified",
+  "run_url": "https://github.com/nickderobertis/onepipeline/actions/runs/1",
+  "targets": [
+    { "id": "crate:onepipeline", "outcome": "shipped-verified", "published": "success", "verified": "success" },
+    { "id": "pypi:onepipeline-cli", "outcome": "shipped-verified", "published": "success", "verified": "success" },
+    { "id": "npm:onepipeline-cli", "outcome": "shipped-unverified", "published": "success", "verified": "failure" }
+  ]
+}
+```
+
+Each `id` is the registry-qualified identifier
+[`release-targets.toml`](release-targets.toml) declares and
+`scripts/release-probe.sh` answers for, so the two are asked in the same
+vocabulary — the probe says *which version* a registry serves, and this says
+*whether anything proved it works*. `schema_version` changes only alongside the
+golden records under `npm/test/golden/`.
+
+The middle state is the one that matters, and it is why verification is not a
+workflow of its own: a workflow whose green meant only that the publishing steps
+exited without error would have been green for every release whose npm launcher
+could not start.
+
 ## Where a plan lives
 
 A plan is one **onetaskgraph project**, and a node is one task in it. A run is

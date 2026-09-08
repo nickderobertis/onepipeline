@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "version": "1.2.3",
+  "outcome": "nothing-shipped",
+  "run_url": "https://github.com/nickderobertis/onepipeline/actions/runs/1",
+  "targets": [
+    {
+      "id": "crate:onepipeline",
+      "outcome": "nothing-shipped",
+      "published": "skipped",
+      "verified": "skipped"
+    },
+    {
+      "id": "pypi:onepipeline-cli",
+      "outcome": "nothing-shipped",
+      "published": "skipped",
+      "verified": "skipped"
+    },
+    {
+      "id": "npm:onepipeline-cli",
+      "outcome": "nothing-shipped",
+      "published": "skipped",
+      "verified": "skipped"
+    }
+  ]
+}
