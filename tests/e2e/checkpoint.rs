@@ -66,7 +66,7 @@ fn blank_a_settlement_within(world: &World, run: &str, within: usize) -> usize {
             panic!("the checkpoint accounts for {within} records and none of them settles a node")
         });
     let blanked = lines[settlement].len() - 1;
-    lines[settlement] = b"#".repeat(blanked).into_iter().chain([b'\n']).collect();
+    lines[settlement] = b"#".repeat(blanked).into_iter().chain(*b"\n").collect();
     std::fs::write(&path, lines.concat()).expect("the journal is rewritten");
     settlement
 }

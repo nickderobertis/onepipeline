@@ -527,8 +527,8 @@ fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
     }
     let mut covered = 0;
     let mut spanning = 0;
-    for boundary in 0..=cap {
-        spanning += ruled_out[boundary];
+    for (boundary, opened) in ruled_out.iter().enumerate().take(cap + 1) {
+        spanning += opened;
         if spanning == 0 {
             covered = boundary;
         }
@@ -995,6 +995,62 @@ mod tests {
             "a marker stopped at an inversion instead of passing it"
         );
         assert_eq!(state, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A line this build cannot read is accounted for by the marker and placed by
+    /// nothing.
+    ///
+    /// Both halves matter and they pull opposite ways: the byte count has to
+    /// include it, or the boundary is short for ever and every later read
+    /// re-reads the store from there; and where the merge would put it must
+    /// decide nothing, because it folds to nothing and holding the records after
+    /// it against a line with no stamp of its own would stop a marker that has
+    /// lost no accuracy at all.
+    #[test]
+    fn a_line_this_build_cannot_read_is_accounted_for_and_placed_by_nothing() {
+        let root = scratch("unreadable-line");
+        let paths = a_recorded_run(&root, "r-unreadable");
+        an_instant_later();
+        crate::ledger::append_line(&paths.journal(), "this is not a record").expect("appended");
+        settle(&paths, "build", "done");
+        settle(&paths, "ship", "done");
+
+        let held = crate::ledger::read_records(&paths.journal()).len() as u64;
+        let state = folded_as(&fold(&paths));
+        let covered = super::stored(&paths).expect("a checkpoint").coverage;
+        assert_eq!(
+            covered.bytes,
+            crate::ledger::read_records(&paths.journal())
+                .iter()
+                .take(covered.records as usize)
+                .map(|record| record.bytes + 1)
+                .sum::<u64>(),
+            "the marker's bytes and the records it counts describe different stores"
+        );
+        assert!(
+            covered.records > 2 && covered.records < held,
+            "a {held}-record store with a line this build cannot read accounts for \
+             {}",
+            covered.records
+        );
+        assert_eq!(state, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run that has recorded nothing folds to the empty state and leaves no
+    /// checkpoint: there is no prefix to cache and nothing to save by caching it.
+    #[test]
+    fn a_run_that_has_recorded_nothing_leaves_no_checkpoint() {
+        let root = scratch("nothing-recorded");
+        let paths = a_run(&root, "r-empty");
+        let state = fold(&paths);
+        assert!(state.strict, "the empty fold is not the fold's own start");
+        assert!(state.graph.is_empty());
+        assert!(
+            !paths.checkpoint().exists(),
+            "a run with no store was given a checkpoint of it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
