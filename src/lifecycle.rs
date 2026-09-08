@@ -109,11 +109,11 @@ pub fn execute(
         // Where this attempt left the branch: `onevcs` commits a session's
         // worktree only where it holds something to commit, so an attempt that
         // recorded no commit added nothing and the branch stands where the last
-        // one left it. Republishing that tree is a refusal the branch did not
+        // one left it. Republishing that commit is a refusal the branch did not
         // cause, so the attempt is handed back rather than spent.
         let tip = preserved.head.clone().or_else(|| published.clone());
-        if let Some(same) = unchanged_tree(published.as_deref(), tip.as_deref()) {
-            return published_an_unchanged_tree(&node.id, &preserved, &endings, &same, attempt);
+        if let Some(same) = unmoved_tip(published.as_deref(), tip.as_deref()) {
+            return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
         }
         published = tip;
         // Two reasons to stop, and one settlement for both: the budget is spent,
@@ -745,8 +745,8 @@ struct Preserved {
     /// a spent budget writes says it exactly as one that settled straight away
     /// does.
     undrafted: Option<String>,
-    /// The commit the session left this branch at, which is *the tree that was
-    /// refused*.
+    /// The commit the session left this branch at, which is the tip that was
+    /// published.
     ///
     /// Read off `onevcs`'s own record of the session — the library that made the
     /// commit is the one that knows what it is at — so comparing two attempts is
@@ -834,18 +834,20 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
 
 /// The commit two consecutive attempts both published, where they published one.
 ///
-/// `None` — "these are not the same tree" — for every other reading, and for the
-/// unknown most of all: the first attempt has nothing before it to be identical
-/// to, and a run that has never seen a tip has no evidence either way. Guessing
-/// would either spend a budget on a tree that had changed or stop retrying one
-/// that had not, and only one of those is recoverable by hand.
-fn unchanged_tree(published: Option<&str>, now: Option<&str>) -> Option<String> {
+/// Named for the **tip** and not for the tree, because that is what is compared:
+/// two commits carrying identical trees are two commits, and this answers `None`
+/// for them. That direction is the safe one — it spends an attempt on work that
+/// may have moved rather than stopping one that had not.
+///
+/// `None` for the unknown, too: the first attempt has nothing before it to be
+/// identical to, and a run that has never seen a tip has no evidence either way.
+fn unmoved_tip(published: Option<&str>, now: Option<&str>) -> Option<String> {
     let published = published?;
     (now == Some(published)).then(|| published.to_owned())
 }
 
-/// The settlement of a node whose attempt published the tree its previous attempt
-/// published.
+/// The settlement of a node whose attempt republished the commit its previous
+/// attempt published — the branch did not move, so its tree did not either.
 ///
 /// **The residual and not the failure's own word.** Each of the four preserving
 /// words says something about the branch, and the branch is not what refused
@@ -855,7 +857,7 @@ fn unchanged_tree(published: Option<&str>, now: Option<&str>) -> Option<String> 
 /// much is left: a reader deciding whether to intervene decides against a budget.
 ///
 /// [`Failure::Terminal`]: crate::vcs::Failure::Terminal
-fn published_an_unchanged_tree(
+fn republished_the_same_commit(
     node: &str,
     preserved: &Preserved,
     endings: &[crate::vcs::Preserving],
@@ -869,9 +871,10 @@ fn published_an_unchanged_tree(
         .get()
         .saturating_sub(attempt.get().saturating_sub(1));
     let roll_up = format!(
-        "{count} publication attempt{plural} on {branch} published the same tree, {head}, and \
-         ended {endings}: the refusal is not about the branch, so no further attempt on it \
-         could answer differently. {unspent} of {attempts} publication attempts are unspent",
+        "{count} publication attempt{plural} on {branch} published the same commit, {head}, \
+         and ended {endings}: the refusal is not about the branch, so no further attempt on \
+         it could answer differently. {unspent} of {attempts} publication attempts are \
+         unspent",
         count = endings.len(),
         plural = if endings.len() == 1 { "" } else { "s" },
         branch = preserved.branch,

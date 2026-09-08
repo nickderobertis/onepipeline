@@ -2383,11 +2383,12 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
 #[test]
 fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
     let world = World::new("lifecycle-heldforever")
+        // One read inside the publication, so the node settles unverified on the
+        // host's single outage; and a second between the asks that follow, which
+        // is what makes this journey stop on the budget rather than on a clock it
+        // would have to wait out.
         .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
-        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1")
-        // Two asks after the settlement, so the run stops on the budget rather
-        // than on a clock this journey would have to wait out.
-        .with_env("ONEPIPELINE_UNREAD_MERGE_PATH_ASKS", "2");
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.repository("change-auto", &[]);
     world.script("publish.work", "the worker wrote this\n");
     world.script("announce.work", "and this announces it\n");
@@ -3089,7 +3090,7 @@ fn a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget()
         .as_str()
         .expect("the settlement names the commit both attempts published");
     for said in [
-        "published the same tree",
+        "published the same commit",
         "the refusal is not about the branch",
         "2 of 3 publication attempts are unspent",
         head,

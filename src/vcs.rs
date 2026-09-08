@@ -28,7 +28,7 @@
 //! misread that way: what the publication did is a case of [`PublishOutcome`],
 //! and the compiler checks every reader of it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -501,51 +501,92 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// verdict the publication could not read is a verdict about the *host*, and a
 /// host that was briefly unreachable comes back.
 ///
-/// **Bounded**, by [`crate::engine::unread_merge_path_asks`]: a run that polled
-/// somebody else's API for good would be worse than one that reported honestly.
-/// When the budget is gone the dependents stay held, which is what they are.
+/// **Bounded** by [`HOLD_ASKS`]: a run that polled somebody else's API for good
+/// would be worse than one that reported honestly, and when the budget is gone
+/// the dependents stay held, which is what they are.
 ///
 /// Asked only about a node actually holding something, so a `pushed-unverified`
 /// leaf costs nothing.
 #[derive(Debug, Default)]
 pub(crate) struct UnreadMergePaths {
-    asked: BTreeMap<String, u32>,
-    shown: BTreeSet<String>,
+    asking: BTreeMap<String, Asking>,
+}
+
+/// How many times one node's unread merge path is asked about again.
+///
+/// Its own number and deliberately not [`crate::engine::merge_path_reads`], which
+/// is the same question asked in a different situation: that one is a publication
+/// holding a session open, so it is small, while nothing is occupied by waiting
+/// here. Twelve asks at the default interval is a minute of holding, which is a
+/// host outage's timescale — and a merge a *person* performs is not something a
+/// run waits for at all, so the ending that bound reaches is the honest one.
+///
+/// A constant rather than a knob, because there is nothing an operator would tune
+/// it against: how patient this run is with a merge path is
+/// [`crate::engine::merge_path_backoff`]'s to say, and it says it for both.
+const HOLD_ASKS: std::num::NonZeroU32 = match std::num::NonZeroU32::new(12) {
+    Some(asks) => asks,
+    None => unreachable!(),
+};
+
+/// How one node's asking has gone.
+///
+/// The count rides both cases, so a landing this run never asked for cannot be
+/// recorded — and neither can a node counted against the budget that is neither
+/// still being asked about nor answered.
+#[derive(Debug, Clone, Copy)]
+enum Asking {
+    /// Asked this many times, and no landing shown yet.
+    Unanswered(std::num::NonZeroU32),
+    /// `onevcs` showed the change reaching its base, on the last of this many
+    /// asks.
+    Landed(std::num::NonZeroU32),
+}
+
+impl Asking {
+    fn asks(self) -> std::num::NonZeroU32 {
+        match self {
+            Self::Unanswered(asks) | Self::Landed(asks) => asks,
+        }
+    }
 }
 
 impl UnreadMergePaths {
-    /// How long to leave between asks.
-    ///
-    /// The publication's own first backoff, because it is the same question about
-    /// the same host: a knob an operator turns to say how patient this run is with
-    /// a merge path should not need turning twice.
+    /// How long to leave between asks: the publication's own first backoff,
+    /// because it is the same question about the same host and how patient a run
+    /// is with a merge path should not need saying twice.
     pub(crate) fn every(&self) -> Duration {
         crate::engine::merge_path_backoff()
     }
 
     /// The nodes still worth asking about: settled with their work on the origin,
-    /// holding at least one dependent, and not yet asked the budget out.
+    /// holding at least one dependent, and neither answered nor asked out.
     pub(crate) fn watching(
         &self,
         state: &crate::projection::RunState,
         statuses: &BTreeMap<String, crate::graph::NodeStatus>,
-    ) -> Vec<String> {
-        let budget = crate::engine::unread_merge_path_asks().get();
+    ) -> Vec<crate::graph::NodeRef> {
+        let budget = HOLD_ASKS.get();
         state
             .graph
             .iter()
-            .map(|node| node.id.clone())
-            .filter(|id| {
-                statuses.get(id) == Some(&crate::graph::NodeStatus::Failed)
-                    && state.outcomes.get(id).map(String::as_str) == Some(Failure::UNREAD)
-                    && state.landings.get(id) != Some(&crate::graph::Landing::Landed)
-                    && self.asked.get(id).copied().unwrap_or(0) < budget
+            .filter(|node| {
+                statuses.get(&node.id) == Some(&crate::graph::NodeStatus::Failed)
+                    && state.outcomes.get(&node.id).map(String::as_str) == Some(Failure::UNREAD)
+                    && match self.asking.get(&node.id) {
+                        None => true,
+                        Some(Asking::Unanswered(asks)) => asks.get() < budget,
+                        Some(Asking::Landed(_)) => false,
+                    }
             })
-            .filter(|id| {
-                state.graph.dependents_of(id).iter().any(|dependent| {
+            .filter(|node| {
+                state.graph.dependents_of(&node.id).iter().any(|dependent| {
                     statuses.get(dependent) == Some(&crate::graph::NodeStatus::Blocked)
                 })
             })
+            // A node identity leaving the graph's own scope is carried as one
+            // rather than as a field anybody could put anything in.
+            .filter_map(crate::graph::NodeRef::of)
             .collect()
     }
 
@@ -557,11 +598,16 @@ impl UnreadMergePaths {
     /// read of something the journal does not record, so a fold that dropped it
     /// would send a dependent this run had already started back to being skipped
     /// by a node whose work is on its base.
+    ///
     /// Reports whether the state had lost one, which is what tells the loop its
     /// derivation is stale.
     pub(crate) fn apply(&self, state: &mut crate::projection::RunState) -> bool {
         let mut restored = false;
-        for node in &self.shown {
+        for (node, _) in self
+            .asking
+            .iter()
+            .filter(|(_, asking)| matches!(asking, Asking::Landed(_)))
+        {
             let already = state
                 .landings
                 .insert(node.clone(), crate::graph::Landing::Landed);
@@ -585,22 +631,29 @@ impl UnreadMergePaths {
     pub(crate) fn read_again(
         &mut self,
         state: &mut crate::projection::RunState,
-        watching: &[String],
+        watching: &[crate::graph::NodeRef],
     ) -> bool {
         let mut lifted = false;
         for node in watching {
+            let id = node.as_str();
             // Every ask is counted, whatever it answers: the budget is on the
             // asking rather than on the answers, so a host that never comes back
             // is bounded by the same number a host that does is.
-            *self.asked.entry(node.clone()).or_default() += 1;
-            let Some(branch) = state.branches.get(node).cloned() else {
+            let asks = self
+                .asking
+                .get(id)
+                .map_or(std::num::NonZeroU32::MIN, |asking| {
+                    asking.asks().saturating_add(1)
+                });
+            self.asking.insert(id.to_owned(), Asking::Unanswered(asks));
+            let Some(branch) = state.branches.get(id).cloned() else {
                 continue;
             };
             // The node's own repository, so a branch name two identities both
             // hold is asked about the one this run's work is in.
-            let repo = state.graph.get(node).and_then(|node| node.repo.clone());
+            let repo = state.graph.get(id).and_then(|node| node.repo.clone());
             if proved_landed(&branch, repo.as_deref()) {
-                self.shown.insert(node.clone());
+                self.asking.insert(id.to_owned(), Asking::Landed(asks));
                 lifted = true;
             }
         }

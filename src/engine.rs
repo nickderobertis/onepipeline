@@ -152,31 +152,6 @@ pub const DEFAULT_MERGE_PATH_READS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 /// two-minute ceiling every backoff in this crate doubles up to.
 pub const DEFAULT_MERGE_PATH_BACKOFF_SECONDS: u64 = 5;
 
-/// The environment variable setting how many times a **settled** node's unread
-/// merge path is asked about again while the run holds dependents on it.
-pub const UNREAD_MERGE_PATH_ASKS_ENV: &str = "ONEPIPELINE_UNREAD_MERGE_PATH_ASKS";
-
-/// How many times a run asks again about a merge path its publication could not
-/// read, while dependents are waiting on the verdict.
-///
-/// Its own budget and deliberately not [`DEFAULT_MERGE_PATH_READS`], which is the
-/// same question asked in a different situation: that one is a publication
-/// holding a session open, so it is small, while this is a run that has already
-/// settled the node and is holding dependents that cannot start. Nothing is
-/// occupied by waiting here, and what is being waited for is a **merge** — a
-/// host finishing a queue, or a person pressing a button — which is minutes
-/// rather than seconds.
-///
-/// Sixty asks at [`DEFAULT_MERGE_PATH_BACKOFF_SECONDS`] apart is five minutes of
-/// holding. Bounded at all for the reason the publication's re-read is bounded: a
-/// run that polled somebody else's merge path for good would be worse than one
-/// that reported honestly, and what the bound settles on is the dependents
-/// staying held — which is what they are.
-///
-/// A [`NonZeroU32`] for [`DEFAULT_PUBLICATION_ATTEMPTS`]'s reason: zero is not a
-/// smaller budget, it is a hold nothing ever asks about.
-pub const DEFAULT_UNREAD_MERGE_PATH_ASKS: NonZeroU32 = NonZeroU32::new(60).unwrap();
-
 /// The environment variable setting how long a cancelled dispatch has to stop
 /// itself before it is torn down.
 pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
@@ -3461,18 +3436,6 @@ pub(crate) fn merge_path_reads() -> NonZeroU32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_MERGE_PATH_READS)
-}
-
-/// How many times a settled node's unread merge path is asked about again.
-///
-/// Read at the boundary the same way every other bound here is, so a value that
-/// is not a number — or is `0`, which would be a hold nothing ever lifts — takes
-/// the default rather than disabling the recovery it configures.
-pub(crate) fn unread_merge_path_asks() -> NonZeroU32 {
-    std::env::var(UNREAD_MERGE_PATH_ASKS_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_UNREAD_MERGE_PATH_ASKS)
 }
 
 /// The first backoff between those reads. It doubles, to [`BOUNDARY_BACKOFF_CEILING`].

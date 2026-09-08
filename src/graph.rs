@@ -858,68 +858,61 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
     None
 }
 
-/// Where a settlement left the node's work, as far as scheduling has to know.
+/// What a node's settlement said, as far as scheduling has to know it.
 ///
-/// Two cases and not a word, deliberately: this is a scheduling fact, and the
-/// vocabulary a settlement is written in belongs to [`crate::vcs`]. Carried as
-/// the outcome string, every spelling of every word in that vocabulary would be
-/// constructible here — and one that matched nothing would silently mean the
-/// first case, which is the reading this exists to stop being taken by accident.
+/// [`NodeStatus`] alone is what the derivation used to read, and it is a
+/// projection that deliberately discards where the work got to — which is right
+/// for eight of the nine settlements and wrong for one. Read as a bare `failed`,
+/// [`ReachedTheOrigin`](Self::ReachedTheOrigin) skipped every dependent of a
+/// change that had in fact merged.
+///
+/// **Cases and not fields**, because these facts are correlated: only a `failed`
+/// node can have reached the origin, and only a node that reached the origin has
+/// a landing this decision reads. Three fields beside each other would make a
+/// `ready` node whose failed publication both reached the origin and landed a
+/// value somebody could construct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Published {
-    /// Nothing this decision turns on: every settlement but the one below.
-    Unremarkable,
-    /// The publishing push **reached the origin** and the merge path behind it
-    /// could not be read, which settles `failed` under
+pub enum Settled {
+    /// Where the node got to, and nothing else this decision turns on.
+    At(NodeStatus),
+    /// It settled `failed` because its publishing push **reached the origin** and
+    /// the merge path behind it could not be read —
     /// [`Failure::UNREAD`](crate::vcs::Failure::UNREAD).
     ///
     /// Not the branch being turned down: the work is on the origin and only the
     /// verdict about it is outstanding.
-    ReachedTheOrigin,
-}
-
-/// What a node's settlement said, as far as scheduling has to know it.
-///
-/// [`NodeStatus`] alone is what the derivation used to read, and it is a
-/// projection that deliberately discards where the work got to. Read as a bare
-/// `failed`, [`Published::ReachedTheOrigin`] skipped every dependent of a change
-/// that had in fact merged.
-///
-/// Three fields on one value rather than three maps threaded past each other,
-/// because they are one node's one settlement: a caller holding two of them for
-/// one node and the third for another is the state this must not have.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Settled {
-    /// Where the node got to.
-    pub status: NodeStatus,
-    /// Where the settlement left its work.
-    pub published: Published,
-    /// Whether the change it published has been observed reaching its base.
-    pub landing: Option<Landing>,
+    ReachedTheOrigin {
+        /// Whether the change has since been observed reaching its base.
+        landed: bool,
+    },
 }
 
 impl Settled {
     /// One settlement, reading the word it settled under **once**, here, so no
     /// caller carries that word any further than the boundary it arrives at.
     pub fn of(status: NodeStatus, outcome: Option<&str>, landing: Option<Landing>) -> Self {
-        let published =
-            if status == NodeStatus::Failed && outcome == Some(crate::vcs::Failure::UNREAD) {
-                Published::ReachedTheOrigin
-            } else {
-                Published::Unremarkable
+        if status == NodeStatus::Failed && outcome == Some(crate::vcs::Failure::UNREAD) {
+            return Self::ReachedTheOrigin {
+                landed: landing == Some(Landing::Landed),
             };
-        Self {
-            status,
-            published,
-            landing,
         }
+        Self::At(status)
     }
 
     /// A settlement known only by its status, which is every node whose word
     /// nothing here has — a cross-DAG upstream, and every caller that asks about
     /// a status alone.
     pub fn at(status: NodeStatus) -> Self {
-        Self::of(status, None, None)
+        Self::At(status)
+    }
+
+    /// Where the node got to.
+    pub fn status(self) -> NodeStatus {
+        match self {
+            Self::At(status) => status,
+            // The one status this case can be, which is what makes it a case.
+            Self::ReachedTheOrigin { .. } => NodeStatus::Failed,
+        }
     }
 }
 
@@ -950,8 +943,8 @@ pub fn derive(
         if let Some(recorded) = settled.get(&node.id) {
             // A recorded settlement stands, except for the two derived gates:
             // they are re-derived against the graph as it is now.
-            if !matches!(recorded.status, NodeStatus::Blocked | NodeStatus::Skipped) {
-                statuses.insert(node.id.clone(), recorded.status);
+            if !matches!(recorded.status(), NodeStatus::Blocked | NodeStatus::Skipped) {
+                statuses.insert(node.id.clone(), recorded.status());
             }
         }
     }
@@ -1018,9 +1011,16 @@ fn eligibility(
                 // word from the record it was derived from: `blocked` and
                 // `skipped` are re-derived every pass and carry no word, and
                 // every other status is the one the settlement wrote.
-                Some(status) => Settled {
-                    status: *status,
-                    ..settled.get(dep).copied().unwrap_or(Settled::at(*status))
+                // The status as this pass derived it is authoritative — `blocked`
+                // and `skipped` are re-derived every pass — and the settlement's
+                // own case stands only where that derivation still agrees with it.
+                Some(status) => match settled.get(dep) {
+                    Some(reached @ Settled::ReachedTheOrigin { .. })
+                        if *status == NodeStatus::Failed =>
+                    {
+                        *reached
+                    }
+                    _ => Settled::At(*status),
                 },
                 None => {
                     all_done = false;
@@ -1039,7 +1039,7 @@ fn eligibility(
             // fact about the node rather than about what may run next.
             continue;
         }
-        match reached.status {
+        match reached.status() {
             NodeStatus::Done => {}
             _ if holds_dependents(&reached) => {
                 gated = true;
@@ -1087,11 +1087,13 @@ fn eligibility(
 /// cause it disagrees with.
 ///
 /// A publication that left its work **on the origin** is deliberately not one,
-/// whichever way its verdict has since gone: see [`unread_merge_path`], and the
-/// two readings of it below.
+/// whichever way its verdict has since gone: it is
+/// [`holds_dependents`] or [`reached_its_base`] below, and never this.
 fn skips_dependents(settled: &Settled) -> bool {
-    matches!(settled.status, NodeStatus::Failed | NodeStatus::Skipped)
-        && !unread_merge_path(settled)
+    matches!(
+        settled,
+        Settled::At(NodeStatus::Failed | NodeStatus::Skipped)
+    )
 }
 
 /// Whether a dependency's publication reached the origin and the verdict on it is
@@ -1106,7 +1108,7 @@ fn skips_dependents(settled: &Settled) -> bool {
 /// not a skip: a skip is permanent and this is not, because the same run goes on
 /// asking whether the verdict has become decidable.
 fn holds_dependents(settled: &Settled) -> bool {
-    unread_merge_path(settled) && settled.landing != Some(Landing::Landed)
+    matches!(settled, Settled::ReachedTheOrigin { landed: false })
 }
 
 /// Whether that verdict has since been decided, and decided in the work's favour.
@@ -1117,16 +1119,7 @@ fn holds_dependents(settled: &Settled) -> bool {
 /// is on the branch it will be cut from — so it starts, while the node keeps the
 /// word its own publication earned.
 fn reached_its_base(settled: &Settled) -> bool {
-    unread_merge_path(settled) && settled.landing == Some(Landing::Landed)
-}
-
-/// Whether this settlement is the one publication failure whose work reached the
-/// origin: the push landed and the merge path behind it could not be read.
-///
-/// Read off [`Published`] rather than off the status, because the status cannot
-/// say it: `failed` is what the node settles as, and rightly so.
-fn unread_merge_path(settled: &Settled) -> bool {
-    settled.published == Published::ReachedTheOrigin
+    matches!(settled, Settled::ReachedTheOrigin { landed: true })
 }
 
 /// The dependencies whose own failure or skip is why `id` derived
@@ -1153,9 +1146,13 @@ pub fn skipped_by(
         .iter()
         .filter_map(|dep| {
             let status = *statuses.get(dep)?;
-            let reached = Settled {
-                status,
-                ..settled.get(dep).copied().unwrap_or(Settled::at(status))
+            let reached = match settled.get(dep) {
+                Some(reached @ Settled::ReachedTheOrigin { .. })
+                    if status == NodeStatus::Failed =>
+                {
+                    *reached
+                }
+                _ => Settled::At(status),
             };
             skips_dependents(&reached).then(|| (dep.clone(), status))
         })
