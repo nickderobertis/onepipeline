@@ -67,14 +67,12 @@ use crate::refusal::Refusal;
 /// setting called `bin`.
 pub const BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
 
-/// The executable's name when the environment names none.
 pub const DEFAULT_BINARY: &str = "onevcs";
 
 /// The hook git puts a commit message to, and the one `onevcs` puts a publication
 /// subject to.
 const COMMIT_MSG_HOOK: &str = "commit-msg";
 
-/// The line `onevcs rules check` states the resolved publication policy on.
 const PUBLICATION_LINE: &str = "publication:";
 
 /// Hold every lifecycle node of `plan` to what its destination repository says.
@@ -105,7 +103,7 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
         let destination = match destination {
             Ok(destination) => destination,
             Err(why) => {
-                unchecked(&node.id, repo, why);
+                report_unchecked(&node.id, repo, why);
                 continue;
             }
         };
@@ -116,7 +114,7 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
             match asked {
                 Ok(Some(refusal)) => return Err(refusal),
                 Ok(None) => {}
-                Err(why) => unchecked(&node.id, repo, &why),
+                Err(why) => report_unchecked(&node.id, repo, &why),
             }
         }
     }
@@ -129,7 +127,7 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
 /// sentence that says the check did not run rather than that it passed: the two
 /// readings are what this whole module exists to keep apart, and a plan that
 /// loaded in silence would carry the second one for free.
-fn unchecked(node: &str, repo: &str, why: &str) {
+fn report_unchecked(node: &str, repo: &str, why: &str) {
     eprintln!(
         "onepipeline: node '{node}': this build could not ask {repo} what it says about this \
          node, so the plan loaded without that check having run — {why}"
@@ -376,9 +374,7 @@ fn title_refusal(node: &Node, destination: &Destination) -> Result<Option<Refusa
 /// What a repository's own hook said when it turned a subject down.
 #[derive(Debug)]
 struct Rejected {
-    /// How the hook exited, which a rejection cannot have been nought.
     exit: String,
-    /// Everything it wrote, both streams, whole.
     said: String,
 }
 
@@ -399,7 +395,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
     if !runnable(&hook)? {
         return Ok(None);
     }
-    let message = message_file(title)?;
+    let message = write_message_file(title)?;
     let ran = Command::new(&hook)
         .arg(&message)
         .current_dir(checkout)
@@ -492,6 +488,13 @@ fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
 /// Windows paths are UTF-16 and a `Command`'s pipe hands back bytes, so there is
 /// no lossless way across; an answer that is not UTF-8 is refused rather than
 /// mangled into a path that names something else.
+// llmlint: ignore[changed_behavior_has_e2e] no journey can reach this arm, on this
+// platform or the one it is written for: git for Windows prints its paths as UTF-8, so
+// producing the input is not something a test can arrange, and the arm exists precisely
+// because a caller must not be handed a path that names something else if it ever did.
+// The alternative — the lossy decode this replaced — is the defect it was written to
+// remove, and it is `from_utf8_lossy` on the Unix side that the suite does drive, through
+// `a_checkout_git_cannot_answer_for_leaves_the_title_unchecked`.
 #[cfg(not(unix))]
 fn os_path(printed: &[u8]) -> Result<PathBuf, String> {
     std::str::from_utf8(printed)
@@ -540,7 +543,7 @@ fn runnable(path: &Path) -> Result<bool, String> {
 ///
 /// Named for this process and for this call, because several loads can be running
 /// on one host at once and a shared name is one of them reading another's title.
-fn message_file(title: &str) -> Result<PathBuf, String> {
+fn write_message_file(title: &str) -> Result<PathBuf, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static ASKED: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -557,7 +560,6 @@ fn message_file(title: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// One line of somebody else's output, for a sentence that carries it inline.
 fn one_line(said: &str) -> String {
     let said = said.trim();
     match said.lines().next() {
@@ -887,8 +889,8 @@ mod tests {
     /// never read each other's title.
     #[test]
     fn every_message_put_to_a_hook_is_its_own_file() {
-        let first = message_file("feat: one").expect("a message file");
-        let second = message_file("feat: two").expect("a second message file");
+        let first = write_message_file("feat: one").expect("a message file");
+        let second = write_message_file("feat: two").expect("a second message file");
         assert_ne!(first, second, "two calls shared one message file");
         assert_eq!(
             std::fs::read_to_string(&first).expect("the first is written"),

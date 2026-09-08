@@ -18,7 +18,6 @@ use serde_json::{json, Value};
 
 use crate::harness::{agent, lifecycle, plan_of, Repository, World, REFUSED};
 
-/// `plan check`'s exit status when something refused.
 const HAS_REFUSALS: i32 = 1;
 
 /// The variable naming the `onevcs` executable the loader asks.
@@ -29,7 +28,6 @@ const HAS_REFUSALS: i32 = 1;
 /// same reason `STORE_BINARY_ENV` is a literal in the harness beside it.
 const ONEVCS_BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
 
-/// The one JSON object `plan check --json` prints.
 fn answer(run: &crate::harness::Run) -> Value {
     serde_json::from_str(run.stdout.trim()).unwrap_or_else(|error| {
         panic!(
@@ -39,7 +37,6 @@ fn answer(run: &crate::harness::Run) -> Value {
     })
 }
 
-/// The engine's own refusals out of that object.
 fn engine_refusals(answered: &Value) -> Vec<Value> {
     answered["refusals"]
         .as_array()
@@ -63,15 +60,15 @@ fn consumer(adoption: Option<&str>) -> Value {
     node
 }
 
-/// The node whose release the consumer waits for, in its own repository.
 fn engine() -> Value {
     let mut node = lifecycle("engine", &[]);
     node["repo"] = json!("engine");
     node
 }
 
-/// The two repositories a `consumes` journey needs, and the plan they carry.
-fn consuming(world: &World, publication: &str) -> Repository {
+/// The `service` repository a `consumes` journey publishes into, with the
+/// `engine` one its dependency lands in registered beside it.
+fn two_repositories(world: &World, publication: &str) -> Repository {
     let service = world.repository(publication, &[]);
     world.extra_repository("engine");
     service
@@ -179,7 +176,7 @@ fn a_repository_with_no_commit_msg_hook_refuses_no_title() {
 #[test]
 fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
     let world = World::new("destination-consumes");
-    consuming(&world, "local-direct");
+    two_repositories(&world, "local-direct");
 
     let project = world.plan(
         "consuming",
@@ -219,7 +216,7 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any
 #[test]
 fn a_published_node_consuming_on_that_same_repository_still_loads() {
     let world = World::new("destination-consumes-published");
-    consuming(&world, "local-direct");
+    two_repositories(&world, "local-direct");
 
     let project = world.plan(
         "consuming",
@@ -233,7 +230,7 @@ fn a_published_node_consuming_on_that_same_repository_still_loads() {
 #[test]
 fn a_consumes_on_a_repository_that_opens_a_change_request_loads() {
     let world = World::new("destination-consumes-change");
-    consuming(&world, "change-auto");
+    two_repositories(&world, "change-auto");
 
     let project = world.plan(
         "consuming",
@@ -282,7 +279,7 @@ fn a_node_whose_identity_this_host_cannot_resolve_loads_and_says_it_was_not_chec
 #[test]
 fn a_host_with_no_resolution_verb_says_the_node_was_not_checked_rather_than_passing_it() {
     let world = World::new("destination-no-verb");
-    consuming(&world, "local-direct");
+    two_repositories(&world, "local-direct");
     let project = world.plan(
         "consuming",
         &plan_of("consuming", vec![engine(), consumer(None)]),
@@ -324,6 +321,7 @@ answer() {{
 "; done < "$1"
   case "$body" in
     '!refuse '*) printf '%s' "${{body#!refuse }}" >&2; exit 1 ;;
+    '!bytes'*) printf '\377\376' ; exit 0 ;;
   esac
   printf '%s' "$body"
 }}
@@ -342,13 +340,16 @@ esac
     path
 }
 
-/// A `rules check` that resolves and then refuses.
 #[cfg(unix)]
 const RULES_CHECK_REFUSES: &str = "!refuse this host has no rules file";
 
-/// The answers that world gives, for one arm.
+/// A verb that succeeds and answers bytes that are not UTF-8.
 #[cfg(unix)]
-fn answering(world: &World, resolve: &str, rules_check: &str) {
+const ANSWERS_NOT_UTF8: &str = "!bytes";
+
+/// Write the two answers that world gives, for one arm.
+#[cfg(unix)]
+fn script_the_answers(world: &World, resolve: &str, rules_check: &str) {
     world.script("onevcs.resolve", resolve);
     world.script("onevcs.rules-check", rules_check);
 }
@@ -370,7 +371,7 @@ fn answering(world: &World, resolve: &str, rules_check: &str) {
 #[test]
 fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_passed() {
     let world = World::new("destination-unreadable-resolve");
-    consuming(&world, "local-direct");
+    two_repositories(&world, "local-direct");
     let project = world.plan(
         "consuming",
         &plan_of("consuming", vec![engine(), consumer(None)]),
@@ -402,7 +403,7 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
     ];
 
     for (why, resolve, said) in cases {
-        answering(
+        script_the_answers(
             &world,
             resolve,
             "publication: change-auto (from the default)\n",
@@ -431,14 +432,14 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
 #[test]
 fn a_policy_this_build_cannot_read_still_lets_the_repositorys_own_hook_answer() {
     let world = World::new("destination-unreadable-policy");
-    let service = consuming(&world, "local-direct");
+    let service = two_repositories(&world, "local-direct");
     world.commit_msg_hook(&service);
 
     let mut node = consumer(None);
     node["title"] = json!("refactor(loader): tidy the seam");
     let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
     let stand_in = onevcs_answering(&world);
-    answering(
+    script_the_answers(
         &world,
         &json!({
             "identity": "github.com/owner/service",
@@ -485,7 +486,7 @@ fn a_checkout_git_cannot_answer_for_leaves_the_title_unchecked() {
     let nowhere = world.root.join("not-a-repository");
     std::fs::create_dir_all(&nowhere).expect("a directory that is no repository");
     let stand_in = onevcs_answering(&world);
-    answering(
+    script_the_answers(
         &world,
         &json!({
             "identity": "github.com/owner/service",
@@ -554,7 +555,7 @@ fn a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart() {
 #[test]
 fn a_node_that_names_its_own_change_policy_consumes_without_being_refused() {
     let world = World::new("destination-narrowed");
-    consuming(&world, "local-direct");
+    two_repositories(&world, "local-direct");
 
     let mut node = consumer(None);
     node["merge_policy"] = json!("change-open");
@@ -572,7 +573,7 @@ fn a_node_that_names_its_own_change_policy_consumes_without_being_refused() {
 #[test]
 fn a_rules_check_that_refuses_or_names_an_unknown_policy_leaves_the_node_unchecked() {
     let world = World::new("destination-policy-arms");
-    let service = consuming(&world, "local-direct");
+    let service = two_repositories(&world, "local-direct");
     let project = world.plan(
         "consuming",
         &plan_of("consuming", vec![engine(), consumer(None)]),
@@ -593,7 +594,7 @@ fn a_rules_check_that_refuses_or_names_an_unknown_policy_leaves_the_node_uncheck
             "states a publication policy this build does not know, 'sideways'",
         ),
     ] {
-        answering(&world, &resolved, rules_check);
+        script_the_answers(&world, &resolved, rules_check);
         let asked = world.run(&["plan", "check", &project]);
         asked
             .exited(0)
@@ -621,7 +622,7 @@ fn a_host_that_cannot_start_git_leaves_the_title_unchecked() {
     let service = world.repository("change-auto", &[]);
     let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
     let stand_in = onevcs_answering(&world);
-    answering(
+    script_the_answers(
         &world,
         &json!({
             "identity": "github.com/owner/service",
@@ -726,4 +727,35 @@ fn a_hook_a_signal_ended_is_reported_as_that_rather_than_as_an_exit_status() {
         !reason.contains("exit "),
         "a hook a signal ended was reported as an exit status it never reached: {reason}"
     );
+}
+
+/// A verb that succeeds and answers bytes that are not UTF-8 leaves the node
+/// **unchecked**.
+///
+/// The one wrong answer a lossy decode would have hidden: replacement characters
+/// in the JSON a shape is read from, or on the line a policy is read off, can
+/// parse as something nobody said. Refused as an answer this build cannot read,
+/// which is a node reported as not checked rather than one waved through.
+#[cfg(unix)]
+#[test]
+fn a_verb_that_answers_bytes_that_are_not_utf8_leaves_the_node_unchecked() {
+    let world = World::new("destination-not-utf8");
+    two_repositories(&world, "local-direct");
+    let project = world.plan(
+        "consuming",
+        &plan_of("consuming", vec![engine(), consumer(None)]),
+    );
+    let stand_in = onevcs_answering(&world);
+    script_the_answers(
+        &world,
+        ANSWERS_NOT_UTF8,
+        "publication: change-auto (from the default)\n",
+    );
+    world
+        .with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy())
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("node 'consumer'")
+        .err_has("the plan loaded without that check having run")
+        .err_has("answered bytes that are not UTF-8");
 }
