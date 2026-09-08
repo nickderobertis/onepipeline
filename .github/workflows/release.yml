@@ -658,8 +658,8 @@ jobs:
       #
       # Job results reach the script through `env:` rather than being
       # interpolated into the command line, the same rule every other input in
-      # this repository follows; the script refuses anything that is not one of
-      # the four results GitHub reports.
+      # this repository follows; the script refuses any value that is not one of the
+      # results GitHub reports, rather than reading an unknown one as "not success".
       - name: Compose the outcome record
         env:
           CRATE_PUBLISHED: ${{ needs.publish-crate.result }}

@@ -407,7 +407,75 @@ describe("the npm publish order", () => {
       assert.match(rejected.stderr, /^ACTION: /m);
     }
 
+    // And a manifest that *is* a map whose values are not pins, inside a
+    // tarball — which is what `release.yml` hands this script. The container is
+    // not the only thing `Object.entries` walks happily: `RegExp.test` coerces
+    // its argument, so `["1.2.3"]` would be read as the version it stringifies
+    // to — a pin nobody wrote — and the other three as no pin at all, which is
+    // this package offered without ever waiting for that dependency.
+    //
+    // A tarball rather than a directory because that is where the gap is: `npm
+    // pack` refuses a non-string dependency value in a package directory, so a
+    // directory never reaches the manifest read at all, and accepts the very
+    // same value inside a tarball.
+    for (const pin of [["1.2.3"], null, 7, { version: "1.2.3" }]) {
+      const staged = join(work, "bad-pin-value");
+      rmSync(staged, { recursive: true, force: true });
+      cpSync(launcherDir, join(staged, "package"), { recursive: true });
+      const at = join(staged, "package", "package.json");
+      const manifest = JSON.parse(readFileSync(at, "utf8"));
+      manifest.optionalDependencies = { "onepipeline-cli-linux-x64": pin };
+      writeFileSync(at, `${JSON.stringify(manifest, null, 2)}\n`);
+      const badTgz = join(work, "bad-pin-value.tgz");
+      await run("tar", ["-czf", badTgz, "-C", staged, "package"]);
+
+      // A short budget so a regression that reads `["1.2.3"]` as the version it
+      // stringifies to is a failing assertion in seconds rather than a job
+      // waiting ten minutes on a package nobody ever published.
+      const rejected = await attempt("bash", ["scripts/publish-npm.sh", badTgz], {
+        env: { ...env, PUBLISH_NPM_AWAIT_BUDGET: "2", PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+      });
+      assert.equal(rejected.code, 2, `${JSON.stringify(pin)}: ${rejected.stderr}`);
+      assert.match(rejected.stderr, /cannot read the manifest inside/);
+      assert.match(rejected.stderr, /is not a string/);
+      assert.match(rejected.stderr, /^ACTION: /m);
+    }
+
     assert.equal(reg.timeline.length, 0, "a package it could not read still reached the registry");
+  });
+
+  it("refuses a later argument before publishing the ones in front of it", async () => {
+    const reg = await freshRegistry();
+    // Exit 2 promises the registry was never asked to take anything. A release
+    // publishes five platform packages in one loop today and could publish them
+    // in one invocation tomorrow, so the promise has to hold for the *fifth*
+    // argument too — discovering it there and exiting 2 with four packages
+    // already public is the one report nobody can act on.
+    const corrupt = join(work, "later-argument.tgz");
+    writeFileSync(corrupt, "this is not a gzipped tarball\n");
+    const tarballs = [...platforms.values()].map(({ tgz }) => tgz);
+
+    const refused = await attempt(
+      "bash",
+      ["scripts/publish-npm.sh", ...tarballs, corrupt, launcherTgz],
+      { env },
+    );
+    const took = () => reg.timeline.filter((event) => event.kind === "accepted");
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /cannot read package metadata from/);
+    assert.deepEqual(
+      took().map((event) => event.identity),
+      [],
+      "a refusal published the arguments in front of the one it refused",
+    );
+
+    // The same arguments without the bad one publish every last package, so the
+    // refusal above is about that argument rather than about the invocation.
+    const accepted = await attempt("bash", ["scripts/publish-npm.sh", ...tarballs, launcherTgz], {
+      env,
+    });
+    assert.equal(accepted.code, 0, accepted.stderr);
+    assert.equal(took().length, tarballs.length + 1, JSON.stringify(took()));
   });
 
   it("refuses a wait it cannot make sense of rather than spinning on it", async () => {

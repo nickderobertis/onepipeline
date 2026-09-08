@@ -33,7 +33,17 @@ const SCHEMA_VERSION = 1;
 const STATES = ["nothing-shipped", "shipped-unverified", "shipped-verified"];
 const [NOTHING_SHIPPED, SHIPPED_UNVERIFIED, SHIPPED_VERIFIED] = STATES;
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this is the one
+// place in this repository that names GitHub Actions' job-result vocabulary — the
+// workflow passes `needs.<job>.result` through without listing its values — so
+// there is no second copy here to reconcile against, and GitHub publishes the set
+// in prose rather than in a schema anything could fetch and diff. What the rule
+// protects is held by failing closed instead: a value outside this list is refused
+// by name below rather than read as "not success", so the day GitHub adds a fifth
+// result the `outcome` job goes red saying which value it did not know, instead of
+// silently downgrading a release that shipped.
 const RESULTS = ["success", "failure", "cancelled", "skipped"];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The caller asked for something this cannot do, and nothing has been written.
 /// Every refusal names what to do next: this runs inside a release job, where
@@ -228,10 +238,18 @@ function compose(argv) {
 const { out, record } = compose(process.argv.slice(2));
 const rendered = `${JSON.stringify(record, null, 2)}\n`;
 
+// llmlint: ignore-block[tool_output_is_signal] without `--out` the document on
+// stdout is this invocation's *product*, not a report about it — the mode exists so
+// a caller can pipe the record somewhere this script does not know about, and the
+// journeys in npm/test/release-outcome.test.mjs read it that way. Silence here would
+// mean composing the record and discarding it. The `--out` branch is the one that
+// reports, and it reports in one line.
+//
 // `--out` is the delivery, so stdout is a summary rather than a second copy of
 // what was just written; without it stdout *is* the delivery.
 if (out === null) {
   process.stdout.write(rendered);
+  // llmlint: ignore-end[tool_output_is_signal]
 } else {
   try {
     writeFileSync(out, rendered);

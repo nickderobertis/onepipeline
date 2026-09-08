@@ -144,6 +144,13 @@ pinned_optional_deps() {
         throw new Error("optionalDependencies is not an object");
       }
       for (const [name, pin] of Object.entries(pins || {})) {
+        // A value that is not a string is refused rather than tested: `RegExp.test`
+        // coerces, so `["1.2.3"]` would read as a pin nobody wrote and `null` would
+        // read as no pin at all — and "no pin" here means publishing this package
+        // without waiting for that dependency, which is the whole failure.
+        if (typeof pin !== "string") {
+          throw new Error(`optionalDependencies["${name}"] is not a string`);
+        }
         if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pin)) {
           process.stdout.write(`${name}@${pin}\n`);
         }
@@ -152,8 +159,13 @@ pinned_optional_deps() {
   '
 }
 
-published=""
-skipped=""
+# Every argument is read and checked here, before any of them is published:
+# `refuse` promises that nothing reached the registry, and discovering the fifth
+# argument unreadable after the first four are public would break that promise
+# with the one exit code that says it held. Nothing in this pass talks to the
+# registry.
+identities=()
+pin_lists=()
 
 for package in "$@"; do
   if ! metadata="$(npm pack --dry-run --json "$package" 2>"$work/pack-error")"; then
@@ -179,15 +191,29 @@ for package in "$@"; do
       "rebuild the npm artifact with scripts/npm-build.mjs, then re-run"
   fi
 
-  # Nothing reaches the registry before the exact versions its own manifest pins
-  # do. For the launcher those pins are the five platform packages, so this is
-  # the rule that stops a user from installing a launcher whose binary npm
-  # silently declined to fetch.
   if ! pinned="$(pinned_optional_deps "$package" 2>"$work/manifest-error")"; then
     cat "$work/manifest-error" >&2
     refuse "cannot read the manifest inside '$package'" \
       "rebuild the npm artifact with scripts/npm-build.mjs, then re-run"
   fi
+
+  identities+=("$identity")
+  pin_lists+=("$pinned")
+done
+
+published=""
+skipped=""
+at=0
+
+for package in "$@"; do
+  identity="${identities[$at]}"
+  pinned="${pin_lists[$at]}"
+  at=$((at + 1))
+
+  # Nothing reaches the registry before the exact versions its own manifest pins
+  # do. For the launcher those pins are the five platform packages, so this is
+  # the rule that stops a user from installing a launcher whose binary npm
+  # silently declined to fetch.
   while read -r pin; do
     [ -n "$pin" ] || continue
     await_served "$pin" "offering $identity, which pins it"
