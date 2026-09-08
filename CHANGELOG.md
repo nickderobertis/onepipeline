@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0](https://github.com/nickderobertis/onepipeline/compare/v0.23.0...v0.24.0) - 2026-09-08
+
+### Fixed
+
+- *(release)* record the landing a manager settles from, and latch a hold once it is satisfied ([#214](https://github.com/nickderobertis/onepipeline/pull/214))
+- *(plan)* refuse at load what a node's publication policy would refuse after the dispatch ([#211](https://github.com/nickderobertis/onepipeline/pull/211))
+
 ## [0.23.0](https://github.com/nickderobertis/onepipeline/compare/v0.22.3...v0.23.0) - 2026-09-07
 
 ### Fixed
