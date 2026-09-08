@@ -319,6 +319,44 @@ describe("the npm publish order", () => {
     assert.match(reported.stdout, new RegExp(version.replace(/\./g, "\\.")));
   });
 
+  it("re-run, publishes nothing again and still says the release is whole", async () => {
+    const reg = await freshRegistry();
+    // A release job gets re-run — that is how a release moves out of
+    // `shipped-unverified` — and an npm version is immutable, so the second run
+    // has to skip what the first published rather than fail on it.
+    //
+    // The first run is made to wait once, with a leading-zero interval. The
+    // digits check accepts `08`, and the only line that does arithmetic on it is
+    // inside the wait, where bash read it as octal and refused it — so a lag is
+    // what reaches that line at all, and the propagation warning below is this
+    // journey's evidence that it did.
+    reg.lagFor([...platforms.values()][0].name, 1000);
+    const first = await publishAsTheReleaseDoes({
+      PUBLISH_NPM_AWAIT_BUDGET: "80",
+      PUBLISH_NPM_AWAIT_INTERVAL: "08",
+    });
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stderr, /the registry took \d+s to serve/, "nothing ever waited");
+    const took = () => reg.timeline.filter((event) => event.kind === "accepted").length;
+    const after = took();
+    assert.equal(after, platforms.size + 1, "the first run did not publish everything");
+
+    const again = await publishAsTheReleaseDoes();
+    assert.equal(again.code, 0, again.stderr);
+    assert.equal(took(), after, "a re-run published a version the registry already served");
+    // Each step reports what it did rather than what it was handed, so the log
+    // of a re-run says the release is whole without claiming it did the work.
+    for (const step of again.steps) {
+      assert.match(step.stdout, /publish-npm: published none; already on npm /, step.stdout);
+    }
+
+    // And what the re-run left is still installable, which is the property the
+    // skip is only worth having for.
+    const reported = await installAndLaunch(["--version"]);
+    assert.equal(reported.code, 0, reported.stderr);
+    assert.match(reported.stdout, new RegExp(version.replace(/\./g, "\\.")));
+  });
+
   it("would leave a launcher that cannot start if it were offered early", async () => {
     const reg = await freshRegistry();
     const host = platforms.get(hostTarget());

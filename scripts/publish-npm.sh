@@ -3,24 +3,15 @@
 # the registry serves what was published.
 #
 # Why the registry is asked rather than the exit code is in README.md's "How the
-# npm launcher is published". Two rules follow from it, and neither is a fixed
-# wait:
+# npm launcher is published"; exhausting the bounded wait there is a refusal
+# rather than a shrug.
 #
-#   * nothing is published before every exact version its own manifest pins is
-#     served; and
-#   * this does not return until the registry serves what it just published, so
-#     a caller sequencing publishes gets the ordering it wrote.
-#
-# Exhausting the bounded wait is a refusal, not a shrug.
-#
-# Publication is idempotent because an npm version is immutable and a release
-# job can be re-run: `npm pack --dry-run --json` yields each package's canonical
-# name@version, and only a registry 404 permits publication. Auth, network, and
-# server errors fail closed rather than being read as "not published yet".
+# Idempotent because an npm version is immutable and a release job can be re-run:
+# only a registry 404 permits publication, and auth, network and server errors
+# fail closed rather than being read as "not published yet".
 #
 # Exits 0 having published or skipped every package it was handed; 2 on a caller
-# error — a missing argument, an unreadable package — refused before anything is
-# published; 1 when the registry did.
+# error, refused before anything is published; 1 when the registry did.
 set -euo pipefail
 
 # The registry, the publish, or the propagation went wrong: something outside
@@ -59,6 +50,12 @@ case "$await_interval" in
     refuse "PUBLISH_NPM_AWAIT_INTERVAL is '$await_interval', which is not a whole number of seconds" \
       "unset it to take the default, or set it to a whole number of seconds" ;;
 esac
+# Base 10 explicitly: the digits check above accepts `08`, and bash arithmetic
+# reads a leading zero as octal and refuses it — half-way through a wait, with a
+# message about base conversion rather than about the value somebody set.
+await_budget=$((10#$await_budget))
+await_interval=$((10#$await_interval))
+
 [ "$await_interval" -gt 0 ] || refuse \
   "PUBLISH_NPM_AWAIT_INTERVAL is 0, so a wait would spin without ever pausing" \
   "unset it to take the default, or set it to at least 1 second"

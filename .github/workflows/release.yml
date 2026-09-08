@@ -23,8 +23,8 @@ name: Release
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
 #                     CARGO_REGISTRY_TOKEN is set.
-#   * verify-crate  — `cargo install` the exact version just published and run
-#                     scripts/smoke-published.sh over what it put on PATH.
+#   * verify-crate  — an artifact a release published and nothing installed is one
+#                     nobody is watching; this is that promise for the crate.
 #   * build-wheels  — wrap the prebuilt binary in per-platform PyPI wheels with
 #                     maturin (the ruff/uv pattern). Runs unconditionally, so a
 #                     packaging break reddens the release even while publishing
@@ -39,10 +39,12 @@ name: Release
 #   * publish-npm   — publish the platform packages, then the launcher that
 #                     depends on them, with the NPM_TOKEN secret, gated on the
 #                     NPM_PUBLISH repo variable.
-#   * verify-npm    — the same, one leg per platform package the launcher pins,
-#                     for `npm install -g`.
-#   * outcome       — attach `release-outcome.json` to the Release: what shipped
-#                     and whether anything verified it, in three states.
+#   * verify-npm    — the same promise for npm, one leg per platform package the
+#                     launcher pins: a platform nothing installs is one nothing
+#                     watches, which is how one of them stayed broken.
+#   * outcome       — the one artifact a consumer outside this repository can ask
+#                     what a release did, rather than reconstructing it from
+#                     thirty job squares.
 #
 # **Verification stays in this workflow rather than a separate one**, so this
 # workflow's conclusion is a claim about what a user can install rather than

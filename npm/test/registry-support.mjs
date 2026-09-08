@@ -27,6 +27,11 @@ class Entry {
   }
 }
 
+/// The most a publish body may be before this answers rather than buffers.
+/// Generous next to what the journeys send — one stripped debug binary, base64'd
+/// — and finite, which is the whole point.
+const BODY_LIMIT = 512 * 1024 * 1024;
+
 export class Registry {
   constructor() {
     this.packages = new Map();
@@ -160,8 +165,22 @@ export class Registry {
 
     if (req.method === "PUT") {
       const chunks = [];
-      req.on("data", (chunk) => chunks.push(chunk));
+      let held = 0;
+      req.on("data", (chunk) => {
+        held += chunk.length;
+        // A publish body is a base64'd tarball, so it is large by design and
+        // bounded anyway: the largest this suite sends is one stripped debug
+        // binary. Past the bound the request is answered rather than buffered,
+        // so a body that never ends is a 413 instead of this process's heap.
+        if (held > BODY_LIMIT) {
+          req.destroy();
+          answer(413, { error: `publish body exceeds ${BODY_LIMIT} bytes` });
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on("end", () => {
+        if (held > BODY_LIMIT) return;
         try {
           this.#publish(path, JSON.parse(Buffer.concat(chunks).toString("utf8")));
           answer(201, { ok: true });
