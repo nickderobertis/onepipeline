@@ -12,11 +12,10 @@ Five places name that platform matrix and must move together:
 3. `scripts/npm-build.mjs`'s `TARGETS` table,
 4. the `build-npm` matrix in `.github/workflows/release.yml`, and
 5. that file's `verify-npm` matrix, whose `package:` key names the platform
-   package each leg exists to prove.
+   package each leg proves.
 
-The fifth is the one that used to be missing. A platform a release builds and
-publishes but never installs is a platform nothing watches, which is how aarch64
-Linux went unnoticed. `npm/test/platform-matrix.test.mjs` reconciles all five.
+A platform that is built and published but never installed is a platform nothing
+watches, so the fifth is not optional.
 
 The committed `package.json` carries `0.0.0-managed`, not a real version. The
 version has exactly one source — `Cargo.toml`, written by release-plz — and
@@ -41,12 +40,8 @@ Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml` assembles, packs, and publishes it, and
 `scripts/publish-npm.sh` makes that publish idempotent.
 
-**`npm publish` exiting 0 does not mean the registry serves the version.** It
-means the upload was accepted; the version becomes resolvable afterwards, and on
-registry.npmjs.org that gap ran from seconds to eight minutes. So
-`scripts/publish-npm.sh` waits for the registry to actually serve what it just
-published, and refuses to publish anything before the exact versions its own
-manifest pins are served — which is what stops the launcher being offered
-against platform packages an install would silently skip. The evidence, and the
-journeys that drive it against a registry that lags, are in that script's header
-and in `npm/test/publish-gate.test.mjs`.
+**`npm publish` exiting 0 means the upload was accepted, not that the registry
+serves the version.** Never treat a publish exit code as evidence that a version
+resolves; ask the registry. `scripts/publish-npm.sh` does both — it waits for
+what it published to be served, and refuses to publish anything before the exact
+versions its own manifest pins are — and its header says why.
