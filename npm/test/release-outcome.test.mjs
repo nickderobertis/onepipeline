@@ -302,6 +302,64 @@ describe("the release outcome record", () => {
     assert.equal(failed.stdout, "", "nothing claims a record that was never written");
   });
 
+  it("is the same document README.md tells a consumer to expect", () => {
+    // README.md is where a consumer outside this repository is told what to
+    // fetch and what it will find, so its example is a second statement of this
+    // schema. Reconciled here rather than left to drift: the states, the shape,
+    // and the version are read out of the README and held to the script and the
+    // goldens.
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const section = readme.slice(readme.indexOf("\n## Release outcome\n"));
+    assert.ok(
+      section.startsWith("\n## Release outcome\n"),
+      "README.md has no Release outcome section",
+    );
+    const body = section.slice(0, section.indexOf("\n## ", 1));
+
+    const script = readFileSync(join(REPO_ROOT, "scripts", "release-outcome.mjs"), "utf8");
+    const states = script.match(/^const STATES = \[([^\]]+)\]/m)?.[1];
+    assert.ok(states, "no STATES list in scripts/release-outcome.mjs");
+    const declaredStates = [...states.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    for (const state of declaredStates) {
+      assert.match(
+        body,
+        new RegExp(`\`${state}\``),
+        `README.md does not describe the ${state} state`,
+      );
+    }
+
+    const fenced = body.match(/```json\n([\s\S]*?)```/);
+    assert.ok(fenced, "README.md's Release outcome section shows no JSON example");
+    const example = JSON.parse(fenced[1]);
+    const golden = JSON.parse(
+      readFileSync(join(GOLDEN, "release-outcome-shipped-unverified.json"), "utf8"),
+    );
+    assert.deepEqual(
+      Object.keys(example),
+      Object.keys(golden),
+      "README.md's example and the record this script writes have different fields",
+    );
+    assert.equal(
+      example.schema_version,
+      golden.schema_version,
+      "README.md shows a schema_version this repository does not write",
+    );
+    assert.ok(declaredStates.includes(example.outcome));
+    for (const target of example.targets) {
+      assert.deepEqual(
+        Object.keys(target),
+        Object.keys(golden.targets[0]),
+        "README.md's example target and the record's have different fields",
+      );
+      assert.ok(declaredStates.includes(target.outcome));
+    }
+    assert.deepEqual(
+      example.targets.map((t) => t.id).sort(),
+      golden.targets.map((t) => t.id).sort(),
+      "README.md's example answers for a different set of targets",
+    );
+  });
+
   it("names the targets release-targets.toml declares, and the ones release.yml passes", () => {
     const declared = [
       ...readFileSync(join(REPO_ROOT, "release-targets.toml"), "utf8").matchAll(

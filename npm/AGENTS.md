@@ -40,8 +40,5 @@ Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml` assembles, packs, and publishes it, and
 `scripts/publish-npm.sh` makes that publish idempotent.
 
-**`npm publish` exiting 0 means the upload was accepted, not that the registry
-serves the version.** Never treat a publish exit code as evidence that a version
-resolves; ask the registry. `scripts/publish-npm.sh` does both — it waits for
-what it published to be served, and refuses to publish anything before the exact
-versions its own manifest pins are — and its header says why.
+**Never treat an `npm publish` exit code as evidence that the version
+resolves.** Ask the registry.

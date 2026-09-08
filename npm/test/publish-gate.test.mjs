@@ -331,14 +331,39 @@ describe("the npm publish order", () => {
 
   it("refuses a package it cannot read before anything reaches the registry", async () => {
     const reg = await freshRegistry();
+
+    // Nothing to publish at all.
+    const nothing = await attempt("bash", ["scripts/publish-npm.sh"], { env });
+    assert.equal(nothing.code, 2, nothing.stderr);
+    assert.match(nothing.stderr, /pass at least one package directory or tarball/);
+    assert.match(nothing.stderr, /^ACTION: /m);
+
+    // Not a package.
     const corrupt = join(work, "not-a-package.tgz");
     writeFileSync(corrupt, "this is not a gzipped tarball\n");
-    const refused = await attempt("bash", ["scripts/publish-npm.sh", corrupt], { env });
+    const unreadable = await attempt("bash", ["scripts/publish-npm.sh", corrupt], { env });
     // 2, not 1: the caller handed it something to fix, and the registry was
     // never asked. A release log reads the two apart by the code alone.
+    assert.equal(unreadable.code, 2, unreadable.stderr);
+    assert.match(unreadable.stderr, /cannot read package metadata from/);
+    assert.match(unreadable.stderr, /^ACTION: /m);
+
+    // A package npm reads and this cannot: npm normalises whatever single root
+    // a tarball has, so a tarball rooted anywhere but `package/` yields valid
+    // metadata and no manifest to read the pins out of. Publishing it would
+    // mean offering something whose optionalDependencies were never checked.
+    const odd = join(work, "odd-root");
+    mkdirSync(join(odd, "mypkg"), { recursive: true });
+    copyFileSync(join(launcherDir, "package.json"), join(odd, "mypkg", "package.json"));
+    const oddTgz = join(work, "odd-root.tgz");
+    await run("tar", ["-czf", oddTgz, "-C", odd, "mypkg"]);
+    const readable = await run("npm", ["pack", "--dry-run", "--json", oddTgz], { env });
+    assert.equal(JSON.parse(readable)[0].name, "onepipeline-cli", "npm could not read it either");
+    const refused = await attempt("bash", ["scripts/publish-npm.sh", oddTgz], { env });
     assert.equal(refused.code, 2, refused.stderr);
-    assert.match(refused.stderr, /cannot read package metadata from/);
+    assert.match(refused.stderr, /cannot read the manifest inside/);
     assert.match(refused.stderr, /^ACTION: /m);
+
     assert.equal(reg.timeline.length, 0, "a package it could not read still reached the registry");
   });
 
@@ -347,6 +372,8 @@ describe("the npm publish order", () => {
     const host = platforms.get(hostTarget());
     for (const [budget, interval] of [
       ["not-a-number", "1"],
+      ["10", "not-a-number"],
+      ["10", "-1"],
       ["10", "0"],
     ]) {
       const refused = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
