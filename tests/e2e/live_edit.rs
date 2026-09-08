@@ -1693,7 +1693,8 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
     // all, an `add` naming a blank one, and the replacement a `retry` of the held
     // node clones.
     let added = |id: &str, title: Option<&str>| {
-        let mut node = json!({"id": id, "persona": "engineer", "task": format!("## What\nDo {id}.")});
+        let mut node =
+            json!({"id": id, "persona": "engineer", "task": format!("## What\nDo {id}.")});
         if let Some(title) = title {
             node["title"] = json!(title);
         }
@@ -1718,8 +1719,13 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
             .into_iter()
             .filter_map(|task| {
                 Some((
-                    task["item"]["metadata"]["onepipeline.id"].as_str()?.to_owned(),
-                    task["item"]["title"].as_str().unwrap_or_default().to_owned(),
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()?
+                        .to_owned(),
+                    task["item"]["title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
                 ))
             })
             .collect()
