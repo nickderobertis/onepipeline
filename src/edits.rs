@@ -1477,6 +1477,18 @@ fn compile_requeue(
     }])
 }
 
+/// Which of the two spellings a stated landing is, so the fold that records it
+/// puts it where a run-produced settlement puts the same fact.
+///
+/// A change request is named by its **URL** and nothing else this op takes is
+/// one, which is the whole of the test: `onevcs` resolves a URL to the change it
+/// opened, and every other spelling the op admits — a commit — is resolved
+/// against the branches this host holds. A value that is neither was refused at
+/// the envelope, by [`compile_settle`].
+pub(crate) fn landing_is_a_change_request(landing: &str) -> bool {
+    landing.starts_with("http://") || landing.starts_with("https://")
+}
+
 /// The status a `settle` puts a node's record at.
 ///
 /// Exhaustive over the outcome the wire carries, so a fourth word cannot arrive

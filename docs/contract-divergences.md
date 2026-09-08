@@ -3201,6 +3201,25 @@ correlation exactly as a run-produced settlement's landing is — and correlatio
 because a change request open at the moment its node settled is merged
 afterwards.
 
+**It reaches the run's record where a run-produced settlement's landing reaches
+it**, so a manager can trace a release decision back to the change that justified
+it in the views they already read rather than in the correlation that acted on
+it. The fold routes it by its spelling into the map that already holds that fact:
+a change request's URL joins `change_urls`, which is what `results`, the run's
+own `result.json` and the board's `onepipeline.change_url` all read, and a commit
+joins `landing_commits`, which is the board's `onepipeline.landing_commit` and
+what a release is measured against. It is kept beside them as a **stated**
+landing as well, because correlation asks about one ahead of the branch the run
+recorded — the branch is the part of the record the settle is correcting.
+
+What it deliberately does **not** write is the `landing` *word*. `Landed` is
+defined as a landing this run saw happen and `Unlanded` as a change of this
+node's that has not reached its base; a settle saw neither, and an operator who
+names an open change request as where the work is would have the run report it
+`landed` at a moment when the correlation reading the same reference answers
+`not-landed`. The word stays the run's own observation, and the reference stays
+the operator's.
+
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
 wait had been done by dropping and re-adding it and its dependent, purely because

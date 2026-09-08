@@ -230,11 +230,9 @@ pub(crate) struct Dependency {
     /// said it did: the commit it reached its base at, or the change request a
     /// person reads it in.
     ///
-    /// A run's own settlement writes a branch and a landing; a `settle` writes
-    /// what the run could not see, and this is the half of it that says *where*.
     /// `None` for every node this run watched settle itself, which is most of
-    /// them — and for one an operator settled without naming where the work
-    /// went, which is exactly the record this run already had.
+    /// them — and for one an operator settled without naming where the work went,
+    /// which is exactly the record this run already had.
     pub landing: Option<String>,
     /// The release target this node consumes that repository at.
     pub target: Option<TargetName>,
@@ -492,17 +490,6 @@ pub(crate) struct Watch {
     /// When the release records were last read. `None` before the first read,
     /// which is due immediately.
     relayed: Option<Instant>,
-    /// Where each node's work landed, as an operator settling it from evidence
-    /// stated it, keyed by the run whose journal it was read from.
-    ///
-    /// Read from a **journal** rather than taken off the folded state, because
-    /// this run's fold is not the only one it is asked about: a cross-DAG
-    /// dependency's landing was stated on the upstream run's journal, and both
-    /// are read here through one function.
-    stated: BTreeMap<String, BTreeMap<String, String>>,
-    /// When a node's landings were last re-read. `None` before the first read,
-    /// which is due immediately.
-    read_landings: Option<Instant>,
     /// Whether a node the last refresh watched could not be described yet.
     unresolved: bool,
     asker: Asker,
@@ -562,8 +549,6 @@ impl Watch {
             surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
-            stated: BTreeMap::new(),
-            read_landings: None,
             asker: Asker::start(Duration::from_secs(poll_seconds())),
         }
     }
@@ -713,10 +698,9 @@ impl Watch {
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
         self.take_up_answers();
         let now = crate::sys::now_millis();
-        let re_read = self.landings_are_due();
         let mut waits: Vec<(Key, Dependency)> = Vec::new();
         for node in watching {
-            for dependency in self.resolve(paths, state, node, re_read) {
+            for dependency in self.resolve(paths, state, node) {
                 let key = (node.id.clone(), dependency.dep.clone());
                 // A release that has arrived is not waited on any more: no
                 // question is put about it again, and the clock the wait was
@@ -1111,42 +1095,6 @@ impl Watch {
         self.adopted.insert(node.to_owned());
     }
 
-    /// Whether a landing re-read is due, and take the tick if it is.
-    ///
-    /// One tick for the whole pass rather than one per node, so a run holding
-    /// several nodes re-reads its journal once and they all see the same answer.
-    /// Paced by the probe's own interval, for the reason
-    /// [`relay_releases`](Self::relay_releases) is: a landing is stated by a
-    /// person over the channel, and asking oftener than the run puts its release
-    /// question re-reads a file for an answer that could not have changed what is
-    /// asked.
-    fn landings_are_due(&mut self) -> bool {
-        if !self
-            .read_landings
-            .is_none_or(|last| last.elapsed() >= self.relay_every)
-        {
-            return false;
-        }
-        self.read_landings = Some(Instant::now());
-        self.stated.clear();
-        true
-    }
-
-    /// Where one node's work landed, as an operator stated it on that run's own
-    /// journal.
-    ///
-    /// Read once per run per re-read tick and kept for the rest of it, because a
-    /// run's journal answers this for every node in it.
-    fn stated_landing(&mut self, paths: &RunPaths, node: &str) -> Option<String> {
-        if !self.stated.contains_key(&paths.run) {
-            self.stated.insert(
-                paths.run.clone(),
-                stated_landings(&journal::read(&paths.journal())),
-            );
-        }
-        self.stated.get(&paths.run)?.get(node).cloned()
-    }
-
     /// One node's out-of-repository dependencies, resolved once — and their
     /// landings re-read for as long as one of them has none.
     ///
@@ -1157,22 +1105,16 @@ impl Watch {
     /// observed — a change request merged after its node settled, stated by an
     /// operator from evidence — arrives after the fact by definition, and frozen
     /// at settlement it answers `not-landed` for ever.
-    fn resolve(
-        &mut self,
-        paths: &RunPaths,
-        state: &RunState,
-        node: &Node,
-        re_read: bool,
-    ) -> Vec<Dependency> {
+    fn resolve(&mut self, paths: &RunPaths, state: &RunState, node: &Node) -> Vec<Dependency> {
         if let Some(known) = self.dependencies.get(&node.id) {
             let known = known.clone();
-            if !re_read || known.iter().all(|dependency| dependency.landing.is_some()) {
+            if known.iter().all(|dependency| dependency.landing.is_some()) {
                 return known;
             }
             let re_read: Vec<Dependency> = known
                 .into_iter()
                 .map(|mut dependency| {
-                    dependency.landing = self.landing_of(paths, &dependency.dep);
+                    dependency.landing = landing_of(paths, state, &dependency.dep);
                     dependency
                 })
                 .collect();
@@ -1226,8 +1168,7 @@ impl Watch {
                 // nothing and there is nothing to pin against.
                 return Resolution::NothingToAwait;
             };
-            let stated = upstream_paths(paths, &reference)
-                .and_then(|upstream| self.stated_landing(&upstream, &reference.node));
+            let stated = upstream.stated_landings.get(&reference.node).cloned();
             return self.outside(
                 dep,
                 &repo,
@@ -1253,7 +1194,7 @@ impl Watch {
             // branch for this one, exactly as it does today.
             return Resolution::NothingToAwait;
         }
-        let stated = self.stated_landing(paths, dep);
+        let stated = state.stated_landings.get(dep).cloned();
         self.outside(
             dep,
             &repo,
@@ -1262,18 +1203,6 @@ impl Watch {
             stated,
             target,
         )
-    }
-
-    /// Where one dependency's work landed, as an operator stated it — whichever
-    /// run's journal that statement is on.
-    fn landing_of(&mut self, paths: &RunPaths, dep: &str) -> Option<String> {
-        match crate::crossdag::parse(dep) {
-            Some(reference) => {
-                let upstream = upstream_paths(paths, &reference)?;
-                self.stated_landing(&upstream, &reference.node)
-            }
-            None => self.stated_landing(paths, dep),
-        }
     }
 
     /// One out-of-repository dependency, with what its repository releases.
@@ -1686,47 +1615,26 @@ fn upstream_of(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Opti
     Some(crate::projection::fold(&journal::read(&upstream.journal())))
 }
 
+/// Where one dependency's work landed, as an operator stated it — in this run's
+/// record, or in that of the run a cross-DAG reference names.
+///
+/// Read off the fold on the pass that needs it rather than kept, because the fold
+/// is redone every pass and an operator states a landing after the fact by
+/// definition.
+fn landing_of(paths: &RunPaths, state: &RunState, dep: &str) -> Option<String> {
+    match crate::crossdag::parse(dep) {
+        Some(reference) => upstream_of(paths, &reference)?
+            .stated_landings
+            .get(&reference.node)
+            .cloned(),
+        None => state.stated_landings.get(dep).cloned(),
+    }
+}
+
 /// Where the run a cross-DAG dependency names keeps its own record.
 fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Option<RunPaths> {
     let upstream = RunPaths::under(paths.dir.parent()?, &reference.run);
     upstream.exists().then_some(upstream)
-}
-
-/// Where each node of one run's journal was stated to have landed.
-///
-/// The operations of every `edit-committed` are read for the one a `settle`
-/// carrying a landing compiles to. A journal is external input and this is a
-/// **read** of one, so a record this build cannot parse whole is passed over
-/// rather than guessed at: what a mis-read costs here is a release question put
-/// about the wrong work, which answers about somebody else's release.
-///
-/// The last statement about a node wins. Two settles of one node are a record
-/// corrected twice, and the newest is the correction.
-fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String> {
-    let mut stated = BTreeMap::new();
-    for event in events {
-        if journal::PipelineKind::from_wire(&event.kind)
-            != Some(journal::PipelineKind::EditCommitted)
-        {
-            continue;
-        }
-        let operations = event
-            .payload
-            .get("operations")
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
-            })
-            .unwrap_or_default();
-        for operation in operations {
-            if let crate::edits::Operation::LandingFromEvidence { node, landing } = operation {
-                let (Some(node), Some(landing)) = (renderable(&node), renderable(&landing)) else {
-                    continue;
-                };
-                stated.insert(node, landing);
-            }
-        }
-    }
-    stated
 }
 
 /// How often an automated target's probe is run.
@@ -1938,66 +1846,6 @@ mod tests {
             assert!(stated.askable(), "a stated landing is no question at all");
             assert_eq!(stated.reference(), Some(landing));
         }
-    }
-
-    /// Where a node's work was stated to have landed is read off the journal, and
-    /// a record this build cannot read whole says nothing.
-    ///
-    /// The journal is external input — another build wrote it and a person can
-    /// edit it — and what a mis-read costs here is a release question put about
-    /// the wrong work, which is answered with somebody else's release.
-    #[test]
-    fn a_stated_landing_is_read_off_the_journal_and_the_last_one_wins() {
-        let edit = |operations: Value| {
-            serde_json::from_value::<crate::event::Envelope>(json!({
-                "v": 1,
-                "ts": "2026-09-07T00:00:00.000Z",
-                "stream": "pipeline",
-                "seq": 0,
-                "source": "pipeline",
-                "kind": journal::PipelineKind::EditCommitted.as_str(),
-                "labels": {"run_id": "settled"},
-                "payload": {"operations": operations},
-            }))
-            .expect("an envelope")
-        };
-        let stated = |node: &str, landing: &str| json!([{"kind": "landing-from-evidence", "node": node, "landing": landing}]);
-        assert_eq!(
-            stated_landings(&[
-                edit(stated("publish", "3f9a1c2")),
-                edit(stated("other", "https://example.invalid/pull/1")),
-                // A record corrected twice: the newest correction is the one.
-                edit(stated("publish", "9d8c7b6")),
-            ]),
-            [
-                (
-                    "other".to_owned(),
-                    "https://example.invalid/pull/1".to_owned()
-                ),
-                ("publish".to_owned(), "9d8c7b6".to_owned()),
-            ]
-            .into_iter()
-            .collect::<BTreeMap<String, String>>()
-        );
-        // Nothing this build cannot read whole is read as a landing: an
-        // operation list it cannot parse, an operation of another kind, and a
-        // value that would forge a line wherever it is rendered.
-        for unreadable in [
-            json!("not a list of operations"),
-            json!([{"kind": "settled-from-evidence", "node": "publish", "outcome": "done",
-                    "evidence": "it merged"}]),
-            stated("publish", ""),
-            stated("publish", "3f9a1c2 and the one before it"),
-            stated("", "3f9a1c2"),
-        ] {
-            assert!(
-                stated_landings(&[edit(unreadable.clone())]).is_empty(),
-                "{unreadable} was read as a landing"
-            );
-        }
-        // And a run whose journal states none has none, which is every run that
-        // has never had a settlement corrected.
-        assert!(stated_landings(&[]).is_empty());
     }
 
     /// One release, as the note and the record name it.

@@ -87,6 +87,23 @@ pub struct RunState {
     pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// Where each node's work landed, as an operator settling it from evidence
+    /// stated it: the commit it reached its base at, or the change request a
+    /// person reads it in.
+    ///
+    /// Beside the two maps the same fact is folded into — [`change_urls`](Self::change_urls)
+    /// for the one spelling and [`landing_commits`](Self::landing_commits) for the
+    /// other — because those record *what* the landing is and this records that a
+    /// person stated it. Release correlation asks about a stated landing ahead of
+    /// the branch the run recorded, for the reason `docs/contract-divergences.md`
+    /// entry 40 gives: the branch is the part of the record the settle corrects.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a landing reference are
+    // the plain strings this crate spells them as, for the reason `landing_commits` records
+    // beside it. Neither is unchecked: `edits::compile_settle` refuses a landing that is not
+    // one usable word and a node the graph does not hold, which is the boundary the value
+    // crosses.
+    pub stated_landings: BTreeMap<String, String>,
     /// Why each dispatch that ended for a reason other than the agent's verdict
     /// ended, in the words its producer classified it with.
     ///
@@ -922,6 +939,22 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                         state
                             .outcomes
                             .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
+                    }
+                    // Where the work went, which the settlement beside this one
+                    // could not say: the run never watched it land. Folded into
+                    // the same map a run-produced settlement's own record of the
+                    // fact reaches — the change request for one spelling, the
+                    // landing commit for the other — so every reader of a run
+                    // answers the same for both, and kept beside them as a
+                    // stated landing because release correlation asks about one
+                    // ahead of the branch this settle is correcting.
+                    Operation::LandingFromEvidence { node, landing } => {
+                        state.stated_landings.insert(node.clone(), landing.clone());
+                        if edits::landing_is_a_change_request(landing) {
+                            state.change_urls.insert(node.clone(), landing.clone());
+                        } else {
+                            state.landing_commits.insert(node.clone(), landing.clone());
+                        }
                     }
                     // Only a note that is still owed to a dispatch. One the
                     // running turn already took has been read, and holding it

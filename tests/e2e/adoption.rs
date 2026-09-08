@@ -3812,6 +3812,51 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+
+    // And the landing the operator supplied is in the run's own record, where a
+    // run-produced settlement's landing is — not only where the release
+    // correlation that acted on it can see it. A manager tracing this release
+    // decision back to the change that justified it reads the same field for
+    // both kinds of settlement, out of `results`, out of `result.json`, and off
+    // the board the run projects onto.
+    let settled = world.run_json(&run, "result.json")["nodes"]
+        .as_array()
+        .expect("the run's record names its nodes")
+        .iter()
+        .find(|node| node["id"] == json!("broken"))
+        .cloned()
+        .expect("the settled node is in the run's record");
+    let projected = world
+        .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == json!("broken"))
+        .expect("the settled node is on the board");
+    let results = world.run(&["results", &run]);
+    results.exited(0);
+    match spelling {
+        Spelling::ChangeRequest => {
+            assert_eq!(
+                settled["change_url"],
+                json!(landing),
+                "the change a person reads this work in is not in the run's record: {settled}"
+            );
+            assert_eq!(
+                projected["item"]["metadata"]["onepipeline.change_url"],
+                json!(landing),
+                "the board does not carry the change that closed the node: {projected}"
+            );
+            assert!(
+                results.stdout.contains(&landing),
+                "`results` does not name the change that closed the node:\n{}",
+                results.stdout
+            );
+        }
+        Spelling::Commit => assert_eq!(
+            projected["item"]["metadata"]["onepipeline.landing_commit"],
+            json!(landing),
+            "the board does not carry the commit this work landed at: {projected}"
+        ),
+    }
 }
 
 /// The commit spelling of a landing, driven end to end.
