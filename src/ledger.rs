@@ -1314,6 +1314,28 @@ pub fn read_records_from(path: &Path, from: u64) -> Vec<Record> {
     records_of(&bytes, from)
 }
 
+/// The **raw bytes** of a byte range of a file, or `None` where the file does not
+/// hold all of them.
+///
+/// The one reader here that hands back bytes rather than records, and it exists
+/// because a checkpoint's marker is corroborated against the journal's own bytes:
+/// a record decoded into a [`Record`] has been through `from_utf8_lossy` and had
+/// its terminator trimmed, so a digest taken over that is a digest of the
+/// decoding rather than of the file. `None` for a file that cannot be opened or
+/// that is shorter than the range asked for, which is the same answer a marker
+/// the journal cannot corroborate gets.
+///
+/// Counted like every other read here — see the note at the head of this file.
+pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let want = usize::try_from(len).ok()?;
+    let mut bytes = vec![0u8; want];
+    file.read_exact(&mut bytes).ok()?;
+    Some(counted(bytes.len(), bytes))
+}
+
 /// Every line of an append-only file, or nothing when it does not exist yet.
 pub fn read_lines(path: &Path) -> Vec<String> {
     read_records(path)

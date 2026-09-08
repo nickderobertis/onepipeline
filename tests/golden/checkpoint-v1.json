@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "run_id": "golden",
+  "coverage": {
+    "bytes": 8192,
+    "records": 42,
+    "at": {
+      "ts": "2026-09-08T12:00:00.000Z",
+      "stream": "golden-host-1"
+    },
+    "streams": {
+      "golden-host-1": 41
+    },
+    "digest": "d02394cf4c0472ece96e15c7144f52e4"
+  },
+  "state": {
+    "graph": {
+      "concurrency": 4,
+      "nodes": [
+        {
+          "id": "build",
+          "task": "## What\ndo it",
+          "persona": "engineer"
+        }
+      ]
+    },
+    "plan": null,
+    "recorded": {
+      "build": {
+        "at": "done"
+      }
+    },
+    "outcomes": {},
+    "parks": {},
+    "branches": {},
+    "sessions": {},
+    "abandoned": {},
+    "change_urls": {},
+    "causes": {},
+    "heads": {},
+    "landing_commits": {},
+    "landings": {},
+    "completed_steps": {},
+    "dispatched_at": {},
+    "settled_at": {},
+    "attestations": [],
+    "decisions_pending": {},
+    "holds": {},
+    "completion_requests": [],
+    "surfaces_queued": 0,
+    "surfaces_read": 0,
+    "last_surface_at": null,
+    "last_write_at": 1786000000000,
+    "stop": "not-stopped",
+    "strict": true,
+    "cross_dag_watches": {},
+    "cross_dag_baselines": {},
+    "cross_dag_reported": [],
+    "pending_context": {},
+    "refusals": {},
+    "served": {},
+    "superseded": {},
+    "activity": {}
+  }
+}
