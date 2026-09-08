@@ -305,15 +305,23 @@ fn consumes_refusal(
     node: &Node,
     destination: &Destination,
 ) -> std::result::Result<Option<Refusal>, String> {
-    // Asked in the order that needs the least. A node consuming nothing holds no
-    // pin whatever its repository publishes with, and one that narrowed to a
-    // change-* policy publishes under the one it named — so neither needs the
-    // resolved policy, and neither is reported as a node this build could not
-    // check for want of it.
-    if node.consumes.is_empty() || node.merge_policy.is_some_and(opens_a_change_request) {
+    // A node consuming nothing has nothing to hold, whatever its repository
+    // publishes with — so it is answered without the resolved policy, and is never
+    // reported as a node this build could not check for want of one.
+    if node.consumes.is_empty() {
         return Ok(None);
     }
-    let publication = destination.publication.clone()?;
+    // The policy this node publishes under: the one it states, where it states
+    // one, and its repository's otherwise. Its own decides *whichever way it
+    // points* — a node that names `local-direct` on a repository that opens change
+    // requests has said it opens none, and reading its repository's answer over
+    // its own would let exactly that node through. Where what it states is a
+    // widening its repository forbids, `onevcs` refuses it at its own boundary,
+    // which is a second refusal about a different thing rather than this one.
+    let publication = match node.merge_policy {
+        Some(stated) => stated,
+        None => destination.publication.clone()?,
+    };
     if opens_a_change_request(publication) {
         return Ok(None);
     }
@@ -451,6 +459,9 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
                 hook.display()
             )
         });
+    // Best effort, and deliberately: a temporary file that outlives its use is
+    // untidy, and turning that into a refusal would throw away a verdict the
+    // repository has already given.
     let _ = std::fs::remove_file(&message);
     let ran = ran?;
     if ran.status.success() {
@@ -796,14 +807,22 @@ mod tests {
             &destination(MergePolicy::LocalDirect),
         );
 
-        // A node that **narrows** its repository's policy publishes under the one
-        // it named, and a change request is what it narrowed to.
+        // A node states the policy it publishes under, and it decides whichever
+        // way it points.
         let mut narrowed = consuming(None);
         narrowed.merge_policy = Some(MergePolicy::ChangeOpen);
         loads(
-            "a node that narrowed to a change-* policy opens a change request to draft",
+            "a node that named a change-* policy opens a change request to draft",
             &narrowed,
             &destination(MergePolicy::LocalDirect),
+        );
+        let mut stated = consuming(None);
+        stated.merge_policy = Some(MergePolicy::LocalDirect);
+        assert!(
+            consumes_refusal(&stated, &destination(MergePolicy::ChangeAuto))
+                .expect("the rule is answerable")
+                .is_some(),
+            "a node that named `local-direct` itself was let through on its repository's answer"
         );
     }
 

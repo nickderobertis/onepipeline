@@ -841,3 +841,139 @@ fn a_git_that_names_no_hooks_path_leaves_the_title_unchecked() {
         .err_has("the plan loaded without that check having run")
         .err_has("git named no path at all");
 }
+
+/// A node that names **`local-direct` itself** is refused on a repository that
+/// opens change requests.
+///
+/// The node's own policy decides whichever way it points. Reading its
+/// repository's answer over its own would let through exactly the node that has
+/// said, in the plan, that it opens no change request — and there would then be
+/// nothing to hold it to the release it consumes.
+#[test]
+fn a_node_that_names_local_direct_itself_is_refused_on_a_change_request_repository() {
+    let world = World::new("destination-node-local-direct");
+    two_repositories(&world, "change-auto");
+
+    let mut node = consumer(None);
+    node["merge_policy"] = json!("local-direct");
+    let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answered = answer(&checked);
+    let refusals = engine_refusals(&answered);
+    assert_eq!(refusals.len(), 1, "{answered}");
+    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
+    assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
+    assert!(
+        refusals[0]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("local-direct"),
+        "{answered}"
+    );
+}
+
+/// A hook that turns a title down on **stdout** is reported as fully as one that
+/// uses stderr, and one that uses both keeps both.
+///
+/// The refusal quotes the hook whole, because what it said is the repository's
+/// rule and this build states none of its own — so dropping the stream a
+/// repository happened to write on would lose exactly that.
+#[cfg(unix)]
+#[test]
+fn a_hook_is_quoted_whole_whichever_stream_it_wrote_on() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("destination-hook-streams");
+    let service = world.repository("change-auto", &[]);
+    world.commit_msg_hook(&service);
+    let hook = crate::harness::commit_msg_hook(&world);
+    let project = world.plan("titled", &plan_of("titled", vec![lifecycle("ship", &[])]));
+
+    for (why, body, said) in [
+        (
+            "a hook that wrote only to stdout",
+            "#!/bin/sh\necho 'said on stdout'\nexit 1\n",
+            vec!["said on stdout"],
+        ),
+        (
+            "a hook that wrote to both",
+            "#!/bin/sh\necho 'said on stdout'\necho 'said on stderr' >&2\nexit 1\n",
+            vec!["said on stdout", "said on stderr"],
+        ),
+    ] {
+        std::fs::write(&hook, body).expect("the hook is written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("it is executable");
+        let checked = world.run(&["plan", "check", &project, "--json"]);
+        checked.exited(HAS_REFUSALS);
+        let answered = answer(&checked);
+        let refusals = engine_refusals(&answered);
+        assert_eq!(refusals.len(), 1, "{why}: {answered}");
+        let reason = refusals[0]["reason"].as_str().expect("a reason");
+        for line in said {
+            assert!(reason.contains(line), "{why} lost {line:?}: {reason}");
+        }
+    }
+}
+
+/// A hooks directory whose name is **not valid Unicode** is found, and its hook
+/// answers.
+///
+/// The whole of what keeping git's own bytes buys: decoded as UTF-8 this path
+/// names a directory that does not exist, so the repository's policy would go
+/// unread and the node would load as one whose repository stated none. Nothing
+/// else in the suite can tell the two implementations apart.
+#[cfg(unix)]
+#[test]
+fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("destination-hooks-not-unicode");
+    let service = world.repository("change-auto", &[]);
+
+    // A directory name git will carry and `String` cannot: a lone continuation
+    // byte, which is not valid UTF-8 in any position.
+    let hooks = world.root.join(OsStr::from_bytes(b"hooks-\xff"));
+    std::fs::create_dir_all(&hooks).expect("a hooks directory named in bytes");
+    let hook = hooks.join("commit-msg");
+    std::fs::write(&hook, crate::harness::COMMIT_MSG_POLICY).expect("the hook is written");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("it is executable");
+    // Through `OsStr` rather than the harness's `git`, whose arguments are `&str`:
+    // routing this name through one would mangle it before git ever saw it, and
+    // the journey would be about a path that was already text.
+    let git = |args: &[&OsStr]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&service.checkout)
+            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+            .output()
+            .expect("git runs")
+    };
+    let set = git(&[
+        OsStr::new("config"),
+        OsStr::new("core.hooksPath"),
+        hooks.as_os_str(),
+    ]);
+    assert!(set.status.success(), "git refused the name: {set:?}");
+    // git stores the value as bytes; what it stores has to be those bytes, or this
+    // journey is about a path that was already mangled before the loader saw it.
+    let stored = git(&[OsStr::new("config"), OsStr::new("core.hooksPath")]);
+    assert_eq!(
+        stored.stdout.strip_suffix(b"\n").unwrap_or(&stored.stdout),
+        hooks.as_os_str().as_bytes(),
+        "git did not carry the name this journey is about"
+    );
+
+    let mut node = lifecycle("tidy", &[]);
+    node["title"] = json!("refactor(loader): tidy the seam");
+    let project = world.plan("titled", &plan_of("titled", vec![node]));
+    world
+        .run(&["plan", "check", &project])
+        .exited(HAS_REFUSALS)
+        .out_has("this repository does not release from 'refactor:'");
+}
