@@ -16,14 +16,10 @@
 //! * **A task's title, body, status, dependency edges and engine metadata are declared** —
 //!   by the node the plan holds and the graph the run folded — so the projection replaces
 //!   them. That is the whole point of the projection. A node carrying no title is written
-//!   under its **id**, which every node has: a title is a human label and a destination
-//!   refuses an item with none, so a projection that passed the absence through refused —
-//!   and it refuses the *whole* write, so six untitled nodes stopped twenty-five items
-//!   reaching the board. Untitled nodes are not a malformed plan either: a plan at an
-//!   earlier schema version declared no title on a lifecycle node, and a node a live
-//!   `retry` or `add` created is exempt from the requirement deliberately (see
-//!   `graph::check_declared_version`), because a `retry` clones the node it supersedes and
-//!   requiring one there would refuse every later edit to a run launched then.
+//!   under its **id**: a destination that requires one refuses an item with none, and the
+//!   copy is a whole-project write, so one untitled node stops every item of the run
+//!   reaching the board. Untitled nodes are ordinary — see
+//!   `graph::check_declared_version` for why an edited graph carries them.
 //! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
 //!   never the board's own heading, so the destination's title is read and written back. In
 //!   particular it is *not* the project's native identifier: on a store where those two
@@ -1749,22 +1745,8 @@ mod tests {
         assert_eq!(design["metadata"]["onepipeline.id"], "design");
     }
 
-    /// A node carrying no title is written under its **id**, and the projection
-    /// that carries it goes through rather than refusing.
-    ///
-    /// Untitled nodes are ordinary rather than malformed. A plan at an earlier
-    /// schema version declared no title on a lifecycle node, and a node a live
-    /// `retry` or `add` created is exempt from the requirement deliberately —
-    /// `graph::check_declared_version` says why: a `retry` clones the node it
-    /// supersedes, so requiring one there would refuse every later edit to a run
-    /// launched at that version. What is not ordinary is what the absence cost:
-    /// a destination that requires a title refuses the item, and the copy is a
-    /// whole-project write, so six untitled nodes stopped all twenty-five items
-    /// of one run reaching the board.
-    ///
-    /// The id is always there and is what every other view of the run names the
-    /// node by, so it is the label a reader already recognises. A blank title is
-    /// the same absence spelled differently and gets the same answer.
+    /// A node carrying no title is written under its **id**, and a blank one is
+    /// the same absence spelled differently.
     #[test]
     fn a_node_with_no_title_is_projected_under_its_id() {
         let mut fixture = Fixture::new("untitled");

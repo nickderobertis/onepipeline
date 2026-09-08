@@ -3702,21 +3702,10 @@ enum Spelling {
 /// the release question is put about — re-read as the run goes on, rather than
 /// frozen at the moment the node settled.
 ///
-/// The shape this exists for, from a real run: a node's dispatch died while its
-/// change was still open, so the run recorded a branch that never reached a base
-/// and a failure. Release correlation joins a release to work through the
-/// landing, so every consumer of that node was held on a question about a branch
-/// that answers `not-landed` for ever — with no timeout, no retry budget and no
-/// degrade, which is what a release hold is by design. Three dependencies of one
-/// node answered `not-landed` after all three of their change requests had
-/// merged. The operator correcting the record from evidence is holding the one
-/// thing that closes it: they read the merge.
-///
-/// The ordering is half the point. An operator states a landing after the fact by
-/// definition, and a change request open when its node settled is merged
-/// afterwards — outside every session, where nothing relays it back to this run.
-/// So the settle comes first here, the merge second, and what the run answers is
-/// read after each.
+/// The ordering is the point: an operator states a landing after the fact by
+/// definition, so the settle comes first here, the merge second, and what the run
+/// answers is read after each. `docs/contract-divergences.md` entry 40 records
+/// what a frozen answer cost.
 fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spelling: Spelling) {
     let world = watching(name);
     world.write_graphs();
@@ -3889,18 +3878,8 @@ fn waits_of(world: &World, run: &str, node: &str) -> Vec<Value> {
 
 /// A release that has arrived is **never awaited again**, however the probe
 /// answers afterwards — and the wait a supervisor is shown is the hold that is
-/// running.
-///
-/// Measured on a live run: a hold was satisfied and its node dispatched, and
-/// fifty-two minutes later the same run raised a wait surface about that node
-/// reporting 4394 seconds waited with a last answer of `not-answered`, for a node
-/// fifty minutes into its dispatch. The probe had stopped answering and an answer
-/// carrying no version had been written over one that did, so the satisfied hold
-/// came back — with the clock still running from the original hold. That surface
-/// is not a report but a decision put to a supervisor, one of whose three options
-/// is stopping the run: a manager could have flipped a running node's adoption
-/// mode, or stopped a healthy run, on the strength of a wait that ended an hour
-/// earlier.
+/// running. What a resurrected one cost is recorded in
+/// `docs/contract-divergences.md` entry 40.
 ///
 /// Two repositories release here because the node has to go on being **held**
 /// after one of its releases arrives: a node nothing is waiting for raises no
@@ -3992,6 +3971,92 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
 
     // And the node starts on the hold that was really running.
     releases_at(&tool_answer, "0.3.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// The same, across runs: a **cross-DAG** dependency whose upstream node was
+/// settled from evidence is correlated through the landing that settle named.
+///
+/// The reference is another run's ledger, so the landing is on another run's
+/// journal — and a consumer of it is held by exactly the same rule, with exactly
+/// the same absence of a timeout. The upstream settles first and its change is
+/// merged after the downstream run is already waiting, which is the ordering an
+/// operator's correction always has.
+#[test]
+fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landing() {
+    let world = watching("adoption-settled-crossdag");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_opens_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+
+    // The upstream run: work that opens a change request, and a node whose own
+    // record goes wrong.
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut broken = engine();
+    broken["id"] = json!("broken");
+    broken["deps"] = json!(["landed"]);
+    world.script("broken.fail", "1");
+    // A node held open, so the upstream run is still being driven when the
+    // settle reaches it — the ordinary path, where the loop applies a queued
+    // command rather than the `reply` applying it itself.
+    world.script("hold.wait", "hold");
+    let upstream = start(
+        &world,
+        "adoption-settled-upstream",
+        vec![landed, broken, agent("hold", &[])],
+    );
+    world.until("the upstream node to settle", |world| {
+        settled_status(world, &upstream, "broken") == Some("failed".to_owned())
+    });
+    let branch = branch_of(&world, &upstream, "landed");
+    bring_the_branch_here(&world, &engine_repo.checkout, &branch);
+    let landing = tip_of(&world, &engine_repo.checkout, &branch);
+    world
+        .run_with_stdin(
+            &["reply", &upstream],
+            &json!({"version": 2, "commands": [{
+                "op": "settle", "id": "broken", "outcome": "done",
+                "evidence": "the change carrying this work is open; the dispatch died \
+                             before it merged",
+                "landing": landing,
+            }]})
+            .to_string(),
+        )
+        // Applied by the loop, or queued for it: which of the two a `reply`
+        // reports is the driver's timing rather than this journey's subject, and
+        // the settlement below is what says it landed either way.
+        .out_has("\"reply\":0");
+    world.until("the upstream settlement to be recorded", |world| {
+        settled_status(world, &upstream, "broken") == Some("done".to_owned())
+    });
+    world.release("hold.go");
+    world.until("the upstream run to settle", |world| {
+        world.run_file(&upstream, "result.json").is_file()
+    });
+
+    // The downstream run, which may not start until a release carrying that
+    // work is out.
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([format!("run:{upstream}#broken")]);
+    let run = start(&world, "adoption-settled-crossdag", vec![consumer]);
+    world.until("the wait to answer about the landing", |world| {
+        answered(world, &run, "consumer") == Some("not-landed".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    land(&world, &engine_repo.checkout, &branch);
+    world.until("the merged landing to be probed", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    releases_at(&answer, "0.2.0");
     world.until("the held node to run", |world| {
         dispatched(world, &run, "consumer")
     });

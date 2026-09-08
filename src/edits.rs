@@ -182,14 +182,9 @@ pub enum Operation {
     /// request a person reads it in.
     ///
     /// **Its own operation beside [`SettledFromEvidence`](Self::SettledFromEvidence)
-    /// rather than a field on it**, so the settlement a `settle` records is byte
-    /// for byte the settlement it recorded before this existed: a build that
-    /// predates this variant folds a record carrying it as the settlement it
-    /// already understood, and one that carries no landing writes nothing here at
-    /// all. What it says is a fact about *where the work is*, which the record was
-    /// missing — the run never observed a landing for a node it never watched
-    /// land, and release correlation joins a release to work through exactly
-    /// that.
+    /// rather than a field on it**, so a settlement stays byte for byte the
+    /// settlement it was: a build that predates this variant folds the record it
+    /// already understood, and a settle naming no landing writes nothing here.
     LandingFromEvidence {
         /// The node.
         node: String,
@@ -2607,17 +2602,9 @@ mod tests {
     /// A settle records where the work landed, in either spelling of a landing —
     /// and records none where the operator named none.
     ///
-    /// The gap it closes: release correlation joins a release to work through the
-    /// landing, so a node settled from evidence with none is, to that machinery,
-    /// work that never landed — and a dependent held on its release is held with
-    /// no timeout, no retry budget and no degrade. What an operator correcting a
-    /// wrong record is holding is usually the very thing that closes it: they
-    /// read the merge.
-    ///
-    /// Both spellings are the same field, because both are references `onevcs`
-    /// resolves work by. The settlement itself is unchanged by either, which is
-    /// what makes the field additive: the same node, the same outcome, the same
-    /// evidence.
+    /// Both spellings are one field, because both are references `onevcs`
+    /// resolves work by, and neither changes the settlement beside it: that is
+    /// what makes the field additive for callers that predate it.
     #[test]
     fn a_settle_records_the_landing_it_was_given_and_none_where_it_was_given_none() {
         let evidence = "the change merged while the dispatch was dying";

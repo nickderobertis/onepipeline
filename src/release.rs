@@ -262,14 +262,9 @@ impl Dependency {
     /// release is measured against; the commit is what the reference block shows a
     /// worker, and the fallback for work whose branch this run did not record.
     ///
-    /// Ahead of both, a [`landing`](Self::landing) an operator stated. A `settle`
-    /// is a correction *of this run's record*, and the branch is the part of that
-    /// record it corrects: a node whose dispatch died before its change merged
-    /// recorded a branch that never landed, so asking about that branch answers
-    /// `not-landed` for ever while the work it names has been on the base for
-    /// hours. The operator settling it read the merge, and what they name is
-    /// where the work actually is — a change request's URL or the commit it
-    /// landed at, both of which are spellings the sibling resolves.
+    /// Ahead of both, a [`landing`](Self::landing) an operator stated: a `settle`
+    /// is a correction of this run's record, and the branch is the part of that
+    /// record it corrects. See `docs/contract-divergences.md` entry 40.
     fn reference(&self) -> Option<&str> {
         self.landing
             .as_deref()
@@ -640,22 +635,13 @@ impl Watch {
 
     /// Record what one ask answered, about every wait it was put on behalf of.
     ///
-    /// **A release does not un-happen.** Every answer but one holds a node, and
-    /// each of them is a statement about *now*: a probe that failed, a target
-    /// awaiting a person, a version that has not moved. Written over an answer
-    /// that carried a version, any of them un-releases a hold the run already
-    /// acted on — the node was dispatched, its task named the version it was
-    /// building against, and its arrival was reported — and the run then holds
-    /// the same node again, on the same key, over a release that happened. That
-    /// was observed: a node fifty minutes into its dispatch had a wait raised
-    /// about it reporting an hour and a quarter waited, with a last answer of
-    /// `not-answered`, put to a supervisor whose three options included stopping
-    /// the run.
+    /// **A release does not un-happen**, so the version latches: every other
+    /// answer is a statement about *now* — a probe that failed, a target awaiting
+    /// a person, a version that has not moved — and any of them written over one
+    /// that carried a version un-releases a hold the run has already acted on.
     ///
-    /// So the version latches. The **first** one, not the newest: what the run
-    /// reports, and what a node was told, is the release that ended its wait — a
-    /// producer releasing again while a consumer builds against the first has
-    /// changed nothing about this run's hold.
+    /// The **first** version, not the newest: what the run reported and what the
+    /// node was told is the release that ended its wait.
     fn take_up(&mut self, keys: &[Key], answer: &Answer) {
         for key in keys {
             if self.answers.get(key).and_then(Answer::version).is_some() {
@@ -1164,20 +1150,13 @@ impl Watch {
     /// One node's out-of-repository dependencies, resolved once — and their
     /// landings re-read for as long as one of them has none.
     ///
-    /// **The set is frozen and the landing is not**, and the two are different
-    /// questions. Which of a node's dependencies land outside its repository, and
-    /// what each of those repositories releases, is settled by the time it is
-    /// asked: every dependency has settled `done`, and a `retry` replaces the node
-    /// under a new id while a `requeue` continues the branch this already names.
-    /// *Where the work went* is not settled then, and the record used to say it
-    /// was. A landing this run **observed** cannot arrive late — the session's own
-    /// follow relays it before the node it belongs to settles — but a landing
-    /// nobody observed is exactly the case: a change request open when its node
-    /// settled is merged afterwards, outside every session, and what names that
-    /// landing is an operator stating it from evidence, after the fact by
-    /// definition. Frozen at settlement, that dependency answers `not-landed` for
-    /// ever about work that reached its base an hour ago — a `published` consumer
-    /// held with no timeout, no retry budget and no degrade.
+    /// **The set is frozen and the landing is not.** Which dependencies land
+    /// outside the node's repository, and what those repositories release, is
+    /// settled by the time it is asked. *Where the work went* is not: a landing
+    /// this run observed is relayed before the node settles, but one nobody
+    /// observed — a change request merged after its node settled, stated by an
+    /// operator from evidence — arrives after the fact by definition, and frozen
+    /// at settlement it answers `not-landed` for ever.
     fn resolve(
         &mut self,
         paths: &RunPaths,
@@ -1936,14 +1915,8 @@ mod tests {
     }
 
     /// A landing an operator stated is asked about ahead of both, in either
-    /// spelling of one.
-    ///
-    /// The branch is the part of the record a `settle` corrects: a node whose
-    /// dispatch died before its change merged recorded a branch that never
-    /// landed, so a question put about that branch answers `not-landed` for ever
-    /// about work that reached its base hours ago. What the operator read is the
-    /// merge. Driven end to end, against a real repository and a real probe, by
-    /// `tests/e2e/adoption.rs`'s two settled-landing journeys.
+    /// spelling of one — and is what makes a dependency the run could not
+    /// otherwise name askable at all.
     #[test]
     fn a_landing_an_operator_stated_is_what_the_sibling_is_asked_about() {
         for landing in [
@@ -2324,19 +2297,7 @@ mod tests {
 
     /// A release that has arrived stays arrived, and the wait it ended is over:
     /// no question is put about it again, and its clock is dropped rather than
-    /// left running.
-    ///
-    /// The defect this closes was measured on a live run. A hold was satisfied
-    /// and its node dispatched; fifty-two minutes later the same run raised a
-    /// wait surface about that node reporting 4394 seconds waited with a last
-    /// answer of `not-answered`, because the probe had stopped answering and the
-    /// answer that carried no version was written over the one that did. That
-    /// surface is not a report but a decision put to a supervisor, and one of its
-    /// three options is stopping the run.
-    ///
-    /// Driven end to end, against a real probe that answers and then stops
-    /// answering, by `tests/e2e/adoption.rs`'s
-    /// `a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+    /// left running under a later hold.
     #[test]
     fn a_release_that_arrived_is_never_awaited_again() {
         let published = Node {

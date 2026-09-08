@@ -1665,18 +1665,9 @@ fn from_entry_57(field: &str) -> Value {
 /// the board under its own id.
 ///
 /// A node an `add` or a `retry` introduces carries no title unless the envelope
-/// names one, and that exemption is deliberate: `graph::check_declared_version`
-/// requires a title on a plan-loaded lifecycle node and lets an edited graph
-/// carry untitled ones, because a `retry` clones the node it supersedes and
-/// requiring one there would refuse every later edit to a run launched at an
-/// earlier schema version.
-///
-/// What the absence cost was the projection. A destination that requires a title
-/// refuses an item with none, and the copy is a **whole-project write** — so six
-/// untitled live-edit nodes stopped all twenty-five items of one run reaching the
-/// board, and the run's record of itself stopped being readable where a person
-/// reads it. The id is what every other view of the run names the node by, so it
-/// is the label the projection writes.
+/// names one — deliberately, for the reason `graph::check_declared_version`
+/// records — and the projection is a whole-project write, so an item a
+/// destination refuses for having no title is every item of the run missing.
 #[test]
 fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
     let world = World::new("edit-untitled");
@@ -1981,6 +1972,19 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         )
         .exited(REFUSED)
         .err_has("no evidence at all");
+    // Nor a landing nothing could resolve. It is handed back to `onevcs` as the
+    // reference a release is measured against and printed into the views, so a
+    // value carrying whitespace or a control character asks an unanswerable
+    // question and forges a line where it lands.
+    for unusable in ["", "3f9a1c2 and the one before it"] {
+        let mut named = settle("publish", evidence);
+        named["landing"] = json!(unusable);
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([named])))
+            .exited(REFUSED)
+            .err_has("not one word naming a commit or a change request")
+            .err_has("omit the field");
+    }
 
     // The planner's settle is applied to a node the run recorded **failed** —
     // the case this op exists for — and the node is left exactly as it was.
@@ -2006,6 +2010,13 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
             .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
             .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
     };
+    // Read once the projection has reached the board, so what is compared either
+    // side of the settle is the projected item rather than the one the plan store
+    // was authored with: this node carries no title of its own, and the
+    // projection writes its id.
+    world.until_store("the settled node to be projected", |world| {
+        identified(world).is_some_and(|node| node["title"] == json!("publish"))
+    });
     let was = identified(&world).expect("the settled node is on the board");
 
     world
@@ -2027,11 +2038,8 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         vec![json!({"kind": "settled-from-evidence", "node": "publish",
                     "outcome": "done", "evidence": evidence})]
     );
-    // A settle naming no landing attributes none: the status, the outcome and
-    // the evidence are what such a settlement has always recorded, and there is
-    // no fourth fact beside them. The field is optional, so every caller written
-    // before it is unaffected — and the run says nothing about where work it was
-    // never told about went.
+    // A settle naming no landing attributes none, so the record is the three
+    // facts such a settlement has always carried and no fourth beside them.
     assert!(
         operations(&world, &run)
             .iter()
