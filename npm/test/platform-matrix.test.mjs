@@ -62,10 +62,9 @@ function workflowTargets(workflow, job) {
   return targets;
 }
 
-/// The platform package each `verify-npm` leg exists to prove, read out of that
-/// job's own matrix. The `package:` key is what makes a leg an assertion about a
-/// platform rather than a runner label — and `release.yml` checks at run time
-/// that the leg really did resolve the package named here.
+/// The platform package each `verify-npm` leg names in `package:`. That key is
+/// also asserted at run time by the leg itself, so a name here is a claim the
+/// release checks rather than a label.
 function workflowVerifyPackages(workflow) {
   const start = workflow.indexOf("\n  verify-npm:\n");
   assert.notEqual(start, -1, "no `verify-npm` job in release.yml");

@@ -215,6 +215,11 @@ export class Registry {
 
     const attachments = Object.entries(body._attachments ?? {});
     for (const [version, manifest] of Object.entries(body.versions)) {
+      // The key becomes an identity, a filename and a URL below, so it is held
+      // to the shape a version has before any of the three are built from it.
+      if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/.test(version)) {
+        refuse(`'${version}' is not a version this registry will file`);
+      }
       if (!isRecord(manifest)) refuse(`the manifest for ${version} is not an object`);
       if (entry.versions.has(version)) {
         throw Object.assign(new Error("cannot publish over the previously published version"), {
@@ -226,7 +231,14 @@ export class Registry {
       if (!isRecord(attached) || typeof attached.data !== "string") {
         refuse(`no tarball attached for ${version}`);
       }
+      // `Buffer.from(_, "base64")` discards anything it cannot decode rather
+      // than failing, so a body that is not base64 would be filed as a short
+      // tarball nobody could install. Checked, then checked again by length.
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(attached.data)) {
+        refuse(`the tarball attached for ${version} is not base64`);
+      }
       const tarball = Buffer.from(attached.data, "base64");
+      if (tarball.length === 0) refuse(`the tarball attached for ${version} is empty`);
       const identity = `${name}@${version}`;
       const lag = this.lag.get(name) ?? 0;
       const at = Date.now();

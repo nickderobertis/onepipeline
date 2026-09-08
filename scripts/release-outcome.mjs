@@ -37,7 +37,6 @@ const SCHEMA_VERSION = 1;
 /// release's own state is the weakest of its targets'.
 const STATES = ["nothing-shipped", "shipped-unverified", "shipped-verified"];
 
-/// What GitHub Actions reports for a job.
 const RESULTS = ["success", "failure", "cancelled", "skipped"];
 
 /// The caller asked for something this cannot do, and nothing has been written.
@@ -119,7 +118,6 @@ function parseArgs(argv) {
   return out;
 }
 
-/// The three-state answer for one target.
 function stateOf(target) {
   if (target.published !== "success") return "nothing-shipped";
   return target.verified === "success" ? "shipped-verified" : "shipped-unverified";

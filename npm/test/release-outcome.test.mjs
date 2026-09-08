@@ -22,6 +22,16 @@ const execFileAsync = promisify(execFile);
 const work = mkdtempSync(join(tmpdir(), "onepipeline-outcome-"));
 after(() => rmSync(work, { recursive: true, force: true }));
 
+/// Run a command, returning its failure instead of throwing it.
+async function attempt(command, args) {
+  try {
+    const { stdout } = await execFileAsync(command, args, { cwd: REPO_ROOT, encoding: "utf8" });
+    return { code: 0, stdout, stderr: "" };
+  } catch (error) {
+    return { code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
+
 /// Run the composer, returning what it wrote and what it exited with.
 async function compose(args) {
   try {
@@ -358,6 +368,52 @@ describe("the release outcome record", () => {
       golden.targets.map((t) => t.id).sort(),
       "README.md's example answers for a different set of targets",
     );
+  });
+
+  it("accepts every tag release.yml will hand it", async () => {
+    // The workflow checks the tag, strips its `v`, and passes the rest here, so
+    // two independently written grammars decide one thing. They need not be
+    // identical — this one may be the looser — but a tag the workflow lets
+    // through and this refuses would fail the outcome job on a release that had
+    // otherwise succeeded. That implication is what is held.
+    const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
+    const patterns = [...workflow.matchAll(/\[\[ "\$GITHUB_REF_NAME" =~ (\^\S+\$) \]\]/g)].map(
+      (m) => m[1],
+    );
+    assert.ok(patterns.length > 0, "release.yml checks no release tag");
+    assert.equal(
+      new Set(patterns).size,
+      1,
+      `release.yml states the release-tag grammar more than one way: ${[...new Set(patterns)].join(" vs ")}`,
+    );
+
+    const tags = [
+      "v1.2.3",
+      "v0.0.0",
+      "v10.20.30",
+      "v1.2.3-rc.1",
+      "v1.2.3+build.5",
+      "1.2.3",
+      "v1.2",
+      "v1.2.3.4",
+      "vx.y.z",
+      "v1.2.3 ",
+    ];
+    for (const tag of tags) {
+      // The workflow's own check, run by the shell that runs it.
+      const checked = await attempt("bash", ["-c", `[[ "$1" =~ ${patterns[0]} ]]`, "check", tag]);
+      if (checked.code !== 0) continue;
+      const composed = await compose([
+        "--version",
+        tag.replace(/^v/, ""),
+        ...targetsFor(ALL_GREEN),
+      ]);
+      assert.equal(
+        composed.code,
+        0,
+        `release.yml accepts the tag ${tag} and this refuses the version in it: ${composed.stderr}`,
+      );
+    }
   });
 
   it("names the targets release-targets.toml declares, and the ones release.yml passes", () => {

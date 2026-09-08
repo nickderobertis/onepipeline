@@ -130,7 +130,7 @@ await_served() {
   done
 }
 
-# The manifest inside a package, whichever of the two shapes this was handed.
+# A package is either a directory or the tarball it packs to.
 manifest_of() {
   case "$1" in
     *.tgz | *.tar.gz) tar -xzOf "$1" package/package.json ;;
