@@ -543,7 +543,7 @@ impl RunView {
         // stands in for — what the checkpoint removes is the fold over them, which
         // is the part that grew from 0.35 s to 17.47 s as one run's store grew to
         // 22 MB. See [`crate::checkpoint`].
-        let mut state = crate::checkpoint::fold(paths, crate::checkpoint::Order::Merged);
+        let mut state = crate::checkpoint::fold(paths);
         landings_the_run_re_read(&mut state, paths);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the

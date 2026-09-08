@@ -34,29 +34,56 @@
 //! full fold's by however much that reordering moved.
 //!
 //! The marker chosen is one a later reordering **cannot** invalidate, rather than
-//! one discarded whenever a reordering could have happened. It carries three
-//! things beside the byte count: how many records those bytes hold, the greatest
-//! `(ts, stream)` among them, and the greatest `seq` folded per stream. A prefix
-//! is only ever *extended* over a record that sorts at or after both — so the
-//! covered records, in the order they were appended, are exactly the order
-//! [`journal::merge_order`] puts them in — and a checkpoint is only ever *used*
-//! when every record the store has grown by since also sorts at or after both.
+//! one discarded whenever a reordering could have happened. Beside the byte count
+//! it carries how many records those bytes hold, the greatest `(ts, stream)`
+//! among them, and the greatest `seq` folded per stream — and a prefix is
+//! covered only when **every record of the store past it sorts at or after all
+//! three**, asked again of the grown store on every read.
 //!
-//! Those two conditions are the whole proof, and it is short. Write `P` for the
-//! covered records and `T` for the rest. The merge is a k-way one: each stream is
-//! queued in its own `seq`, and each pass takes the queue head with the least
-//! `(ts, stream)`. Every record of `T` sorts at or after every record of `P`, so
-//! while any record of `P` is still queued no head belonging to `T` can win —
-//! except at a tie, which is one stream, where the `seq` condition puts `P`'s
-//! record first. So the merge emits all of `P`, in the order it emits `P` alone,
-//! and then all of `T`. Folding the checkpoint's state and then the records the
-//! store has grown by therefore lands on the state the whole store folds to.
+//! That is the whole proof, and it is short. Write `P` for the covered records
+//! and `T` for the rest. The merge is a k-way one: each stream is queued in its
+//! own `seq`, and each pass takes the queue head with the least `(ts, stream)`.
+//! Every record of `T` sorts at or after every record of `P`, so while any record
+//! of `P` is still queued no head belonging to `T` can win — except at a tie,
+//! which is one stream, where the `seq` condition puts `P`'s record first. So the
+//! merge emits all of `P`, in the order it emits `P` alone, and then all of `T`:
+//! `merge_order(P ∪ T) = merge_order(P) ++ merge_order(T)`. Folding the
+//! checkpoint's state and then the records the store has grown by therefore lands
+//! on the state the whole store folds to, and extending the marker over the front
+//! of `T` is the same statement again with `P` grown.
 //!
-//! Where a record arrives that the marker cannot be extended over — a producer
-//! whose clock runs behind this host's, an `oneharness-session` published out of
-//! band and stamped when its session opened — the coverage simply stops there.
-//! The state is still right: what is lost is the saving on the records past it,
-//! and never the answer.
+//! **What the covered records are not is a prefix of the file's own order**, and
+//! that distinction is the difference between a marker that grows and one that
+//! stops. A run's store has several appenders — the loop's own writer and the
+//! relay carrying its dispatches' streams — so a relayed record stamped a
+//! millisecond before the record appended in front of it is ordinary rather than
+//! exceptional, and it is one the merge moves. A marker that had to keep the file
+//! order would stop at the first of those and never pass it, however far the run
+//! ran on: measured on a settled six-record-per-node run here, it stopped at 6
+//! records of a store many times that. So the covered records are folded **in the
+//! merge order**, and what the marker demands of them is only that nothing past
+//! them sorts in front — which a later record ordinarily satisfies, and which the
+//! inverted record itself satisfies as soon as it is inside `P` rather than in
+//! front of it.
+//!
+//! Where a record does arrive that the marker cannot be extended over — a
+//! producer whose clock runs behind this host's by more than the store's own
+//! tail, an `oneharness-session` published out of band and stamped when its
+//! session opened — the checkpoint is discarded and the store folded whole, and
+//! the marker written afterwards covers the record that discarded it. The state
+//! is never in question: what an unusable checkpoint costs is a fold.
+//!
+//! # One order, for both readers
+//!
+//! A checkpoint is one document and it holds one fold, so the two readers of a
+//! run fold in one order — [`journal::merge_order`], which is the order
+//! [`crate::views`], [`crate::summary`] and [`crate::telemetry`] already read the
+//! store in, and the only ordering promise an envelope carries. The reconcile
+//! loop folded the file as it was appended before this document existed, which
+//! differs from that order exactly where a producer's stamp and this host's
+//! appends do; what it reasons about is its **own** stream, whose records the
+//! merge keeps in their own `seq` whatever their stamps, so what moves is where a
+//! relayed record sits against them — which is what the producer's stamp is for.
 
 use std::collections::BTreeMap;
 
@@ -200,33 +227,26 @@ struct Checkpoint {
     state: RunState,
 }
 
-/// Which order the records a store has grown by are folded in.
-///
-/// The two readers of a run disagree about this today and this type is where
-/// that disagreement is *stated* rather than removed: [`crate::views`] folds the
-/// merged store, and the reconcile loop folds the store as it was appended. A
-/// checkpoint serves both because the records it accounts for are in the one
-/// order both agree on — see the module note — so what each reader is choosing
-/// here is only how to fold the records past it, which is the same choice each
-/// made about the whole store before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Order {
-    /// Fold them in the order they were appended.
-    Appended,
-    /// Fold them in [`journal::merge_order`].
-    Merged,
-}
-
 /// A run's folded state, and how much of its journal that state accounts for.
 ///
 /// Held by a caller that folds a run more than once — the reconcile loop, which
 /// re-folds after every applied command — so each of those folds costs the
 /// records that arrived since the last one rather than the run's whole history.
-/// A caller that folds once takes [`state`](Self::state) and drops it.
+/// A caller that folds once takes [`into_state`](Self::into_state) and drops it.
 #[derive(Debug)]
 pub(crate) struct Projected {
-    state: RunState,
+    /// The fold of exactly what [`coverage`](Self::coverage) accounts for, which
+    /// is the only state the marker may be written beside.
+    covered: RunState,
     coverage: Coverage,
+    /// That, with the records past the marker folded onto it: the whole store.
+    ///
+    /// Kept apart from the one above rather than derived from it on demand,
+    /// because the records past the marker are re-folded on every pass — they are
+    /// the store's own open instant, held back so an arrival beside them can still
+    /// sort in front — and folding them onto a state that already carried them
+    /// would count each of them twice.
+    state: RunState,
     /// How many journal records the last fold took.
     ///
     /// Kept on the value rather than read back off the process-wide counter this
@@ -251,16 +271,17 @@ impl std::ops::DerefMut for Projected {
 
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one.
-    pub(crate) fn open(paths: &RunPaths, order: Order) -> Self {
+    pub(crate) fn open(paths: &RunPaths) -> Self {
         let mut projected = match stored(paths) {
             Some(checkpoint) => Self {
-                state: checkpoint.state,
+                state: checkpoint.state.clone(),
+                covered: checkpoint.state,
                 coverage: checkpoint.coverage,
                 took: 0,
             },
             None => Self::empty(),
         };
-        projected.refresh(paths, order);
+        projected.refresh(paths);
         projected
     }
 
@@ -272,7 +293,7 @@ impl Projected {
     /// than the marker, or it has grown by a record the marker's own records do
     /// not all sort in front of — the whole store is folded again, which is the
     /// same answer more slowly.
-    pub(crate) fn refresh(&mut self, paths: &RunPaths, order: Order) {
+    pub(crate) fn refresh(&mut self, paths: &RunPaths) {
         let journal = paths.journal();
         let mut grown = journal::finished_records_after(&journal, self.coverage.bytes);
         if length_of(&journal) < self.coverage.bytes || !self.corroborated(&grown) {
@@ -280,7 +301,7 @@ impl Projected {
             grown = journal::finished_records_after(&journal, 0);
         }
         self.took = grown.len() as u64;
-        self.take(paths, grown, order);
+        self.take(paths, &grown);
         // Not folded from the journal and therefore not part of what a fold of it
         // produces: `crate::crossdag` fills this in **after** a fold, from another
         // run's ledger, and a caller that had done so already must find it exactly
@@ -295,19 +316,6 @@ impl Projected {
         self.state
     }
 
-    /// The fold of a store with nothing in it, as [`projection::fold`] starts
-    /// from.
-    fn empty() -> Self {
-        Self {
-            state: RunState {
-                strict: true,
-                ..RunState::default()
-            },
-            coverage: Coverage::default(),
-            took: 0,
-        }
-    }
-
     /// How many journal records the last fold took.
     #[cfg(test)]
     pub(crate) fn took(&self) -> u64 {
@@ -318,6 +326,21 @@ impl Projected {
     #[cfg(test)]
     pub(crate) fn coverage(&self) -> &Coverage {
         &self.coverage
+    }
+
+    /// The fold of a store with nothing in it, as [`projection::fold`] starts
+    /// from.
+    fn empty() -> Self {
+        let empty = RunState {
+            strict: true,
+            ..RunState::default()
+        };
+        Self {
+            state: empty.clone(),
+            covered: empty,
+            coverage: Coverage::default(),
+            took: 0,
+        }
     }
 
     /// Whether every record the store has grown by sorts at or after every
@@ -335,44 +358,33 @@ impl Projected {
 
     /// Fold the records the store has grown by, and write what may be accounted
     /// for.
-    fn take(&mut self, paths: &RunPaths, grown: Vec<(Option<Envelope>, u64)>, order: Order) {
-        if grown.is_empty() {
-            return;
-        }
+    ///
+    /// Two folds, split where the marker will stop: the records it may account
+    /// for go onto the covered state, and the ones past it onto a copy of it.
+    /// Both runs are folded in [`journal::merge_order`], and the split holds in
+    /// that order as well as in the file's because a covered prefix is one
+    /// nothing past it sorts in front of — which is the same statement the marker
+    /// is chosen by.
+    fn take(&mut self, paths: &RunPaths, grown: &[(Option<Envelope>, u64)]) {
         // What this fold cost, in the unit the saving is stated in: the records
         // the store has grown by, rather than every record the run has written.
         crate::loopstats::records_folded(grown.len() as u64);
-        let accountable = extent(&self.coverage, &grown);
+        let accountable = extent(&self.coverage, grown);
         let accounted_before = self.coverage.bytes;
-        let mut ahead = Vec::new();
-        for (index, (event, bytes)) in grown.into_iter().enumerate() {
-            if index < accountable {
-                if let Some(event) = &event {
-                    projection::fold_one(&mut self.state, event);
-                }
-                self.coverage.absorb(event.as_ref(), bytes);
-            } else if let Some(event) = event {
-                ahead.push(event);
-            }
-        }
-        // The state as of the marker, which is the only state the marker may be
-        // written beside. Taken only where there is something past it: a coverage
-        // that reached the end of the store is already that state, and cloning it
-        // to say so would be the one copy this exists to avoid.
-        let covered = (!ahead.is_empty()).then(|| self.state.clone());
-        if order == Order::Merged {
-            journal::merge_order(&mut ahead);
-        }
-        for event in &ahead {
-            projection::fold_one(&mut self.state, event);
+        let (covered, ahead) = grown.split_at(accountable);
+        fold_in_merge_order(&mut self.covered, covered);
+        for (event, bytes) in covered {
+            self.coverage.absorb(event.as_ref(), *bytes);
         }
         // Only where the marker actually moved. A store whose every record the
-        // marker cannot be extended over — the shape the module note ends on —
-        // would otherwise rewrite an unchanged document on every read, and a
-        // reader that saved nothing would pay a write to say so.
+        // marker cannot be extended over would otherwise rewrite an unchanged
+        // document on every read, and a reader that saved nothing would pay a
+        // write to say so.
         if self.coverage.bytes > accounted_before {
-            self.write(paths, covered.as_ref().unwrap_or(&self.state));
+            self.write(paths);
         }
+        self.state = self.covered.clone();
+        fold_in_merge_order(&mut self.state, ahead);
     }
 
     /// Write the checkpoint.
@@ -383,16 +395,28 @@ impl Projected {
     /// a fold and costs this one nothing. Written atomically, so a reader beside
     /// a writer sees one whole document or the one before it, and two writers
     /// racing leave a document each of them would have written.
-    fn write(&self, paths: &RunPaths, state: &RunState) {
+    fn write(&self, paths: &RunPaths) {
         let _ = ledger::write_json(
             &paths.checkpoint(),
             &Checkpoint {
                 schema_version: CHECKPOINT_SCHEMA_VERSION,
                 run_id: paths.run.clone(),
                 coverage: self.coverage.clone(),
-                state: state.clone(),
+                state: self.covered.clone(),
             },
         );
+    }
+}
+
+/// Fold a run of records into a state, in the order the merge puts them.
+fn fold_in_merge_order(state: &mut RunState, records: &[(Option<Envelope>, u64)]) {
+    let mut ordered: Vec<Envelope> = records
+        .iter()
+        .filter_map(|(event, _)| event.clone())
+        .collect();
+    journal::merge_order(&mut ordered);
+    for event in &ordered {
+        projection::fold_one(state, event);
     }
 }
 
@@ -400,8 +424,8 @@ impl Projected {
 ///
 /// What a caller that folds a run **once** takes — every view — spelled as one
 /// call so it reads where `projection::fold(&journal::read(..))` used to.
-pub(crate) fn fold(paths: &RunPaths, order: Order) -> RunState {
-    Projected::open(paths, order).into_state()
+pub(crate) fn fold(paths: &RunPaths) -> RunState {
+    Projected::open(paths).into_state()
 }
 
 /// The stored checkpoint, where there is one this build may fold from.
@@ -424,89 +448,115 @@ fn length_of(journal: &std::path::Path) -> u64 {
 
 /// **How many of the records a store has grown by a coverage may account for.**
 ///
-/// The leading ones that keep the marker's two conditions true, which is what
-/// makes the covered records a prefix of the merge order rather than of the file
-/// — see the module note.
+/// The **largest** prefix nothing past it sorts in front of, which is the one
+/// condition the module note's proof needs — and it is the largest rather than
+/// the first, because a prefix that stopped at the first record the file and the
+/// merge disagree about is a marker that never passes it. A relayed record
+/// stamped a millisecond behind the record appended in front of it is inside the
+/// prefix and sorts wherever the merge puts it; what disqualifies a boundary is
+/// only a record **past** it that sorts in front of one inside it.
 ///
-/// Two passes rather than one, because a record may be accountable on its own and
-/// still not be accountable *here*. The first takes the run of records each of
-/// which sorts at or after everything accounted for before it. The second stops
-/// that run wherever a record **past** it does not sort at or after what the run
-/// had reached: extending over that one would be writing a marker the very next
-/// reader could not corroborate, and the coverage would fall straight back to a
-/// full fold. Only records past the first pass's run can do that — the ones
-/// inside it sort at or after every earlier one by construction — so the second
-/// pass is a walk of two lists rather than a comparison of every pair.
+/// Read as spans. Each record that sorts in front of an earlier one — by
+/// `(ts, stream)`, or by `seq` within its own stream — rules out every boundary
+/// that would separate the two, and that is a *range* of boundaries rather than
+/// one. So each record contributes at most one span, found by binary search
+/// against the running maxima in front of it, and the answer is the largest
+/// boundary no span covers. Linear in the store but for those searches, which is
+/// what it has to be: this runs over the whole journal on the fold that has no
+/// checkpoint to resume from.
+///
+/// The trailing records sharing the store's last timestamp are held back and
+/// never covered — [`crate::summary`]'s own maintainer holds the same run open
+/// for the same reason. A record arriving next is stamped at or after that
+/// instant, so leaving it uncovered is what lets an ordinary arrival sort in
+/// front of something without making the marker unusable.
 fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
-    let mut running = coverage.clone();
-    let mut ordered = 0;
-    for (event, bytes) in grown {
-        if let Some(event) = event {
-            if !running.is_in_front_of(event) {
-                break;
-            }
+    let cap = held_open(grown);
+    // One more than the boundaries there are, so a span ending at the last of
+    // them closes inside the array rather than off the end of it.
+    let mut ruled_out = vec![0i64; cap + 2];
+    let mut rule_out = |from: usize, to: usize| {
+        if from <= cap {
+            ruled_out[from] += 1;
+            ruled_out[to.min(cap) + 1] -= 1;
         }
-        running.absorb(event.as_ref(), *bytes);
-        ordered += 1;
-    }
-    let barrier = Barrier::of(&grown[ordered..]);
-    let mut accountable = 0;
-    for (event, _) in &grown[..ordered] {
-        // The record itself rather than the coverage it would leave: everything
-        // absorbed before it already sorts in front of the barrier — the coverage
-        // handed in did, or it would not have been usable, and every record after
-        // that passed this same test — so the one record being added is the only
-        // thing that can newly reach past it.
-        if event
-            .as_ref()
-            .is_some_and(|event| !barrier.is_behind(event))
-        {
-            break;
-        }
-        accountable += 1;
-    }
-    accountable
-}
-
-/// The earliest place anything the coverage may **not** reach sorts at.
-///
-/// One value taken once rather than a comparison per candidate boundary: what
-/// stops a coverage extending is the least-sorting record past it, and that
-/// record does not change as the boundary moves.
-#[derive(Debug, Default)]
-struct Barrier {
-    at: Option<Placed>,
-    streams: BTreeMap<String, u64>,
-}
-
-impl Barrier {
-    /// Where the records past a candidate coverage begin.
-    fn of(ahead: &[(Option<Envelope>, u64)]) -> Self {
-        let mut barrier = Self::default();
-        for event in ahead.iter().filter_map(|(event, _)| event.as_ref()) {
-            let placed = placed(event);
-            if barrier.at.as_ref().is_none_or(|at| placed < *at) {
-                barrier.at = Some(placed);
-            }
-            let reached = barrier
-                .streams
-                .entry(event.stream.clone())
-                .or_insert(event.seq);
-            *reached = (*reached).min(event.seq);
-        }
-        barrier
-    }
-
-    /// Whether one record a coverage would absorb still sorts in front of
-    /// everything past it.
-    fn is_behind(&self, event: &Envelope) -> bool {
+    };
+    // The greatest `(ts, stream)` in front of each boundary, which only ever
+    // grows — so the first record to reach past a given place is found by
+    // searching this rather than by scanning back through the store.
+    let mut reached: Vec<Option<Placed>> = vec![coverage.at.clone()];
+    // Each stream's own records: where each sits in the store, and the greatest
+    // `seq` that stream had reached there. Growing too, for the same reason, and
+    // per stream because the merge keeps a stream in its own `seq` whatever the
+    // stamps say.
+    let mut per_stream: BTreeMap<&str, Vec<(usize, u64)>> = BTreeMap::new();
+    for (at, (event, _)) in grown.iter().enumerate() {
+        let front = reached[at].clone();
+        let Some(event) = event else {
+            // A record this build cannot read folds to nothing, so no boundary is
+            // ruled out by where the merge would put it.
+            reached.push(front);
+            continue;
+        };
         let placed = placed(event);
-        self.at.as_ref().is_none_or(|at| placed <= *at)
-            && self
-                .streams
-                .get(&event.stream)
-                .is_none_or(|barrier| event.seq <= *barrier)
+        if front.as_ref().is_some_and(|front| *front > placed) {
+            // The merge puts this record in front of one appended before it, so
+            // every boundary between the two is one it would be carried across.
+            let first =
+                reached.partition_point(|reached| reached.as_ref().is_none_or(|at| *at <= placed));
+            rule_out(first, at);
+        }
+        let stream = per_stream.entry(event.stream.as_str()).or_default();
+        if stream
+            .last()
+            .is_some_and(|(_, reached)| *reached > event.seq)
+        {
+            // The same statement about one stream's own order. The `seq` the
+            // marker already carries for this stream cannot be the record in
+            // front: a checkpoint is only usable where every record the store has
+            // grown by is past it, which `corroborated` has already asked.
+            let first = stream.partition_point(|(_, reached)| *reached <= event.seq);
+            rule_out(stream[first].0 + 1, at);
+        }
+        let carried = stream.last().map_or(event.seq, |(_, reached)| *reached);
+        stream.push((at, carried.max(event.seq)));
+        reached.push(Some(match front {
+            Some(front) if front > placed => front,
+            _ => placed,
+        }));
     }
+    let mut covered = 0;
+    let mut spanning = 0;
+    for boundary in 0..=cap {
+        spanning += ruled_out[boundary];
+        if spanning == 0 {
+            covered = boundary;
+        }
+    }
+    covered
+}
+
+/// How many of a store's records may be considered for a marker at all.
+///
+/// Everything but the trailing run of records carrying the last one's timestamp.
+/// Counted from the end rather than by that timestamp, so a store some producer
+/// stamped out of order does not hold an earlier instant open too — those records
+/// are placed already, and taking them with the tail would move a boundary
+/// nothing arriving next can reach.
+fn held_open(grown: &[(Option<Envelope>, u64)]) -> usize {
+    let Some(last) = grown
+        .iter()
+        .rev()
+        .find_map(|(event, _)| event.as_ref().map(|event| event.ts.clone()))
+    else {
+        // Nothing datable in the whole of it: no instant is open, because no
+        // arrival can sort in front of a record that folds to nothing.
+        return grown.len();
+    };
+    grown
+        .iter()
+        .rposition(|(event, _)| event.as_ref().is_some_and(|event| event.ts != last))
+        .map_or(0, |before| before + 1)
 }
 
 #[cfg(test)]
@@ -584,6 +634,18 @@ mod tests {
         paths
     }
 
+    /// Let the clock reach the next millisecond.
+    ///
+    /// A run records over time and a fixture records as fast as the host will
+    /// take it, so without this every record a journey writes can carry one
+    /// stamp — and a store that is a single instant is one a marker holds
+    /// entirely open, which is a different shape from the run these journeys are
+    /// about. Two milliseconds rather than one, because the stamp is truncated to
+    /// the millisecond.
+    fn an_instant_later() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
     /// A run whose store carries a plan and one node's dispatch, through the
     /// real journal writer.
     fn a_recorded_run(root: &Path, run: &str) -> RunPaths {
@@ -596,6 +658,7 @@ mod tests {
                 crate::journal::payload(&[("plan", json!(plan(&["build", "ship"])))]),
             )
             .expect("appended");
+        an_instant_later();
         journal
             .emit(
                 PipelineKind::NodeDispatched,
@@ -608,6 +671,7 @@ mod tests {
 
     /// Settle one node, through the same writer.
     fn settle(paths: &RunPaths, node: &str, status: &str) {
+        an_instant_later();
         Journal::open(paths)
             .emit(
                 PipelineKind::NodeSettled,
@@ -661,10 +725,10 @@ mod tests {
     /// writes a checkpoint of its own: a control that left one behind would hand
     /// the journey a document covering the whole store in place of the one it was
     /// about to make a claim about.
-    fn without_a_checkpoint(paths: &RunPaths, order: Order) -> Value {
+    fn without_a_checkpoint(paths: &RunPaths) -> Value {
         let held = std::fs::read(paths.checkpoint()).ok();
         let _ = std::fs::remove_file(paths.checkpoint());
-        let whole = folded_as(&fold(paths, order));
+        let whole = folded_as(&fold(paths));
         match held {
             Some(bytes) => std::fs::write(paths.checkpoint(), bytes).expect("put back"),
             None => {
@@ -680,30 +744,26 @@ mod tests {
     /// counter it also reports to: this repository runs a test per process, and
     /// a check that only holds where that is true is a check that stops holding
     /// the day it is not.
-    fn folding(paths: &RunPaths, order: Order) -> (Value, u64) {
-        let projected = Projected::open(paths, order);
+    fn folding(paths: &RunPaths) -> (Value, u64) {
+        let projected = Projected::open(paths);
         (folded_as(&projected), projected.took())
     }
 
-    /// The point of the document: the state is the state a full fold produces,
-    /// through both orders a reader of this crate folds in.
+    /// The point of the document: the state is the state a full fold produces.
     #[test]
     fn a_resumed_fold_lands_on_the_state_the_whole_store_folds_to() {
-        for order in [Order::Merged, Order::Appended] {
-            let root = scratch(&format!("resumed-is-whole-{order:?}").to_lowercase());
-            let paths = a_recorded_run(&root, "r-resumed");
-            // One read writes the checkpoint; the store then grows past it.
-            let _ = fold(&paths, order);
-            settle(&paths, "build", "done");
-            relayed(&paths, "graph-1", 0, "2099-01-01T00:00:01.000Z", "ship");
-            settle(&paths, "ship", "done");
-            assert!(paths.checkpoint().is_file(), "no checkpoint was written");
+        let root = scratch("resumed-is-whole");
+        let paths = a_recorded_run(&root, "r-resumed");
+        // One read writes the checkpoint; the store then grows past it.
+        let _ = fold(&paths);
+        settle(&paths, "build", "done");
+        relayed(&paths, "graph-1", 0, "2099-01-01T00:00:01.000Z", "ship");
+        settle(&paths, "ship", "done");
+        assert!(paths.checkpoint().is_file(), "no checkpoint was written");
 
-            let resumed = folded_as(&fold(&paths, order));
-            let whole = without_a_checkpoint(&paths, order);
-            assert_eq!(resumed, whole, "{order:?} disagreed with a full fold");
-            let _ = std::fs::remove_dir_all(&root);
-        }
+        let resumed = folded_as(&fold(&paths));
+        assert_eq!(resumed, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **Which records each path consumed**, observed rather than timed.
@@ -718,11 +778,15 @@ mod tests {
         let root = scratch("takes-only-the-tail");
         let paths = a_recorded_run(&root, "r-tail");
         settle(&paths, "build", "done");
-        let _ = fold(&paths, Order::Merged);
+        let _ = fold(&paths);
 
+        let held = crate::ledger::read_records(&paths.journal()).len() as u64;
         let mut stored = super::stored(&paths).expect("the checkpoint this read wrote");
         let covered = stored.coverage.records;
-        assert_eq!(covered, 3, "the whole store was not accounted for");
+        assert!(
+            covered > 0 && covered < held,
+            "a marker over a {held}-record store accounts for {covered}"
+        );
         stored
             .state
             .outcomes
@@ -730,7 +794,8 @@ mod tests {
         crate::ledger::write_json(&paths.checkpoint(), &stored).expect("the checkpoint is written");
 
         settle(&paths, "ship", "done");
-        let (resumed, took) = folding(&paths, Order::Merged);
+        let grew_to = crate::ledger::read_records(&paths.journal()).len() as u64;
+        let (resumed, took) = folding(&paths);
         assert_eq!(
             resumed["outcomes"]["build"], "carried-from-the-checkpoint",
             "the records the marker accounts for were folded again: {resumed}"
@@ -740,19 +805,23 @@ mod tests {
             json!({"at": "done"}),
             "the records past the marker were not folded: {resumed}"
         );
-        assert_eq!(took, 1, "a resumed fold took more than the store grew by");
+        assert_eq!(
+            took,
+            grew_to - covered,
+            "a resumed fold took more than the store grew by"
+        );
 
-        let held = std::fs::read(paths.checkpoint()).expect("the poisoned checkpoint");
+        let poisoned = std::fs::read(paths.checkpoint()).expect("the poisoned checkpoint");
         std::fs::remove_file(paths.checkpoint()).expect("the checkpoint goes away");
-        let (whole, took_whole) = folding(&paths, Order::Merged);
-        std::fs::write(paths.checkpoint(), held).expect("put back");
+        let (whole, took_whole) = folding(&paths);
+        std::fs::write(paths.checkpoint(), poisoned).expect("put back");
         assert_eq!(
             whole["outcomes"].get("build"),
             None,
             "the control fold kept an account only the checkpoint carried"
         );
         assert_eq!(
-            took_whole, 4,
+            took_whole, grew_to,
             "the control fold did not take the whole store"
         );
         assert!(
@@ -792,7 +861,7 @@ mod tests {
         let root = scratch(name);
         let paths = a_recorded_run(&root, "r-fallback");
         settle(&paths, "build", "done");
-        let _ = fold(&paths, Order::Merged);
+        let _ = fold(&paths);
         let mut stored = super::stored(&paths).expect("the checkpoint that read wrote");
         stored
             .state
@@ -800,7 +869,7 @@ mod tests {
             .insert("build".into(), "carried-from-the-checkpoint".into());
         crate::ledger::write_json(&paths.checkpoint(), &stored).expect("written");
         settle(&paths, "ship", "done");
-        let whole = without_a_checkpoint(&paths, Order::Merged);
+        let whole = without_a_checkpoint(&paths);
         assert_eq!(
             whole["outcomes"].get("build"),
             None,
@@ -865,13 +934,13 @@ mod tests {
         let root = scratch("rearranged");
         let paths = a_recorded_run(&root, "r-rearranged");
         settle(&paths, "build", "done");
-        let _ = fold(&paths, Order::Merged);
+        let _ = fold(&paths);
         let covered = super::stored(&paths).expect("a checkpoint").coverage;
         assert!(covered.records > 0, "nothing was accounted for");
 
         relayed(&paths, "graph-0", 0, "1999-01-01T00:00:00.000Z", "build");
-        let resumed = folded_as(&fold(&paths, Order::Merged));
-        assert_eq!(resumed, without_a_checkpoint(&paths, Order::Merged));
+        let resumed = folded_as(&fold(&paths));
+        assert_eq!(resumed, without_a_checkpoint(&paths));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -883,13 +952,49 @@ mod tests {
         let paths = a_run(&root, "r-unplaceable");
         relayed(&paths, "graph-b", 0, "2099-01-01T00:00:03.000Z", "build");
         relayed(&paths, "graph-a", 0, "2099-01-01T00:00:01.000Z", "build");
-        let state = folded_as(&fold(&paths, Order::Merged));
+        let state = folded_as(&fold(&paths));
         let covered = super::stored(&paths).map(|stored| stored.coverage);
         assert!(
             covered.is_none_or(|covered| covered.records == 0),
             "a record the merge order moves was accounted for"
         );
-        assert_eq!(state, without_a_checkpoint(&paths, Order::Merged));
+        assert_eq!(state, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A marker passes a **local** inversion rather than stopping at it.
+    ///
+    /// The property the whole scheme turns on, and the one a marker that had to
+    /// keep the file's own order does not have: a record the merge moves in front
+    /// of the one appended before it rules out the boundaries *between the two*
+    /// and no others, so the marker sits past both. Measured on a real run, the
+    /// difference between the two readings was a marker that stopped at 6 records
+    /// of a store and one that reached 18.
+    #[test]
+    fn a_marker_passes_a_local_inversion_rather_than_stopping_at_it() {
+        let root = scratch("past-an-inversion");
+        let paths = a_run(&root, "r-inverted");
+        for (stream, ts) in [
+            ("graph-a", "2099-01-01T00:00:01.000Z"),
+            ("graph-c", "2099-01-01T00:00:05.000Z"),
+            // Stamped between the two in front of it and appended after them,
+            // which is what a relay carrying another process's stream does.
+            ("graph-b", "2099-01-01T00:00:03.000Z"),
+            ("graph-d", "2099-01-01T00:00:09.000Z"),
+            ("graph-e", "2099-01-01T00:00:11.000Z"),
+        ] {
+            relayed(&paths, stream, 0, ts, "build");
+        }
+        let state = folded_as(&fold(&paths));
+        let covered = super::stored(&paths)
+            .expect("a checkpoint")
+            .coverage
+            .records;
+        assert_eq!(
+            covered, 4,
+            "a marker stopped at an inversion instead of passing it"
+        );
+        assert_eq!(state, without_a_checkpoint(&paths));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -902,28 +1007,33 @@ mod tests {
         for nth in 0..20 {
             settle(&paths, if nth % 2 == 0 { "build" } else { "ship" }, "done");
         }
-        let mut projected = Projected::open(&paths, Order::Appended);
+        let mut projected = Projected::open(&paths);
         assert_eq!(
             projected.took(),
             22,
             "the loop did not open on the whole store"
         );
-        assert_eq!(
-            projected.coverage().records,
-            22,
-            "the loop did not account for the store it opened"
+        let covered = projected.coverage().records;
+        assert!(
+            covered > 0,
+            "the loop accounted for none of the 22-record store it opened"
         );
 
         settle(&paths, "build", "failed");
-        projected.refresh(&paths, Order::Appended);
+        projected.refresh(&paths);
         let took = projected.took();
+        // What the store grew by, plus the instant the marker was holding open —
+        // bounded by one timestamp's records rather than by the run's length, and
+        // the whole of what a re-fold pays twice.
         assert_eq!(
-            took, 1,
+            took,
+            23 - covered,
             "a re-fold took {took} records of a 23-record store"
         );
+        assert!(took <= 4, "the open instant is not a bounded run: {took}");
         assert_eq!(
             folded_as(&projected),
-            without_a_checkpoint(&paths, Order::Appended),
+            without_a_checkpoint(&paths),
             "the loop's state and a full fold's disagree"
         );
         let _ = std::fs::remove_dir_all(&root);

@@ -26,6 +26,7 @@ mod amend;
 mod boundary;
 mod cancellation;
 mod channel;
+mod checkpoint;
 mod concurrency;
 mod criteria;
 mod crossdag;

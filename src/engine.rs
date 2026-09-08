@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
-use crate::checkpoint::{Order, Projected};
+use crate::checkpoint::Projected;
 use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -640,16 +640,6 @@ impl Dispatch {
     }
 }
 
-/// The order this loop folds a run's journal in.
-///
-/// **As it was appended**, which is what this loop has always folded — it is the
-/// journal's single writer of graph state, so the order it wrote records in is
-/// the order it reasons about them in. A view folds the merged store instead,
-/// and the two agree over everything a checkpoint accounts for by construction:
-/// see [`crate::checkpoint`], where the records a marker may cover are exactly
-/// the ones the merge order and the file agree about.
-const FOLD_ORDER: Order = Order::Appended;
-
 /// Take the run's ownership lock, or report who holds it.
 ///
 /// Taken by the caller rather than by the loop, because a caller that is about
@@ -689,7 +679,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     // the run has got to costs is the records written since the last time it was
     // asked, rather than the run's whole history over and over. See
     // [`crate::checkpoint`].
-    let mut state = Projected::open(paths, FOLD_ORDER);
+    let mut state = Projected::open(paths);
     report_unreadable_records(paths, &state);
 
     let outcome = converge(paths, &mut journal, &mut state, &launch)?;
@@ -1081,7 +1071,7 @@ fn converge(
                 Message::Settled(settlement) => {
                     in_flight.remove(&settlement.node);
                     settle(paths, journal, &settlement)?;
-                    state.refresh(paths, FOLD_ORDER);
+                    state.refresh(paths);
                     // A node that settled may have readied its dependents, and a
                     // node that is ready again — a requeue, a retry — is announced
                     // again. `announce_ready` retains against the frontier at the
@@ -1793,7 +1783,7 @@ fn reconcile_edits(
                             raise(paths, journal, surface)?;
                         }
                     }
-                    state.refresh(paths, FOLD_ORDER);
+                    state.refresh(paths);
                     changed = true;
                 }
                 Err(error) => {
@@ -2192,7 +2182,7 @@ fn adopt_releases(
             ]),
         )?;
     }
-    state.refresh(paths, FOLD_ORDER);
+    state.refresh(paths);
     Ok(true)
 }
 
@@ -2314,7 +2304,7 @@ fn start_ready(
         settled_here = true;
     }
     if settled_here {
-        state.refresh(paths, FOLD_ORDER);
+        state.refresh(paths);
     }
     Ok(settled_here)
 }
