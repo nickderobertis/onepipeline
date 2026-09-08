@@ -3698,6 +3698,7 @@ enum Spelling {
     ChangeRequest,
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — the compiled binary, its own release watch, a real `onevcs` publication, a real git merge and a real probe subprocess — so a project edged narrower than the crate would declare the same dependency and skip nothing. It lives beside the other release-adoption journeys in this file, which is where a reader looks for one and what `just test-e2e` already runs on its own, and it carries the same suppression they do for the same reason.
 /// A node settled from evidence says **where the work landed**, and that is what
 /// the release question is put about — re-read as the run goes on, rather than
 /// frozen at the moment the node settled.
@@ -3941,6 +3942,9 @@ fn waits_of(world: &World, run: &str, node: &str) -> Vec<Value> {
         .collect()
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — the compiled binary, its own release watch, a real `onevcs` publication, a real git merge and a real probe subprocess — so a project edged narrower than the crate would declare the same dependency and skip nothing. It lives beside the other release-adoption journeys in this file, which is where a reader looks for one and what `just test-e2e` already runs on its own, and it carries the same suppression they do for the same reason.
 /// A release that has arrived is **never awaited again**, however the probe
 /// answers afterwards — and the wait a supervisor is shown is the hold that is
 /// running. What a resurrected one cost is recorded in
@@ -4057,6 +4061,9 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     });
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — the compiled binary, its own release watch, a real `onevcs` publication, a real git merge and a real probe subprocess — so a project edged narrower than the crate would declare the same dependency and skip nothing. It lives beside the other release-adoption journeys in this file, which is where a reader looks for one and what `just test-e2e` already runs on its own, and it carries the same suppression they do for the same reason.
 /// The same, across runs: a **cross-DAG** dependency whose upstream node was
 /// settled from evidence is correlated through the landing that settle named.
 ///
@@ -4142,3 +4149,4 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
         world.run_file(&run, "result.json").is_file()
     });
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

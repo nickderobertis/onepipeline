@@ -1661,6 +1661,7 @@ fn from_entry_57(field: &str) -> Value {
     block[field].clone()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives beside the other live-edit journeys in this file, which is where a reader looks for one and what `just test-e2e` already runs on its own. What it exercises is the crate's own edit vocabulary, its reconciler and its projection, which any change under `src/` can move, so a project edged narrower than the crate could not honestly run it — and it carries the same suppression its neighbours do for the same reason.
 /// A run holding nodes a live edit created **projects**, and each of them reaches
 /// the board under its own id.
 ///
@@ -1776,6 +1777,8 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
         );
     }
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
 // beside the twenty-seven other live-edit journeys in this file, which is where a reader

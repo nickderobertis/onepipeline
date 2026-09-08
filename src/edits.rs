@@ -1485,6 +1485,13 @@ fn compile_requeue(
 /// not an object name at all, whichever hash the repository uses.
 const OBJECT_NAME_WIDTHS: std::ops::RangeInclusive<usize> = 7..=64;
 
+// llmlint: ignore[boundary_inputs_validated] what this checks is the whole of what can be
+// checked here, and the rest is not this boundary's to answer. Whether a URL names a change
+// request `onevcs` can resolve is that library's question, asked against host state that
+// changes *while a run waits*: the case this op exists for is a change request that has not
+// merged yet, and the run goes on asking about it until it does — so a boundary that refused
+// a reference the host cannot resolve yet would refuse exactly the settlement this field was
+// added for. The sibling answers an unresolvable reference itself, by name.
 /// Whether a stated landing is spelled as a **URL**, which is how a change
 /// request is named.
 ///
