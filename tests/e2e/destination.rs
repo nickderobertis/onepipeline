@@ -268,6 +268,13 @@ fn a_consumes_on_a_repository_that_opens_a_change_request_loads() {
 /// this host has not registered, which is a plan that launches correctly today;
 /// loading in silence would let it load looking as though it had cleared a bar
 /// nobody applied.
+///
+/// This is also the journey over the arm where the verb **started and turned the
+/// identity down** — a real `onevcs resolve` exits non-zero on a repository it
+/// does not hold — which is a different answer from the neighbour below, where
+/// the executable is not there to start. So it asserts on that arm's own word
+/// rather than on the note alone: the two arms end in the same note, and a
+/// journey that read only the note could not tell which of them had answered.
 #[test]
 fn a_node_whose_identity_this_host_cannot_resolve_loads_and_says_it_was_not_checked() {
     let world = World::new("destination-unresolvable");
@@ -283,12 +290,30 @@ fn a_node_whose_identity_this_host_cannot_resolve_loads_and_says_it_was_not_chec
         &plan_of("unresolvable", vec![agent("engine", &[]), node]),
     );
 
-    world
-        .run(&["plan", "check", &project])
+    let asked = world.run(&["plan", "check", &project]);
+    asked
         .exited(0)
         .err_has("node 'tidy'")
         .err_has("github.com/owner/nobody-registered-this")
+        .err_has("refused:")
         .err_has("the plan loaded without that check having run");
+
+    // And what the verb said is carried rather than swallowed. Everything this
+    // build composes for this arm ends at `refused:`, so the rest of that line is
+    // the sibling's own diagnostic and nothing else — asserted as *present*
+    // rather than word for word, because the sentence is `onevcs`'s to change and
+    // relaying it is this crate's to keep.
+    let said = asked
+        .stderr
+        .lines()
+        .find_map(|line| line.split_once("refused:"))
+        .map(|(_, said)| said.trim())
+        .expect("the resolution verb's refusal is reported");
+    assert!(
+        !said.is_empty(),
+        "the verb turned the identity down and the loader relayed nothing it said:\n{}",
+        asked.stderr
+    );
 }
 
 /// A host with no resolution verb reports every lifecycle node as one it could
