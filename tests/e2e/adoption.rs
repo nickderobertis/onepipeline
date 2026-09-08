@@ -3850,12 +3850,32 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
                 "`results` does not name the change that closed the node:\n{}",
                 results.stdout
             );
+            assert!(
+                projected["item"]["metadata"]["onepipeline.landing_commit"].is_null(),
+                "a change request was written where a reader looks for the commit a \
+                 change landed at: {projected}"
+            );
         }
-        Spelling::Commit => assert_eq!(
-            projected["item"]["metadata"]["onepipeline.landing_commit"],
-            json!(landing),
-            "the board does not carry the commit this work landed at: {projected}"
-        ),
+        Spelling::Commit => {
+            assert_eq!(
+                projected["item"]["metadata"]["onepipeline.landing_commit"],
+                json!(landing),
+                "the board does not carry the commit this work landed at: {projected}"
+            );
+            // The other half of the routing: a commit is not written where a
+            // person reads a change, which is the field `results` prints and the
+            // run's own record carries. Each spelling reaches the reader that
+            // holds that fact and no other.
+            assert!(
+                settled["change_url"].is_null(),
+                "a commit was recorded as the change a person reads this work in: {settled}"
+            );
+            assert!(
+                !results.stdout.contains(&landing),
+                "`results` printed a commit where it names a change request:\n{}",
+                results.stdout
+            );
+        }
     }
 }
 
