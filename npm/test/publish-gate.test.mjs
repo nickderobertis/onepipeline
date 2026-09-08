@@ -332,11 +332,9 @@ describe("the npm publish order", () => {
     // is this journey's evidence that it did.
     //
     // Held by the reader's own polling rather than by a clock, because what this
-    // asserts is that the publish *waited*. `registry-support.mjs` records what a
-    // clock cost here: a 1000ms lag is a bet that npm answers the first poll in
-    // under a second, and on a loaded host it does not — the version is already
-    // served, nothing waits, and this fails on the machine rather than on the
-    // code. One read is one poll, so this holds for exactly one.
+    // asserts is that the publish *waited*, and `holdUntilRead` is where why a
+    // clock cannot carry that is written. One read is one poll, so this holds for
+    // exactly one.
     reg.holdUntilRead([...platforms.values()][0].name, 1);
     const first = await publishAsTheReleaseDoes({
       PUBLISH_NPM_AWAIT_BUDGET: "80",
