@@ -652,11 +652,14 @@ jobs:
             echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
             exit 1
           fi
-      # The identifiers are release-targets.toml's own, which
-      # `npm/test/release-targets.test.mjs` reconciles against this file, so the
-      # record names artifacts by the same names the release-target contract and
-      # `scripts/release-probe.sh` use. Every one of them names a verification
-      # job, which is the property `verify-crate` above was added to hold.
+      # The identifiers are release-targets.toml's own, so the record names
+      # artifacts by the same names the release-target contract and
+      # `scripts/release-probe.sh` use. `npm/test/release-outcome.test.mjs` reads
+      # the `--target` names back out of this job and fails when they are not
+      # exactly what that file declares — and the goldens with them, so a target
+      # added to the declaration cannot be left out of the record. Every one of
+      # them names a verification job, which is the property `verify-crate` above
+      # was added to hold.
       #
       # Job results reach the script through `env:` rather than being
       # interpolated into the command line, the same rule every other input in
