@@ -32,7 +32,6 @@ async function attempt(command, args) {
   }
 }
 
-/// Run the composer, returning what it wrote and what it exited with.
 async function compose(args) {
   try {
     const { stdout } = await execFileAsync("node", ["scripts/release-outcome.mjs", ...args], {

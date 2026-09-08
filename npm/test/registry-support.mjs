@@ -57,7 +57,7 @@ export class Registry {
     return `http://127.0.0.1:${this.port}/`;
   }
 
-  /// The versions of `name` a reader can see right now.
+  /// Time-gated: a version published under a lag is not here until it elapses.
   visible(name) {
     const entry = this.packages.get(name);
     if (!entry) return [];
@@ -67,15 +67,13 @@ export class Registry {
       .map(([version]) => version);
   }
 
-  /// The instant `identity` (`name@version`) became resolvable, or undefined
-  /// while it still is not. The value is the entry's own `visibleAt`, not when
-  /// the timer that recorded it happened to run, so a caller comparing it
-  /// against another event compares two instants rather than two observations.
+  /// The entry's own `visibleAt` rather than the instant the timer that recorded
+  /// it happened to run, so a caller comparing this against another event
+  /// compares two instants rather than two observations.
   visibleAt(identity) {
     return this.timeline.find((e) => e.kind === "visible" && e.identity === identity)?.at;
   }
 
-  /// When `identity` was accepted for publication, or undefined.
   acceptedAt(identity) {
     return this.timeline.find((e) => e.kind === "accepted" && e.identity === identity)?.at;
   }

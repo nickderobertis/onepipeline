@@ -50,9 +50,8 @@ async function run(command, args, options = {}) {
   return stdout;
 }
 
-/// Run and return the outcome instead of throwing it, for the journeys whose
-/// subject is a refusal — and for the ones whose subject is what a *successful*
-/// run said on stderr, which `run` above discards.
+/// For the journeys whose subject is a refusal, and for the ones whose subject
+/// is what a *successful* run said on stderr — which `run` above discards.
 async function attempt(command, args, options = {}) {
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
