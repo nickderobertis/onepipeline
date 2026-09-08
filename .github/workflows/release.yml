@@ -37,7 +37,8 @@ name: Release
 #   * publish-npm   — publish the platform packages, then the launcher that
 #                     depends on them, with the NPM_TOKEN secret, gated on the
 #                     NPM_PUBLISH repo variable.
-#   * verify-npm    — the same, on the same matrix, for `npm install -g`.
+#   * verify-npm    — the same, one leg per platform package the launcher pins,
+#                     for `npm install -g`.
 #
 # Every verify job runs the version at publish time only, and by exact version.
 # `published-smoke.yml` runs the identical script against whatever the registries
@@ -488,7 +489,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        # One leg per platform package the launcher's manifest declares, and
+        # `package:` says which one each leg is here to prove.
+        # `npm/test/platform-matrix.test.mjs` reads these names back out of this
+        # file and fails when a declared platform has no leg — so the coverage
+        # question is answerable without a runner for that platform, and a leg
+        # that stopped resolving its own package is a red square rather than a
+        # green one nobody looked at. aarch64 Linux is here because it had no leg
+        # at all while its package was one of the three the registry served late.
+        include:
+          - os: ubuntu-latest
+            package: onepipeline-cli-linux-x64
+          - os: ubuntu-24.04-arm
+            package: onepipeline-cli-linux-arm64
+          - os: macos-latest
+            package: onepipeline-cli-darwin-arm64
+          - os: macos-15-intel
+            package: onepipeline-cli-darwin-x64
+          - os: windows-latest
+            package: onepipeline-cli-win32-x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -514,9 +533,55 @@ jobs:
             --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH" \
             --action "check https://www.npmjs.com/package/onepipeline-cli — the platform package for this runner may not have published" \
             -- npm install -g --prefer-online "onepipeline-cli@${ver}"
+      # A leg that installed the launcher and never resolved its own platform
+      # package would still pass the smoke below on a machine that happened to
+      # have an older copy on PATH. This is the leg saying which package it
+      # proved, so `package:` above is an assertion rather than a label.
+      - name: Check npm resolved this leg's own platform package
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          root="$(npm root -g)"
+          node -e '
+            const { existsSync } = require("node:fs");
+            const { join } = require("node:path");
+            const root = process.argv[1];
+            const want = process.env.PACKAGE;
+            const where = [
+              join(root, want),
+              join(root, "onepipeline-cli", "node_modules", want),
+            ];
+            if (!where.some((dir) => existsSync(join(dir, "package.json")))) {
+              console.error(
+                `::error::npm installed onepipeline-cli without ${want}. An install ` +
+                  "silently skips an optional dependency it cannot resolve, so this is " +
+                  "the registry not yet serving that package at this version.",
+              );
+              process.exit(1);
+            }
+            console.log(`${want} resolved under ${root}`);
+          ' "$root"
       - name: Smoke-test what npm served
         run: |
           ver="${GITHUB_REF_NAME#v}"
           bash scripts/smoke-published.sh \
             --expect-version "$ver" \
             --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH"
+
+  # What this release actually did, as an artifact rather than as a conclusion
+  # somebody has to reconstruct from twenty-nine job squares.
+  #
+  # Three states, because two cannot say the thing that matters here: **nothing
+  # shipped**, **shipped but unverified**, and **shipped and verified**. A
+  # release that published every artifact and then failed to install one is the
+  # middle state, and it is the state this repository was in for months while its
+  # aggregate red was read as noise.
+  #
+  # `if: always()` and `needs` on every publish and verify job, so this answers
+  # for a release that failed exactly as readily as for one that did not — an
+  # outcome record that only exists when everything worked answers the one
+  # question nobody needs to ask.
+  #
+  # It is attached to the GitHub Release, which is a public URL any consumer can
+  # fetch with no credential and without reading a job log. README.md's "Release
+  # outcome" section is where that URL is written down.

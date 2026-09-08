@@ -1,4 +1,4 @@
-// The drift gate for the one platform matrix this repository restates four
+// The drift gate for the one platform matrix this repository restates five
 // times.
 //
 // The set of Rust targets a release builds has to agree, exactly, across:
@@ -9,13 +9,21 @@
 //   3. `npm/onepipeline-cli/package.json`'s optionalDependencies (what npm
 //      installs), and
 //   4. the `upload`, `build-wheels`, and `build-npm` matrices in
-//      `.github/workflows/release.yml` (what actually gets built).
+//      `.github/workflows/release.yml` (what actually gets built), and
+//   5. that file's `verify-npm` matrix (what a release actually *installs and
+//      starts* on each platform).
+//
+// The fifth is not the same question as the fourth, and the gap between them is
+// how a platform stayed broken: aarch64 Linux was built and published by every
+// release and installed by none of them, so nothing watched the one package
+// whose registry lag was visible from 0.16.4 onward. Building a platform nobody
+// verifies is a platform nobody is watching.
 //
 // None can be generated from another — a workflow matrix is YAML a workflow
 // engine reads, npm resolves optionalDependencies before any code runs, and the
 // launcher must resolve with no build step. So the sets are reconciled here
 // instead: add a platform in one place and this fails until it is added in all
-// four. Drift here does not break a build; it 404s an install, on the one
+// five. Drift here does not break a build; it 404s an install, on the one
 // platform nobody tested.
 
 import { readFileSync } from "node:fs";
@@ -52,6 +60,19 @@ function workflowTargets(workflow, job) {
   const targets = [...body.matchAll(/^\s*- target: (\S+)$/gm)].map((m) => m[1]);
   assert.ok(targets.length > 0, `the \`${job}\` job builds no targets`);
   return targets;
+}
+
+/// The platform package each `verify-npm` leg exists to prove, read out of that
+/// job's own matrix. The `package:` key is what makes a leg an assertion about a
+/// platform rather than a runner label — and `release.yml` checks at run time
+/// that the leg really did resolve the package named here.
+function workflowVerifyPackages(workflow) {
+  const start = workflow.indexOf("\n  verify-npm:\n");
+  assert.notEqual(start, -1, "no `verify-npm` job in release.yml");
+  const rest = workflow.slice(start + 1);
+  const nextJob = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const body = nextJob === -1 ? rest : rest.slice(0, nextJob + 1);
+  return [...body.matchAll(/^\s*- os: \S+\n\s*package: (\S+)$/gm)].map((m) => m[1]);
 }
 
 describe("the platform matrix", () => {
@@ -100,6 +121,23 @@ describe("the platform matrix", () => {
       resolved,
       built,
       "the launcher resolves package names a release does not build",
+    );
+  });
+
+  it("verifies an install on every platform the launcher declares a package for", () => {
+    const declared = Object.keys(manifest.optionalDependencies).sort();
+    const verified = workflowVerifyPackages(workflow);
+    assert.deepEqual(
+      [...verified].sort(),
+      declared,
+      "release.yml's `verify-npm` matrix and the launcher's optionalDependencies disagree — a " +
+        "platform with a package and no leg is one no release installs, and a leg for a package " +
+        "nothing publishes can only ever be red",
+    );
+    assert.equal(
+      new Set(verified).size,
+      verified.length,
+      "two `verify-npm` legs name the same platform package, so one platform is unwatched",
     );
   });
 });
