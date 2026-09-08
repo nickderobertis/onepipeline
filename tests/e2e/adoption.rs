@@ -4028,6 +4028,197 @@ fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() 
     });
 }
 
+/// How long a hold is let run before this journey does anything to it.
+///
+/// The clock a satisfied hold used to leave behind is the whole subject, so it
+/// has to be **visibly** bigger than nothing by the time the second hold is put:
+/// four seconds is four of this world's probe intervals, and a wait that reported
+/// them for a hold seconds old would be the defect this journey is about.
+const OLD_ENOUGH_TO_SEE: u64 = 4;
+
+/// One awaited entry off the last wait raised about a node.
+fn awaited_entry(world: &World, run: &str, node: &str, dep: &str) -> Option<Value> {
+    awaiting(world, run, node)
+        .into_iter()
+        .find(|entry| entry["dep"] == json!(dep))
+}
+
+/// How long one awaited entry says its hold has been running.
+fn waited_seconds(entry: &Value) -> u64 {
+    entry["waited_seconds"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a wait says how long it has been: {entry}"))
+}
+
+/// The seconds a supervisor is shown for a hold are **that hold's own**, and a
+/// hold that ended is not counted beside it.
+///
+/// The node is held on two releases; one arrives; and the node is then parked and
+/// returned to the frontier, so the same node's holds are put a **second** time
+/// with one of them already satisfied and its probe no longer answering. What a
+/// supervisor is shown about that second hold is read where a supervisor reads
+/// it — the wait the run raises and the surface it queues — and it must be the
+/// running hold, timed from the start the run recorded for *it*.
+///
+/// Before the latch, the satisfied hold came back beside the running one the
+/// moment its probe could not answer, carrying every second since the first hold
+/// opened: measured at 4394 of them, on a node that had been dispatched fifty
+/// minutes earlier. The surface that reports this is a decision put to a
+/// supervisor, one of whose options is stopping the run.
+///
+/// **Both of a node's holds open in one pass** — the set of releases it awaits is
+/// frozen the first time every one of them resolves — so a hold that opens later
+/// than its node's others is not a state this engine can reach, and the second
+/// putting of the question is what a node re-entering the frontier is.
+///
+/// What this journey cannot force, and where that is held instead: the resurrection
+/// needs a probe answer *taken up after* its own key was satisfied, and the asker
+/// re-reads the loop's question set at the top of every iteration — so a key the
+/// loop has answered is out of the set before the probe's interval comes round
+/// again, and no sequence of writes to a probe's answer here schedules the
+/// ordering. Measured: with the latch and the dropped clock both reverted, this
+/// journey and
+/// `a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`
+/// each still pass. `release::a_release_that_arrived_is_never_awaited_again` puts
+/// that ordering to `take_up` directly and is the check that fails without the
+/// fix; this one is what a supervisor reads, driven through the binary.
+#[test]
+fn a_second_hold_on_a_node_is_timed_from_the_hold_that_is_running() {
+    let world = watching("adoption-wait-clock");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (engine_script, engine_answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_release(&engine_script, "tool", &tool_script));
+
+    let mut tool = lifecycle("tool", &[]);
+    tool["repo"] = json!("tool");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([ENGINE, "tool"]);
+    // A node held open throughout, so the loop is still driving this run when the
+    // park and the requeue arrive: a graph whose every other node has settled has
+    // no driver left to apply an edit or to raise the wait this reads.
+    world.script("hold.wait", "hold");
+    let run = start(
+        &world,
+        "adoption-wait-clock",
+        vec![engine(), tool, consumer, agent("hold", &[])],
+    );
+
+    // Both holds are put, and are let run until the clock they share is big
+    // enough that showing it for a hold that had ended would be unmistakable.
+    world.until("both holds to have run long enough to see", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 2
+            && awaited
+                .iter()
+                .all(|entry| waited_seconds(entry) >= OLD_ENOUGH_TO_SEE)
+    });
+    let running =
+        awaited_entry(&world, &run, "consumer", "tool").expect("the tool hold is awaited");
+    let running_since = running["since"].clone();
+    let ended =
+        awaited_entry(&world, &run, "consumer", ENGINE).expect("the engine hold is awaited");
+    let ended_clock = waited_seconds(&ended);
+
+    // One of the two is satisfied, which ends that hold and nothing else.
+    releases_at(&engine_answer, "0.2.0");
+    world.until("the satisfied hold to leave the awaited set", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 1 && awaited[0]["dep"] == json!("tool")
+    });
+    // Then its probe stops answering, which is a statement about the probe and
+    // not about the release — and is what used to bring the ended hold back.
+    stops_answering(&engine_answer);
+
+    // The node is parked and returned to the frontier, through the verb a
+    // supervisor uses, so its holds are put a second time: the same node, the
+    // same two dependencies, one of them released already.
+    let envelope = |command: Value| {
+        json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [command]})
+            .to_string()
+    };
+    for command in [
+        json!({"op": "cancel", "id": "consumer",
+               "reason": "parked while the release question is put again"}),
+        json!({"op": "requeue", "id": "consumer"}),
+    ] {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(command))
+            .exited(0);
+    }
+    let requeued_at = waits_of(&world, &run, "consumer").len();
+    let surfaced_at = wait_surfaces_of(&world, &run, "consumer").len();
+
+    // Every wait raised about the node since names the hold that is **running**
+    // and nothing else, and the seconds beside it are counted from the start the
+    // run recorded for that hold rather than from the one that ended.
+    world.until("several waits after the second putting", |world| {
+        waits_of(world, &run, "consumer").len() >= requeued_at + 3
+    });
+    for wait in waits_of(&world, &run, "consumer")
+        .into_iter()
+        .skip(requeued_at)
+    {
+        let awaited = wait["payload"]["awaiting"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            awaited.len(),
+            1,
+            "the second hold was put beside one that had already been satisfied: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["dep"],
+            json!("tool"),
+            "the wait names a release that had arrived rather than the hold that is on: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["since"], running_since,
+            "the hold that is running was timed from another hold's start: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["last_answer"],
+            json!("not-released"),
+            "the hold that is running took a probe's silence about another release: {wait}"
+        );
+        assert!(
+            waited_seconds(&awaited[0]) >= ended_clock,
+            "the running hold's clock was restarted rather than gone on with: {wait}"
+        );
+    }
+
+    // And the surface a supervisor actually reads says the same: one wait, with
+    // the seconds of the hold that is running beside it and no second figure from
+    // a hold that ended.
+    assert!(
+        wait_surfaces_of(&world, &run, "consumer").len() > surfaced_at,
+        "no wait was put to a supervisor after the node returned to the frontier"
+    );
+    let message = wait_surface(&world, &run, "consumer");
+    assert_eq!(
+        message.matches("waited ").count(),
+        1,
+        "a supervisor was shown more elapsed waits than the node has holds:\n{message}"
+    );
+    assert!(
+        message.contains("tool") && !message.contains("not-answered"),
+        "the wait a supervisor reads is not the hold that is running:\n{message}"
+    );
+
+    // And the hold that was really running is the one the node starts on.
+    releases_at(&tool_answer, "0.3.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
