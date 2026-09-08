@@ -68,7 +68,9 @@
 // llmlint: ignore-file[invalid_states_unrepresentable] serialized fields an older build
 // wrote, on `src/summary.rs`'s terms and carrying that file's own suppression. The shape a
 // type could not exclude either — a state that is not the fold of the prefix it claims — is
-// excluded only by folding that prefix, which is the cost this removes.
+// excluded only by folding that prefix, which is the cost this removes; what a type cannot
+// say, `Coverage::sealed_with` says instead, by refusing any part of the document that has
+// moved since a writer sealed it.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -244,7 +246,7 @@ impl Coverage {
     /// **every** record the store has grown by since.
     ///
     /// One half of what the journal is asked about a marker; the other half is
-    /// [`covers_the_journal_it_claims`](Self::covers_the_journal_it_claims), which
+    /// [`corroborated_by`](Self::corroborated_by), which
     /// asks whether the covered bytes are still the bytes this was folded from.
     fn sorts_in_front_of(&self, grown: &[(Option<Envelope>, u64)]) -> bool {
         grown
@@ -253,13 +255,20 @@ impl Coverage {
             .all(|event| self.is_in_front_of(event))
     }
 
-    /// This marker's seal, over a digest of the journal bytes it covers.
+    /// This marker's seal: the journal bytes it covers, then its own claims, then
+    /// the state written beside it.
     ///
-    /// Every claim the marker makes goes in, in a fixed order, so a claim edited
-    /// without the bytes changing is a claim that no longer seals to what the
-    /// document carries. [`digest`](Self::digest) itself does not, which is what
-    /// stops it sealing over itself.
-    fn sealed_with(&self, digested_bytes: u128) -> u128 {
+    /// Everything the document asserts goes in, in a fixed order, so **anything
+    /// edited no longer seals to what the document carries** — a claim, or the fold
+    /// itself. [`digest`](Self::digest) does not go in, which is what stops it
+    /// sealing over itself.
+    ///
+    /// What that leaves is a document this build wrote, over a journal prefix that
+    /// has not moved. It is still not a proof that the state is the *fold* of those
+    /// bytes — only folding them proves that, which is the cost this document
+    /// removes — but there is no longer any part of the document a reader takes on
+    /// trust separately from the rest.
+    fn sealed_with(&self, digested_bytes: u128, state: &RunState) -> u128 {
         let mut sealed = digested(digested_bytes, &self.bytes.to_le_bytes());
         sealed = digested(sealed, &self.records.to_le_bytes());
         if let Some(at) = &self.at {
@@ -270,25 +279,35 @@ impl Coverage {
             sealed = digested(sealed, stream.as_bytes());
             sealed = digested(sealed, &reached.to_le_bytes());
         }
-        sealed
+        // The fold as the document carries it. Through its own serialization rather
+        // than field by field, so a field added to `RunState` is sealed by existing
+        // rather than by somebody remembering to add it here — and the crate's
+        // `float_roundtrip` is what makes a value read back the value written, so
+        // the two sides digest the same bytes.
+        match serde_json::to_vec(state) {
+            Ok(written) => digested(sealed, &written),
+            // A state that will not serialize is one no writer could have sealed,
+            // so nothing may match it.
+            Err(_) => sealed.wrapping_add(1),
+        }
     }
 
     /// Whether the journal corroborates every claim this marker makes.
     ///
     /// **What makes the journal authoritative.** Three questions of the file rather
     /// than of the document: it is at least as long as the marker claims, the marker
-    /// ends where a record ends, and the covered bytes plus the marker's own claims
-    /// seal to what the document carries. The third is the one nothing else can
-    /// answer — a covered record rewritten in place at the same length moves no
-    /// count and no maximum — and it is why a truncated or edited prefix, or an
-    /// edited claim about one, takes a full fold.
+    /// ends where a record ends, and the covered bytes together with everything the
+    /// document asserts seal to what it carries. The third is the one nothing else
+    /// can answer — a covered record rewritten in place at the same length moves no
+    /// count and no maximum — and it is why a truncated or edited prefix, an edited
+    /// claim about one, or an edited fold takes a full fold.
     ///
     /// Asked where a marker arrives **from a document**, which is the boundary it is
     /// about. A marker this process established by folding those very bytes, under
     /// the run's single-writer lock over an append-only file, has no document to
     /// corroborate — and re-digesting the prefix per applied command would put back a
     /// cost that grows with the run.
-    fn corroborated_by(&self, journal: &std::path::Path) -> Option<u128> {
+    fn corroborated_by(&self, journal: &std::path::Path, state: &RunState) -> Option<u128> {
         if length_of(journal) < self.bytes {
             return None;
         }
@@ -299,7 +318,7 @@ impl Coverage {
             return None;
         }
         digest_of_prefix(journal, self.bytes)
-            .filter(|digested_bytes| self.sealed_with(*digested_bytes) == self.digest)
+            .filter(|digested_bytes| self.sealed_with(*digested_bytes, state) == self.digest)
     }
 
     /// Account for one more record.
@@ -394,11 +413,11 @@ impl std::ops::DerefMut for Projected {
 
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one.
-    // llmlint: ignore[boundary_inputs_validated] the reason is on [`readable`], which
-    // decided this document.
     pub(crate) fn open(paths: &RunPaths) -> Self {
         let resumed = readable(paths).and_then(|checkpoint| {
-            let digested_bytes = checkpoint.coverage.corroborated_by(&paths.journal())?;
+            let digested_bytes = checkpoint
+                .coverage
+                .corroborated_by(&paths.journal(), &checkpoint.state)?;
             Some((checkpoint, digested_bytes))
         });
         let mut projected = match resumed {
@@ -500,7 +519,9 @@ impl Projected {
         // write to say so.
         if let Some(taken) = taken.filter(|taken| !taken.is_empty()) {
             self.digested_bytes = digested(self.digested_bytes, &taken);
-            self.coverage.digest = self.coverage.sealed_with(self.digested_bytes);
+            self.coverage.digest = self
+                .coverage
+                .sealed_with(self.digested_bytes, &self.covered);
             self.write(paths);
         }
         self.state = self.covered.clone();
@@ -562,17 +583,11 @@ pub(crate) fn resume(paths: &RunPaths) -> RunState {
 /// decided here — absent, unreadable or unparseable, and written at a version this
 /// build does not read — and so is a document that names another run, which is one
 /// copied between run roots. Whether the marker it carries still describes the
-/// journal is the fourth, and is [`Coverage::marker_sorts_in_front_of`]'s.
-// llmlint: ignore-block[boundary_inputs_validated] every claim a reader can check without
-// re-folding is checked, at `Coverage::covers_the_journal_it_claims` and by the types this
-// deserializes through: the covered bytes are digested against the file, so a prefix
-// truncated or edited at any length is refused. The claim left is that the *state* is the
-// fold of those bytes, which is provable only by folding them — the cost this removes.
+/// journal is the fourth, and is [`Coverage::corroborated_by`]'s.
 fn readable(paths: &RunPaths) -> Option<Checkpoint> {
     ledger::read_json_opt::<Checkpoint>(&paths.checkpoint())
         .filter(|checkpoint| checkpoint.run_id == paths.run)
 }
-// llmlint: ignore-end[boundary_inputs_validated]
 
 /// Whether a byte offset sits just past a record's own terminator.
 ///
@@ -892,6 +907,28 @@ mod tests {
         whole
     }
 
+    /// Seal a document as a writer would have sealed it, and write it.
+    ///
+    /// What lets a journey plant a document whose *content* the journal does not
+    /// support while leaving it one a reader accepts — which is the only way to
+    /// observe which records that reader consumed. The seal is taken over the
+    /// document **as parsed**, because that is what a reader digests, so a value the
+    /// reader normalizes on the way in stays on the wire and still seals.
+    fn seal_and_write(paths: &RunPaths, document: &mut Value) {
+        let parsed: Checkpoint =
+            serde_json::from_value(document.clone()).expect("a document this build reads");
+        let bytes = digest_of_prefix(&paths.journal(), parsed.coverage.bytes)
+            .expect("the journal holds the bytes the marker claims");
+        let sealed = parsed.coverage.sealed_with(bytes, &parsed.state);
+        document["coverage"]["digest"] = json!(format!("{sealed:032x}"));
+        crate::ledger::write_json(&paths.checkpoint(), document).expect("written");
+    }
+
+    /// The stored document, as a value a journey can edit.
+    fn document(paths: &RunPaths) -> Value {
+        crate::ledger::read_json_opt(&paths.checkpoint()).expect("the checkpoint this run carries")
+    }
+
     /// One fold of a run, and how many journal records it took.
     ///
     /// The count comes off the fold itself rather than off the process-wide
@@ -935,17 +972,15 @@ mod tests {
         let _ = resume(&paths);
 
         let held = crate::ledger::read_records(&paths.journal()).len() as u64;
-        let mut stored = super::readable(&paths).expect("the checkpoint this read wrote");
+        let stored = super::readable(&paths).expect("the checkpoint this read wrote");
         let covered = stored.coverage.records;
         assert!(
             covered > 0 && covered < held,
             "a marker over a {held}-record store accounts for {covered}"
         );
-        stored
-            .state
-            .outcomes
-            .insert("build".into(), "carried-from-the-checkpoint".into());
-        crate::ledger::write_json(&paths.checkpoint(), &stored).expect("the checkpoint is written");
+        let mut planted = document(&paths);
+        planted["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
+        seal_and_write(&paths, &mut planted);
 
         settle(&paths, "ship", "done");
         let grew_to = crate::ledger::read_records(&paths.journal()).len() as u64;
@@ -1016,12 +1051,9 @@ mod tests {
         let paths = a_recorded_run(&root, "r-fallback");
         settle(&paths, "build", "done");
         let _ = resume(&paths);
-        let mut stored = super::readable(&paths).expect("the checkpoint that read wrote");
-        stored
-            .state
-            .outcomes
-            .insert("build".into(), "carried-from-the-checkpoint".into());
-        crate::ledger::write_json(&paths.checkpoint(), &stored).expect("written");
+        let mut planted = document(&paths);
+        planted["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
+        seal_and_write(&paths, &mut planted);
         settle(&paths, "ship", "done");
         let whole = without_a_checkpoint(&paths);
         assert_eq!(
@@ -1052,10 +1084,11 @@ mod tests {
     #[test]
     fn a_checkpoint_this_build_did_not_write_folds_the_whole_store() {
         let (root, paths, whole) = a_run_with_a_checkpoint("another-version");
-        let mut document: Value = crate::ledger::read_json_opt(&paths.checkpoint())
-            .expect("the checkpoint this run carries");
-        document["schema_version"] = json!(CHECKPOINT_SCHEMA_VERSION + 1);
-        crate::ledger::write_json(&paths.checkpoint(), &document).expect("written");
+        // The version alone: the seal does not cover it, so this document is refused
+        // for the one thing this journey is about.
+        let mut later = document(&paths);
+        later["schema_version"] = json!(CHECKPOINT_SCHEMA_VERSION + 1);
+        crate::ledger::write_json(&paths.checkpoint(), &later).expect("written");
         assert_eq!(a_view_of(&paths), whole);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1063,15 +1096,14 @@ mod tests {
     #[test]
     fn a_coverage_the_journal_does_not_corroborate_folds_the_whole_store() {
         let (root, paths, whole) = a_run_with_a_checkpoint("uncorroborated");
-        let mut stored = super::readable(&paths).expect("the checkpoint this run carries");
-        // A marker claiming to account for records the store in front of it does
-        // not sort after: the settlement appended since is stamped now, and this
-        // says everything covered was written a century later.
-        stored.coverage.at = Some(Placed {
-            ts: "2199-01-01T00:00:00.000Z".into(),
-            stream: "zzzz".into(),
-        });
-        crate::ledger::write_json(&paths.checkpoint(), &stored).expect("written");
+        // A marker claiming to account for records the store in front of it does not
+        // sort after: the settlement appended since is stamped now, and this says
+        // everything covered was written a century later. **Sealed as a writer would
+        // have sealed it**, so what refuses it is the ordering condition rather than
+        // the seal — which is the condition this journey is about.
+        let mut ahead = document(&paths);
+        ahead["coverage"]["at"] = json!({"ts": "2199-01-01T00:00:00.000Z", "stream": "zzzz"});
+        seal_and_write(&paths, &mut ahead);
         assert_eq!(a_view_of(&paths), whole);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1208,12 +1240,13 @@ mod tests {
         let _ = resume(&paths);
         let whole = without_a_checkpoint(&paths);
 
-        let mut document: Value =
-            crate::ledger::read_json_opt(&paths.checkpoint()).expect("a checkpoint");
+        let mut planted = document(&paths);
         // A blank reason is the one state `Park` must not hold, and a document can
-        // carry one however the boundary that writes a park refuses it.
-        document["state"]["parks"] = json!({"build": {"by": "planner", "reason": "   "}});
-        crate::ledger::write_json(&paths.checkpoint(), &document).expect("written");
+        // carry one however the boundary that writes a park refuses it. It stays on
+        // the wire and still seals, because a reader digests the document as it
+        // parsed it — which is this normalization, applied.
+        planted["state"]["parks"] = json!({"build": {"by": "planner", "reason": "   "}});
+        seal_and_write(&paths, &mut planted);
         let read = resume(&paths);
         assert_eq!(
             read.parks.get("build"),
@@ -1226,9 +1259,9 @@ mod tests {
 
         // And a session handle this crate refuses off a stream: refused here too,
         // which is one more unusable checkpoint.
-        document["state"]["sessions"] =
+        planted["state"]["sessions"] =
             json!({"build": {"token": "../somewhere-else", "branch": "work"}});
-        crate::ledger::write_json(&paths.checkpoint(), &document).expect("written");
+        crate::ledger::write_json(&paths.checkpoint(), &planted).expect("written");
         assert_eq!(folded_as(&resume(&paths)), whole);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1270,13 +1303,14 @@ mod tests {
         settle(&paths, "build", "done");
         let _ = resume(&paths);
 
-        let mut stored = super::readable(&paths).expect("the checkpoint that read wrote");
-        let marker = stored.coverage.clone();
-        stored
-            .state
-            .outcomes
-            .insert("build".into(), "carried-from-the-checkpoint".into());
-        crate::ledger::write_json(&paths.checkpoint(), &stored).expect("written");
+        let marker = super::readable(&paths)
+            .expect("the checkpoint that read wrote")
+            .coverage;
+        // Sealed as a writer would have sealed it, so what refuses this document is
+        // the prefix moving underneath it rather than the plant itself.
+        let mut planted = document(&paths);
+        planted["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
+        seal_and_write(&paths, &mut planted);
         settle(&paths, "ship", "done");
 
         // One covered line replaced by as many bytes as it held.
@@ -1295,11 +1329,15 @@ mod tests {
             "this journey did not hold the store's length"
         );
         std::fs::write(&store, &mangled).expect("the journal is rewritten");
+        let after = super::readable(&paths)
+            .expect("the checkpoint is still there")
+            .coverage;
+        // Everything the marker *counts* is where it was — which is the whole point:
+        // no count can see this rewrite, so only the seal can. The seal itself moved
+        // when the plant above was sealed, and is not what is being held still here.
         assert_eq!(
-            crate::ledger::read_json_opt::<super::Checkpoint>(&paths.checkpoint())
-                .expect("the checkpoint is still there")
-                .coverage,
-            marker,
+            (after.bytes, after.records, &after.at, &after.streams),
+            (marker.bytes, marker.records, &marker.at, &marker.streams),
             "the marker moved, so this journey is not about a store that did not"
         );
 
@@ -1345,6 +1383,16 @@ mod tests {
             task: Some("## What\ndo it".into()),
             ..Node::default()
         });
+        let state = RunState {
+            graph,
+            recorded: BTreeMap::from([(
+                "build".to_string(),
+                crate::projection::Recorded::At(crate::graph::NodeStatus::Done),
+            )]),
+            last_write_at: Some(1_786_000_000_000),
+            strict: true,
+            ..RunState::default()
+        };
         // Sealed as a writer seals it, so the golden is a document a reader would
         // accept over a journal whose covered bytes are those — rather than a shape
         // with a plausible number where its seal goes.
@@ -1358,21 +1406,12 @@ mod tests {
             streams: BTreeMap::from([("golden-host-1".to_string(), 41)]),
             digest: 0,
         };
-        coverage.digest = coverage.sealed_with(GOLDEN_BYTES_DIGESTED);
+        coverage.digest = coverage.sealed_with(GOLDEN_BYTES_DIGESTED, &state);
         Checkpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             run_id: "golden".into(),
             coverage,
-            state: RunState {
-                graph,
-                recorded: BTreeMap::from([(
-                    "build".to_string(),
-                    crate::projection::Recorded::At(crate::graph::NodeStatus::Done),
-                )]),
-                last_write_at: Some(1_786_000_000_000),
-                strict: true,
-                ..RunState::default()
-            },
+            state,
         }
     }
 
@@ -1404,8 +1443,9 @@ mod tests {
         // claims, so a claim read back differently would not seal to this.
         assert_eq!(
             read.coverage.digest,
-            read.coverage.sealed_with(GOLDEN_BYTES_DIGESTED),
-            "the marker read back does not seal to what the document carries"
+            read.coverage
+                .sealed_with(GOLDEN_BYTES_DIGESTED, &read.state),
+            "the document read back does not seal to what it carries"
         );
 
         let mut later: serde_json::Value = serde_json::from_str(GOLDEN).expect("it parses");
@@ -1452,6 +1492,38 @@ mod tests {
                 "{refused} was accepted as a session"
             );
         }
+    }
+
+    /// **A fold edited in the document, without the seal moving with it, takes a
+    /// full fold.**
+    ///
+    /// The counterpart of a rewritten prefix, from the document's side: the journal
+    /// is untouched and every count is what the writer wrote, so the seal over the
+    /// state is the only thing that refuses it. Without this the cache could assert
+    /// anything about a run and be believed.
+    #[test]
+    fn a_state_edited_without_the_seal_moving_folds_the_whole_store() {
+        let root = scratch("state-edited");
+        let paths = a_recorded_run(&root, "r-edited");
+        settle(&paths, "build", "done");
+        let _ = resume(&paths);
+        settle(&paths, "ship", "done");
+        let whole = without_a_checkpoint(&paths);
+
+        // Written straight back, which is what an editor does — no seal taken.
+        let mut edited = document(&paths);
+        edited["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
+        crate::ledger::write_json(&paths.checkpoint(), &edited).expect("written");
+
+        let read = folded_as(&resume(&paths));
+        assert_eq!(
+            read.get("outcomes")
+                .and_then(|outcomes| outcomes.get("build")),
+            None,
+            "a fold edited in the document was served: {read}"
+        );
+        assert_eq!(read, whole);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A run that has recorded nothing folds to the empty state and leaves no

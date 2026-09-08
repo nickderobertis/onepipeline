@@ -60,20 +60,6 @@ fn summary_line(world: &World) -> String {
         .to_string()
 }
 
-/// Give the document an account of its **covered** records that the journal does
-/// not support, leaving the journal itself untouched.
-///
-/// The only way to observe from outside which records a reader consumed: the
-/// covered settlement says `failed` in the document and `done` in the store, so a
-/// reader that folded the covered records again overwrites it and one that folded
-/// only the tail hands it back. Nothing about the journal changes, so this measures
-/// what was read rather than saying anything about the journal's authority.
-fn contradict_the_covered_records(world: &World) {
-    let mut document = world.run_json("tail", "checkpoint.json");
-    document["state"]["recorded"]["build"] = json!({"at": "failed"});
-    write_checkpoint(world, &document);
-}
-
 /// What the run's summary line reads with no checkpoint there at all.
 ///
 /// Whatever was there is put back, because the read this takes writes one of its
@@ -104,18 +90,31 @@ fn parsed(document: &[u8]) -> Value {
     serde_json::from_slice(document).expect("the checkpoint parses")
 }
 
-/// A read through a usable checkpoint reports the state a full fold reports, and
-/// gets there by folding only the records the checkpoint does not account for.
+/// What a marker *counts*, which is everything about it but its seal.
+fn counted(coverage: &Value) -> Value {
+    json!([
+        coverage["bytes"],
+        coverage["records"],
+        coverage["at"],
+        coverage["streams"]
+    ])
+}
+
+/// A read through a usable checkpoint reports the state a full fold reports, over a
+/// marker that accounts for most of the store.
 ///
-/// Two reads, because one cannot carry both claims. The journal is not touched by
-/// either.
-// llmlint: ignore-block[tests_mirror_real_usage] no verb edits the cache beside a run's
-// journal, and which records a reader *consumed* is reported by no user-facing surface.
+/// The state is what this holds; *which records were folded to reach it* is held
+/// where it can be counted — `Projected::took` in `src/checkpoint.rs`'s own
+/// journeys, and the driver's `records_folded` below. It cannot be held here,
+/// because the document seals over its own contents: a journey outside the crate
+/// cannot plant a contradiction in one without the reader refusing it, which is the
+/// property the seal exists for.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb removes the cache beside a run's
+// journal, and what a marker accounts for is reported by no user-facing surface.
 #[test]
-fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() {
+fn a_read_through_a_usable_checkpoint_reports_what_a_full_fold_reports() {
     let world = a_settled_run("checkpoint-tail");
 
-    // The state, through a usable document and through no document at all.
     let resumed = summary_line(&world);
     assert_eq!(
         resumed,
@@ -124,16 +123,12 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
     );
     assert!(resumed.contains("2/2 done"), "{resumed}");
 
-    // And which records it consumed to get there.
-    contradict_the_covered_records(&world);
-    let tail_only = summary_line(&world);
+    // And what the next read will not fold, off the document this one wrote.
+    let records = world.journal("tail").len();
+    let accounted = accounted_for(&world);
     assert!(
-        tail_only.contains("1/2 done"),
-        "the records the marker accounts for were folded again: {tail_only}"
-    );
-    assert!(
-        without_a_checkpoint(&world).contains("2/2 done"),
-        "the control fold served an account only the document carried"
+        accounted * 2 > records,
+        "a marker over a {records}-record store accounts for only {accounted}"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -160,7 +155,7 @@ fn a_read_through_a_usable_checkpoint_folds_only_what_it_does_not_account_for() 
 fn a_covered_record_changed_at_identical_length_rejects_the_checkpoint() {
     let world = a_settled_run("checkpoint-rewritten");
     let accounted = accounted_for(&world);
-    let marker = world.run_json("tail", "checkpoint.json")["coverage"].clone();
+    let marker = counted(&world.run_json("tail", "checkpoint.json")["coverage"]);
     assert!(
         summary_line(&world).contains("2/2 done"),
         "the store this journey is about does not read as settled to begin with"
@@ -191,9 +186,9 @@ fn a_covered_record_changed_at_identical_length_rejects_the_checkpoint() {
     );
     std::fs::write(&store, &mangled).expect("the journal is rewritten");
     assert_eq!(
-        world.run_json("tail", "checkpoint.json")["coverage"],
+        counted(&world.run_json("tail", "checkpoint.json")["coverage"]),
         marker,
-        "the marker moved, so this journey is not about a store whose marker did not"
+        "the marker's counts moved, so this journey is not about a rewrite they cannot see"
     );
 
     let read = summary_line(&world);
@@ -209,36 +204,31 @@ fn a_covered_record_changed_at_identical_length_rejects_the_checkpoint() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// Every other state that makes a checkpoint unusable reports the journal's own
-/// account rather than the document's.
+/// Every other state that makes a checkpoint unusable still reports what the journal
+/// says, and leaves the run readable rather than refusing it.
 ///
-/// The document contradicts its covered records throughout, so a state wrongly
-/// accepted reads `1/2 done` where the journal's own answer reads `2/2 done`. The
-/// journal is never touched.
+/// A document a reader may not fold from must cost a fold and nothing else: the
+/// failure this guards is a view that errors, or reports a run it cannot read as one
+/// that is not there, over a cache nobody has to keep.
 // llmlint: ignore-block[tests_mirror_real_usage] as above: no verb edits the cache beside a
 // run's journal, and there is no interface that would.
 #[test]
 fn every_unusable_checkpoint_reports_what_the_journal_says() {
     let world = a_settled_run("checkpoint-unusable");
-    contradict_the_covered_records(&world);
     let at = world.run_file("tail", "checkpoint.json");
-    let contradicting = std::fs::read(&at).expect("the contradicting document");
-    assert!(
-        summary_line(&world).contains("1/2 done"),
-        "the document does not contradict its covered records, so nothing here is a test"
-    );
+    let usable = std::fs::read(&at).expect("the document this run carries");
 
     for (unusable, leave) in unusable_states() {
         // Back to the document each state is a departure from, so no state inherits
         // the one before it.
         let _ = std::fs::remove_file(&at);
         let _ = std::fs::remove_dir_all(&at);
-        std::fs::write(&at, &contradicting).expect("the document is put back");
-        leave(&world, &contradicting);
+        std::fs::write(&at, &usable).expect("the document is put back");
+        leave(&world, &usable);
         let read = summary_line(&world);
         assert!(
             read.contains("2/2 done"),
-            "a checkpoint {unusable} was folded from anyway: {read}"
+            "a checkpoint {unusable} did not read as the journal says: {read}"
         );
     }
 }
@@ -356,6 +346,93 @@ fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
             std::fs::create_dir(&at).expect("a directory where the document goes");
         }),
     ]
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// **The loop's own state and a view's agree** over a store the merge order
+/// rearranges.
+///
+/// The loop folded the file as it was appended before this change and now folds it in
+/// `journal::merge_order`, which is what lets one checkpoint serve both readers. The
+/// rearrangement is *constructed* rather than waited for — a run's own store holds one
+/// only when its appenders happen to interleave, and a journey whose subject arrives by
+/// chance is one that sometimes proves nothing. So a relayed record stamped before the
+/// records already in the store is appended by hand, and the view is then held to the
+/// account the loop settled on.
+// llmlint: ignore-block[tests_mirror_real_usage] the two accounts of one run are the
+// binary's own outputs, read the way a consumer reads them. No verb appends another
+// producer's record to a run's store after it has settled, and there is no interface that
+// would — what it stands in for is a relay landing behind the loop, which is ordinary while
+// a run is live and cannot be arranged once one is not.
+#[test]
+fn the_loop_and_a_view_agree_about_a_store_the_merge_order_rearranges() {
+    let world = World::new("checkpoint-one-order");
+    settled(
+        &world,
+        "tail",
+        vec![agent("build", &[]), agent("ship", &["build"])],
+    );
+
+    // What the loop's own state settled on, before anything is added to the store.
+    let settled_as: Vec<(String, String)> = world.run_json("tail", "result.json")["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().unwrap_or_default().to_string(),
+                node["status"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(settled_as.len(), 2, "{settled_as:?}");
+
+    // A record of another producer's stream, stamped before every record the store
+    // already holds: the merge puts it first, and the file puts it last.
+    let store = world.run_file("tail", "events.jsonl");
+    let relayed = json!({
+        "v": 1,
+        "ts": "1999-01-01T00:00:00.000Z",
+        "stream": "graph-behind",
+        "seq": 0,
+        "source": "agentgraph",
+        "kind": "turn-activity",
+        "labels": {"run_id": "tail", "node": "build"},
+        "payload": {"tool": "Edit"},
+        "artifacts": [],
+    });
+    let mut held = std::fs::read_to_string(&store).expect("the run's journal");
+    held.push_str(&format!(
+        "{relayed}
+"
+    ));
+    std::fs::write(&store, held).expect("the journal is appended to");
+    let after = world.journal("tail");
+    let placed = |event: &Value| {
+        (
+            event["ts"].as_str().unwrap_or_default().to_string(),
+            event["stream"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    assert!(
+        after
+            .windows(2)
+            .any(|pair| placed(&pair[1]) < placed(&pair[0])),
+        "the store does not hold a record the merge moves in front of one appended \
+         before it, so nothing here is about the order either reader folds in"
+    );
+
+    // And the view's account of that store, which has to be the loop's.
+    let rendered = world.run(&["results", "tail"]);
+    rendered.exited(0);
+    for (node, status) in &settled_as {
+        assert!(
+            rendered.stdout.contains(node) && rendered.stdout.contains(status.as_str()),
+            "the loop settled '{node}' as '{status}' and the view does not say so:\n{}",
+            rendered.stdout
+        );
+    }
+    assert!(summary_line(&world).contains("2/2 done"));
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
