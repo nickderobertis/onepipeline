@@ -226,6 +226,16 @@ pub(crate) struct Dependency {
     pub branch: Option<String>,
     /// The commit that work reached its base at, where the run observed one.
     pub commit: Option<String>,
+    /// Where the work landed, where an operator settling the node from evidence
+    /// said it did: the commit it reached its base at, or the change request a
+    /// person reads it in.
+    ///
+    /// A run's own settlement writes a branch and a landing; a `settle` writes
+    /// what the run could not see, and this is the half of it that says *where*.
+    /// `None` for every node this run watched settle itself, which is most of
+    /// them — and for one an operator settled without naming where the work
+    /// went, which is exactly the record this run already had.
+    pub landing: Option<String>,
     /// The release target this node consumes that repository at.
     pub target: Option<TargetName>,
     /// How that target is released.
@@ -251,8 +261,20 @@ impl Dependency {
     /// The sibling resolves the branch to the landing itself, which is what a
     /// release is measured against; the commit is what the reference block shows a
     /// worker, and the fallback for work whose branch this run did not record.
+    ///
+    /// Ahead of both, a [`landing`](Self::landing) an operator stated. A `settle`
+    /// is a correction *of this run's record*, and the branch is the part of that
+    /// record it corrects: a node whose dispatch died before its change merged
+    /// recorded a branch that never landed, so asking about that branch answers
+    /// `not-landed` for ever while the work it names has been on the base for
+    /// hours. The operator settling it read the merge, and what they name is
+    /// where the work actually is — a change request's URL or the commit it
+    /// landed at, both of which are spellings the sibling resolves.
     fn reference(&self) -> Option<&str> {
-        self.branch.as_deref().or(self.commit.as_deref())
+        self.landing
+            .as_deref()
+            .or(self.branch.as_deref())
+            .or(self.commit.as_deref())
     }
 
     /// Whether there is a question about this dependency to put at all.
@@ -475,6 +497,17 @@ pub(crate) struct Watch {
     /// When the release records were last read. `None` before the first read,
     /// which is due immediately.
     relayed: Option<Instant>,
+    /// Where each node's work landed, as an operator settling it from evidence
+    /// stated it, keyed by the run whose journal it was read from.
+    ///
+    /// Read from a **journal** rather than taken off the folded state, because
+    /// this run's fold is not the only one it is asked about: a cross-DAG
+    /// dependency's landing was stated on the upstream run's journal, and both
+    /// are read here through one function.
+    stated: BTreeMap<String, BTreeMap<String, String>>,
+    /// When a node's landings were last re-read. `None` before the first read,
+    /// which is due immediately.
+    read_landings: Option<Instant>,
     /// Whether a node the last refresh watched could not be described yet.
     unresolved: bool,
     asker: Asker,
@@ -534,6 +567,8 @@ impl Watch {
             surface_every: Duration::from_secs(surface_every_seconds()),
             relay_every: Duration::from_secs(poll_seconds()),
             relayed: None,
+            stated: BTreeMap::new(),
+            read_landings: None,
             asker: Asker::start(Duration::from_secs(poll_seconds())),
         }
     }
@@ -598,11 +633,36 @@ impl Watch {
         let mut arrived = false;
         for (keys, answer) in self.asker.answered() {
             arrived = true;
-            for key in keys {
-                self.answers.insert(key, answer.clone());
-            }
+            self.take_up(&keys, &answer);
         }
         arrived
+    }
+
+    /// Record what one ask answered, about every wait it was put on behalf of.
+    ///
+    /// **A release does not un-happen.** Every answer but one holds a node, and
+    /// each of them is a statement about *now*: a probe that failed, a target
+    /// awaiting a person, a version that has not moved. Written over an answer
+    /// that carried a version, any of them un-releases a hold the run already
+    /// acted on — the node was dispatched, its task named the version it was
+    /// building against, and its arrival was reported — and the run then holds
+    /// the same node again, on the same key, over a release that happened. That
+    /// was observed: a node fifty minutes into its dispatch had a wait raised
+    /// about it reporting an hour and a quarter waited, with a last answer of
+    /// `not-answered`, put to a supervisor whose three options included stopping
+    /// the run.
+    ///
+    /// So the version latches. The **first** one, not the newest: what the run
+    /// reports, and what a node was told, is the release that ended its wait — a
+    /// producer releasing again while a consumer builds against the first has
+    /// changed nothing about this run's hold.
+    fn take_up(&mut self, keys: &[Key], answer: &Answer) {
+        for key in keys {
+            if self.answers.get(key).and_then(Answer::version).is_some() {
+                continue;
+            }
+            self.answers.insert(key.clone(), answer.clone());
+        }
     }
 
     /// Whether any node in this run names a dependency outside its own
@@ -667,10 +727,20 @@ impl Watch {
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
         self.take_up_answers();
         let now = crate::sys::now_millis();
+        let re_read = self.landings_are_due();
         let mut waits: Vec<(Key, Dependency)> = Vec::new();
         for node in watching {
-            for dependency in self.resolve(paths, state, node) {
+            for dependency in self.resolve(paths, state, node, re_read) {
                 let key = (node.id.clone(), dependency.dep.clone());
+                // A release that has arrived is not waited on any more: no
+                // question is put about it again, and the clock the wait was
+                // measured on is dropped rather than left running. Both are the
+                // same fact — this wait is over — and leaving either behind is
+                // what let a satisfied hold be reported as an hour-long one.
+                if self.answers.get(&key).and_then(Answer::version).is_some() {
+                    self.since.remove(&key);
+                    continue;
+                }
                 self.since.entry(key.clone()).or_insert(now);
                 waits.push((key, dependency));
             }
@@ -1055,10 +1125,80 @@ impl Watch {
         self.adopted.insert(node.to_owned());
     }
 
-    /// One node's out-of-repository dependencies, resolved once and then kept.
-    fn resolve(&mut self, paths: &RunPaths, state: &RunState, node: &Node) -> Vec<Dependency> {
+    /// Whether a landing re-read is due, and take the tick if it is.
+    ///
+    /// One tick for the whole pass rather than one per node, so a run holding
+    /// several nodes re-reads its journal once and they all see the same answer.
+    /// Paced by the probe's own interval, for the reason
+    /// [`relay_releases`](Self::relay_releases) is: a landing is stated by a
+    /// person over the channel, and asking oftener than the run puts its release
+    /// question re-reads a file for an answer that could not have changed what is
+    /// asked.
+    fn landings_are_due(&mut self) -> bool {
+        if !self
+            .read_landings
+            .is_none_or(|last| last.elapsed() >= self.relay_every)
+        {
+            return false;
+        }
+        self.read_landings = Some(Instant::now());
+        self.stated.clear();
+        true
+    }
+
+    /// Where one node's work landed, as an operator stated it on that run's own
+    /// journal.
+    ///
+    /// Read once per run per re-read tick and kept for the rest of it, because a
+    /// run's journal answers this for every node in it.
+    fn stated_landing(&mut self, paths: &RunPaths, node: &str) -> Option<String> {
+        if !self.stated.contains_key(&paths.run) {
+            self.stated.insert(
+                paths.run.clone(),
+                stated_landings(&journal::read(&paths.journal())),
+            );
+        }
+        self.stated.get(&paths.run)?.get(node).cloned()
+    }
+
+    /// One node's out-of-repository dependencies, resolved once — and their
+    /// landings re-read for as long as one of them has none.
+    ///
+    /// **The set is frozen and the landing is not**, and the two are different
+    /// questions. Which of a node's dependencies land outside its repository, and
+    /// what each of those repositories releases, is settled by the time it is
+    /// asked: every dependency has settled `done`, and a `retry` replaces the node
+    /// under a new id while a `requeue` continues the branch this already names.
+    /// *Where the work went* is not settled then, and the record used to say it
+    /// was. A landing this run **observed** cannot arrive late — the session's own
+    /// follow relays it before the node it belongs to settles — but a landing
+    /// nobody observed is exactly the case: a change request open when its node
+    /// settled is merged afterwards, outside every session, and what names that
+    /// landing is an operator stating it from evidence, after the fact by
+    /// definition. Frozen at settlement, that dependency answers `not-landed` for
+    /// ever about work that reached its base an hour ago — a `published` consumer
+    /// held with no timeout, no retry budget and no degrade.
+    fn resolve(
+        &mut self,
+        paths: &RunPaths,
+        state: &RunState,
+        node: &Node,
+        re_read: bool,
+    ) -> Vec<Dependency> {
         if let Some(known) = self.dependencies.get(&node.id) {
-            return known.clone();
+            let known = known.clone();
+            if !re_read || known.iter().all(|dependency| dependency.landing.is_some()) {
+                return known;
+            }
+            let re_read: Vec<Dependency> = known
+                .into_iter()
+                .map(|mut dependency| {
+                    dependency.landing = self.landing_of(paths, &dependency.dep);
+                    dependency
+                })
+                .collect();
+            self.dependencies.insert(node.id.clone(), re_read.clone());
+            return re_read;
         }
         let mine = node
             .repo
@@ -1107,11 +1247,14 @@ impl Watch {
                 // nothing and there is nothing to pin against.
                 return Resolution::NothingToAwait;
             };
+            let stated = upstream_paths(paths, &reference)
+                .and_then(|upstream| self.stated_landing(&upstream, &reference.node));
             return self.outside(
                 dep,
                 &repo,
                 upstream.branches.get(&reference.node).cloned(),
                 upstream.landing_commits.get(&reference.node).cloned(),
+                stated,
                 target,
             );
         }
@@ -1131,13 +1274,27 @@ impl Watch {
             // branch for this one, exactly as it does today.
             return Resolution::NothingToAwait;
         }
+        let stated = self.stated_landing(paths, dep);
         self.outside(
             dep,
             &repo,
             state.branches.get(dep).cloned(),
             state.landing_commits.get(dep).cloned(),
+            stated,
             target,
         )
+    }
+
+    /// Where one dependency's work landed, as an operator stated it — whichever
+    /// run's journal that statement is on.
+    fn landing_of(&mut self, paths: &RunPaths, dep: &str) -> Option<String> {
+        match crate::crossdag::parse(dep) {
+            Some(reference) => {
+                let upstream = upstream_paths(paths, &reference)?;
+                self.stated_landing(&upstream, &reference.node)
+            }
+            None => self.stated_landing(paths, dep),
+        }
     }
 
     /// One out-of-repository dependency, with what its repository releases.
@@ -1147,6 +1304,7 @@ impl Watch {
         repo: &str,
         branch: Option<String>,
         commit: Option<String>,
+        landing: Option<String>,
         named: Option<TargetName>,
     ) -> Resolution {
         let Some(releases) = self.repositories.of(repo) else {
@@ -1182,6 +1340,7 @@ impl Watch {
             identity,
             branch,
             commit,
+            landing,
             target,
             style,
             action,
@@ -1544,12 +1703,51 @@ pub(crate) fn watching(
 
 /// Another run's folded state, for a cross-DAG dependency.
 fn upstream_of(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Option<RunState> {
-    let root = paths.dir.parent()?;
-    let upstream = RunPaths::under(root, &reference.run);
-    if !upstream.exists() {
-        return None;
-    }
+    let upstream = upstream_paths(paths, reference)?;
     Some(crate::projection::fold(&journal::read(&upstream.journal())))
+}
+
+/// Where the run a cross-DAG dependency names keeps its own record.
+fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Option<RunPaths> {
+    let upstream = RunPaths::under(paths.dir.parent()?, &reference.run);
+    upstream.exists().then_some(upstream)
+}
+
+/// Where each node of one run's journal was stated to have landed.
+///
+/// The operations of every `edit-committed` are read for the one a `settle`
+/// carrying a landing compiles to. A journal is external input and this is a
+/// **read** of one, so a record this build cannot parse whole is passed over
+/// rather than guessed at: what a mis-read costs here is a release question put
+/// about the wrong work, which answers about somebody else's release.
+///
+/// The last statement about a node wins. Two settles of one node are a record
+/// corrected twice, and the newest is the correction.
+fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String> {
+    let mut stated = BTreeMap::new();
+    for event in events {
+        if journal::PipelineKind::from_wire(&event.kind)
+            != Some(journal::PipelineKind::EditCommitted)
+        {
+            continue;
+        }
+        let operations = event
+            .payload
+            .get("operations")
+            .and_then(|value| {
+                serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
+            })
+            .unwrap_or_default();
+        for operation in operations {
+            if let crate::edits::Operation::LandingFromEvidence { node, landing } = operation {
+                let (Some(node), Some(landing)) = (renderable(&node), renderable(&landing)) else {
+                    continue;
+                };
+                stated.insert(node, landing);
+            }
+        }
+    }
+    stated
 }
 
 /// How often an automated target's probe is run.
@@ -1585,6 +1783,7 @@ mod tests {
             identity: "github.com/owner/engine".to_owned(),
             branch: Some("onevcs/s-1".to_owned()),
             commit: Some("9f3c1ab".to_owned()),
+            landing: None,
             target: target.map(|name| name.parse().expect("a target name")),
             style,
             action: style
@@ -1734,6 +1933,98 @@ mod tests {
         assert_eq!(branchless.reference(), Some("9f3c1ab"));
         branchless.commit = None;
         assert_eq!(branchless.reference(), None);
+    }
+
+    /// A landing an operator stated is asked about ahead of both, in either
+    /// spelling of one.
+    ///
+    /// The branch is the part of the record a `settle` corrects: a node whose
+    /// dispatch died before its change merged recorded a branch that never
+    /// landed, so a question put about that branch answers `not-landed` for ever
+    /// about work that reached its base hours ago. What the operator read is the
+    /// merge. Driven end to end, against a real repository and a real probe, by
+    /// `tests/e2e/adoption.rs`'s two settled-landing journeys.
+    #[test]
+    fn a_landing_an_operator_stated_is_what_the_sibling_is_asked_about() {
+        for landing in [
+            "https://github.com/owner/engine/pull/12",
+            "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d",
+        ] {
+            let mut stated = dependency(Some("crate"), Some(ReleaseStyle::Automated));
+            stated.landing = Some(landing.to_owned());
+            assert_eq!(
+                stated.reference(),
+                Some(landing),
+                "the branch this settle corrects is still what the release is measured against"
+            );
+            // And it is what makes a dependency the run could not otherwise name
+            // askable at all: a node settled from evidence that never published
+            // has no branch and no commit of its own.
+            stated.branch = None;
+            stated.commit = None;
+            assert!(stated.askable(), "a stated landing is no question at all");
+            assert_eq!(stated.reference(), Some(landing));
+        }
+    }
+
+    /// Where a node's work was stated to have landed is read off the journal, and
+    /// a record this build cannot read whole says nothing.
+    ///
+    /// The journal is external input — another build wrote it and a person can
+    /// edit it — and what a mis-read costs here is a release question put about
+    /// the wrong work, which is answered with somebody else's release.
+    #[test]
+    fn a_stated_landing_is_read_off_the_journal_and_the_last_one_wins() {
+        let edit = |operations: Value| {
+            serde_json::from_value::<crate::event::Envelope>(json!({
+                "v": 1,
+                "ts": "2026-09-07T00:00:00.000Z",
+                "stream": "pipeline",
+                "seq": 0,
+                "source": "pipeline",
+                "kind": journal::PipelineKind::EditCommitted.as_str(),
+                "labels": {"run_id": "settled"},
+                "payload": {"operations": operations},
+            }))
+            .expect("an envelope")
+        };
+        let stated = |node: &str, landing: &str| json!([{"kind": "landing-from-evidence", "node": node, "landing": landing}]);
+        assert_eq!(
+            stated_landings(&[
+                edit(stated("publish", "3f9a1c2")),
+                edit(stated("other", "https://example.invalid/pull/1")),
+                // A record corrected twice: the newest correction is the one.
+                edit(stated("publish", "9d8c7b6")),
+            ]),
+            [
+                (
+                    "other".to_owned(),
+                    "https://example.invalid/pull/1".to_owned()
+                ),
+                ("publish".to_owned(), "9d8c7b6".to_owned()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<String, String>>()
+        );
+        // Nothing this build cannot read whole is read as a landing: an
+        // operation list it cannot parse, an operation of another kind, and a
+        // value that would forge a line wherever it is rendered.
+        for unreadable in [
+            json!("not a list of operations"),
+            json!([{"kind": "settled-from-evidence", "node": "publish", "outcome": "done",
+                    "evidence": "it merged"}]),
+            stated("publish", ""),
+            stated("publish", "3f9a1c2 and the one before it"),
+            stated("", "3f9a1c2"),
+        ] {
+            assert!(
+                stated_landings(&[edit(unreadable.clone())]).is_empty(),
+                "{unreadable} was read as a landing"
+            );
+        }
+        // And a run whose journal states none has none, which is every run that
+        // has never had a settlement corrected.
+        assert!(stated_landings(&[]).is_empty());
     }
 
     /// One release, as the note and the record name it.
@@ -2029,6 +2320,97 @@ mod tests {
         assert_eq!(entries[0]["last_answer"], json!("awaiting-human-step"));
         assert_eq!(entries[0]["action"], json!("cut a release on PyPI"));
         assert!(watch.awaiting("auto")[0].get("action").is_none());
+    }
+
+    /// A release that has arrived stays arrived, and the wait it ended is over:
+    /// no question is put about it again, and its clock is dropped rather than
+    /// left running.
+    ///
+    /// The defect this closes was measured on a live run. A hold was satisfied
+    /// and its node dispatched; fifty-two minutes later the same run raised a
+    /// wait surface about that node reporting 4394 seconds waited with a last
+    /// answer of `not-answered`, because the probe had stopped answering and the
+    /// answer that carried no version was written over the one that did. That
+    /// surface is not a report but a decision put to a supervisor, and one of its
+    /// three options is stopping the run.
+    ///
+    /// Driven end to end, against a real probe that answers and then stops
+    /// answering, by `tests/e2e/adoption.rs`'s
+    /// `a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering`.
+    #[test]
+    fn a_release_that_arrived_is_never_awaited_again() {
+        let published = Node {
+            id: "held".to_owned(),
+            adoption: Some(Adoption::Published),
+            ..Node::default()
+        };
+        let paths = RunPaths::under(std::path::Path::new("/nowhere"), "demo");
+        let mut watch = Watch::of_run(&paths);
+        let key = ("held".to_owned(), "engine".to_owned());
+        watch.dependencies.insert(
+            "held".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        let watching = vec![published];
+
+        // The hold, and the clock it is measured on, from an hour ago.
+        let long_ago = crate::sys::now_millis().saturating_sub(4_394_000);
+        watch.since.insert(key.clone(), long_ago);
+        assert!(watch.held(&watching).contains("held"));
+
+        // The release arrives, so the hold is over.
+        watch.take_up(
+            std::slice::from_ref(&key),
+            &Answer::Released {
+                version: "0.2.0".to_owned(),
+            },
+        );
+        watch.refresh(&paths, &RunState::default(), &watching);
+        assert!(watch.held(&watching).is_empty(), "a released hold held");
+        assert!(
+            watch.awaiting("held").is_empty(),
+            "a released dependency is still on the awaited list"
+        );
+        assert!(
+            !watch.since.contains_key(&key),
+            "the clock of a wait that ended is still running"
+        );
+
+        // Then the probe stops answering, which is a statement about the probe
+        // and not about the release.
+        for gone in [Answer::NotAnswered, Answer::NotReleased, Answer::NotLanded] {
+            watch.take_up(std::slice::from_ref(&key), &gone);
+            assert_eq!(
+                watch.answers.get(&key).and_then(Answer::version),
+                Some("0.2.0"),
+                "{gone:?} un-released a release that had happened"
+            );
+        }
+        watch.refresh(&paths, &RunState::default(), &watching);
+        assert!(
+            watch.held(&watching).is_empty() && watch.awaiting("held").is_empty(),
+            "a satisfied hold was resurrected by a probe that stopped answering"
+        );
+        // And what the wait would have reported is what made this urgent: an hour
+        // and a quarter waited, for a node that had been dispatched.
+        assert!(
+            !watch.since.contains_key(&key),
+            "the resurrected wait would have counted from the hold that ended"
+        );
+
+        // A hold this run opens **after** that one is timed from itself. The
+        // clock a satisfied hold left behind is the one that reported 4394
+        // seconds, so what proves it was dropped is a second wait on the same key
+        // starting at zero.
+        watch.answers.remove(&key);
+        watch.refresh(&paths, &RunState::default(), &watching);
+        let waited = watch.awaiting("held")[0]["waited_seconds"]
+            .as_u64()
+            .expect("a wait says how long it has been");
+        assert!(
+            waited < 60,
+            "a second hold on the same node counted {waited}s from a hold that had ended"
+        );
     }
 
     /// Only an answer of released lets a `published` node start, and a node the
