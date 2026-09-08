@@ -2245,9 +2245,7 @@ fn a_merge_path_that_never_answers_settles_the_node_saying_where_the_work_is() {
 /// its dependents, and they run once that verdict becomes decidable.
 ///
 /// Nothing here states a landing to the binary: the branch is taken onto its base
-/// by this test, with git, exactly as a merge does it, and what the run then
-/// reads is that repository. Both halves are asserted, because either alone
-/// proves nothing — a hold nothing lifts stops the run as surely as a skip.
+/// with git, and what the run then reads is that repository.
 #[test]
 fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decidable() {
     let world = World::new("lifecycle-heldunverified")
@@ -2374,11 +2372,9 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
 /// A verdict that stays readable and says the work has **not** landed leaves the
 /// dependents held, and the run settles rather than asking for good.
 ///
-/// The other end of the hold. The host answers every time it is asked here — the
-/// branch really is on the origin and its change really has not reached the base
-/// — so what bounds the asking is the budget rather than an outage ending. When
-/// it is gone the dependents stay held, which is what they are: work waiting on a
-/// merge nobody in this run can perform, rather than work a failure made unsafe.
+/// The other end of the hold: the host answers every ask here and answers that
+/// the change has not reached the base, so what bounds the asking is the budget.
+/// When it is gone the dependents stay held, which is what they are.
 #[test]
 fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
     let world = World::new("lifecycle-heldforever")
@@ -2440,13 +2436,8 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
 /// same time.
 ///
 /// What must not be inferred from the hold above: nothing here serialises
-/// same-repository work.
-///
-/// Observed rather than inferred, twice over. Both workers arrive at a barrier
-/// that releases only when both are inside their own dispatch, so a run that
-/// started the second after the first had finished never releases it and settles
-/// nothing; and the run's own record is then read for the overlap, which is both
-/// dispatches on the record before either settlement.
+/// same-repository work. Observed rather than inferred — a barrier no serialised
+/// run could release, and then the overlap off the run's own record.
 #[test]
 fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
     let world = World::new("lifecycle-sidebyside");
@@ -2748,11 +2739,10 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
 /// the conflict a session **open** meets is not it.
 ///
 /// Both conditions in one run, because one word covers them and only one is
-/// retryable. The conflict is real and made the way one happens: the base takes a
-/// change to the same file while the worker is still working, and the
-/// publication's resolve-and-requeue cannot merge the two. The second dispatch
-/// then meets the other condition, at session open, where no attempt converges
-/// because neither side changes on its own.
+/// retryable. The base takes a change to the same file while the worker is still
+/// working, which the publication's resolve-and-requeue cannot merge; the second
+/// dispatch then meets the other condition, at session open, where no attempt
+/// converges because neither side changes on its own.
 #[test]
 fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retries() {
     let world = World::new("lifecycle-syncconflict")
@@ -2937,12 +2927,11 @@ fn a_session_open_conflict_raises_a_decision_where_a_publication_conflict_retrie
 ///
 /// Every change request this host is handed and not just the first: the check is
 /// red and stays red, which is the loop the budget exists to bound.
-/// The worker writes something **new** on every dispatch, which is what makes the
-/// budget the thing being spent: an attempt that republishes the tree the last one
-/// published is handed its attempt back rather than spending it — see
-/// `a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget` —
-/// so a journey about a spent budget needs a tree that really moves between
-/// attempts.
+///
+/// The worker writes something **new** on every dispatch, because an attempt that
+/// republished the last one's commit is handed its attempt back rather than
+/// spending it — see
+/// `a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget`.
 fn publishing_into_checks_that_stay_red(world: &World, name: &str) -> (String, Repository) {
     let repo = world.repository("change-auto", &[]);
     world.script("service.work-anew", "the worker wrote this\n");

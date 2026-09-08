@@ -450,13 +450,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.ignores-the-ask")).exists() {
         fake::ignore_the_polite_ask();
     }
-    // `<key>.concurrent` holds this dispatch until the number of dispatches it
-    // names are all inside their own. A hold released from outside cannot say
-    // this — it proves only that one dispatch was somewhere — while a barrier
-    // releases exactly when every party is running, so a journey that reads the
-    // arrivals afterwards is reading the set that was live at one instant. It is
-    // how "two nodes ran at the same time" is *observed* rather than inferred
-    // from two records that never say what overlapped.
+    // Held until the number of dispatches `<key>.concurrent` names are all
+    // inside their own, which is how "these ran at the same time" is observed
+    // rather than inferred: a hold released from outside proves only that one
+    // dispatch was somewhere.
     if let Some(parties) = fake::node_script(dir, &key, "concurrent") {
         let parties = parties
             .trim()
@@ -563,11 +560,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
 
     // The same, except that every dispatch writes something the one before it
-    // did not: the body carries which dispatch wrote it. A journey about
-    // *re-dispatching* needs a worker that really changes the tree, because
-    // `<key>.work` writing one fixed body leaves a continued branch with nothing
-    // to commit — which is a different thing for the engine than a worker that
-    // tried again and produced a new tree.
+    // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
+    // one fixed body leaves a continued branch with nothing to commit, which is a
+    // different thing for the engine than a worker that produced a new tree.
     if let Some(body) = fake::node_script(dir, &key, "work-anew") {
         let nth = fake::count(dir, &format!("{key}.work-anew"));
         write_work(

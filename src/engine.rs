@@ -755,10 +755,8 @@ fn converge(
     // edge is paid at most once per change to the folded state rather than once
     // per caller that wants it.
     let mut derived: Option<BTreeMap<String, NodeStatus>> = None;
-    // The nodes whose work reached the origin with the merge path unread. Their
-    // dependents are held rather than skipped, so this is what lifts the hold:
-    // the same question the publication could not get an answer to, asked again
-    // through `onevcs` while the run is still here to act on it.
+    // What lifts the hold on a node whose work reached the origin: the question
+    // its publication could not get an answer to, asked again.
     let mut unread = crate::vcs::UnreadMergePaths::default();
     let mut read_unread: Option<Instant> = None;
     // When each piece of paced work was last done. `None` is due now, which is
@@ -788,9 +786,8 @@ fn converge(
         // reports `true` only for work it *consumed*, which bounds this at one
         // extra pass per change and leaves a converged run running none.
         let mut moved = false;
-        // Every landing this run has already been shown, put back before anything
-        // derives from the state: the fold a settlement triggers re-reads the
-        // journal, and a landing this run proved by asking `onevcs` is not in it.
+        // Put back before anything derives from the state: the fold a settlement
+        // triggers re-reads the journal, and this is not in it.
         if unread.apply(state) {
             derived = None;
             unpublished = true;
@@ -874,8 +871,7 @@ fn converge(
             moved = true;
         }
 
-        // A verdict the publication could not read may have become readable, and
-        // the run holding dependents on it is what has to find out.
+        // A verdict the publication could not read may have become readable.
         let statuses = statuses_of(&mut derived, state);
         let mut watching_merge_paths = unread.watching(state, &statuses);
         if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {
@@ -935,12 +931,8 @@ fn converge(
         if in_flight.is_empty() && watching_merge_paths.is_empty() {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
-            //
-            // A merge path this run is still asking about is the exception, and
-            // it is why the condition above carries a second clause: a `blocked`
-            // dependent is a *settled* status, so a run holding one on a verdict
-            // it is about to be able to read would call itself converged and go,
-            // leaving the work it was holding for undone.
+            // A merge path still being asked about is the exception the second
+            // clause above carries, because `blocked` is a *settled* status.
             if graph::is_terminal(&statuses) {
                 break;
             }
@@ -2551,15 +2543,10 @@ pub(crate) fn attempt(
         {
             return drained;
         }
-        // The one refusal at this boundary that another attempt provably cannot
-        // answer: the session met a **base conflict** when it opened. Nothing
-        // about it changes between attempts — the branch and its base disagree
-        // about a file, and no dispatch of this node's ever gets far enough to
-        // touch either — so the whole budget is spent reproducing one refusal and
-        // the node then reads as an infrastructure wobble that was tried three
-        // times. It is put to the supervisor instead, who resolves the merge and
-        // says so in one move, which is the only thing that makes the next
-        // attempt different from this one.
+        // The one refusal at this boundary another attempt provably cannot
+        // answer: the branch and its base disagree about a file, and no dispatch
+        // of this node's gets far enough to touch either. It goes to the
+        // supervisor rather than spending the budget reproducing itself.
         if conflicted_at_session_open(&drained.settlement) {
             let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
                 node: node.to_string(),
@@ -2597,14 +2584,12 @@ pub(crate) fn attempt(
     last
 }
 
-/// Whether this settlement is a dispatch the sibling refused because the session
-/// it needed met a base conflict when it opened.
+/// Whether the sibling refused this dispatch because the session it needed met a
+/// base conflict when it opened.
 ///
-/// Both halves, because either alone is the wrong question. It has to be a
-/// dispatch the layer refused *before any work began* — [`INFRASTRUCTURE_FAILURE`]
-/// is exactly that word and no other reaches this — and the refusal has to be the
-/// conflict, which [`crate::vcs::session_open_conflicted`] decides off the text
-/// that module composed for the purpose.
+/// Both halves, because either alone is the wrong question: the refusal has to
+/// have come *before any work began*, which [`INFRASTRUCTURE_FAILURE`] is the
+/// word for, and it has to have been the conflict.
 fn conflicted_at_session_open(settlement: &Settlement) -> bool {
     settlement.outcome.as_deref() == Some(INFRASTRUCTURE_FAILURE)
         && settlement
@@ -2631,16 +2616,8 @@ pub(crate) struct SessionConflict {
 /// The decision a session-open conflict puts to the supervisor.
 ///
 /// **Blocking**, because it is a decision rather than a report: nothing in this
-/// run can converge on it, and the subtree below the node is waiting on work that
-/// cannot start until somebody merges two branches by hand. That is the same
-/// shape as a release hold — a wait no retry resolves, answered by a person in
-/// one move — and it is what the node had instead: a retry budget spent
-/// reproducing one refusal, and then a settlement a `retry` met again because
-/// nothing about the conflict had changed.
-///
-/// It names both halves a supervisor needs: the conflict, in the sibling's own
-/// words — which carry the conflicting files and the checkout to resolve them in
-/// — and the move that answers it here.
+/// run converges on it, and the subtree below the node cannot start until
+/// somebody merges two branches by hand.
 fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
     Surface {
         id: 0,

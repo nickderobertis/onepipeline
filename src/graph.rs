@@ -861,16 +861,14 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
 /// What a node's settlement said, as far as scheduling has to know it.
 ///
 /// [`NodeStatus`] alone is what the derivation used to read, and it is a
-/// projection that deliberately discards where the work got to — which is right
-/// for eight of the nine settlements and wrong for one. Read as a bare `failed`,
+/// projection that discards where the work got to — which is right for eight of
+/// the nine settlements and wrong for one: read as a bare `failed`,
 /// [`ReachedTheOrigin`](Self::ReachedTheOrigin) skipped every dependent of a
 /// change that had in fact merged.
 ///
-/// **Cases and not fields**, because these facts are correlated: only a `failed`
-/// node can have reached the origin, and only one that reached the origin can
-/// have been shown reaching its base. Fields beside each other would make a
-/// `ready` node whose failed publication landed a value somebody could
-/// construct.
+/// Cases and not fields, because these facts are correlated and fields beside
+/// each other would make a `ready` node whose failed publication landed a value
+/// somebody could construct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     /// Where the node got to, and nothing else this decision turns on.
@@ -1090,8 +1088,7 @@ fn eligibility(
 /// cause it disagrees with.
 ///
 /// A publication that left its work **on the origin** is deliberately not one,
-/// whichever way its verdict has since gone: it is
-/// [`holds_dependents`] or [`reached_its_base`] below, and never this.
+/// whichever way its verdict has since gone.
 fn skips_dependents(settled: &Settled) -> bool {
     matches!(
         settled,
@@ -1102,13 +1099,8 @@ fn skips_dependents(settled: &Settled) -> bool {
 /// Whether a dependency's publication reached the origin and the verdict on it is
 /// still outstanding, so its dependents **wait** rather than being skipped.
 ///
-/// The engine says in three places that this failure is not the tree being turned
-/// down — [`crate::vcs::failure_of`] routes it apart from the four that are,
-/// [`crate::vcs`]'s own documentation says the push landed, and the node is not
-/// re-dispatched because there is nothing for a worker to change — and until this
-/// existed, none of that reached the one decision it should have changed. The
-/// dependent is waiting on a merge that is already in flight, which is a hold and
-/// not a skip: a skip is permanent and this is not, because the same run goes on
+/// The dependent is waiting on a merge already in flight, which is a hold and not
+/// a skip: a skip is permanent and this is not, because the same run goes on
 /// asking whether the verdict has become decidable.
 fn holds_dependents(settled: &Settled) -> bool {
     matches!(settled, Settled::ReachedTheOrigin)
@@ -1116,11 +1108,9 @@ fn holds_dependents(settled: &Settled) -> bool {
 
 /// Whether that verdict has since been decided, and decided in the work's favour.
 ///
-/// The other side of the hold, and the only thing that lifts it: `onevcs` has
-/// been asked again and shown the change reaching its base. For everything a
-/// dependent does next that is exactly what `done` means — the work it consumes
-/// is on the branch it will be cut from — so it starts, while the node keeps the
-/// word its own publication earned.
+/// The only thing that lifts the hold. For everything a dependent does next this
+/// is what `done` means — the work it consumes is on the branch it will be cut
+/// from — so it starts, while the node keeps the word its publication earned.
 fn reached_its_base(settled: &Settled) -> bool {
     matches!(settled, Settled::ReachedItsBase)
 }

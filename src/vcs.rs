@@ -64,15 +64,13 @@ fn providers() -> Providers<'static> {
 }
 
 /// How a refusal this module composed says a session open met a **base
-/// conflict**, so the one reader of it can tell that refusal from every other.
+/// conflict**.
 ///
-/// Written here and read by [`session_open_conflicted`] here, which is what
-/// keeps it a convention of this module rather than a reading of somebody else's
-/// sentence: the classification is made off `onevcs`'s own typed
-/// [`SyncConflict`](onevcs::Error::SyncConflict) at the moment the library
-/// answers, and this phrase only carries that decision across the executor
-/// seam — whose refusal is [`Error::Sibling`], a shape `docs/contract.md` fixes
-/// and this crate may not widen with a variant of its own.
+/// Written and read here, so it is this module's own convention rather than a
+/// reading of somebody else's sentence: the classification is made off `onevcs`'s
+/// typed [`SyncConflict`](onevcs::Error::SyncConflict), and this phrase carries
+/// it across the executor seam — whose refusal is [`Error::Sibling`], a shape
+/// `docs/contract.md` fixes.
 const SESSION_OPEN_CONFLICT: &str = "the base conflicts with this branch";
 
 /// Open a session over a per-run clone and worktree.
@@ -87,13 +85,10 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 /// refusal no further attempt converges on **named**.
 ///
 /// A sync conflict is two conditions sharing one word. During a publication the
-/// base moved under work that was already going and the bounded resolve-and-
-/// requeue lost the race, which another attempt can win — that one is
-/// [`Preserving::SyncConflict`]. At *session open* it is a merge nobody has
-/// performed: the branch and its base disagree about a file, and opening the
-/// session again reproduces the identical refusal because neither side has
-/// changed. Asking again is the whole of what the dispatch boundary would do
-/// with it, so the two must not arrive at that boundary looking alike.
+/// base moved under work already going and the bounded resolve-and-requeue lost
+/// the race, which another attempt can win — [`Preserving::SyncConflict`]. At
+/// *session open* it is a merge nobody has performed, and opening the session
+/// again reproduces the identical refusal.
 fn session_refusal(error: onevcs::Error) -> Error {
     match &error {
         onevcs::Error::SyncConflict { .. } => sibling(format!("{SESSION_OPEN_CONFLICT}: {error}")),
@@ -105,10 +100,8 @@ fn session_refusal(error: onevcs::Error) -> Error {
 /// conflict when it opened.
 ///
 /// Asked of the refusal's own text because that is the whole of what crosses the
-/// executor seam — see [`SESSION_OPEN_CONFLICT`] for why the seam carries no
-/// narrower shape — and the text was composed by [`session_refusal`] a few lines
-/// above rather than by the sibling, so what is matched here is this module's own
-/// word and not a sentence somebody else is free to reword.
+/// executor seam, and of text [`session_refusal`] composed rather than of the
+/// sibling's own — see [`SESSION_OPEN_CONFLICT`].
 pub(crate) fn session_open_conflicted(detail: &str) -> bool {
     detail.contains(SESSION_OPEN_CONFLICT)
 }
@@ -496,17 +489,9 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// The nodes whose publication left its work on the origin with the merge path
 /// unread, and how many times this run has asked again about each.
 ///
-/// `crate::graph` holds their dependents rather than skipping them; a hold
-/// nothing lifts stops a run just as surely, so this is what lifts it. The
-/// verdict the publication could not read is a verdict about the *host*, and a
-/// host that was briefly unreachable comes back.
-///
-/// **Bounded** by [`HOLD_ASKS`]: a run that polled somebody else's API for good
-/// would be worse than one that reported honestly, and when the budget is gone
-/// the dependents stay held, which is what they are.
-///
-/// Asked only about a node actually holding something, so a `pushed-unverified`
-/// leaf costs nothing.
+/// `crate::graph` holds their dependents rather than skipping them, and a hold
+/// nothing lifts stops a run just as surely — so this is what lifts it. Bounded
+/// by [`HOLD_ASKS`], and asked only about a node actually holding something.
 #[derive(Debug, Default)]
 pub(crate) struct UnreadMergePaths {
     asking: BTreeMap<String, Asking>,
@@ -514,16 +499,11 @@ pub(crate) struct UnreadMergePaths {
 
 /// How many times one node's unread merge path is asked about again.
 ///
-/// Its own number and deliberately not [`crate::engine::merge_path_reads`], which
-/// is the same question asked in a different situation: that one is a publication
-/// holding a session open, so it is small, while nothing is occupied by waiting
-/// here. Twelve asks at the default interval is a minute of holding, which is a
-/// host outage's timescale — and a merge a *person* performs is not something a
-/// run waits for at all, so the ending that bound reaches is the honest one.
-///
-/// A constant rather than a knob, because there is nothing an operator would tune
-/// it against: how patient this run is with a merge path is
-/// [`crate::engine::merge_path_backoff`]'s to say, and it says it for both.
+/// Deliberately not [`crate::engine::merge_path_reads`]: that one is a
+/// publication holding a session open, so it is small, while nothing is occupied
+/// by waiting here. Twelve at the default interval is a minute of holding, which
+/// is a host outage's timescale — and a merge a *person* performs is not
+/// something a run waits for at all.
 const HOLD_ASKS: std::num::NonZeroU32 = match std::num::NonZeroU32::new(12) {
     Some(asks) => asks,
     None => unreachable!(),
@@ -532,8 +512,7 @@ const HOLD_ASKS: std::num::NonZeroU32 = match std::num::NonZeroU32::new(12) {
 /// How one node's asking has gone.
 ///
 /// The count rides both cases, so a landing this run never asked for cannot be
-/// recorded — and neither can a node counted against the budget that is neither
-/// still being asked about nor answered.
+/// recorded.
 #[derive(Debug, Clone, Copy)]
 enum Asking {
     /// Asked this many times, and no landing shown yet.
@@ -593,14 +572,9 @@ impl UnreadMergePaths {
     /// Put every landing this run has been shown back onto the state it belongs
     /// to.
     ///
-    /// Every pass, rather than once where it was read, because the loop re-folds
-    /// the whole state from the journal each time a node settles — and this is a
-    /// read of something the journal does not record, so a fold that dropped it
-    /// would send a dependent this run had already started back to being skipped
-    /// by a node whose work is on its base.
-    ///
-    /// Reports whether the state had lost one, which is what tells the loop its
-    /// derivation is stale.
+    /// Every pass rather than once where it was read, because the loop re-folds
+    /// the whole state from the journal each time a node settles and this is not
+    /// in the journal. Reports whether the state had lost one.
     pub(crate) fn apply(&self, state: &mut crate::projection::RunState) -> bool {
         let mut restored = false;
         for (node, _) in self
@@ -621,13 +595,9 @@ impl UnreadMergePaths {
     ///
     /// The answer goes onto the run's own state rather than into its journal, for
     /// the reason `crate::engine`'s cross-DAG resolution does the same: it is a
-    /// read of something this run does not write, re-taken by whatever is driving
-    /// the run, so a fresh driver re-derives it rather than inheriting a claim it
-    /// cannot check. What the journal keeps is the settlement, which is unchanged
-    /// — the node published, and the publication did not read a verdict.
-    ///
-    /// Reports whether anything became decidable, which is what tells the loop a
-    /// hold may have lifted.
+    /// read of something this run does not write, so a fresh driver re-derives it
+    /// rather than inheriting a claim it cannot check. Reports whether anything
+    /// became decidable.
     pub(crate) fn read_again(
         &mut self,
         state: &mut crate::projection::RunState,

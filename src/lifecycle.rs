@@ -95,10 +95,7 @@ pub fn execute(
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
-    // The commit the branch stood at when the previous attempt published it, so
-    // this one's tip can be compared against it. `None` until an attempt has
-    // published one — an unknown tip is not evidence that two trees are the
-    // same, and is never read as it.
+    // The commit the branch stood at when the previous attempt published it.
     let mut published: Option<String> = None;
     loop {
         let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
@@ -108,9 +105,7 @@ pub fn execute(
         endings.push(preserved.outcome);
         // Where this attempt left the branch: `onevcs` commits a session's
         // worktree only where it holds something to commit, so an attempt that
-        // recorded no commit added nothing and the branch stands where the last
-        // one left it. Republishing that commit is a refusal the branch did not
-        // cause, so the attempt is handed back rather than spent.
+        // recorded none added nothing and the branch stands where it stood.
         let tip = preserved.head.clone().or_else(|| published.clone());
         if let Some(same) = unmoved_tip(published.as_deref(), tip.as_deref()) {
             return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
@@ -836,11 +831,8 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
 ///
 /// Named for the **tip** and not for the tree, because that is what is compared:
 /// two commits carrying identical trees are two commits, and this answers `None`
-/// for them. That direction is the safe one — it spends an attempt on work that
-/// may have moved rather than stopping one that had not.
-///
-/// `None` for the unknown, too: the first attempt has nothing before it to be
-/// identical to, and a run that has never seen a tip has no evidence either way.
+/// for them, which is the safe direction. `None` for the unknown too — a run that
+/// has never seen a tip has no evidence either way.
 fn unmoved_tip(published: Option<&str>, now: Option<&str>) -> Option<String> {
     let published = published?;
     (now == Some(published)).then(|| published.to_owned())
@@ -851,10 +843,8 @@ fn unmoved_tip(published: Option<&str>, now: Option<&str>) -> Option<String> {
 ///
 /// **The residual and not the failure's own word.** Each of the four preserving
 /// words says something about the branch, and the branch is not what refused
-/// this; [`Failure::Terminal`] is the ending whose meaning covers it.
-///
-/// The attempt is **handed back** rather than spent, and the settlement says how
-/// much is left: a reader deciding whether to intervene decides against a budget.
+/// this; [`Failure::Terminal`] is the ending whose meaning covers it. The attempt
+/// is handed back rather than spent, and the settlement says how much is left.
 ///
 /// [`Failure::Terminal`]: crate::vcs::Failure::Terminal
 fn republished_the_same_commit(
