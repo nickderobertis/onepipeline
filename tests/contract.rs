@@ -22,8 +22,8 @@ use onepipeline::channel::{
 use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
-    EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
-    EXIT_WATCH_ELAPSED,
+    EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS,
+    EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
 };
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Phase, PipelineKind, Source,
@@ -4656,6 +4656,31 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
             "the README's watch passage does not name `--{flag}`, which the verb takes"
         );
     }
+    // The `--until` vocabulary, both ways, out of the constant a caller's
+    // condition is parsed against. A condition this build accepts and the README
+    // never mentions is one nobody was told they could ask for — and the wait it
+    // ends is the one that may now have no bound at all — while a condition the
+    // README keeps past the code sends a supervisor to spell something this
+    // binary refuses.
+    for condition in onepipeline::cli::watch_conditions() {
+        assert!(
+            passage.contains(&format!("`--until {condition}`")),
+            "the README's watch passage does not name `--until {condition}`, which the verb \
+             accepts"
+        );
+    }
+    for named in passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|span| span.strip_prefix("--until "))
+    {
+        assert!(
+            onepipeline::cli::watch_conditions().contains(&named),
+            "the README's watch passage names `--until {named}`, which the verb does not accept"
+        );
+    }
+
     for (what, stated) in [
         (
             "the run settling",
@@ -4672,6 +4697,10 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         (
             "the wait elapsing",
             format!("`{EXIT_WATCH_ELAPSED}` when the"),
+        ),
+        (
+            "a node the wait named settling",
+            format!("`{EXIT_NODE_SETTLED}` when a node the wait was told to return on settled"),
         ),
     ] {
         assert!(
@@ -4717,6 +4746,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_NOTHING_DRIVING,
         EXIT_SURFACE_WAITING,
         EXIT_WATCH_ELAPSED,
+        EXIT_NODE_SETTLED,
     ]
     .iter()
     .map(i32::to_string)
