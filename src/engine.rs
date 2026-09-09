@@ -5101,42 +5101,6 @@ mod tests {
             .expect("the gate's place is taken by something else");
     }
 
-    /// A gate whose holder this host can prove is gone is reclaimed, and holding
-    /// it then means what holding it always means.
-    ///
-    /// A driver that dies inside the section leaves a file nothing will remove,
-    /// and a gate nobody could ever take would stop every submission and every
-    /// release on the run. So a dead holder's is reclaimed — and the reclaimed
-    /// gate is a gate like any other: the next taker waits on its holder rather
-    /// than reclaiming it a second time, which is what keeps the reclaim from
-    /// being a second way in for everyone who arrives afterwards.
-    #[test]
-    fn a_gate_whose_holder_is_gone_is_reclaimed_and_then_held_like_any_other() {
-        let paths = handover_scratch("gate-stale");
-        // The entry a holder that died inside the section leaves behind: its own
-        // name, carrying the pid nothing on this host answers for.
-        std::fs::create_dir_all(paths.channel("handover")).expect("the gate's entries");
-        // Its name and its body as a holder writes them — the moment, the pid,
-        // the attempt, and the host whose process table can answer for that pid —
-        // carrying a pid nothing on this host answers for.
-        std::fs::write(
-            paths
-                .channel("handover")
-                .join(format!("{:012}-{:010}", 1, 0)),
-            sys::hostname(),
-        )
-        .expect("the entry is written");
-
-        let reclaimed = ledger::Handover::hold_within(&paths, Duration::from_millis(50))
-            .expect("a gate whose holder is gone is reclaimed");
-        // And it is a gate like any other once taken: the next taker waits on
-        // this process, rather than reclaiming it a second time.
-        ledger::Handover::hold_within(&paths, Duration::from_millis(50))
-            .expect_err("the reclaimed gate is held, so a second taker is refused");
-        drop(reclaimed);
-        std::fs::remove_dir_all(&paths.dir).ok();
-    }
-
     /// **A gate this process could not take stops both sections.**
     ///
     /// Failing open would put the two back where they were: an edit accepted onto

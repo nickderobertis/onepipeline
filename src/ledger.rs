@@ -1496,28 +1496,36 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
 /// conversation or a graph fold. A party that cannot take it does neither of its
 /// two things and says so.
 ///
-/// # Why it is entries rather than a lock file
+/// # What arbitrates it
 ///
-/// Every attempt writes an entry of **its own**, and the lowest entry holds the
-/// gate. Nothing writes over or removes another party's claim, so nothing has to
-/// be broken: a dead holder's entry names that holder alone, any waiter may clear
-/// it, and two that clear the same one both find it gone. Exclusion is a
-/// comparison, and what it rests on is that the names carry a **total order with
-/// no ties** — so exactly one entry is the lowest, whichever entries are in the
-/// gate at once. Which of two entries that is is not a claim about which was made
-/// first: two processes sample their own clocks, and nothing here says whose read
-/// came first. It does not need to. The gate is exclusion, not fairness, and an
-/// entry that loses a comparison waits and is let in next.
+/// The gate is the **highest-numbered entry that exists**, and its holder is
+/// whoever created that entry. Taking it means creating the number above the
+/// highest one seen, exclusively — so two parties that looked at the same moment
+/// and picked the same number meet **on one path**, where the filesystem decides:
+/// exactly one create succeeds, and the other looks again and finds a live holder
+/// to wait for.
 ///
-/// A single lock file cannot promise that. Taking one nobody holds is exclusive,
-/// but *reclaiming* one whose holder is gone is a read, a write and a check with
-/// no atomicity across them, so two processes meeting the same dead holder can
-/// each come away believing they hold it — and a gate two parties are inside is
-/// the race this closes.
+/// That is the whole of it, and the two things it does not do are why it holds:
+///
+/// * **Nothing is ever numbered above a holder that is alive.** A number above
+///   the top is taken only when the top's holder is one this host can prove is
+///   gone, and every uncertainty — another host's entry, a body that cannot be
+///   read, a listing that cannot be read — counts as alive.
+/// * **No party ever removes an entry it did not create.** A dead holder's entry
+///   is left exactly where it is and stepped *over*, so there is no moment at
+///   which one process is deleting a file another has just taken. Stale entries
+///   are the residue of a process dying inside a two-file-operation section; they
+///   cost a name each and block nobody.
+///
+/// A name carrying its maker's own clock could do neither. Clocks disagree
+/// between machines, and one process can read its own before another and write it
+/// after, so a party arriving later could sort below the holder and both would
+/// read themselves in. A name carrying the maker's *identity* beside the number
+/// is worse still: two parties picking one number then create two different
+/// paths, and the filesystem is never asked to arbitrate at all.
 #[derive(Debug)]
 pub(crate) struct Handover {
-    /// This process's own entry, which nothing else writes or removes while its
-    /// holder is alive.
+    /// The entry this process created, which nothing else ever removes.
     entry: PathBuf,
 }
 
@@ -1546,26 +1554,22 @@ pub(crate) const DRIVE_VERB: &str = "drive";
 /// every caller's job is to do nothing that needed it.
 const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How many times one attempt will lose the race for a number before it reports
+/// the gate untaken.
+const NUMBERS_TRIED: usize = 1_000;
+
 // llmlint: ignore-block[changed_behavior_has_e2e] what a journey can drive of this is
 // driven: `driver::an_edit_that_cannot_be_gated_is_refused_and_nothing_reaches_the_queue`
 // and `driver::a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed` are
-// two real runs meeting a gate this host will not take. What no journey can drive is the
-// *ordering* itself — which party is inside the section when the other arrives — because
-// that is decided in microseconds inside two processes and no CLI input places anything
-// there. It is driven instead from both sides at once by
-// `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`,
-// with the two ways out of the wait held by
-// `engine::tests::contention_outlasting_the_patience_refuses_rather_than_going_on_without_the_gate`
-// and `engine::tests::a_gate_whose_holder_is_gone_is_reclaimed_and_then_held_like_any_other`.
+// real runs meeting a gate this host cannot take. What no journey can drive is which party
+// is inside the section when the other arrives, or which of two writes lands first: both
+// are decided in microseconds inside two processes, and no CLI input places anything
+// there. Those are driven instead by the cases beside this code in `tests` — two parties
+// that looked at one gate, an arrival while another is inside, a holder this host knows is
+// gone, and three it cannot account for — and from both sides at once by
+// `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`.
 impl Handover {
     /// Hold the gate for this run, or report that this process is not inside it.
-    ///
-    /// Waits out an entry ahead of this one whose holder is a live process, since
-    /// that is a peer in a section that ends in microseconds. An entry whose
-    /// holder is gone is cleared — it names that holder and nothing else, so
-    /// clearing it takes nothing from anybody — and a directory this host will
-    /// not write to at all is refused, because no amount of waiting turns that
-    /// into a gate this process holds.
     pub(crate) fn hold(paths: &RunPaths) -> Result<Self> {
         Self::hold_within(paths, HANDOVER_PATIENCE)
     }
@@ -1574,117 +1578,109 @@ impl Handover {
     /// contention that outlasts it without waiting out the shipped bound.
     pub(crate) fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
         let dir = handover_entries(paths);
-        let held = Self::take_a_place(paths, &dir)?;
+        fs::create_dir_all(&dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+        let host = sys::hostname();
         let deadline = std::time::Instant::now() + patience;
-        loop {
-            match ahead_of(&dir, &held.entry).map_err(|e| not_taken(&paths.run, &e.to_string()))? {
-                // Nothing is ahead: this entry is the lowest, so this process is
-                // the one inside the gate.
-                None => return Ok(held),
-                Some(ahead) => {
-                    // An entry whose holder is gone is cleared by whoever finds
-                    // it — it is that holder's own file and names it, so two
-                    // waiters clearing it both simply find it gone.
-                    if holder_of_entry_is_gone(&ahead) {
-                        match fs::remove_file(&ahead) {
-                            // Cleared, or cleared by another waiter a moment ago:
-                            // either way it is out of the order.
-                            Ok(()) => continue,
-                            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                            // Anything else is this host refusing to clear it, and
-                            // no number of further looks changes that: the entry
-                            // stays ahead of this one for ever, so the answer is
-                            // the one every other way of not getting in gives.
-                            Err(e) => {
-                                return Err(not_taken(
-                                    &paths.run,
-                                    &format!(
-                                        "the entry ahead of this one is a holder that is \
-                                         gone, and it could not be cleared: {e}"
-                                    ),
-                                ))
-                            }
-                        }
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(not_taken(
-                            &paths.run,
-                            &format!(
-                                "it has been held for {}s by a live process ({})",
-                                patience.as_secs(),
-                                ahead.file_name().unwrap_or_default().to_string_lossy()
-                            ),
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+        for _ in 0..NUMBERS_TRIED {
+            let top = highest_entry_in(&dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+            // Somebody holds the gate, so far as this process can establish —
+            // and everything it cannot establish counts as somebody.
+            if top.is_some_and(|top| !holder_is_gone(&dir, top, &host)) {
+                if std::time::Instant::now() >= deadline {
+                    return Err(not_taken(
+                        &paths.run,
+                        &format!(
+                            "it has been held for {}s by a party this process cannot show \
+                             has gone",
+                            patience.as_secs()
+                        ),
+                    ));
                 }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
             }
-        }
-    }
-
-    /// Take a place in the order, above every entry that exists.
-    ///
-    /// **The order is the filesystem's to arbitrate, not a clock's.** A name
-    /// carrying the moment its maker read its own clock would let a later
-    /// arrival sort *below* a holder — two machines' clocks disagree, and one
-    /// process can read its own before another and write it after — and two
-    /// processes would then each read themselves lowest. So the number is one
-    /// above the highest entry present, and creating it is exclusive: two
-    /// attempts that pick the same number meet in `create_new`, exactly one
-    /// comes away with it, and the other looks again and picks a higher one.
-    ///
-    /// A number is never reused while anything is in the gate, because the
-    /// highest is read from the entries themselves — and an empty gate is one
-    /// nobody is inside, which is the only time the count starts over.
-    fn take_a_place(paths: &RunPaths, dir: &Path) -> Result<Self> {
-        fs::create_dir_all(dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
-        // Bounded so that a directory something is filling faster than this can
-        // read it ends in the refusal every other way of not getting in gives,
-        // rather than in a loop nothing leaves.
-        for _ in 0..PLACES_TRIED {
-            let entry = dir.join(entry_named(highest_place_in(dir)? + 1, sys::pid()));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&entry)
-            {
-                Ok(mut file) => {
-                    // The place is the name; the body is the host whose process
-                    // table can answer for the pid in it. A body that cannot be
-                    // written is a gate this process did not take — and the entry
-                    // it made goes with it, because an entry naming a live pid is
-                    // one no waiter may clear.
-                    use std::io::Write;
-                    if let Err(e) = file.write_all(sys::hostname().as_bytes()) {
-                        drop(file);
-                        let _ = fs::remove_file(&entry);
-                        return Err(not_taken(&paths.run, &e.to_string()));
-                    }
-                    return Ok(Self { entry });
-                }
-                // Somebody else took that place between the look and the write.
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(not_taken(&paths.run, &e.to_string())),
+            // A gate numbered to the ceiling is one nothing can be taken above,
+            // which is the refusal every other way of not getting in gives rather
+            // than a number that wraps. It is also what an entry this build
+            // cannot place reads as, so this is the arm that answers those.
+            let Some(below) = top.unwrap_or(0).checked_add(1).map(|_| top.unwrap_or(0)) else {
+                return Err(not_taken(
+                    &paths.run,
+                    "its order is at the highest number this build can write",
+                ));
+            };
+            match Self::take_above(paths, &dir, below, sys::pid(), &host)? {
+                Some(held) => return Ok(held),
+                // The number went to somebody else between the look and the
+                // write, which is the race this shape exists to arbitrate: look
+                // again, and find the party that won it.
+                None => continue,
             }
         }
         Err(not_taken(
             &paths.run,
-            &format!("{PLACES_TRIED} places in its order were taken while this process looked"),
+            &format!("{NUMBERS_TRIED} numbers in its order were taken while this process looked"),
         ))
+    }
+
+    /// One attempt to take the number above `observed`, as `pid` of `host`.
+    ///
+    /// `None` where another party took that number first — which is the whole
+    /// arbitration, and is why the number alone names the file: two parties that
+    /// looked at the same moment write to **one path**, and the filesystem says
+    /// which of them holds it. The identity goes in the body, where it tells a
+    /// later waiter whether this holder is still there; in the name it would give
+    /// each party a path of its own and arbitrate nothing.
+    ///
+    /// Takes the identity rather than reading it, so that a test can be two
+    /// parties that looked at one gate.
+    fn take_above(
+        paths: &RunPaths,
+        dir: &Path,
+        observed: u64,
+        pid: u32,
+        host: &str,
+    ) -> Result<Option<Self>> {
+        let entry = dir.join(entry_named(observed + 1));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&entry)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(not_taken(&paths.run, &e.to_string())),
+        };
+        use std::io::Write;
+        if let Err(e) = file.write_all(body_of_entry(pid, host).as_bytes()) {
+            // An entry whose body never landed is one no waiter can read an
+            // identity out of, and so one they all wait on for ever. It goes with
+            // the attempt that failed to write it — this process created it, so
+            // this process is the one that may.
+            drop(file);
+            let _ = fs::remove_file(&entry);
+            return Err(not_taken(&paths.run, &e.to_string()));
+        }
+        Ok(Some(Self { entry }))
     }
 }
 
-/// The highest place any entry in the gate holds, or `0` for a gate nobody is in.
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The highest-numbered entry in the gate, or `None` where nobody is in it.
 ///
-/// A name outside this build's shape holds no place — [`ahead_of`] is what
-/// answers for those, and it answers that they are ahead — so it is passed over
-/// here rather than counted.
-fn highest_place_in(dir: &Path) -> Result<u64> {
+/// A name outside the shape [`entry_named`] writes is **not** passed over: it is
+/// a claim this build cannot read, and the answer to a claim it cannot read is
+/// the same as to one it can — somebody is in there. So it reports the highest
+/// number it did read, and [`holder_is_gone`] answers that such a holder is not
+/// one this host can show has gone.
+fn highest_entry_in(dir: &Path) -> Result<Option<u64>> {
     let listing = fs::read_dir(dir).map_err(|e| Error::Ledger {
         path: dir.to_path_buf(),
         source: e,
     })?;
-    let mut highest = 0;
+    let mut highest: Option<u64> = None;
+    let mut a_name_this_build_did_not_write = false;
     for entry in listing {
         let name = entry
             .map_err(|e| Error::Ledger {
@@ -1692,15 +1688,66 @@ fn highest_place_in(dir: &Path) -> Result<u64> {
                 source: e,
             })?
             .file_name();
-        if let Some(place) = place_of_entry(Path::new(&name)) {
-            highest = highest.max(place);
+        match number_of_entry(Path::new(&name)) {
+            Some(number) => highest = Some(highest.map_or(number, |high: u64| high.max(number))),
+            None => a_name_this_build_did_not_write = true,
         }
     }
-    Ok(highest)
+    match (highest, a_name_this_build_did_not_write) {
+        // Something is in the gate that this build cannot place. It is not
+        // stepped over: `u64::MAX` is a holder no number can be taken above and
+        // no host can show has gone, so every party waits and then refuses.
+        (_, true) => Ok(Some(u64::MAX)),
+        (highest, false) => Ok(highest),
+    }
 }
 
-/// How many places a single attempt will try before it reports the gate untaken.
-const PLACES_TRIED: usize = 1_000;
+/// Whether the holder of entry `number` is one **this host** can prove is gone.
+///
+/// Every uncertainty answers `false`, because the only thing this decides is
+/// whether a party may number itself above that holder: a body it cannot read, an
+/// identity it cannot parse, and an entry another host wrote are each a holder it
+/// cannot rule out. A pid is only the host that issued it to judge.
+fn holder_is_gone(dir: &Path, number: u64, this_host: &str) -> bool {
+    let Ok(body) = fs::read_to_string(dir.join(entry_named(number))) else {
+        return false;
+    };
+    let Some((pid, host)) = identity_of_body(&body) else {
+        return false;
+    };
+    host == this_host && !sys::process_may_be_live(pid)
+}
+
+/// One entry's name: the number it holds in the gate's order, and nothing else.
+///
+/// **Nothing else on purpose.** The name is the path two parties picking the same
+/// number contend on, so anything in it that differs between them — an identity,
+/// a clock reading — would give each a path of its own and leave the race
+/// unarbitrated.
+fn entry_named(number: u64) -> String {
+    format!("{number:020}")
+}
+
+/// The number an entry's name holds, or `None` for a name outside that shape.
+fn number_of_entry(entry: &Path) -> Option<u64> {
+    let name = entry.file_name()?.to_str()?;
+    (name.len() == 20 && name.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| name.parse().ok())
+        .flatten()
+}
+
+/// What an entry carries: who holds it, for a waiter deciding whether they are
+/// still there, and for an operator reading one left behind.
+fn body_of_entry(pid: u32, host: &str) -> String {
+    format!("{pid} {host}")
+}
+
+/// The identity an entry's body carries, or `None` for a body this build cannot
+/// read — which is a holder it cannot show has gone.
+fn identity_of_body(body: &str) -> Option<(u32, &str)> {
+    let (pid, host) = body.trim().split_once(' ')?;
+    Some((pid.parse().ok()?, host))
+}
 
 /// The one answer a party that is not inside the gate gets, whatever kept it
 /// out: what it must not do, and why.
@@ -1713,117 +1760,8 @@ fn not_taken(run: &str, because: &str) -> Error {
     ))
 }
 
-// llmlint: ignore-end[changed_behavior_has_e2e]
-
-/// The entry ahead of `ours`, or `None` where `ours` is the lowest.
-///
-/// **Every uncertainty here counts as an entry ahead**, because the only thing
-/// this answers is whether this process may go in: a directory it cannot read, an
-/// entry it cannot read, and a name it cannot place in the order are each a claim
-/// it cannot rule out — and a later build's naming would be exactly that. So an
-/// unreadable listing is `Err`, which the caller reports as a gate it did not
-/// take, and a name from outside this build's shape is answered as ahead whatever
-/// it would have sorted as. Nothing can show such a holder is gone, so it is
-/// waited on and the wait ends in a refusal rather than in a second party inside
-/// the gate.
-fn ahead_of(dir: &Path, ours: &Path) -> Result<Option<PathBuf>> {
-    let ours = ours.file_name().unwrap_or_default().to_os_string();
-    let listing = fs::read_dir(dir).map_err(|e| Error::Ledger {
-        path: dir.to_path_buf(),
-        source: e,
-    })?;
-    let mut lowest: Option<std::ffi::OsString> = None;
-    for entry in listing {
-        let name = entry
-            .map_err(|e| Error::Ledger {
-                path: dir.to_path_buf(),
-                source: e,
-            })?
-            .file_name();
-        // A name outside this build's own shape is answered **before** the order
-        // is consulted, because it has no place in that order: where it sorts is
-        // an accident of its spelling, and reading it as behind this entry would
-        // be ruling out a claim on the strength of that accident.
-        if pid_of_entry(Path::new(&name)).is_none() {
-            return Ok(Some(dir.join(name)));
-        }
-        if lowest.as_ref().is_none_or(|low| name < *low) {
-            lowest = Some(name);
-        }
-    }
-    let lowest = lowest.ok_or_else(|| {
-        Error::Invalid(format!(
-            "{}: this process's own entry is not in the gate it wrote it to",
-            dir.display()
-        ))
-    })?;
-    Ok((lowest != ours).then(|| dir.join(lowest)))
-}
-
-/// One entry's name: the place it holds in the gate's order, and the process
-/// holding it.
-///
-/// The place is what the order is read off — it is assigned above every place
-/// present and taken exclusively, so it is a **total order with no ties** in
-/// which nothing arrives below something already there. The pid is how a waiter
-/// tells a holder that is gone from one that is working.
-fn entry_named(place: u64, pid: u32) -> String {
-    format!("{place:012}-{pid:010}")
-}
-
-/// The place an entry's name holds, or `None` for a name outside the shape
-/// [`entry_named`] writes.
-fn place_of_entry(entry: &Path) -> Option<u64> {
-    fields_of_entry(entry)?.0
-}
-
-/// The pid an entry's name carries, or `None` for a name outside that shape —
-/// which is a holder this build cannot show is gone, and so one it waits on.
-fn pid_of_entry(entry: &Path) -> Option<u32> {
-    fields_of_entry(entry)?.1
-}
-
-/// An entry's two fields, where the whole name is one this build wrote.
-///
-/// The whole name is checked rather than the one field being read off it: a name
-/// that merely happens to have a number where a field goes is not this build's,
-/// and reading it as one would put a stranger's file into the order and into the
-/// staleness rule.
-fn fields_of_entry(entry: &Path) -> Option<(Option<u64>, Option<u32>)> {
-    let name = entry.file_name()?.to_str()?;
-    let fields: Vec<&str> = name.split('-').collect();
-    let [place, pid] = fields[..] else {
-        return None;
-    };
-    fn numeric(field: &str, width: usize) -> bool {
-        field.len() == width && field.bytes().all(|byte| byte.is_ascii_digit())
-    }
-    if !(numeric(place, 12) && numeric(pid, 10)) {
-        return None;
-    }
-    Some((place.parse().ok(), pid.parse().ok()))
-}
-
-/// Whether an entry's holder is one **this host** can prove is gone.
-///
-/// Both halves are load-bearing. A pid is only the host that wrote it to judge —
-/// a runs root two hosts share holds entries whose numbers mean nothing in this
-/// process table — so the host is read off the entry's own body and has to be
-/// this one. And a body this process cannot read is not evidence of anything, so
-/// it answers the way every other uncertainty here does: the holder stays.
-fn holder_of_entry_is_gone(entry: &Path) -> bool {
-    let Some(pid) = pid_of_entry(entry) else {
-        return false;
-    };
-    match fs::read_to_string(entry) {
-        Ok(wrote_it) => wrote_it.trim() == sys::hostname() && !sys::process_may_be_live(pid),
-        Err(_) => false,
-    }
-}
-
 impl Drop for Handover {
-    /// A `Handover` exists only where this process wrote its own entry, so a drop
-    /// always has one to take away — and takes away no other.
+    /// Takes away the entry this process created, and never another's.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.entry);
     }
@@ -2104,86 +2042,207 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{entry_named, pid_of_entry, place_of_entry};
+    use super::{body_of_entry, entry_named, identity_of_body, number_of_entry, Handover};
+    use std::time::Duration;
 
-    /// **A party that arrives while another is inside takes a place above it.**
-    ///
-    /// This is what a clock could not give. A name carrying the moment its maker
-    /// read its own clock lets a later arrival sort *below* the holder — two
-    /// machines' clocks disagree, and one process can read its own before another
-    /// and write it after — and each would then read itself lowest and go in. The
-    /// place is handed out above every place present instead, so the arrival is
-    /// behind the holder and waits, whatever either clock says.
-    #[test]
-    fn a_party_arriving_while_another_is_inside_takes_a_place_above_it() {
-        let dir = std::env::temp_dir().join(format!("onepipeline-gate-late-{}", sys::pid()));
+    /// A run directory of this test's own, emptied first.
+    fn gate_scratch(name: &str) -> RunPaths {
+        let dir = std::env::temp_dir().join(format!("onepipeline-gate-{name}-{}", sys::pid()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a run directory");
-        let paths = RunPaths {
-            run: "late".to_owned(),
-            dir: dir.clone(),
-        };
-
-        let inside = super::Handover::hold(&paths).expect("this thread is inside the gate");
-        let held = super::place_of_entry(&inside.entry).expect("the holder holds a place");
-
-        // The arrival: it does not get in, and what it left behind while trying
-        // is a place above the holder's rather than below it.
-        super::Handover::hold_within(&paths, std::time::Duration::from_millis(50))
-            .expect_err("a gate another party is inside is not taken");
-        let places: Vec<u64> = std::fs::read_dir(paths.channel("handover"))
-            .expect("the gate's entries")
-            .filter_map(|entry| {
-                super::place_of_entry(std::path::Path::new(&entry.ok()?.file_name()))
-            })
-            .collect();
-        assert!(
-            places.iter().all(|place| *place >= held),
-            "an entry took a place below the holder's ({held}): {places:?}, so both would \
-             read themselves lowest"
-        );
-
-        drop(inside);
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("channel")).expect("a run directory");
+        RunPaths {
+            run: name.to_owned(),
+            dir,
+        }
     }
 
-    /// The gate's entry name is written by one function and read by another, so
-    /// the two are held to each other here rather than by a reader noticing.
+    /// Every entry the gate is holding, by number.
+    fn entries_in(paths: &RunPaths) -> Vec<u64> {
+        let mut numbers: Vec<u64> = std::fs::read_dir(paths.channel("handover"))
+            .expect("the gate's entries")
+            .filter_map(|entry| number_of_entry(std::path::Path::new(&entry.ok()?.file_name())))
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// **Two parties that looked at the same gate do not both enter it.**
     ///
-    /// Both halves matter. The pid comes back out, which is how a waiter tells a
-    /// holder that is gone from one that is working. And the places carry a
-    /// **total order with no ties**, which is what makes exactly one entry the
-    /// lowest whichever entries are in the gate at once.
+    /// This is the interleaving no ordering by name survives and no sequential
+    /// test reaches: both parties look while the gate is empty, and only then
+    /// does either write. A name carrying its maker's identity beside the number
+    /// gives each of them a path of its own — so both creates succeed, both are
+    /// numbered 1, and whichever sorts lower reads itself in while the other is
+    /// already inside. The number alone is the name here, so the two meet on one
+    /// path and the filesystem says which of them holds it.
+    ///
+    /// The identities are the test's rather than this process's, because one
+    /// process cannot be two — and it is exactly two *identities* picking one
+    /// number that the broken shape let through.
     #[test]
-    fn a_gate_entrys_name_carries_its_place_and_its_pid() {
-        let first = entry_named(1, 4242);
-        assert_eq!(place_of_entry(std::path::Path::new(&first)), Some(1));
-        assert_eq!(pid_of_entry(std::path::Path::new(&first)), Some(4242));
+    fn two_parties_that_looked_at_the_same_gate_do_not_both_enter_it() {
+        let paths = gate_scratch("looked-together");
+        let dir = paths.channel("handover");
+        std::fs::create_dir_all(&dir).expect("the gate's entries");
 
-        // Places compare as text in the order they are handed out, whichever
-        // process holds them — a later place never reads as an earlier one.
-        for later in [
-            entry_named(2, 1),
-            entry_named(10, 4242),
-            entry_named(1_000_000, 9),
+        // Both look, and both see a gate nobody is in. Neither has written yet:
+        // this is the moment the second party is paused in.
+        let the_first_looked = super::highest_entry_in(&dir).expect("the gate reads");
+        let the_second_looked = super::highest_entry_in(&dir).expect("the gate reads");
+        assert_eq!((the_first_looked, the_second_looked), (None, None));
+
+        let first = Handover::take_above(&paths, &dir, 0, 200, "this-host")
+            .expect("the first party's write is answered")
+            .expect("the first party takes the gate");
+        let second = Handover::take_above(&paths, &dir, 0, 100, "this-host")
+            .expect("the second party's write is answered");
+
+        assert!(
+            second.is_none(),
+            "two parties took the same number, so both are inside the gate: {:?}",
+            entries_in(&paths)
+        );
+        assert_eq!(
+            entries_in(&paths),
+            vec![1],
+            "the gate holds an entry no party is accountable for"
+        );
+        // And the party that lost the race finds a holder rather than a way in.
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("the gate another party is inside is not taken");
+
+        drop(first);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// **A party arriving while another is inside is numbered above it**, and a
+    /// holder nothing can show has gone is never stepped over.
+    #[test]
+    fn a_party_arriving_while_another_is_inside_does_not_get_in() {
+        let paths = gate_scratch("late-arrival");
+        let inside = Handover::hold(&paths).expect("this thread is inside the gate");
+        assert_eq!(entries_in(&paths), vec![1]);
+
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("a gate another party is inside is not taken");
+        assert_eq!(
+            entries_in(&paths),
+            vec![1],
+            "an arrival numbered itself over a holder that is alive"
+        );
+
+        // And once the holder lets go, the next party is let in — above the
+        // entry it left, never in place of it.
+        drop(inside);
+        let next = Handover::hold(&paths).expect("the gate is free once its holder lets go");
+        drop(next);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A holder this host can prove is gone is **stepped over**, not removed.
+    ///
+    /// Removing it is what would let one party delete a file another has just
+    /// taken; the number above it is free, so nothing needs to be removed. The
+    /// entry a process that died inside the section leaves behind costs a name
+    /// and blocks nobody.
+    #[test]
+    fn a_holder_this_host_knows_is_gone_is_stepped_over_rather_than_removed() {
+        let paths = gate_scratch("holder-gone");
+        let dir = paths.channel("handover");
+        std::fs::create_dir_all(&dir).expect("the gate's entries");
+        std::fs::write(dir.join(entry_named(1)), body_of_entry(0, &sys::hostname()))
+            .expect("the entry a holder that died left behind");
+
+        let held = Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect("a gate whose holder is gone is taken");
+        assert_eq!(
+            entries_in(&paths),
+            vec![1, 2],
+            "the entry of the holder that is gone was removed rather than stepped over"
+        );
+        // And it is a gate like any other once taken.
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("the gate is held, so a second party is refused");
+        drop(held);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A holder this host **cannot** show has gone is waited on, whatever it is.
+    ///
+    /// Another host's pid, a body this build cannot read, and a name outside the
+    /// shape it writes are each a claim it cannot rule out — and the answer to a
+    /// claim it cannot rule out is the one it gives a live holder.
+    #[test]
+    fn a_holder_this_host_cannot_account_for_is_waited_on_rather_than_stepped_over() {
+        for (what, name, body) in [
+            (
+                "another host's",
+                entry_named(1),
+                body_of_entry(0, "somewhere-else"),
+            ),
+            (
+                "an unreadable body",
+                entry_named(1),
+                "not an identity".to_owned(),
+            ),
+            (
+                "a name from outside this build",
+                "handover.lock".to_owned(),
+                String::new(),
+            ),
         ] {
-            assert!(
-                first < later,
-                "place {first} does not read as lower than {later}, so which entry is the \
-                 lowest is not decided"
-            );
-        }
+            let paths = gate_scratch("holder-unknown");
+            let dir = paths.channel("handover");
+            std::fs::create_dir_all(&dir).expect("the gate's entries");
+            std::fs::write(dir.join(&name), &body).expect("the entry is written");
 
-        // And a name this build did not write carries neither field, which is
-        // what makes a waiter treat it as a holder it cannot show is gone —
-        // including one that merely has numbers where the fields go.
-        for stranger in ["handover.lock", "anything-123", "42-0000000000", "1-2-3"] {
+            Handover::hold_within(&paths, Duration::from_millis(50))
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("a gate held by {what} was taken, so two parties are inside it")
+                });
+            std::fs::remove_dir_all(&paths.dir).ok();
+        }
+    }
+
+    /// The entry's name and body are written by one pair of functions and read by
+    /// another, so the two are held to each other here rather than by a reader
+    /// noticing.
+    #[test]
+    fn a_gate_entrys_name_carries_its_number_and_its_body_the_holder() {
+        assert_eq!(
+            number_of_entry(std::path::Path::new(&entry_named(1))),
+            Some(1)
+        );
+        assert_eq!(
+            identity_of_body(&body_of_entry(4242, "a-host")),
+            Some((4242, "a-host"))
+        );
+        // Numbers compare as text in the order they are handed out, which is what
+        // makes the highest entry the holder.
+        assert!(entry_named(2) > entry_named(1));
+        assert!(entry_named(10) > entry_named(2));
+        assert!(entry_named(u64::MAX) > entry_named(1_000_000));
+
+        // A name or a body this build did not write is read as neither.
+        for stranger in [
+            "handover.lock",
+            "1",
+            "0000000000000000000x",
+            "-0000000000000000001",
+        ] {
             assert_eq!(
-                pid_of_entry(std::path::Path::new(stranger)),
+                number_of_entry(std::path::Path::new(stranger)),
                 None,
                 "'{stranger}' was read as a name this build wrote"
             );
-            assert_eq!(place_of_entry(std::path::Path::new(stranger)), None);
+        }
+        for stranger in ["", "notanumber a-host", "4242"] {
+            assert_eq!(
+                identity_of_body(stranger),
+                None,
+                "'{stranger}' was read as an identity this build wrote"
+            );
         }
     }
 
