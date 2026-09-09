@@ -5913,8 +5913,8 @@ mod tests {
         // **One of every variant**, so a variant that changes its answer — or a
         // variant added without one — fails here rather than leaving the entry
         // describing a classification this build no longer makes. The list is
-        // held to the enum by `every_operation_variant_is_classified` in
-        // `src/edits.rs`, which counts it against the enum's own serialization.
+        // held to the enum by `every_operation_kind_is_one_the_enum_carries` in
+        // `src/edits.rs`, which counts it against the enum's own declarations.
         let node = || "later".to_string();
         let every = [
             edits::Operation::FindingRaised {
