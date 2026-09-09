@@ -588,14 +588,6 @@ pub(crate) fn resume(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
-// llmlint: ignore[changed_behavior_has_e2e] one thing this boundary does has no journey
-// through the binary and cannot have one: a park reason that says nothing is *normalized*
-// rather than refused, and no read surface renders a park reason — it reaches a person only
-// in the refusal an edit earns, which is a `reply` against a park a checkpoint happens to
-// carry. The normalization is driven over a real document by
-// `a_state_read_back_goes_through_the_checks_that_made_it`; every path here that a reader
-// can observe — the version, the run, the seal, the session values, a field this build does
-// not know — has one in `tests/e2e/checkpoint.rs`.
 /// The checkpoint document, where the run root holds one **this build can read as
 /// this run's**.
 ///
@@ -932,8 +924,8 @@ mod tests {
     /// What lets a journey plant a document whose *content* the journal does not
     /// support while leaving it one a reader accepts — which is the only way to
     /// observe which records that reader consumed. The seal is taken over the
-    /// document **as parsed**, because that is what a reader digests, so a value the
-    /// reader normalizes on the way in stays on the wire and still seals.
+    /// document **as parsed**, because that is what a reader digests — so a document
+    /// this build cannot parse is one no seal can be taken over at all.
     fn seal_and_write(paths: &RunPaths, document: &mut Value) {
         let parsed: Checkpoint =
             serde_json::from_value(document.clone()).expect("a document this build reads");
@@ -1247,10 +1239,9 @@ mod tests {
     /// rather than straight into the field.
     ///
     /// A checkpoint is a file, so a value in it arrives from outside exactly as a
-    /// stream's record does: a session handle this crate would have refused off a
-    /// stream is refused off a document, which is one more full fold — and a park
-    /// reason that says nothing reads as no reason at all, which is what
-    /// `edits::Park::of` does with the same value.
+    /// stream's record does — and one this crate would have refused off a stream is
+    /// refused off a document, which is one more full fold. A park stating a reason
+    /// that says nothing and a session handle that is no handle are both that.
     #[test]
     fn a_state_read_back_goes_through_the_checks_that_made_it() {
         let root = scratch("checked-on-the-way-back");
@@ -1259,29 +1250,40 @@ mod tests {
         let _ = resume(&paths);
         let whole = without_a_checkpoint(&paths);
 
-        let mut planted = document(&paths);
-        // A blank reason is the one state `Park` must not hold, and a document can
-        // carry one however the boundary that writes a park refuses it. It stays on
-        // the wire and still seals, because a reader digests the document as it
-        // parsed it — which is this normalization, applied.
-        planted["state"]["parks"] = json!({"build": {"by": "planner", "reason": "   "}});
-        seal_and_write(&paths, &mut planted);
-        let read = resume(&paths);
-        assert_eq!(
-            read.parks.get("build"),
-            Some(&crate::edits::Park::of(
-                crate::channel::Author::Planner,
-                None
-            )),
-            "a reason that says nothing was carried as a reason"
-        );
-
-        // And a session handle this crate refuses off a stream: refused here too,
-        // which is one more unusable checkpoint.
-        planted["state"]["sessions"] =
-            json!({"build": {"token": "../somewhere-else", "branch": "work"}});
-        crate::ledger::write_json(&paths.checkpoint(), &planted).expect("written");
-        assert_eq!(folded_as(&resume(&paths)), whole);
+        for (planting, named) in [
+            (
+                json!({"parks": {"build": {"by": "planner", "reason": "   "}}}),
+                "reason",
+            ),
+            (
+                json!({"sessions": {"build": {"token": "../somewhere-else", "branch": "work"}}}),
+                "session handle",
+            ),
+        ] {
+            let mut planted = document(&paths);
+            for (field, value) in planting.as_object().expect("one field to plant") {
+                planted["state"][field] = value.clone();
+            }
+            // Refused where the document is **parsed**, which is in front of the
+            // seal — the seal is taken over the state as parsed, so a value that
+            // never parses is one no document could have been sealed with. That is
+            // what makes this the check the planting is about rather than a marker
+            // the journal stopped corroborating when the value was planted.
+            let refusal = serde_json::from_value::<Checkpoint>(planted.clone())
+                .expect_err("a value this crate refuses off a stream is refused off a document");
+            assert!(
+                refusal.to_string().contains(named),
+                "the refusal of {planting} does not name what it refused: {refusal}"
+            );
+            // And through the real reader: one more unusable checkpoint, folding
+            // the state the whole store folds to.
+            crate::ledger::write_json(&paths.checkpoint(), &planted).expect("written");
+            assert_eq!(
+                folded_as(&resume(&paths)),
+                whole,
+                "a document carrying {planting} was folded from"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1526,6 +1528,43 @@ mod tests {
             assert!(
                 serde_json::from_value::<crate::vcs::DispatchSession>(refused.clone()).is_err(),
                 "{refused} was accepted as a session"
+            );
+        }
+    }
+
+    /// A park the writer produced is one the reader accepts, and the one state the
+    /// type must not hold is refused.
+    ///
+    /// The drift gate over `edits::Park`'s two directions, as the session's is over
+    /// `vcs::DispatchSession`'s: a park a run recorded that the reader refused would
+    /// take a run's parks away without saying so, and a blank reason accepted would
+    /// put back the state `Park::of` exists to keep out.
+    #[test]
+    fn a_park_the_writer_produced_is_one_the_reader_accepts() {
+        let written = crate::edits::Park::of(crate::channel::Author::Planner, Some("waiting"));
+        let document = serde_json::to_value(&written).expect("it serialises");
+        assert_eq!(
+            serde_json::from_value::<crate::edits::Park>(document.clone())
+                .expect("a park this crate accepts"),
+            written,
+            "a park does not read back as the document it was written as"
+        );
+        // A park with no reason writes none rather than a null, and reads back as
+        // the same park.
+        let none = serde_json::to_value(crate::edits::Park::of(
+            crate::channel::Author::Planner,
+            None,
+        ))
+        .expect("it serialises");
+        assert_eq!(none, json!({"by": "planner"}));
+        for refused in [
+            json!({"by": "planner", "reason": "   "}),
+            json!({"by": "planner", "reason": ""}),
+            json!({"by": "planner", "extra": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<crate::edits::Park>(refused.clone()).is_err(),
+                "{refused} was accepted as a park"
             );
         }
     }

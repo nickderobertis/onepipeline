@@ -335,10 +335,12 @@ pub struct Frontier {
 /// and why. Its [`Default`] is the planner's park with no reason, which is what
 /// every park recorded before this existed was.
 ///
-/// A checkpoint of the fold carries this value, so it is read back through the
-/// same normalization [`Park::of`] applies rather than straight into the field:
-/// a checkpoint is a file, and a file is something an editor can put a blank
-/// reason into.
+/// A checkpoint of the fold carries this value, and a document carrying the one
+/// state this type must not hold — a reason that is present and says nothing — is
+/// **refused** rather than read: [`Park::of`] never writes one, so a document
+/// with one in it is a document no writer here produced, and refusing it costs
+/// the reader a whole-store fold and nothing else. `vcs::DispatchSession` refuses
+/// a token or a branch it would not have written for the same reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Park {
@@ -361,13 +363,28 @@ pub struct Park {
     reason: Option<String>,
 }
 
-/// A reason read back off a checkpoint, with one that says nothing read as no
-/// reason at all — which is what [`Park::of`] does with the same value.
+/// A reason read back off a checkpoint, with one that says nothing refused.
+///
+/// The blank reason is normalized where it is *folded* — [`Park::of`] does that,
+/// because a journal record an older build wrote can carry one and the run still
+/// has to be readable. A checkpoint is not a record: it is this build's own cache,
+/// so a blank reason in one is a value no writer here produced, and the document
+/// goes back to the whole-store fold rather than into a park a refusal would
+/// quote nothing out of.
 fn stated<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<Option<String>, D::Error> {
     use serde::Deserialize;
-    Ok(Option::<String>::deserialize(reader)?.filter(|reason| !reason.trim().is_empty()))
+    let written = Option::<String>::deserialize(reader)?;
+    if written
+        .as_ref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(serde::de::Error::custom(
+            "a park reason that is present and says nothing",
+        ));
+    }
+    Ok(written)
 }
 
 impl Park {

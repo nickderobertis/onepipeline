@@ -319,6 +319,14 @@ fn unusable_states() -> Vec<(&'static str, LeaveUnusable)> {
             },
         ),
         (
+            "carrying a park reason that says nothing",
+            |world, usable| {
+                let mut document = parsed(usable);
+                document["state"]["parks"] = json!({"build": {"by": "planner", "reason": "   "}});
+                write_checkpoint(world, &document);
+            },
+        ),
+        (
             "carrying a session branch this crate refuses",
             |world, usable| {
                 let mut document = parsed(usable);
