@@ -1407,7 +1407,6 @@ struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    /// One row of a listing read over `root`.
     fn of(root: &Path, summary: &'a RunSummary) -> Self {
         Self {
             paths: RunPaths::under(root, &summary.run_id),
@@ -1453,7 +1452,8 @@ impl<'a> Row<'a> {
         observer_phrase(Some(observer_liveness(&launch)), &launch.observer_ending)
     }
 
-    /// The `n/m done` line, with every landing it counts decided **now**.
+    /// The `n/m done` line, with every landing it counts decided **now** —
+    /// which is why the counts come off the document and the landings do not.
     fn tally(&self) -> String {
         let render = rendering(Rendered::Summary, &self.summary.run_id);
         let counted = |word: NodeStatus| {
@@ -1503,7 +1503,6 @@ impl<'a> Row<'a> {
         outstanding
     }
 
-    /// The surfaces nobody has read yet, read from the run's channel now.
     fn unread(&self) -> Unread {
         Unread::of(&crate::channel::ChannelState::new(&self.paths).queue())
     }

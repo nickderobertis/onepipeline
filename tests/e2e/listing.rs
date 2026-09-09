@@ -39,10 +39,8 @@ use crate::harness::{agent, plan_of, World};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION};
 
-/// The three invocations this module is about, in the order a report states them.
 const LISTINGS: [&[&str]; 3] = [&["runs"], &["runs", "--mine"], &["status"]];
 
-/// Launch a run and wait for it to settle.
 fn settled(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &path, "--attach"]).settled();
@@ -56,7 +54,6 @@ fn paths_of(world: &World, run: &str) -> RunPaths {
     RunPaths::under(&world.runs, run)
 }
 
-/// What the three listing views render, in one value.
 fn listed(world: &World) -> Vec<String> {
     LISTINGS
         .iter()
@@ -67,13 +64,11 @@ fn listed(world: &World) -> Vec<String> {
         .collect()
 }
 
-/// One run's summary document, as JSON.
 fn document(paths: &RunPaths) -> Value {
     serde_json::from_str(&std::fs::read_to_string(paths.summary()).expect("the document"))
         .expect("a summary document")
 }
 
-/// Put a document back, exactly as given.
 // llmlint: ignore-block[tests_mirror_real_usage] no verb writes this document — its run's
 // own journal writer maintains it — and the three states below are left by a build or a
 // crash rather than by an interface: a build that never wrote one, a writer killed between
@@ -382,6 +377,10 @@ const SCALED_JOURNAL_BYTES: u64 = 1 << 30;
 const JOURNAL_MULTIPLE: u64 = 10;
 
 /// How many of those runs the reading session owns.
+///
+/// **A handful**, because that is the shape the cost was wrong about: the filter
+/// ran after every run on the host had been folded, so asking for three rows out
+/// of four hundred cost more than asking for all four hundred.
 const SCALED_OWNED: usize = 3;
 
 /// What each of the three renders may take over the unmultiplied root.
@@ -401,6 +400,10 @@ const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 const GROWTH_BOUND: u32 = 2;
 
 /// How many renders each median is taken over, after one warm-up.
+///
+/// The warm-up is discarded because what it measures is mostly a debug binary
+/// nobody has paged in, and a median rather than a mean because the outlier this
+/// has to survive is another test on the same host, not a slow render.
 const TIMED: usize = 5;
 
 /// One run root cloned from a real one, under a new id and a new owner.
@@ -508,7 +511,6 @@ fn rendered(world: &World, argv: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The median of [`TIMED`] renders of one invocation, after one warm-up.
 fn median(world: &World, argv: &[&str]) -> std::time::Duration {
     let mut took: Vec<std::time::Duration> = Vec::with_capacity(TIMED);
     for nth in 0..=TIMED {
