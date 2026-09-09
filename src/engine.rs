@@ -688,20 +688,10 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
     // The **last** claim on the command queue, after everything this driver owed
-    // the run is written and with nothing left to do but let go of it.
-    //
-    // The loop takes one of its own on its way out, but the run is not released
-    // there: `record_result` still has to run, and it asks `onevcs` about every
-    // change this run left unlanded. So an edit can be accepted after the loop
-    // stopped claiming and before the run is let go — and *how much* happens in
-    // between decides nothing, because the window is a preemption and not a
-    // duration. What decides it is that the last look at the queue and the
-    // release are one section under the handover: see [`let_go_of`].
-    //
-    // Claimed until the queue is empty, and the result written again whenever a
-    // claim moved the graph: an edit applied after the record was written is an
-    // edit the record does not carry, and this is the run's last word on what
-    // became of it. It cannot spin, because the queue's cursor only advances.
+    // the run is written. Claimed until the queue is empty, and the result
+    // written again whenever a claim moved the graph — this is the run's last
+    // word on what became of it. It cannot spin, because the queue's cursor only
+    // advances, and the release itself is [`let_go_of`]'s.
     let channel = ChannelState::new(paths);
     let mut lock = lock;
     loop {
@@ -791,11 +781,8 @@ pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
     letting
 }
 
-/// The section itself, for a caller already inside the handover.
-///
-/// Apart from its gate so that the ordering the gate produces can be driven from
-/// both sides: a test holding the handover is the other party, and reaches this
-/// the way that party's own process would.
+/// The section itself, for a caller already inside the handover — apart from its
+/// gate so a test holding the gate can be the other party.
 fn letting_go_under_the_handover(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
     if ChannelState::new(paths).claimable_commands().is_empty() {
         lock.release();

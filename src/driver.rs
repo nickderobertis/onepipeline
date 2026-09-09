@@ -2774,7 +2774,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // since — and the answer is taken the only way it cannot be raced.
             let answered = match answered {
                 Some(outcome) => Some(outcome),
-                None => outcome_after_the_wait(paths, &channel, id)?,
+                None => take_the_run_over_and_answer(paths, &channel, id)?,
             };
             if let Some(outcome) = answered {
                 deliver_verdict_half(paths, &channel, envelope)?;
@@ -2800,25 +2800,19 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     }
 }
 
-/// This envelope's answer once the wait for a reconciler has run out — taking the
-/// run over and reconciling its queue where nothing is driving it any more.
+/// Take the run over and reconcile its queue where nothing is driving it any
+/// more, and answer what became of this envelope.
 ///
-/// The holder of the run's ownership lock is the only party that can apply a
-/// queued edit. A driver that dies holding the run releases nothing, so the
-/// commands it never claimed wait for whatever takes the run next — which used
-/// to mean an `adopt` somebody had to think to type, on exactly the runs a
-/// `retry` or a `requeue` was aimed at. This process accepted the edit, so this
-/// process is what takes the run over when the lock's holder has gone.
+/// A driver that dies holding a run releases nothing, so the commands it never
+/// claimed wait for whatever takes the run next. This process accepted the edit,
+/// so it is what takes the run over.
 ///
-/// **It never resubmits and never applies anything twice.** The envelope is
-/// already on the durable queue and stays the one copy of itself: what runs here
-/// is the reconciler, over that queue, behind that queue's own cursor. So an
-/// envelope some other writer already claimed is not claimed again — and this
-/// answers `None` for it, which reports it still queued rather than applying a
-/// second copy of commands that may already be half applied.
-///
-/// `None` is also what a run something is still driving answers, because the
-/// lock is what says so and it is not taken here.
+/// **It never resubmits and never applies anything twice**: the envelope stays
+/// the one copy of itself on the durable queue and what runs here is the
+/// reconciler, behind that queue's own cursor. So an envelope another writer
+/// already claimed answers `None`, which reports it still queued rather than
+/// applying a second copy of commands that may be half applied — and so does a
+/// run something is still driving, because the lock is what says so.
 // llmlint: ignore-block[changed_behavior_has_e2e] the two answers this can give are
 // driven end to end — applied by
 // `driver::an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it`
@@ -2828,7 +2822,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 // run's own store. Neither is a state a journey can put a run into — there is no input to
 // either CLI that refuses one file to one process — and both leave the same answer the
 // wait already had, which is that the edits are queued.
-fn outcome_after_the_wait(
+fn take_the_run_over_and_answer(
     paths: &RunPaths,
     channel: &ChannelState,
     id: u64,
@@ -2840,11 +2834,11 @@ fn outcome_after_the_wait(
                 // Taking a lock is not instant, and whoever had it may have
                 // answered this envelope while it was being taken.
                 if let Some(outcome) = channel.outcome_of(id) {
-                    let_go(paths, lock);
+                    let_go_or_leave_the_claim(paths, lock);
                     return Ok(Some(outcome));
                 }
                 let reconciled = engine::reconcile_queued(paths);
-                let_go(paths, lock);
+                let_go_or_leave_the_claim(paths, lock);
                 reconciled?;
                 // Whatever the queue answered about *this* envelope, which is
                 // `None` where the reconciler's cursor had already passed it.
@@ -2888,8 +2882,8 @@ fn outcome_after_the_wait(
 
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// Let go of a run this process took over, draining anything that reached the
-/// queue while it was writing.
+/// Let go of a run this process took over — draining anything that reached the
+/// queue while it was writing — or leave the claim standing where it cannot.
 ///
 /// A takeover is an owner like any other and leaves the run the same way: the
 /// queue's last look and the release are one section, so an edit accepted after
@@ -2908,7 +2902,7 @@ fn outcome_after_the_wait(
 // way out, is the call
 // `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
 // drives with two replies contending for one run.
-fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
+fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
     let mut lock = lock;
     loop {
         match engine::let_go_of(paths, lock) {
@@ -3463,7 +3457,7 @@ mod tests {
         std::fs::write(paths.channel("handover"), "not a directory")
             .expect("the gate's place is taken by something else");
 
-        let_go(&paths, held);
+        let_go_or_leave_the_claim(&paths, held);
 
         assert!(
             paths.lock().is_file(),

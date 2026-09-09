@@ -1382,18 +1382,10 @@ pub struct LockRecord {
 /// file that says which process it is.
 ///
 /// Taking a claim nobody holds is exclusive, because creating a file exclusively
-/// is what the filesystem decides. *Reclaiming* the claim of a holder this host
-/// can prove is gone is not one operation and cannot be: the record is written
-/// and read back, which turns away a contender arriving after the winner, but two
-/// that meet the same dead holder at the same moment can each write and each read
-/// their own back.
-///
-/// **That is this lock's own long-standing shape and what `adopt` recovers a dead
-/// driver's run by**, and the answer to it is a decision about how every lock in
-/// this crate is taken — an advisory lock the operating system drops when a
-/// process dies — rather than about this function. What does not rest on it is
-/// [`Handover`], which orders two sections against each other and so had to be
-/// exclusive without breaking anything: it elects a lowest entry instead.
+/// is what the filesystem decides. Reclaiming the claim of a holder this host can
+/// prove is gone is not one operation and cannot be — which is this lock's own
+/// long-standing shape, and what `adopt` recovers a dead driver's run by.
+/// [`Handover`] does not rest on it, and says there why.
 fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
@@ -1431,6 +1423,12 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
             match held_by {
                 // A holder on this host that this host can prove is gone
                 // leaves a lock nothing will release. Reclaim it.
+                // llmlint: ignore-block[changed_behavior_has_e2e] two processes reclaiming
+                // one dead driver's run at the same instant is not a state a journey can
+                // place them in — `adopt` is what reaches this, and a suite can start two
+                // but not decide which microsecond each reads the record in. What this
+                // build does about it is stated above rather than promised away, and the
+                // gate that had to be exclusive does not rest on it.
                 Some(held)
                     if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
                 {
@@ -1456,6 +1454,7 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
                         }),
                     }
                 }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 Some(held) => Err(Error::Locked {
                     run: run.to_string(),
                     pid: held.pid,
@@ -1484,40 +1483,32 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
 /// things that cannot interleave.
 ///
 /// A departing owner reads the command queue and, finding it empty, releases the
-/// run. A submitter asks whether anything is driving the run and, finding one,
-/// queues its commands behind it. Between either pair the scheduler may stop a
-/// process for as long as it likes, so without a gate the two interleave into
-/// the one outcome neither party would accept: an envelope accepted onto the
-/// queue of a run whose owner has just decided there was nothing on it, and left.
-/// **No absence of I/O closes that** — the window is a preemption, not a
-/// duration.
+/// run; a submitter asks whether anything is driving the run and, finding one,
+/// queues behind it. Interleaved, those two produce the outcome neither party
+/// would accept: an envelope accepted onto the queue of a run whose owner has
+/// just left. **No absence of I/O closes that** — the window is a preemption, not
+/// a duration — so both parties hold this across their pair, and one of the two
+/// orders happens instead.
 ///
-/// Both parties hold this across their pair, so one of the two orders happens and
-/// each is answerable: the submitter first, and the departing owner's own read
-/// finds the envelope; the owner first, and the submitter's ask finds the run
-/// free and takes it. What it does not do — deliberately — is guard *applying*
-/// an edit: the sections it serializes are a file read and a file remove, so a
-/// holder of this is never inside a subprocess, a conversation or a graph fold.
+/// What it deliberately does *not* guard is applying an edit: what it serializes
+/// is a file read and a file remove, so a holder is never inside a subprocess, a
+/// conversation or a graph fold. A party that cannot take it does neither of its
+/// two things and says so.
 ///
-/// A party that cannot take it does neither of its two things and says so: see
-/// [`Handover::hold`].
+/// # Why it is entries rather than a lock file
 ///
-/// # How it is exclusive, and why it is not a lock file
+/// Every attempt writes an entry of **its own**, named so entries sort into the
+/// order they were made, and the lowest holds the gate. Nothing writes over or
+/// removes another party's claim, so nothing has to be broken: a dead holder's
+/// entry names that holder alone, any waiter may clear it, and two that clear the
+/// same one both find it gone. Exclusion is a comparison — exactly one entry is
+/// lowest.
 ///
-/// Every attempt writes an entry of **its own**, named so the entries sort into
-/// the order they were made, and the lowest entry holds the gate. So no process
-/// ever writes, removes or overwrites another's claim, and nothing has to be
-/// broken: the file a dead holder leaves behind names that holder and nobody
-/// else, so any waiter may clear it, and two waiters that clear the same one
-/// both simply find it gone. Exclusion is then a comparison rather than a
-/// creation, and it holds because exactly one entry is the lowest.
-///
-/// A single lock file cannot do that. Taking one nobody holds is exclusive —
-/// the filesystem decides who creates it — but *reclaiming* one whose holder is
-/// gone is a read, a write and a check with no atomicity across them, so two
-/// processes meeting the same dead holder can each come away believing they
-/// hold it. That is the one shape this had to avoid, since a gate two parties
-/// are inside is the race it exists to close.
+/// A single lock file cannot promise that. Taking one nobody holds is exclusive,
+/// but *reclaiming* one whose holder is gone is a read, a write and a check with
+/// no atomicity across them, so two processes meeting the same dead holder can
+/// each come away believing they hold it — and a gate two parties are inside is
+/// the race this closes.
 #[derive(Debug)]
 pub(crate) struct Handover {
     /// This process's own entry, which nothing else writes or removes while its
@@ -1550,6 +1541,17 @@ pub(crate) const DRIVE_VERB: &str = "drive";
 /// every caller's job is to do nothing that needed it.
 const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
+// llmlint: ignore-block[changed_behavior_has_e2e] what a journey can drive of this is
+// driven: `driver::an_edit_that_cannot_be_gated_is_refused_and_nothing_reaches_the_queue`
+// and `driver::a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed` are
+// two real runs meeting a gate this host will not take. What no journey can drive is the
+// *ordering* itself — which party is inside the section when the other arrives — because
+// that is decided in microseconds inside two processes and no CLI input places anything
+// there. It is driven instead from both sides at once by
+// `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`,
+// with the two ways out of the wait held by
+// `engine::tests::contention_outlasting_the_patience_refuses_rather_than_going_on_without_the_gate`
+// and `engine::tests::a_gate_whose_holder_is_gone_is_reclaimed_and_then_held_like_any_other`.
 impl Handover {
     /// Hold the gate for this run, or report that this process is not inside it.
     ///
@@ -1632,6 +1634,8 @@ fn not_taken(run: &str, because: &str) -> Error {
          whose owner has already left"
     ))
 }
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The entry ahead of `ours`, or `None` where `ours` is the lowest.
 ///
