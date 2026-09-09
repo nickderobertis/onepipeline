@@ -5122,7 +5122,7 @@ mod tests {
         std::fs::write(
             paths
                 .channel("handover")
-                .join(format!("{:013}-{:010}-{:06}", 1, 0, 0)),
+                .join(format!("{:012}-{:010}", 1, 0)),
             sys::hostname(),
         )
         .expect("the entry is written");
