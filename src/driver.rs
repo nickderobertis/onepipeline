@@ -2626,20 +2626,21 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
             for command in &envelope.commands {
-                let step = match validate_here(&mut graph, &frontier, envelope.author, command) {
-                    Ok(step) => step,
-                    Err(error) => {
-                        engine::record_rejection(
-                            paths,
-                            &mut journal,
-                            envelope.author,
-                            command,
-                            &error,
-                        )?;
-                        lock.release();
-                        return Err(error);
-                    }
-                };
+                let step =
+                    match validate_here(paths, &mut graph, &frontier, envelope.author, command) {
+                        Ok(step) => step,
+                        Err(error) => {
+                            engine::record_rejection(
+                                paths,
+                                &mut journal,
+                                envelope.author,
+                                command,
+                                &error,
+                            )?;
+                            lock.release();
+                            return Err(error);
+                        }
+                    };
                 edits::advance(&mut frontier, step.staged());
                 staged.push(step);
             }
@@ -2651,7 +2652,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             let mut pending: Vec<Vec<edits::Operation>> =
                 Vec::with_capacity(envelope.commands.len());
             for (command, step) in envelope.commands.iter().zip(staged) {
-                let operations = match engine::commits_of(paths, step, None) {
+                let operations = match engine::commits_of(step) {
                     Ok(operations) => operations,
                     Err(error) => {
                         // The refusal is the run's record as much as the caller's
@@ -2749,6 +2750,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 /// answer, and the delivery is [`engine::commits_of`], which this pass runs only
 /// after every command of the envelope has come through here.
 fn validate_here(
+    paths: &RunPaths,
     graph: &mut crate::graph::Graph,
     frontier: &Frontier,
     author: Author,
@@ -2766,19 +2768,22 @@ fn validate_here(
     else {
         return Ok(engine::Staged::Compiled(operations));
     };
-    Ok(engine::Staged::Note(Box::new(
-        engine::validate_manager_note(&engine::Offered {
-            id,
-            addressee: *addressee,
-            text,
-            criterion: criterion.as_ref(),
-            reach: crate::note::Reach::of(id, *deliver, *persist)?,
-            // Nothing is driving the run, so the frontier this was validated
-            // against is the whole of what says whether the node has a dispatch
-            // left to carry the note to.
-            dispatchable: frontier.recorded.get(id) != Some(&crate::graph::NodeStatus::Done),
-        })?,
-    )))
+    engine::validate_manager_note(&engine::Offered {
+        id,
+        addressee: *addressee,
+        text,
+        criterion: criterion.as_ref(),
+        reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        // Nothing is driving the run, so the frontier this was validated
+        // against is the whole of what says whether the node has a dispatch
+        // left to carry the note to.
+        dispatchable: frontier.recorded.get(id) != Some(&crate::graph::NodeStatus::Done),
+        // And nothing is in flight either, so the only conversation there can be
+        // is the member the node's last dispatch reported. Resolved here rather
+        // than at the delivery below, so that a node this run has no member for
+        // is answered before anything is offered to anybody.
+        address: engine::last_turn_address(paths, id),
+    })
 }
 
 fn reply_timeout_seconds() -> u64 {

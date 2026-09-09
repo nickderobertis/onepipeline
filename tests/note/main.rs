@@ -416,31 +416,38 @@ fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() 
     );
 }
 
-/// A note the live turn **took**, in an envelope whose next delivery then
-/// refused.
+/// A note to a node the run has **no conversation for** refuses before any note of
+/// its envelope has been offered to anybody.
 ///
-/// Validation offers nothing to a conversation, so a note is never delivered on
-/// behalf of an envelope the run has already decided to refuse. What is left is
-/// the delivery phase itself, which is entered only once every command has
-/// validated and which stops at the first delivery a conversation refuses — so at
-/// most the notes *before* that one were read. Nothing of the envelope is
-/// journalled, the graph does not move, and the answer reports the delivered note
-/// as validated-and-not-applied rather than as applied, so a manager resending
-/// the envelope is not surprised by it.
+/// The last refusal that could follow a delivery, and the one this journey used to
+/// record as unavoidable. A `live` note that will persist to no dispatch is
+/// refused when nothing takes it — and for a node no dispatch of which has ever
+/// reported a member, "nothing takes it" is not a fact about a conversation at
+/// all: there is no conversation. The pass used to discover that in the delivery
+/// phase, *after* the note before it in the envelope had already been handed to a
+/// live turn, so an envelope that applied none of its commands had all the same
+/// left a worker reading a correction.
+///
+/// It is decided in validation now, off the address the run either has for the
+/// node or does not, and validation offers nothing to anything. So the delivery
+/// phase can be refused by one thing only: a conversation that was asked and said
+/// no. What that leaves is stated on `engine::deliver_envelope`, and it is
+/// strictly smaller than what this journey used to prove.
 ///
 /// It is here rather than in `tests/e2e` because this is the only tier where a
 /// live delivery can actually succeed: the note seam is a library call into
 /// `oneagentgraph`, and a suite that substitutes that sibling as an *executable*
 /// gets an undelivered note by construction — which
 /// `a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable` is
-/// about.
+/// about. **That is what makes the assertion below load-bearing**: a note that
+/// never reaches the worker here is one the pass did not offer, rather than one
+/// the tier could not have delivered.
 #[test]
-fn a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refuses() {
+fn a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered() {
     let world = World::new("note-envelope-refused");
     let run = "envelope";
-    // A second node that never dispatches: a `live` note to it that will persist
-    // to no dispatch is the refusal only the reconciler can make, so it is what
-    // reaches the applying pass after the first note has already been delivered.
+    // A second node that never dispatches, so the run has no member for it and
+    // no conversation to offer its note to.
     held_conversation(
         &world,
         run,
@@ -465,25 +472,26 @@ fn a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refus
         !world.events_of(run, "node-settled").is_empty()
     });
 
-    // The worker really did read it: the note reached a turn that was live, which
-    // is the side effect the refusal cannot undo.
+    // The point: the worker's turn was live and reachable for the whole window —
+    // the release above waited for the note to be queued before ending it — and
+    // the note was never handed to it, because the envelope was already refused.
     let worker = worked(&world);
     assert!(
-        worker.iter().any(|prompt| prompt.contains(NOTE)),
-        "the live note never reached the worker, so this journey is not about the case \
-         it names:\n{worker:#?}"
+        !worker.iter().any(|prompt| prompt.contains(NOTE)),
+        "a note of an envelope the run refused was offered to the live turn anyway:\n\
+         {worker:#?}"
     );
 
-    // And the run committed nothing of the envelope — neither the note that
-    // landed nor the one that refused.
+    // And the run committed nothing of the envelope — neither the note that would
+    // have landed nor the one that refused.
     assert!(
         world.events_of(run, "edit-committed").is_empty()
             && world.events_of(run, "command-accepted").is_empty(),
         "a command of a refused envelope reached the record: {:?}",
         world.kinds(run)
     );
-    // The answer says so of the delivered note too, rather than reporting it
-    // applied because it happened to land.
+    // And the answer tells the two apart: nothing was wrong with the first, so a
+    // manager resends it — which costs nothing, because nothing of it happened.
     let answered = world
         .command_outcomes(run)
         .last()
@@ -494,7 +502,8 @@ fn a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refus
     assert_eq!(
         answered["results"][0]["outcome"],
         json!("validated"),
-        "the note that landed was reported as applied, or as its own refusal: {answered}"
+        "the note nobody was offered was reported as delivered or as its own refusal: \
+         {answered}"
     );
     assert_eq!(
         answered["results"][1]["outcome"],

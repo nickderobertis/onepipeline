@@ -1002,10 +1002,11 @@ pub(crate) struct CommandOutcome {
 ///
 /// Every command is evaluated, whatever the ones before it said, so each entry is
 /// that command's **own** answer. The envelope is still atomic — a refusal
-/// anywhere in it applies none of it — and the three words below are what tells
-/// the two facts apart: which commands were wrong, and which were fine and went
-/// down with them. A manager reading them knows which to fix and which to resend
-/// unchanged.
+/// anywhere in it applies none of it — and the four words below are what tells
+/// apart the facts a single boolean could not: which commands were wrong, which
+/// were fine and went down with them, and which of those had already been read by
+/// a conversation that cannot unread it. A manager reading them knows which to
+/// fix, which to resend unchanged, and which not to resend at all.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandResult {
     /// Where in the envelope's `commands` this one sat, from zero.
@@ -1022,7 +1023,7 @@ pub(crate) struct CommandResult {
     pub reason: Option<String>,
 }
 
-/// The three things that can become of one command of an envelope.
+/// The four things that can become of one command of an envelope.
 ///
 /// One field rather than a boolean and a sentence, because "not applied" was two
 /// facts wearing one word: a command that was wrong and a command that was fine.
@@ -1033,19 +1034,39 @@ pub(crate) struct CommandResult {
 pub(crate) enum CommandVerdict {
     /// It was validated and committed.
     Applied,
-    /// It was validated and nothing was wrong with it. Something else in the
-    /// envelope refused, and an envelope applies all of its commands or none, so
-    /// **nothing of this one was committed** — no graph moved and no record was
-    /// written for it. Resending it on its own is what gets it in.
-    ///
-    /// Not the same as "nothing of it happened", for exactly one command: a
-    /// `note` the delivery phase had already offered before a later delivery
-    /// refused was read by the conversation it reached. A conversation has no
-    /// undo, so the word here is about what the run committed — which is nothing
-    /// — and a manager resending the envelope may find that note delivered twice.
-    /// Validation itself offers nothing to any conversation, so this can only
-    /// ever be a note in an envelope every command of which validated.
+    /// It was validated and nothing was wrong with it, and **nothing of it
+    /// happened**: no conversation was offered anything on its behalf, no graph
+    /// moved, and no record was written for it. Something else in the envelope
+    /// refused, and an envelope applies all of its commands or none. Resending it
+    /// on its own is what gets it in, and resending it costs nothing, because it
+    /// had no effect to repeat.
     Validated,
+    /// A `note` whose conversation **took it**, in an envelope that was refused
+    /// after that.
+    ///
+    /// The one word that is not about the run's record, and it exists because the
+    /// run's record is not the whole of what a note does: a conversation has no
+    /// undo. Nothing of this command was committed — the same nothing
+    /// [`Validated`](Self::Validated) reports — but the party it reached has read
+    /// it, so resending the envelope hands that party the note a second time.
+    ///
+    /// It is reachable only through the one window an envelope cannot close: a
+    /// note is offered to a conversation only once every command of its envelope
+    /// has validated, and only the conversation's own answer can refuse a
+    /// delivery after that. See `engine::deliver_envelope`, which states when
+    /// that window is open and what is done about it.
+    // llmlint: ignore[changed_behavior_has_e2e] no journey can arrange this
+    // window: it takes one node whose live conversation accepts a note and, in
+    // the same run and the same envelope, a second node whose member has already
+    // settled — and the harness double holds every turn of a run on one shared
+    // gate, so a run cannot have one of each at once. Both sides of it are driven
+    // end to end in `tests/note/main.rs` —
+    // `a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered`
+    // for the refusals decided before any delivery, and
+    // `a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded`
+    // for a conversation refusing one — and the word itself by
+    // `engine::tests::a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`.
+    Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,
 }
