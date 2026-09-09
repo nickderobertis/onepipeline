@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1](https://github.com/nickderobertis/onepipeline/compare/v0.24.0...v0.24.1) - 2026-09-09
+
+### Fixed
+
+- *(scheduler)* decide a node's dependents from its outcome, not from its status alone ([#213](https://github.com/nickderobertis/onepipeline/pull/213))
+
 ## [0.24.0](https://github.com/nickderobertis/onepipeline/compare/v0.23.0...v0.24.0) - 2026-09-08
 
 ### Fixed
