@@ -339,19 +339,13 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
 /// A note is **not** offered to a conversation on behalf of an envelope the run
 /// is going to refuse.
 ///
-/// Validation used to deliver: compiling a `note` handed it to the node's live
-/// turn, because how it reached the node is part of what the record has to say.
-/// So a later command's refusal left a correction a worker had read and the run
-/// had no record of — the worker acting on a bar nobody moved, which is the
-/// failure the whole envelope-atomicity work is about.
-///
-/// The two halves are separate now: validation composes the note and decides
-/// whether the run can carry it, and offers it to nothing. Delivery happens only
-/// once **every** command has validated. The refusal here is one only the
-/// reconciler can make — `reply`'s submission check carries no dispatch in its
-/// frontier, so a `settle` of a running node passes it and the loop refuses it —
-/// and it comes *after* the note in the envelope, which is exactly the order that
-/// used to deliver first and refuse second.
+/// Compiling a `note` used to hand it to the node's live turn, so a later
+/// command's refusal left a correction a worker had read and the run had no
+/// record of. The refusal here is one only the reconciler can make — `reply`'s
+/// submission check carries no dispatch in its frontier, so a `settle` of a
+/// running node passes it and the loop refuses it — and it comes *after* the note
+/// in the envelope, which is the order that used to deliver first and refuse
+/// second.
 #[test]
 fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() {
     let world = World::new("note-envelope-unoffered");
@@ -420,28 +414,16 @@ fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() 
 /// its envelope has been offered to anybody.
 ///
 /// The last refusal that could follow a delivery, and the one this journey used to
-/// record as unavoidable. A `live` note that will persist to no dispatch is
-/// refused when nothing takes it — and for a node no dispatch of which has ever
-/// reported a member, "nothing takes it" is not a fact about a conversation at
-/// all: there is no conversation. The pass used to discover that in the delivery
-/// phase, *after* the note before it in the envelope had already been handed to a
-/// live turn, so an envelope that applied none of its commands had all the same
-/// left a worker reading a correction.
+/// record as unavoidable: "nothing takes it" for a node that has never reported a
+/// member is not a fact about a conversation at all, and the pass used to discover
+/// it only after handing the note before it to a live turn. Deciding it in
+/// validation leaves the delivery refusable by one thing alone — a conversation
+/// that was asked and said no, which `engine::deliver_envelope` bounds.
 ///
-/// It is decided in validation now, off the address the run either has for the
-/// node or does not, and validation offers nothing to anything. So the delivery
-/// phase can be refused by one thing only: a conversation that was asked and said
-/// no. What that leaves is stated on `engine::deliver_envelope`, and it is
-/// strictly smaller than what this journey used to prove.
-///
-/// It is here rather than in `tests/e2e` because this is the only tier where a
-/// live delivery can actually succeed: the note seam is a library call into
-/// `oneagentgraph`, and a suite that substitutes that sibling as an *executable*
-/// gets an undelivered note by construction — which
-/// `a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable` is
-/// about. **That is what makes the assertion below load-bearing**: a note that
-/// never reaches the worker here is one the pass did not offer, rather than one
-/// the tier could not have delivered.
+/// This tier is the only one where a live delivery can succeed at all, since a
+/// suite substituting `oneagentgraph` as an *executable* gets an undelivered note
+/// by construction. That is what makes the assertion below load-bearing: a note
+/// that never reaches the worker here is one the pass did not offer.
 #[test]
 fn a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered() {
     let world = World::new("note-envelope-refused");

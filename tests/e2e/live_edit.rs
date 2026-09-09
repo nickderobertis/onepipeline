@@ -2502,13 +2502,12 @@ fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
 /// enough that a view either shows it or does not.
 const CORRECTION: &str = "## What\nthe corrected criterion this envelope carried";
 
-/// A run with a turn open on one node and a second node that never dispatches,
-/// which is the only shape that reaches a refusal **only the reconciler** can
-/// raise: `reply` validates every command against the projected graph before it
-/// queues anything, so a refusal `edits::compile` can make never gets as far as
-/// the loop. A `live` note that will persist to no dispatch is refused where the
-/// note is *delivered*, which is inside the loop and after the commands before it
-/// have already compiled.
+/// A run with a turn open on one node and a second node that never dispatches.
+///
+/// The only shape that reaches a refusal **only the reconciler** can raise:
+/// `reply` validates every command against the projected graph before it queues
+/// anything, so a refusal `edits::compile` can make never gets as far as the loop,
+/// while a `live` note that will persist to no dispatch does.
 fn undeliverable_note_run(world: &World, name: &str) -> String {
     world.script("slow.turn-open", "");
     live(

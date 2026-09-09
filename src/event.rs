@@ -30,16 +30,13 @@ use serde_json::{Map, Value};
 
 /// The envelope version this crate stamps on everything it writes.
 ///
-/// **2** since the journal's own record shapes moved: an accepted command that
-/// commits nothing a reader folds is journalled under its own
-/// [`PipelineKind::CommandAccepted`] rather than as a committed edit, and both
-/// that kind and [`PipelineKind::EditCommitted`] carry `operation_kinds`. So the
-/// number answers the question a reader of a runs root actually has — a root
-/// outlives the build that wrote into it, and holds records from every build that
-/// ever ran on the host. At `1`, an `edit-committed` may be an accepted command
-/// that changed nothing; at `2` it means something changed, and a reader keys on
-/// the operation kinds without deserializing the command. Entry 65 of
-/// `docs/contract-divergences.md` is where that move is proposed.
+/// **2** since the journal's record shapes moved: at `1` an `edit-committed` may
+/// be an accepted command that changed nothing; at `2` it means something changed,
+/// an accepted command that did not is [`PipelineKind::CommandAccepted`], and both
+/// kinds carry `operation_kinds` so a reader keys on what happened without
+/// deserializing the command. A runs root outlives the build that wrote into it,
+/// which is why the number is the question a reader of one has. Entry 65 of
+/// `docs/contract-divergences.md` proposes the move.
 ///
 /// A **relayed** envelope keeps its producer's own number, exactly as it keeps
 /// that producer's `stream`, `seq`, `source` and kind: the version says which

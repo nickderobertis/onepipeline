@@ -1777,46 +1777,26 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// build or a caller that did not check, and the reconciler is the last place a
 /// refusal still means something.
 ///
-/// # Three phases, in this order and for this reason
-///
-/// [`edits::compile`] promises that a refused edit cannot half-apply, and that
-/// promise is real and narrower than it reads: it is about **one** command's
-/// multi-edge mutation, validated against a cloned graph and thrown away whole
-/// when any edge of it refuses. Nothing above it provided the same for an
-/// envelope, so a loop that journalled each command as it compiled left the
-/// commands before a refusal committed and abandoned every one after it — and
-/// answered for all of it with a single boolean naming only the command that
-/// failed. One envelope carrying a `note` and the `amend` that made the same
-/// correction durable delivered neither and reported only the note, which is a
-/// manager believing a node's bar had changed when it had not.
-///
-/// 1. **Validate.** Every command is validated, in order, against a **staged**
-///    copy of the run's state that carries what the commands before it did, so a
-///    command that depends on its predecessor is judged against the state its
-///    predecessor produced. A refusal does **not** end the pass: the commands
-///    after it are validated on their own merits, so each one gets its own
-///    answer rather than "we never looked". Nothing here reaches a conversation,
-///    the journal, or the graph — see [`validate_envelope`].
-/// 2. **Deliver.** Only entered when every command validated, and the first
-///    thing in the pass that reaches outside the run: a note is offered to the
-///    conversation its validation resolved, and what it commits is what that
-///    conversation answered.
-/// 3. **Journal.** Only entered when every delivery answered, so a refusal in
-///    either phase leaves the journal — and therefore the graph — exactly as it
-///    was.
-///
-/// # The property, and the one window it cannot cover
+/// # Three phases, and the property they exist for
 ///
 /// **No command of an envelope takes effect — neither a graph mutation nor a note
 /// reaching a party of a conversation — if any command of that envelope is going
-/// to be refused.** Phase 1 makes every refusal it can with nothing offered to
-/// anybody, and it makes all but one of the refusals there are: `validate_command`
-/// resolves the conversation a note would go to, so a node the run has no member
-/// for is answered there rather than after an earlier note has already landed.
+/// to be refused.** [`edits::compile`] provides that for one command's multi-edge
+/// mutation and no further, so the envelope's half is here:
 ///
-/// The exception is the answer only a conversation can give, and it is named
-/// where it lives: [`deliver_envelope`] states when that window is open, what the
-/// run does about it, and what a manager is told.
+/// 1. **Validate.** Every command, in order, against a **staged** copy of the
+///    run's state carrying what the commands before it did. A refusal does not
+///    end the pass — each command gets its own answer rather than "we never
+///    looked" — and nothing reaches a conversation, the journal, or the graph.
+///    See [`validate_envelope`].
+/// 2. **Deliver.** Only once every command validated: a note is offered to the
+///    conversation its validation resolved, and commits what that conversation
+///    answered.
+/// 3. **Journal.** Only once every delivery answered, so a refusal in either
+///    phase leaves the journal — and therefore the graph — exactly as it was.
+///
+/// Phase 1 makes every refusal that does not need a conversation asked. The one
+/// that does is named where it lives: [`deliver_envelope`].
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -2090,46 +2070,27 @@ fn validate_envelope(
 /// refuse. A delivery a conversation refuses ends the phase: the deliveries after
 /// it would be side effects for an envelope nothing will journal.
 ///
-/// # The one window this cannot close, which is the whole of it
+/// # The one window this cannot close
 ///
-/// A conversation has no undo. So the property the envelope owes — that no
-/// command of it takes effect if any command of it is going to refuse — holds
-/// exactly as far as every refusal is decided before the first note is offered,
-/// and [`validate_manager_note`] is where all but one of them now are: a note that
-/// cannot compose, one that asks for no live attempt and has no next dispatch to
-/// be carried to, and one the run has no member for at all are each refused there,
-/// with nothing offered to anybody.
+/// A conversation has no undo, and whether a member will take a note is not
+/// knowable without offering it one. Every other refusal is
+/// [`validate_manager_note`]'s, made with nothing offered to anybody — so the
+/// residue is exactly: **two or more** notes in one envelope each asking for a
+/// live attempt, an earlier one accepted, and a later one refused by its own
+/// conversation under a reach that carries it nowhere.
 ///
-/// **What is left is the answer only the conversation can give.** Whether a member
-/// will take a note is not knowable without offering it one — the member may have
-/// settled, or its conversation reached completion, in the moment between the
-/// decision and the call — and this crate does not ask `oneagentgraph` to guess it
-/// either. So the residue is exactly this: an envelope carrying **two or more**
-/// notes that each ask for a live attempt, an earlier one accepted by its
-/// conversation, and a later one the conversation refuses under a reach that
-/// composes nothing forward or against a node with no next dispatch.
-///
-/// When that happens the envelope is refused whole and **nothing of it is
-/// journalled** — no graph moves, and no record says any command of it was
-/// committed. What cannot be taken back is that a party read the earlier note, so
-/// it is *reported* rather than hidden: that command's own entry in the answer is
+/// The envelope is then refused whole and **nothing of it is journalled**. What
+/// cannot be taken back is that a party read the earlier note, so it is reported
+/// rather than hidden: that command's entry is
 /// [`CommandVerdict::Delivered`](crate::channel::CommandVerdict::Delivered), which
 /// says the note landed, that the run recorded nothing of it, and that resending
-/// the envelope hands it over a second time. The phase stops at the first refusal
-/// so no note after it is offered, which bounds what a manager has to reason about
-/// to the notes before it.
+/// the envelope hands it over a second time.
 ///
-/// **Why it is not closed the rest of the way**, since it could be: an envelope
-/// carrying more than one such note could be refused outright by
-/// [`validate_envelope`], and the single remaining one offered before any note
-/// that cannot refuse. That reaches zero residue by refusing a shape a planner may
-/// legitimately send — and `docs/contract.md` describes no such refusal, so
-/// inventing one is a proposal to the planner who owns it rather than an
-/// implementation choice — and by handing a node's own notes to it in an order the
-/// envelope did not write them in. A rare residue that is reported in the answer
-/// was judged the smaller cost than a new refusal of valid asks and a delivery
-/// order nobody asked for. Whoever revisits that is revisiting a decision rather
-/// than an oversight.
+/// **Not closed the rest of the way, deliberately.** It could be — refuse such an
+/// envelope past one such note, and offer that one first — at the price of a
+/// refusal `docs/contract.md` describes nowhere and of handing a node its own
+/// notes out of the order the envelope wrote them. A reported residue was judged
+/// the smaller cost; whoever revisits it is revisiting a decision.
 fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Error>> {
     let mut delivered: Vec<std::result::Result<Delivery, Error>> = Vec::with_capacity(staged.len());
     for step in staged {

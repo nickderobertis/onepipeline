@@ -284,23 +284,18 @@ impl Operation {
 
     /// Whether committing this operation is what *makes* the change it records.
     ///
-    /// The question `edit-committed` exists to answer, and the one that decides
-    /// which kind a compiled command is journalled under. Deliberately **not**
-    /// "does it move the desired graph": what it is about is everything a reader
-    /// folding this operation list moves, graph or not, because those are one
-    /// durable document to that reader — an attestation, a park, a supersession
-    /// and a settlement-from-evidence each move a node's recorded state and are
-    /// read back off this record by name, so a build that stopped writing them
-    /// here would silently lose them.
+    /// The question `edit-committed` exists to answer. Deliberately **not** "does
+    /// it move the desired graph": it is about everything a reader folding this
+    /// operation list moves, graph or not, because a park, an attestation and a
+    /// settlement-from-evidence each move a node's recorded state and are read
+    /// back off this record by name.
     ///
-    /// Exactly two operations answer `false`, and both are **reports**: the
-    /// record of them is not what makes them true. A `finding-raised` went to the
-    /// planner's surface queue, and a `completion-request` is journalled as its
-    /// own `completion-requested` — the fold of an `edit-committed` skips it for
-    /// that very reason, so that one request is not counted twice. Neither is
-    /// read off an operation list by anything, here or downstream, which is why
-    /// moving them off this kind takes nothing away from a reader that predates
-    /// the move.
+    /// The two that answer `false` are the two **reports** — a `finding-raised`
+    /// went to the planner's surface queue and a `completion-request` is
+    /// journalled as its own `completion-requested` — and nothing here or
+    /// downstream reads either off an operation list, which is what makes moving
+    /// them cost a preceding reader nothing. Entry 65 of
+    /// `docs/contract-divergences.md` is where that classification is proposed.
     ///
     /// Exhaustive on purpose: a variant added later has to decide this rather
     /// than inherit an answer.
@@ -320,28 +315,34 @@ impl Operation {
             | Self::SettledFromEvidence { .. }
             | Self::LandingFromEvidence { .. }
             | Self::TaskAmended { .. }
+            // llmlint: ignore-block[names_match_behavior] both are `true` for
+            // every disposition on purpose, though only `ContextAdded`'s
+            // `Deferred` and `NoteDelivered`'s `Carried` move anything a fold
+            // moves. The test the two `false` answers above pass is that nothing
+            // reads them off `edit-committed`; these fail it — `recorded` in
+            // `tests/note/main.rs` reads a delivered note off that kind and
+            // predates the split — so moving them is the regression the split was
+            // written to avoid. Splitting them *by disposition* is worse again: one
+            // op word would land under two kinds depending on what a conversation
+            // answered, and no reader could key on `note` at all. Which operations
+            // answer this is entry 65 of `docs/contract-divergences.md`, still open
+            // and the planner's to resolve.
             | Self::ContextAdded { .. }
             | Self::NoteDelivered { .. } => true,
+            // llmlint: ignore-end[names_match_behavior]
         }
     }
 }
 
 /// Every kind [`Operation`] can be recorded under, in declaration order.
 ///
-/// The list a classification of the operations has to be **complete** against:
-/// `edit-committed` means something changed, and which operations answer to that
-/// is restated in entry 65 of `docs/contract-divergences.md`, so a variant added
-/// or reclassified without reconciling that entry is a document describing a
-/// build that no longer exists. Kept beside the enum rather than in the test that
-/// reads it, so there is one list, and held to the enum by
-/// `every_operation_kind_is_one_the_enum_carries`, which counts it against the
-/// variants `Operation` actually declares.
-///
-/// Beside the enum rather than in a test module, because what it is *for* is the
-/// document: entry 65 names these, and the one place a reader looks for the set
-/// is the file that declares them. Nothing in the crate's own paths reads it —
-/// the classification is [`Operation::commits_a_change`], which is exhaustive on
-/// its own — so it is compiled for the checks that hold the two together.
+/// The list entry 65 of `docs/contract-divergences.md` names, so a variant added
+/// or reclassified without reconciling that entry fails rather than leaving the
+/// document describing a build that no longer exists. It lives beside the enum
+/// because that is where a reader looks for the set, and is held to it by
+/// `every_operation_kind_is_one_the_enum_carries`. Nothing in the crate's own
+/// paths reads it: the classification is [`Operation::commits_a_change`], which is
+/// exhaustive on its own.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn every_operation_kind() -> Vec<String> {

@@ -1041,30 +1041,17 @@ pub(crate) enum CommandVerdict {
     /// on its own is what gets it in, and resending it costs nothing, because it
     /// had no effect to repeat.
     Validated,
-    /// A `note` whose conversation **took it**, in an envelope that was refused
-    /// after that.
+    /// A `note` whose conversation **took it**, in an envelope refused after that.
     ///
-    /// The one word that is not about the run's record, and it exists because the
-    /// run's record is not the whole of what a note does: a conversation has no
-    /// undo. Nothing of this command was committed — the same nothing
-    /// [`Validated`](Self::Validated) reports — but the party it reached has read
-    /// it, so resending the envelope hands that party the note a second time.
-    ///
-    /// It is reachable only through the one window an envelope cannot close: a
-    /// note is offered to a conversation only once every command of its envelope
-    /// has validated, and only the conversation's own answer can refuse a
-    /// delivery after that. See `engine::deliver_envelope`, which states when
-    /// that window is open and what is done about it.
-    // llmlint: ignore[changed_behavior_has_e2e] no journey can arrange this
-    // window: it takes one node whose live conversation accepts a note and, in
-    // the same run and the same envelope, a second node whose member has already
-    // settled — and the harness double holds every turn of a run on one shared
-    // gate, so a run cannot have one of each at once. Both sides of it are driven
-    // end to end in `tests/note/main.rs` —
-    // `a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered`
-    // for the refusals decided before any delivery, and
-    // `a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded`
-    // for a conversation refusing one — and the word itself by
+    /// Nothing of this command was committed — the same nothing
+    /// [`Validated`](Self::Validated) reports — but a conversation has no undo, so
+    /// resending the envelope hands that party the note a second time.
+    /// `engine::deliver_envelope` states the one window this is reachable through.
+    // llmlint: ignore[changed_behavior_has_e2e] no journey can arrange that
+    // window: it takes a live conversation accepting a note and, in the same run
+    // and envelope, a second node whose member has settled — and the harness
+    // double holds every turn of a run on one shared gate. Its two sides are
+    // driven end to end in `tests/note/main.rs` and the word itself by
     // `engine::tests::a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`.
     Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.

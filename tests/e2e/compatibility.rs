@@ -1,39 +1,28 @@
 //! Compatibility across the journal this change adds to, in both directions.
 //!
-//! Splitting `edit-committed` into two kinds and adding a field to the record is
-//! a change to a **durable document** that outlives the build that wrote it: a
-//! runs root holds journals from every build that ever ran on the host, and this
-//! crate is not the only thing that reads one. So the property is held both ways
-//! round, and neither direction is inferable from the other.
+//! A runs root holds journals from every build that ever ran on the host, and
+//! this crate is not the only thing that reads one — so neither direction is
+//! inferable from the other and both are held:
 //!
 //! * **A journal from before the change reads the same.** This build folds one
-//!   and renders it, and the rendering is committed beside it — so a later change
-//!   to how a pre-change record is read fails here rather than quietly changing
-//!   what an old run says.
+//!   and renders it, and the rendering is committed beside it.
 //! * **A reader from before the change reads a journal this build writes.**
-//!   [`derived_by_a_preceding_reader`] is that reader, written here rather than
-//!   asked of the build under test: it keys on exactly the record kinds the
-//!   committed fixture carries and reads an `edit-committed`'s operations the way
-//!   a consumer had to before `operation_kinds` existed. What it derives from a
-//!   journal this build writes has to be what it derives from the fixture — the
-//!   **same run**, so "what it reported" is a value in hand rather than a claim.
+//!   [`derived_by_a_preceding_reader`] is that reader, keying on exactly the
+//!   record kinds the committed fixture carries and reading an `edit-committed`'s
+//!   operations the way a consumer had to before `operation_kinds` existed. What
+//!   it derives from a journal this build writes has to be what it derives from
+//!   the fixture — the **same run**, so "what it reported" is a value in hand.
 //!
-//! The record shapes carry a **version line**, and it is what makes the two
-//! directions checkable rather than argued: everything this build writes is
-//! stamped [`ENVELOPE_VERSION`], the fixture is stamped the version before it,
-//! and both are in [`ENVELOPE_VERSIONS_READ`]. A relayed envelope keeps its
-//! producer's own number in either journal, which is why the assertions below
-//! ask the version only of this library's own records.
+//! Everything this build writes is stamped [`ENVELOPE_VERSION`], the fixture the
+//! version before it, and both are in [`ENVELOPE_VERSIONS_READ`]. A relayed
+//! envelope keeps its producer's own number in either journal, which is why the
+//! assertions below ask the version only of this library's own records.
 //!
 //! [`FIXTURE`] is the immutable reference for what a preceding reader knows: the
-//! journal of a real run of [`recorded_run`], carrying the record shapes the
-//! build at `4db4e7e` — the commit this work forked from — wrote. The two things
-//! this change adds to a record are the whole of what was put back, because they
-//! are the whole of what it adds: the kind an accepted command that changes no
-//! graph is journalled under, and the `operation_kinds` field. Host paths and
-//! stream names are stood in for so the document is portable; nothing here reads
-//! either. It is committed and **never regenerated** — a fixture edited to match
-//! a newer build proves nothing about an older one, which is what
+//! journal of a real run of [`recorded_run`] at `4db4e7e`, the commit this work
+//! forked from, with host paths and stream names stood in for. It is committed and
+//! **never regenerated** — a fixture edited to match a newer build proves nothing
+//! about an older one, which is what
 //! [`the_committed_fixture_is_a_journal_from_before_this_change`] holds it to.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
