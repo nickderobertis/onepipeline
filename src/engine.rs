@@ -5122,15 +5122,17 @@ mod tests {
         .expect("the gate record is written");
     }
 
-    /// A gate whose holder this host can prove is gone is reclaimed — **once**.
+    /// A gate whose holder this host can prove is gone is reclaimed, and holding
+    /// it then means what holding it always means.
     ///
     /// A driver that dies inside the section leaves a file nothing will remove,
-    /// and a gate nobody can ever take would stop every submission and every
-    /// release on the run. So a dead holder's is reclaimed; what keeps that from
-    /// being a second way in is that the record is read back, so of two
-    /// contenders that both saw the same dead holder only one comes away with it.
+    /// and a gate nobody could ever take would stop every submission and every
+    /// release on the run. So a dead holder's is reclaimed — and the reclaimed
+    /// gate is a gate like any other: the next taker waits on its holder rather
+    /// than reclaiming it a second time, which is what keeps the reclaim from
+    /// being a second way in for everyone who arrives afterwards.
     #[test]
-    fn a_gate_whose_holder_is_gone_is_reclaimed_by_one_taker() {
+    fn a_gate_whose_holder_is_gone_is_reclaimed_and_then_held_like_any_other() {
         let paths = handover_scratch("gate-stale");
         std::fs::write(
             paths.channel("handover.lock"),

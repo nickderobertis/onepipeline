@@ -1382,12 +1382,21 @@ pub struct LockRecord {
 /// — [`OwnershipLock`] over the run itself and [`Handover`] over letting go of it
 /// — are taken the same way and reclaimed on the same terms.
 ///
-/// Exclusive on both paths, and by two different mechanisms: creating the file is
-/// exclusive because the filesystem makes it so, and *reclaiming* a dead holder's
-/// is exclusive because the record is read back afterwards — two contenders that
-/// both saw the same dead holder both write, and only the one the record names
-/// comes away with it.
-fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
+/// **Exclusive on the path that matters and best-effort on the other, and the
+/// difference is stated rather than papered over.** Taking a claim nobody holds
+/// is exclusive because creating a file exclusively is what the filesystem
+/// decides, and every contended acquisition goes down that path. *Reclaiming* the
+/// claim of a holder this host can prove is gone does not: the record is written
+/// and read back, which turns away a contender that arrives after the winner, but
+/// two that both meet the same dead holder can each write and each read their own
+/// back. That is the one case two processes can come away holding this, and what
+/// would close it is an advisory lock the operating system releases when a
+/// process dies rather than a file this crate reasons about — which is a change
+/// to how every lock here is taken, not to this function.
+///
+/// It is bounded by how the case arises: a holder that died *inside* a section of
+/// two file operations, met by two contenders at that moment.
+fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
             path: parent.to_path_buf(),
@@ -1495,8 +1504,8 @@ fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
 /// Held for the run rather than for the queue, because releasing the run is one
 /// of the two things it orders and that is not the channel's file.
 ///
-/// A wait that runs out is the one case a party goes on **without** it, saying
-/// so: see [`HANDOVER_PATIENCE`].
+/// A party that cannot take it does neither of its two things and says so: see
+/// [`Handover::hold`].
 #[derive(Debug)]
 pub(crate) struct Handover {
     path: PathBuf,
@@ -1545,7 +1554,7 @@ impl Handover {
         let path = paths.channel("handover.lock");
         let deadline = std::time::Instant::now() + patience;
         loop {
-            let refused = match take_exclusively(&path, &paths.run, HANDING_OVER) {
+            let refused = match claim_or_report_the_holder(&path, &paths.run, HANDING_OVER) {
                 Ok(()) => return Ok(Self { path }),
                 Err(refused) => refused,
             };
@@ -1601,7 +1610,7 @@ impl OwnershipLock {
     /// the state `adopt` exists to recover from.
     pub fn acquire(paths: &RunPaths, verb: &str) -> Result<Self> {
         let path = paths.lock();
-        take_exclusively(&path, &paths.run, verb)?;
+        claim_or_report_the_holder(&path, &paths.run, verb)?;
         Ok(Self { path, held: true })
     }
 
