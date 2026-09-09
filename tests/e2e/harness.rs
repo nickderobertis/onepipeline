@@ -361,10 +361,6 @@ enum StoreEdgeKind {
 /// The exit code a refused or malformed command carries.
 pub const REFUSED: i32 = onepipeline::error::EXIT_REFUSED;
 
-/// The exit code for accepted-but-not-yet-reconciled edits, and for a graph
-/// that settled unfinished.
-pub const QUEUED: i32 = onepipeline::error::EXIT_QUEUED;
-
 /// The exit code for a run nothing is driving.
 pub const NOTHING_DRIVING: i32 = onepipeline::error::EXIT_NOTHING_DRIVING;
 

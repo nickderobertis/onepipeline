@@ -1,6 +1,7 @@
 //! The version-1 edit envelope: all nine ops, each op's required fields, its
-//! refusal cases, and the exit codes the contract assigns — `0` applied, `1`
-//! accepted-not-yet-reconciled, `2` refused or malformed.
+//! refusal cases, and the exit codes this build answers with — `0` applied, `0`
+//! accepted-not-yet-reconciled, `2` refused or malformed. The contract gives the
+//! middle one `1`; divergence 67 is why an accepted envelope answers as accepted.
 //!
 //! Every edit is **applied or rejected with a reason**. There is no round for an
 //! edit to need: a run being driven queues it for the loop, and one nothing is
@@ -1643,7 +1644,13 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
              "deliver": "next"}
         ])),
     );
-    reply.exited(crate::harness::QUEUED).out_has("\"queued\"");
+    // Exit 0: the envelope was **accepted**, and this verb's non-zero statuses
+    // are refusals to correct. What is left to happen is a reconciler, which the
+    // receipt says and the reply says again on stderr.
+    reply
+        .exited(0)
+        .out_has("\"queued\"")
+        .err_has("not to be sent again");
 
     world.release("slow.go");
 }

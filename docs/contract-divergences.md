@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–66 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–67 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 66 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 67 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -4271,3 +4271,59 @@ which hands one queued surface out twice and a second surface once and reads the
 three instants recorded, and held against a record from before the field by
 `tests/replay.rs`'s
 `a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads`.
+
+## 67. A queued reply exits non-zero, which the contract fixes as `1` — OPEN
+
+**Proposal (for the planner who owns the contract): amend the channel
+paragraph's "reply exit 0 = applied, 1 = accepted-not-yet-reconciled, 2 =
+refused/malformed" to `0 = applied or accepted-and-queued, 2 =
+refused/malformed`, leaving `1` to mean what it means everywhere else in this
+binary — a run that has not settled.**
+
+The contract states three codes and the code wrote all three. What it could not
+carry is the meaning the rest of the surface gives a non-zero status: `reply`'s
+own documentation says a non-zero answer is **a rejection to correct and never a
+command to resend**, and the code says the same in the comment beside the
+receipt — "still queued: **not** an instruction to send it again". A caller
+reading the status alone was told the opposite of both.
+
+**What it cost.** Measured on one host during real supervision, one reply
+answered `queued` at exit **1** and its edit applied cleanly eighteen seconds
+later, while another answered `applied` at exit 0 — two outcomes of one
+submission, one of which every status-reading wrapper treats as a failure. The
+window that produces it selects for the edits worth applying: `retry` a failed
+node, `requeue` a parked one, settle a wrong record are reached for on a run that
+is **not progressing**, which is exactly the run whose driver is on its way out.
+Divergence's other half is closed in the driver — a driver drains the command
+queue on its way out, before it releases the run's ownership lock — and this half
+is what is left over: an envelope that is genuinely still queued, waiting for a
+driver.
+
+**What the code does.** `onepipeline reply` exits **0** for a queued envelope, and
+its receipt still says `"state": "queued"` and `"commands": "queued"` — entry 64's
+object, unchanged, which is where a caller reads *which* of the two 0s it got. So
+nothing that reads the receipt changes, and what changes is that a caller reading
+only the status is no longer told a refusal. Beside the receipt, on **stderr**,
+the reply says in words what is left to happen: the edits are on the run's durable
+command queue, something has to drive the run for them to take effect, and they
+are not to be sent again.
+
+**`1` is not vacated.** It is a run's own *unfinished* — `drive` and `attach`
+answer with it for a graph that is waiting or has a failed node — and
+`plan check` answers with it for a plan carrying refusals. Both are unchanged;
+what moved is only the one reading that made an accepted envelope share a status
+with a rejection.
+
+```json
+{
+  "reply_applied_exit": 0,
+  "reply_queued_exit": 0,
+  "reply_refused_exit": 2
+}
+```
+
+Driven end to end by `channel::a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway`
+and `live_edit::edits_accepted_but_not_reconciled_in_time_are_reported_queued`,
+which read the status a queued reply exits at and the words it says beside it,
+and by `driver::an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`
+for the half this leaves nothing to answer for.

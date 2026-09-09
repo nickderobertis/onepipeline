@@ -21,6 +21,10 @@ pub enum Error {
     Refused(String),
     /// A reply's edits are accepted and durable but were not reconciled within
     /// the timeout; they remain queued. Exits [`EXIT_QUEUED`].
+    ///
+    /// **Nothing returns it.** A queued envelope is accepted, so `reply` answers
+    /// it with a receipt at [`EXIT_SUCCESS`] rather than with an error — see
+    /// divergence 67 — and this variant stays because it is published API.
     #[error("queued: {0}")]
     Queued(String),
     /// Nothing is driving the run: no orchestrator process, no surface, no
@@ -103,11 +107,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// The run settled, or the reply's every edit was applied.
 pub const EXIT_SUCCESS: i32 = 0;
 
-/// The reply's edits are accepted and durable but not yet reconciled.
+/// A run's own "unfinished": a graph that is waiting or has a failed node has
+/// not settled.
 ///
-/// It is also a run's own "unfinished": a graph that is waiting or has a
-/// failed node has not settled, and the two readings agree — neither is an
-/// error, and neither is completion.
+/// Neither an error nor completion. It is **not** what `reply` answers for
+/// accepted-but-unreconciled edits any more: a queued envelope is accepted, and
+/// a caller reading a status has to be able to tell one from a refusal to
+/// correct. See divergence 67.
 pub const EXIT_QUEUED: i32 = 1;
 
 /// The reply was malformed, or an edit was refused.

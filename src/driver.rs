@@ -30,7 +30,7 @@ use crate::cli::{
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
 use crate::engine;
-use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
+use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_SUCCESS};
 use crate::filter::{self, EventFilter};
 use crate::graph::{self, GraphState};
 use crate::journal::{self, Journal};
@@ -2216,7 +2216,27 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         Submitted::AppliedByRun { reply } => {
             (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
-        Submitted::Queued { reply } => (Receipt::Queued { reply, verdict }, EXIT_QUEUED),
+        Submitted::Queued { reply } => {
+            // **Exit 0, and the sentence out loud.** A non-zero status from this
+            // verb is a rejection to correct — that is what the documentation
+            // says, and what [`Submitted::Queued`]'s own comment says — and a
+            // queued envelope is the opposite of one: accepted, durable, and
+            // never an instruction to resend. Exiting 1 on it told every caller
+            // that reads a status the one thing that is not true, on the runs
+            // where it matters most: the verbs a supervisor reaches for on a
+            // stalled run are the ones this answers. So the status says accepted
+            // and the words say what is left — which is a driver, not a resend.
+            // See divergence 67.
+            eprintln!(
+                "onepipeline: the edits are on run '{}'s durable command queue and have \
+                 not been reconciled yet, so something has to drive the run for them to \
+                 take effect: they are applied by the driver holding it, or by \
+                 `onepipeline adopt {}` if nothing is driving it. They are not to be sent \
+                 again — a second copy is a second edit.",
+                paths.run, paths.run
+            );
+            (Receipt::Queued { reply, verdict }, EXIT_SUCCESS)
+        }
     };
     println!(
         "{}",

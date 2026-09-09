@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
+use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
@@ -3124,7 +3124,12 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
         })
         .to_string(),
     );
-    submitted.exited(QUEUED).out_has("\"queued\"");
+    // Exit 0: accepted, durable, and not reconciled yet is not a refusal, and
+    // this verb's non-zero statuses are refusals to correct.
+    submitted
+        .exited(0)
+        .out_has("\"queued\"")
+        .err_has("has to drive the run");
     // Two fates, and the receipt names each: the ruling is gone to a reader and
     // the edits are still in the queue, which one word could only say one of.
     // Held to entry 64 here rather than only in the receipt journey, because this

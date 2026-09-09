@@ -2697,6 +2697,11 @@ fn the_only_surface_kind_the_contract_names_is_check_in() {
 
 #[test]
 fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
+    // The contract's own sentence, verbatim, and the constants it assigns — both
+    // unchanged. What `reply` answers for an *accepted and still queued*
+    // envelope is `0` rather than the `1` this sentence gives it, which is
+    // divergence 67 and is stated there: `1` is still this build's constant and
+    // still what an unfinished run and a refused plan check exit at.
     assert!(CONTRACT.contains(
         "reply exit 0 = applied, 1 = accepted-not-yet-reconciled, 2 = refused/malformed"
     ));
@@ -2813,6 +2818,56 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
     assert!(
         journeys.contains("fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued("),
         "entry 66 names a journey the channel suite does not run"
+    );
+}
+
+/// The statuses entry 67 declares a reply exits at are this build's constants.
+///
+/// The contract fixes three codes for this verb and the code no longer writes
+/// one of them, so the entry is where the mapping a caller branches on is
+/// written down — and a caller that read a queued envelope as a refusal is the
+/// defect it exists to close. An entry naming a status this build does not exit
+/// at is a document about a build that does not exist.
+#[test]
+fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
+    let block = divergence_block("67.");
+
+    assert_eq!(
+        block["reply_applied_exit"],
+        json!(EXIT_SUCCESS),
+        "entry 67 names a status this build does not exit at for an applied edit"
+    );
+    assert_eq!(
+        block["reply_queued_exit"],
+        json!(EXIT_SUCCESS),
+        "entry 67 names a status this build does not exit at for a queued edit"
+    );
+    assert_eq!(
+        block["reply_refused_exit"],
+        json!(EXIT_REFUSED),
+        "entry 67 names a status this build does not exit at for a refused edit"
+    );
+    // The whole of the proposal is that the first two are the same number: an
+    // envelope that was accepted answers as accepted, whichever writer applies
+    // it, and only a refusal answers otherwise.
+    assert_eq!(
+        block["reply_queued_exit"], block["reply_applied_exit"],
+        "entry 67 has a queued envelope answering with a status of its own again"
+    );
+    assert_ne!(
+        block["reply_queued_exit"],
+        json!(EXIT_QUEUED),
+        "entry 67 has a queued reply answering with the unfinished-run status again"
+    );
+    // And what the reply says beside the status, which is the half a status
+    // cannot carry: that the edits are durable and waiting for a driver.
+    let driver = std::fs::read_to_string(repo_root().join("src/driver.rs"))
+        .expect("the driver ships");
+    assert!(
+        driver.contains("durable command queue")
+            && driver.contains("has to drive the run for them to")
+            && driver.contains("They are not to be sent"),
+        "the reply no longer says what a queued envelope is waiting for"
     );
 }
 
@@ -4669,9 +4724,17 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     );
     assert!(
         readme.contains(&format!(
-            "exits `{EXIT_SUCCESS}` when the reconciler applied it, `{EXIT_QUEUED}` when it is queued"
-        )) && readme.contains(&format!("and `{EXIT_REFUSED}` when")),
+            "exits `{EXIT_SUCCESS}` when the reconciler applied it, `{EXIT_SUCCESS}` when it is \
+             accepted and still queued"
+        )) && readme.contains(&format!("and `{EXIT_REFUSED}` when it was refused")),
         "the README's reply exit-code mapping no longer matches the crate's constants"
+    );
+    // And it no longer gives a queued reply a status of its own: an envelope that
+    // was accepted and a reply that was refused must not be answered with two
+    // codes a caller has to tell apart from a rejection. Divergence 67.
+    assert!(
+        !readme.contains(&format!("`{EXIT_QUEUED}` when it is queued")),
+        "the README still maps a queued reply to a non-zero status"
     );
 
     // Every view the README lists is a command the binary actually offers.
