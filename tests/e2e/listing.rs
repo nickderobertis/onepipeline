@@ -221,12 +221,22 @@ fn a_document_at_the_schema_before_this_build_is_refused_refolded_and_left_curre
 
     // The document as the previous build wrote it: at its own version, and
     // without the three keys it never had.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the state under test is *a previous
+    // build's output*, and no interface of this build produces one: the writer that
+    // maintains this document only ever writes the schema it reads, so the only way to hold
+    // a run recorded by the build before this one is to write what that build wrote. It is
+    // written from this build's own document rather than invented — the version it carried,
+    // less exactly the keys it did not have — and every claim after it is read off the
+    // compiled binary's own stdout. `tests/golden/run-summary-v1.json` is the same document
+    // pinned, and `src/summary.rs` holds the reader's refusal of it.
     let mut older = written.clone();
     older["schema_version"] = json!(1);
     for gone in ["parked", "judge_rejected", "landings"] {
         older.as_object_mut().expect("a document").remove(gone);
     }
     put_back(&paths, &older);
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     assert_eq!(
         listed(&world),
@@ -634,4 +644,55 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
             argv.join(" ")
         );
     }
+}
+
+/// `status` given no run renders the run-level lines and **leaves the per-node
+/// block to `status <RUN>`**.
+///
+/// The one thing this verb stopped printing without a run named, said out loud:
+/// a per-node block for every run on a host is a fold of every store on it,
+/// which is the cost the listing exists to remove. It is not lost — it is where
+/// a detail read is, and the same invocation with the run named still prints it.
+#[test]
+fn status_given_no_run_leaves_the_per_node_block_to_status_given_one() {
+    let world = World::new("listing-detail");
+    // A dispatch held open, so the run has a node the detail read has something
+    // to say about: `status <RUN>` ages a running node and names what it is
+    // doing.
+    world.script("build.wait", "hold");
+    let path = world.plan("detailed", &plan_of("detailed", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the node to be dispatched", |world| {
+        !world.events_of("detailed", "node-dispatched").is_empty()
+    });
+
+    let detail = world.run(&["status", "detailed"]);
+    detail
+        .exited(0)
+        .out_has("detailed")
+        .out_has("build: running for");
+
+    let listed = world.run(&["status"]);
+    listed.exited(0).out_has("detailed").out_has("0/1 done");
+    assert!(
+        !listed.stdout.contains("build: running for"),
+        "`status` given no run printed a per-node line, which is the fold this \
+         path must not make: {}",
+        listed.stdout
+    );
+    // And the run-level line itself is the same line either way, which is what
+    // makes the split a move rather than a loss.
+    let header = |rendered: &str| {
+        rendered
+            .lines()
+            .find(|line| line.starts_with("detailed"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        header(&listed.stdout),
+        header(&detail.stdout),
+        "the two reads disagree about the run itself"
+    );
+    world.release("build.go");
 }

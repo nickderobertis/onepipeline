@@ -1079,28 +1079,126 @@ fn rejected_by_a_judge(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) 
         .collect()
 }
 
-impl WorkStanding {
-    /// What a graph leaves for somebody to do, over the four readings of it.
+/// Where a run's **graph** has got to, as one answer rather than as the several
+/// questions it is read from.
+///
+/// A closed set, because the questions behind it are not independent and reading
+/// them as though they were is how a contradiction gets a name: every node `done`
+/// implies every node settled, so "complete but not converged" describes no graph
+/// — except the empty one, which is not a finished run but a run that has not
+/// started, and which is [`Unrecorded`](Self::Unrecorded) here rather than a
+/// coincidence of two flags.
+///
+/// One vocabulary over two readers: the folding views read it off a status map
+/// and the bounded listing off a summary document's status counts, and each
+/// reader has its own constructor so no half-answer crosses between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphStanding {
+    /// Nothing has recorded a graph for this run at all.
+    Unrecorded,
+    /// Something can still move, with or without a driver attached to move it.
+    Moving,
+    /// Every node settled, and every one of them is `done`.
+    Complete,
+    /// Every node settled, and something is waiting on a person or blocked
+    /// behind one.
+    ConvergedWaiting,
+    /// Every node settled, and nothing is waiting on anybody.
+    ConvergedStill,
+}
+
+impl GraphStanding {
+    /// Read off a run's folded status map.
+    fn of_statuses(statuses: &BTreeMap<String, NodeStatus>) -> Self {
+        // An empty status map is a run whose graph nothing has read, not a run
+        // with nothing left to do: `is_terminal` and `state_of` both answer an
+        // empty map with the settled reading, and taking it would report a run
+        // that has recorded nothing as finished.
+        if statuses.is_empty() {
+            return Self::Unrecorded;
+        }
+        if !graph::is_terminal(statuses) {
+            return Self::Moving;
+        }
+        if graph::state_of(statuses) == graph::GraphState::Complete {
+            return Self::Complete;
+        }
+        if statuses
+            .values()
+            .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked))
+        {
+            return Self::ConvergedWaiting;
+        }
+        Self::ConvergedStill
+    }
+
+    /// The same reading off a summary document: the same words, counted.
     ///
-    /// One derivation, because two readers reach it: the folding views read
-    /// these off a run's whole store and the bounded listing reads them off that
-    /// run's summary document, and the reading — not the reader — is what
-    /// decides the word on the row and the advice under it.
-    fn of(
-        converged: bool,
-        complete: bool,
-        outstanding: bool,
-        parked: Vec<String>,
-        rejected: Vec<String>,
-    ) -> Self {
-        if converged && complete {
-            Self::Complete
-        } else if let Some(held) = HeldWork::of(parked, rejected) {
-            Self::Held(held)
-        } else if !converged || outstanding {
-            Self::Outstanding
+    /// `converged` is the document's own [`RunSummary::graph_complete`], which is
+    /// that same "every node settled, and there is a node" — derived once, where
+    /// the graph was in hand, rather than guessed back out of a count.
+    fn of_counts(counts: &BTreeMap<String, u64>, converged: bool) -> Self {
+        if counts.is_empty() {
+            return Self::Unrecorded;
+        }
+        if !converged {
+            return Self::Moving;
+        }
+        if counts.keys().all(|word| word == NodeStatus::Done.as_str()) {
+            return Self::Complete;
+        }
+        if counts.contains_key(NodeStatus::Waiting.as_str())
+            || counts.contains_key(NodeStatus::Blocked.as_str())
+        {
+            return Self::ConvergedWaiting;
+        }
+        Self::ConvergedStill
+    }
+
+    /// Whether the loop has anything left to converge.
+    fn converged(self) -> bool {
+        matches!(
+            self,
+            Self::Complete | Self::ConvergedWaiting | Self::ConvergedStill
+        )
+    }
+
+    /// The nodes a converged run holds, and nothing for one still moving.
+    ///
+    /// A run with a node still ready, running, or pending has work a fresh driver
+    /// moves, whatever else is parked or a judge rejected, and `adopt` is the
+    /// whole of what it needs. Held work is the reading for the frontier that
+    /// cannot move.
+    ///
+    /// The nodes are named by a closure rather than passed, because one of the
+    /// two callers reads them out of the run's whole event store: a moving run
+    /// must not pay for an answer this would discard.
+    fn holding(self, named: impl FnOnce() -> Vec<String>) -> Vec<String> {
+        if self.converged() {
+            named()
         } else {
-            Self::Settled
+            Vec::new()
+        }
+    }
+}
+
+impl WorkStanding {
+    /// What a graph leaves for somebody to do.
+    ///
+    /// One derivation, because two readers reach it: the folding views read the
+    /// graph off a run's whole store and the bounded listing reads it off that
+    /// run's summary document, and the reading — not the reader — is what decides
+    /// the word on the row and the advice under it.
+    fn of(graph: GraphStanding, parked: Vec<String>, rejected: Vec<String>) -> Self {
+        if graph == GraphStanding::Complete {
+            return Self::Complete;
+        }
+        if let Some(held) = HeldWork::of(parked, rejected) {
+            return Self::Held(held);
+        }
+        match graph {
+            GraphStanding::ConvergedStill => Self::Settled,
+            _ => Self::Outstanding,
         }
     }
 }
@@ -1109,74 +1207,40 @@ impl Standing {
     /// Read one run's standing, once.
     fn of(view: &RunView) -> Self {
         let statuses = view.state.statuses();
-        // An empty status map is a run whose graph nothing has read, not a run
-        // with nothing left to do: `is_terminal` and `state_of` both answer an
-        // empty map with the settled reading, and taking it would report a run
-        // that has recorded nothing as finished.
-        let converged = !statuses.is_empty() && graph::is_terminal(&statuses);
-        let parked: Vec<_> = if converged {
-            statuses
-                .iter()
-                .filter(|(_, status)| **status == NodeStatus::Parked)
-                .map(|(id, _)| id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Read for a converged run alone, and for the same reason the park above
-        // is: a run with a node still ready, running, or pending has work a fresh
-        // driver moves, whatever else a judge rejected, and `adopt` is the whole
-        // of what it needs. This reading is for the frontier that cannot move.
-        let rejected = if converged {
-            rejected_by_a_judge(view, &statuses)
-        } else {
-            Vec::new()
-        };
+        let graph = GraphStanding::of_statuses(&statuses);
         Self {
             liveness: view.liveness(),
             work: WorkStanding::of(
-                converged,
-                graph::state_of(&statuses) == graph::GraphState::Complete,
-                statuses
-                    .values()
-                    .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked)),
-                parked,
-                rejected,
+                graph,
+                graph.holding(|| {
+                    statuses
+                        .iter()
+                        .filter(|(_, status)| **status == NodeStatus::Parked)
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                }),
+                graph.holding(|| rejected_by_a_judge(view, &statuses)),
             ),
-            convergence: Convergence::of(converged),
+            convergence: Convergence::of(graph.converged()),
         }
     }
 
     /// The same standing, off one row of a bounded listing.
     ///
-    /// The three readings the fold takes off a status map are taken off the
-    /// document's own counts instead, and they are the same readings: `complete`
-    /// is every node `done` — which an empty map answers exactly as
-    /// [`graph::state_of`] answers it — and `outstanding` is a node waiting on a
-    /// person or blocked behind one. What a status *count* cannot answer, the
-    /// document names outright: which nodes are parked, and which a judge turned
-    /// down.
+    /// The graph is read off the document's own status counts rather than off a
+    /// status map, in the same words and by the same reading. What a count cannot
+    /// answer, the document names outright: which nodes are parked, and which a
+    /// judge turned down.
     fn of_row(row: &Row<'_>) -> Self {
-        let counts = &row.summary.node_counts;
-        let converged = row.summary.graph_complete;
-        let held = |named: &[String]| {
-            if converged {
-                named.to_vec()
-            } else {
-                Vec::new()
-            }
-        };
+        let graph = GraphStanding::of_counts(&row.summary.node_counts, row.summary.graph_complete);
         Self {
             liveness: row.liveness(),
             work: WorkStanding::of(
-                converged,
-                counts.keys().all(|word| word == NodeStatus::Done.as_str()),
-                counts.contains_key(NodeStatus::Waiting.as_str())
-                    || counts.contains_key(NodeStatus::Blocked.as_str()),
-                held(&row.summary.parked),
-                held(&row.summary.judge_rejected),
+                graph,
+                graph.holding(|| row.summary.parked.clone()),
+                graph.holding(|| row.summary.judge_rejected.clone()),
             ),
-            convergence: Convergence::of(converged),
+            convergence: Convergence::of(graph.converged()),
         }
     }
 
