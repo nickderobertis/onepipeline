@@ -205,15 +205,21 @@ fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Er
     writer.serialize_str(&format!("{digest:032x}"))
 }
 
-/// Read a digest, refusing anything [`as_hex`] would not have written — the fixed
-/// 32 digits included, so a truncated value is a document nobody here produced
-/// rather than a smaller number.
+/// Read a digest, refusing anything [`as_hex`] would not have written.
+///
+/// The shape is checked here rather than left to `from_str_radix`, which takes a
+/// leading sign, an upper-case digit, and any number of digits at all: each of
+/// those reads back a value **no writer here produced**, and a document with one in
+/// it is one nothing on this side wrote — a truncated value most of all, which
+/// `from_str_radix` would otherwise hand back as a smaller number that seals to
+/// nothing.
 fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
     let written = String::deserialize(reader)?;
     let refuse =
         |why: &str| serde::de::Error::custom(format!("checkpoint digest '{written}': {why}"));
-    if written.len() != 32 {
-        return Err(refuse("not 32 hex digits"));
+    let a_digit = |digit: &u8| matches!(digit, b'0'..=b'9' | b'a'..=b'f');
+    if written.len() != 32 || !written.as_bytes().iter().all(a_digit) {
+        return Err(refuse("not 32 lower-case hex digits"));
     }
     u128::from_str_radix(&written, 16).map_err(|e| refuse(&e.to_string()))
 }
@@ -1470,11 +1476,28 @@ mod tests {
             "the refusal does not name what it refused: {refused}"
         );
 
-        // And a digest that is not one this build could have written, which is a
-        // document that cannot be corroborated at all.
-        let mut mangled: serde_json::Value = serde_json::from_str(GOLDEN).expect("it parses");
-        mangled["coverage"]["digest"] = json!("not a digest");
-        assert!(serde_json::from_value::<Checkpoint>(mangled).is_err());
+        // And every digest that is not one this build could have written, which is a
+        // document that cannot be corroborated at all. The upper-case and signed
+        // spellings are here because they are the ones a hex parser takes and the
+        // writer never emits, so a reader that accepted them would corroborate a
+        // document from somewhere else.
+        for refused in [
+            "not a digest",
+            // Upper case, a leading sign, and one digit short: the three a hex
+            // parser takes and `as_hex` never writes.
+            "ABCDEF01234567890123456789ABCDEF",
+            "+bcdef01234567890123456789abcdef",
+            "bcdef01234567890123456789abcdef",
+        ] {
+            let mut mangled: serde_json::Value = serde_json::from_str(GOLDEN).expect("it parses");
+            mangled["coverage"]["digest"] = json!(refused);
+            let refusal = serde_json::from_value::<Checkpoint>(mangled)
+                .expect_err("a digest no writer here produced is refused");
+            assert!(
+                refusal.to_string().contains("digest"),
+                "the refusal of '{refused}' does not name what it refused: {refusal}"
+            );
+        }
     }
 
     /// A populated session survives the document, through the checks that make one.
