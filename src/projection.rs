@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::edits::{self, Frontier, Operation};
@@ -28,7 +29,8 @@ use crate::plan::Plan;
 /// nothing can mean — a run not stopped whose workers outlived the stop — and
 /// every view that reports an in-flight node has to choose exactly one of these
 /// sentences about it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum StopState {
     /// No stop has been recorded.
     #[default]
@@ -43,7 +45,15 @@ pub enum StopState {
 }
 
 /// Everything the journal says about a run.
-#[derive(Debug, Clone, Default)]
+///
+/// **Serialized as a whole** so a reader can resume a fold from where an earlier
+/// one stopped rather than replaying the run's entire history — see
+/// [`crate::checkpoint`]. Every field is written by the fold and read back by
+/// it, and the one that is not — [`cross_dag`](Self::cross_dag), which
+/// `crate::crossdag` fills in afterwards — is deliberately skipped, so what a
+/// checkpoint carries is a fold of the journal and nothing a caller added to it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunState {
     /// The desired graph the loop is converging toward, with every committed
     /// edit applied.
@@ -214,6 +224,7 @@ pub struct RunState {
     /// reader that cannot reach another run's ledger reports a consumer as
     /// waiting rather than inventing an answer about it. `crate::crossdag` is
     /// what fills this in.
+    #[serde(skip)]
     pub cross_dag: BTreeMap<String, NodeStatus>,
     /// The notes still owed to a node's **next dispatch**.
     ///
@@ -288,7 +299,8 @@ pub struct RunState {
 /// One value rather than a status beside a map of cancellation times, so every
 /// transition writes the whole of it and a wait cannot outlive the park that
 /// carried it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Recorded {
     /// The status the journal stated, with nothing left running for the node.
     At(NodeStatus),
@@ -331,7 +343,8 @@ impl Recorded {
 /// outlives the driver that reported it: an adoption picks up a run parked on
 /// one, and a fresh loop that did not know what its predecessor was holding
 /// would clear it silently — the pause reported, the release never.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PendingDecision {
     /// What kind of decision it is, in the vocabulary its raiser used.
     pub kind: String,
@@ -340,7 +353,8 @@ pub struct PendingDecision {
 }
 
 /// What one node's dispatch has recorded, and what it last said it was doing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeActivity {
     /// The tool the last `turn-activity` named, with its bounded detail.
     ///
@@ -371,7 +385,8 @@ pub struct NodeActivity {
 /// recorded events at no time and one that has recorded none at a time, and a
 /// view rendering either claims an age nothing measured — which is the misreading
 /// this whole readout exists to prevent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Progress {
     events: NonZeroU64,
     last_at: u64,
@@ -426,7 +441,8 @@ impl Progress {
 /// member — which side of the conversation the chain belonged to are that
 /// library's contract, and a second declaration of them here is a second thing
 /// to keep true. What this crate adds is what the *envelope* carried around it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Refusal {
     /// The advance exactly as `oneagentgraph` published it.
     pub advanced: oneagentgraph::event::FallbackAdvanced,
@@ -459,7 +475,8 @@ pub struct Refusal {
 /// and attributes nothing per side or per turn — so a node whose records carry
 /// none is a node this crate cannot say either way about, never one whose chains
 /// ran out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Served {
     /// The invocation exactly as `oneagentgraph` published it.
     pub session: oneagentgraph::event::OneharnessSession,
@@ -476,7 +493,8 @@ pub struct Served {
 /// label a producer stamped and this build cannot read is **not** a producer
 /// that stamped none, and a view saying "the record does not name a side" about
 /// one would be denying a record that does name one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MemberLabel {
     /// The producer stamped one, and it reads.
     Named(String),

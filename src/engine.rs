@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
+use crate::checkpoint::Projected;
 use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -676,7 +677,12 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     }
     // llmlint: ignore-end[boundary_inputs_validated]
     let mut journal = Journal::open(paths);
-    let mut state = projection::fold(&journal::read(&paths.journal()));
+    // Folded from the run's checkpoint where there is a usable one, and re-folded
+    // the same way after every change this loop records — so what knowing where
+    // the run has got to costs is the records written since the last time it was
+    // asked, rather than the run's whole history over and over. See
+    // [`crate::checkpoint`].
+    let mut state = Projected::open(paths);
     report_unreadable_records(paths, &state);
 
     let outcome = converge(paths, &mut journal, &mut state, &launch)?;
@@ -689,7 +695,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
 fn converge(
     paths: &RunPaths,
     journal: &mut Journal,
-    state: &mut RunState,
+    state: &mut Projected,
     launch: &LaunchRecord,
 ) -> Result<GraphState> {
     // Resolving write-back is deliberately best effort. A run launched by an older build
@@ -1103,7 +1109,7 @@ fn converge(
                 Message::Settled(settlement) => {
                     in_flight.remove(&settlement.node);
                     settle(paths, journal, &settlement)?;
-                    *state = projection::fold(&journal::read(&paths.journal()));
+                    state.refresh(paths);
                     // A node that settled may have readied its dependents, and a
                     // node that is ready again — a requeue, a retry — is announced
                     // again. `announce_ready` retains against the frontier at the
@@ -1773,7 +1779,7 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
-    state: &mut RunState,
+    state: &mut Projected,
     channel: &ChannelState,
     launch: &LaunchRecord,
     in_flight: &mut BTreeMap<String, Dispatch>,
@@ -1815,7 +1821,7 @@ fn reconcile_edits(
                             raise(paths, journal, surface)?;
                         }
                     }
-                    *state = projection::fold(&journal::read(&paths.journal()));
+                    state.refresh(paths);
                     changed = true;
                 }
                 Err(error) => {
@@ -2153,7 +2159,7 @@ fn deliver_note(
 fn adopt_releases(
     paths: &RunPaths,
     journal: &mut Journal,
-    state: &mut RunState,
+    state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
     releases: &mut crate::release::Watch,
     in_flight: &BTreeMap<String, Dispatch>,
@@ -2214,7 +2220,7 @@ fn adopt_releases(
             ]),
         )?;
     }
-    *state = projection::fold(&journal::read(&paths.journal()));
+    state.refresh(paths);
     Ok(true)
 }
 
@@ -2246,7 +2252,7 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 fn start_ready(
     paths: &RunPaths,
     journal: &mut Journal,
-    state: &mut RunState,
+    state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
     rules: &ExecutorRules,
     launch: &LaunchRecord,
@@ -2336,7 +2342,7 @@ fn start_ready(
         settled_here = true;
     }
     if settled_here {
-        *state = projection::fold(&journal::read(&paths.journal()));
+        state.refresh(paths);
     }
     Ok(settled_here)
 }

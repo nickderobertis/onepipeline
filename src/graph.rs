@@ -285,6 +285,58 @@ pub struct Graph {
     pub concurrency: u32,
 }
 
+/// A graph as a checkpoint of the fold carries it: the concurrency, and the
+/// nodes in the order the plan wrote them.
+///
+/// The two private fields are **not** written side by side, because they are one
+/// fact held twice — `order` is the keys of `nodes` — and a document carrying
+/// both is a document an editor can make disagree. Written through
+/// [`Graph::iter`] and read back through [`Graph::insert`], which is the one
+/// constructor that keeps them agreeing.
+///
+/// **What this round-trips is whatever the fold produces**, which is not the same
+/// set a plan may state. [`check`] refuses a *plan* whose `concurrency` is zero,
+/// and [`Graph::default`] carries exactly that: it is the graph of a run whose
+/// store does not yet hold its `run-started`, and every fold starts there.
+// llmlint: ignore-block[invalid_states_unrepresentable] a `NonZeroU32` here, or a check
+// for one, would make the state of a run that has recorded no plan unrepresentable and its
+// checkpoint unreadable — that state is `Graph::default()`, which this crate mints itself
+// and which `projection::fold` starts from, so refusing it would refuse the checkpoint of
+// every run mid-launch. The rule the value does cross is `check`'s, at the boundary a plan
+// crosses, and it is asked there of every plan this engine executes.
+// llmlint: ignore-block[boundary_inputs_validated] the same reason: the only rule to
+// validate against is the plan's, this value is not one, and refusing it here refuses a
+// state the fold itself produces.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsWritten {
+    concurrency: u32,
+    nodes: Vec<Node>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-end[boundary_inputs_validated]
+
+impl Serialize for Graph {
+    fn serialize<S: serde::Serializer>(&self, writer: S) -> std::result::Result<S::Ok, S::Error> {
+        AsWritten {
+            concurrency: self.concurrency,
+            nodes: self.iter().cloned().collect(),
+        }
+        .serialize(writer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Graph {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<Self, D::Error> {
+        let written = AsWritten::deserialize(reader)?;
+        let mut graph = Self::with_concurrency(written.concurrency);
+        for node in written.nodes {
+            graph.insert(node);
+        }
+        Ok(graph)
+    }
+}
+
 impl Graph {
     /// An empty graph that will dispatch at most `concurrency` nodes at once.
     pub fn with_concurrency(concurrency: u32) -> Self {

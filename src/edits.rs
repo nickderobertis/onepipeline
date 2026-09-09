@@ -334,9 +334,14 @@ pub struct Frontier {
 /// The two facts a park carrying only a node id could not state: who decided,
 /// and why. Its [`Default`] is the planner's park with no reason, which is what
 /// every park recorded before this existed was.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// A checkpoint of the fold carries this value, and one carrying a reason that is
+/// present and says nothing is refused rather than read — see [`stated`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Park {
     /// The envelope author that issued it.
+    #[serde(default)]
     pub by: Author,
     /// Why, when it stated one and that one says something.
     ///
@@ -346,7 +351,36 @@ pub struct Park {
     /// durable record that an older build — or a person with an editor — can have
     /// written one into, and a refusal reading "whose reason was:" with nothing
     /// after it is worse than one that says the park carried none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "stated"
+    )]
     reason: Option<String>,
+}
+
+/// A reason read back off a checkpoint, with one that says nothing refused.
+///
+/// The blank reason is normalized where it is *folded* — [`Park::of`] does that,
+/// because a journal record an older build wrote can carry one and the run still
+/// has to be readable. A checkpoint is not a record: it is this build's own cache,
+/// so a blank reason in one is a value no writer here produced, and the document
+/// goes back to the whole-store fold rather than into a park a refusal would
+/// quote nothing out of.
+fn stated<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::Deserialize;
+    let written = Option::<String>::deserialize(reader)?;
+    if written
+        .as_ref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(serde::de::Error::custom(
+            "a park reason that is present and says nothing",
+        ));
+    }
+    Ok(written)
 }
 
 impl Park {

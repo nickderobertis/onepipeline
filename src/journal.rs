@@ -241,6 +241,31 @@ pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)>
         .collect()
 }
 
+/// Every **finished** record a run's journal has grown by since its first
+/// `from` bytes, each with how many bytes of the file it occupies.
+///
+/// [`read_after`] and [`finished_after`] at once, because a checkpoint needs
+/// exactly one half of each. Like the tailer, it **stops** at a record whose
+/// writer has not finished it: the byte it hands back becomes the byte a later
+/// read resumes at, and a boundary inside a half-written line loses the record
+/// it lands in once that writer finishes. Like [`read_after`], it hands back a
+/// record this build cannot read **with its size**, because that line is one the
+/// file holds and a boundary that skipped it would be short for ever.
+pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+    let mut grown = Vec::new();
+    for record in ledger::read_records_from(path, from) {
+        if !record.terminated {
+            break;
+        }
+        let whole = match reading(&record) {
+            Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
+            Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+        };
+        grown.push((whole, record.bytes + 1));
+    }
+    grown
+}
+
 /// Every **finished** record a run's journal has grown by since its first `from`
 /// bytes, and the byte a later read resumes at.
 ///

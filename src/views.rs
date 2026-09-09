@@ -55,7 +55,7 @@ use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord};
-use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
+use crate::projection::{MemberLabel, Refusal, RunState, Served};
 use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
@@ -536,7 +536,11 @@ impl RunView {
         let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
-        let mut state = projection::fold(&events);
+        // Resumed from the run's checkpoint rather than folded from nothing: the
+        // events above are the merged store this view hands to its caller, and what
+        // no longer grows with them is the fold over them. See
+        // [`crate::checkpoint`].
+        let mut state = crate::checkpoint::fold_and_checkpoint(paths);
         landings_the_run_re_read(&mut state, paths);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
@@ -3969,7 +3973,7 @@ mod tests {
             &[("reason", json!("quota"))],
         );
         nameless.stream = "oneagentgraph-1".into();
-        assert!(projection::fold(&[nameless]).refusals.is_empty());
+        assert!(crate::projection::fold(&[nameless]).refusals.is_empty());
     }
 
     /// One chain, two turns, two endings: the recovered turn and the one that
@@ -3980,7 +3984,7 @@ mod tests {
     /// one it picked would decide where a reader went.
     #[test]
     fn one_chain_that_recovers_and_then_runs_out_says_both() {
-        let state = projection::fold(&[
+        let state = crate::projection::fold(&[
             advanced(Some("agent"), Some(1), "claude-code", "quota"),
             invocation(
                 oneagentgraph::event::Role::Agent,
@@ -4023,8 +4027,10 @@ mod tests {
             invocation(oneagentgraph::event::Role::Agent, 1, "claude-code"),
             invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
         ] {
-            let crossed =
-                projection::fold(&[advanced(Some("judge"), Some(1), "codex", "quota"), crossing]);
+            let crossed = crate::projection::fold(&[
+                advanced(Some("judge"), Some(1), "codex", "quota"),
+                crossing,
+            ]);
             assert_eq!(
                 chain_records(&crossed, "build")
                     .iter()
@@ -4036,7 +4042,7 @@ mod tests {
 
         // And the member's *own* invocation still answers for it, so the
         // isolation above is a boundary rather than a chain nothing can pair.
-        let paired = projection::fold(&[
+        let paired = crate::projection::fold(&[
             advanced_for("reviewer", Some("judge"), Some(1), "codex", "quota"),
             invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
         ]);

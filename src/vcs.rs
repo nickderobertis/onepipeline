@@ -37,6 +37,7 @@ use onevcs::{
     DraftReason, EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome,
     PublishRequest, Session, SessionRequest, SessionToken, Subject,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::event::Envelope;
@@ -1352,10 +1353,51 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
 /// worktree and clone still hold them — and both are private, so a value of this
 /// type is one [`read_from`](Self::read_from) has already checked. There is no
 /// other way to make one.
+///
+/// A checkpoint of the fold carries this value, and it is read back through
+/// [`read_from`](Self::read_from)'s own checks rather than straight into the two
+/// private fields: a checkpoint is a file, so the values in it arrive from
+/// outside exactly as a stream's record does, and a token or a branch this crate
+/// would have refused off a stream is one it refuses off a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchSession {
     token: SessionToken,
     branch: BranchName,
+}
+
+/// A session as a checkpoint carries it, before the checks that make it one.
+///
+/// **One type for both directions**, so the wire is declared once: a second
+/// declaration is a shape that drifts, and a document the writer produced that the
+/// reader refuses would take a run's sessions away on the quiet.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionAsWritten {
+    token: String,
+    branch: String,
+}
+
+impl Serialize for DispatchSession {
+    fn serialize<S: serde::Serializer>(&self, writer: S) -> std::result::Result<S::Ok, S::Error> {
+        SessionAsWritten {
+            token: self.token.0.clone(),
+            branch: self.branch.0.clone(),
+        }
+        .serialize(writer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DispatchSession {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<Self, D::Error> {
+        let written = SessionAsWritten::deserialize(reader)?;
+        let token = token_of(&written.token).ok_or_else(|| {
+            serde::de::Error::custom(format!("'{}' is no session handle", written.token))
+        })?;
+        let branch = BranchName::checked(&written.branch).ok_or_else(|| {
+            serde::de::Error::custom(format!("'{}' is no branch name", written.branch))
+        })?;
+        Ok(Self { token, branch })
+    }
 }
 
 /// A branch a stream's record named, and [`usable`] accepted.

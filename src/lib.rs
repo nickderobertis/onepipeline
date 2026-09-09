@@ -63,6 +63,7 @@ pub mod views;
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
 mod agentgraph;
+mod checkpoint;
 mod concurrency;
 mod criteria;
 mod crossdag;

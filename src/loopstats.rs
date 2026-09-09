@@ -40,6 +40,16 @@ static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Journal records folded into a run's state by this process.
+///
+/// The count the checkpoint is measured by, and it is stated in **records**
+/// rather than in bytes because that is what the saving is: a fold resumed from
+/// a checkpoint takes the records the store has grown by since, and a fold
+/// without one takes every record the run has ever written. Beside
+/// [`STORE_BYTES`] rather than folded into it, because the two answer different
+/// questions — what a read cost the filesystem, and what the fold cost the
+/// loop.
+static RECORDS_FOLDED: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn pass() {
     PASSES.fetch_add(1, Ordering::Relaxed);
@@ -63,6 +73,10 @@ pub(crate) fn release_asked() {
 
 pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+}
+
+pub(crate) fn records_folded(records: u64) {
+    RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }
 
 /// What that counter stands at, for the checks that hold a bounded read bounded.
@@ -102,6 +116,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
+        "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });
     crate::ledger::write_json(&paths.dir.join(STATS_FILE), &document)
 }
@@ -140,6 +155,7 @@ mod tests {
         upstream_read();
         release_asked();
         store_read(7);
+        records_folded(3);
         flush(&paths).expect("the counts are written");
         std::env::remove_var(STATS_ENV);
         let written: serde_json::Value = crate::ledger::read_json_opt(&paths.dir.join(STATS_FILE))
@@ -154,6 +170,7 @@ mod tests {
             "upstream_reads",
             "release_asks",
             "store_bytes",
+            "records_folded",
         ] {
             assert!(
                 written[name].as_u64().is_some_and(|count| count > 0),
