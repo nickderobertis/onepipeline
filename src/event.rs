@@ -183,7 +183,7 @@ pub enum PipelineKind {
     ///
     /// Emitted only where at least one operation the command compiled to
     /// **changed** something a reader folds — see
-    /// [`Operation::changes_the_graph`](crate::edits::Operation::changes_the_graph)
+    /// [`Operation::commits_a_change`](crate::edits::Operation::commits_a_change)
     /// — so this kind means the graph moved and nothing else. The kinds of the
     /// operations it committed ride on the record as `operation_kinds`, so a
     /// reader keys on what happened without parsing the command that produced it.

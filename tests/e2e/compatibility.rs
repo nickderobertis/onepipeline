@@ -29,6 +29,14 @@
 //! a newer build proves nothing about an older one, which is what
 //! [`the_committed_fixture_is_a_journal_from_before_this_change`] holds it to.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary against a real run store; what the journeys here assert is the record
+// this crate writes and what a reader derives from it, neither of which the double
+// produces. The scenario the double states is one a real sibling would need paid model
+// turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is driven
+// instead. `harness.rs` carries the same suppression and the full rationale.
+
 use crate::harness::{agent, plan_of, World, REFUSED};
 
 use serde_json::{json, Value};

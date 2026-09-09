@@ -285,13 +285,13 @@ impl Operation {
     /// Whether committing this operation is what *makes* the change it records.
     ///
     /// The question `edit-committed` exists to answer, and the one that decides
-    /// which kind a compiled command is journalled under. "The graph" here is the
-    /// desired graph **and the record derived beside it** — what a reader folding
-    /// this operation list actually moves — because those are one durable
-    /// document to every reader: an attestation, a park, a supersession and a
-    /// settlement-from-evidence each move a node's recorded state and are read
-    /// back off this record by name, so a build that stopped writing them here
-    /// would silently lose them.
+    /// which kind a compiled command is journalled under. Deliberately **not**
+    /// "does it move the desired graph": what it is about is everything a reader
+    /// folding this operation list moves, graph or not, because those are one
+    /// durable document to that reader — an attestation, a park, a supersession
+    /// and a settlement-from-evidence each move a node's recorded state and are
+    /// read back off this record by name, so a build that stopped writing them
+    /// here would silently lose them.
     ///
     /// Exactly two operations answer `false`, and both are **reports**: the
     /// record of them is not what makes them true. A `finding-raised` went to the
@@ -305,7 +305,7 @@ impl Operation {
     /// Exhaustive on purpose: a variant added later has to decide this rather
     /// than inherit an answer.
     #[must_use]
-    pub fn changes_the_graph(&self) -> bool {
+    pub fn commits_a_change(&self) -> bool {
         match self {
             Self::FindingRaised { .. } | Self::CompletionRequested { .. } => false,
             Self::NodeAdded { .. }

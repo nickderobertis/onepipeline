@@ -2005,7 +2005,7 @@ fn commit_command(
 /// Nothing is lost by the split, in either direction: what a reader reads off
 /// this record is the operation list, and both kinds carry the same one.
 pub(crate) fn journalled_as(operations: &[edits::Operation]) -> journal::PipelineKind {
-    if operations.iter().any(edits::Operation::changes_the_graph) {
+    if operations.iter().any(edits::Operation::commits_a_change) {
         journal::PipelineKind::EditCommitted
     } else {
         journal::PipelineKind::CommandAccepted
@@ -5509,7 +5509,7 @@ mod tests {
     /// Which kind an accepted command is journalled under, and the field that
     /// says what it committed, are the ones the divergence record proposes.
     ///
-    /// `Operation::changes_the_graph` is what decides the kind, and it is private
+    /// `Operation::commits_a_change` is what decides the kind, and it is private
     /// vocabulary — so `tests/contract.rs`, which drives the public surface,
     /// cannot reach it, and entry 65 is the only place the split is written down.
     /// Both directions: an operation that stops being a report without a line
@@ -5540,7 +5540,7 @@ mod tests {
         ];
         let reports: Vec<String> = every
             .iter()
-            .filter(|operation| !operation.changes_the_graph())
+            .filter(|operation| !operation.commits_a_change())
             .map(edits::Operation::kind)
             .collect();
         assert_eq!(

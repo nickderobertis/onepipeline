@@ -2676,6 +2676,27 @@ fn an_envelope_whose_commands_all_succeed_applies_and_records_every_one() {
         .out_has("extra")
         .out_has("the corrected criterion this envelope carried");
 
+    // And the answer reports each command's own result here too, rather than
+    // only when one of them refuses: a reader keying on the entries has them for
+    // every envelope, and does not have to know which case it is in.
+    let answered = world
+        .command_outcomes(&run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    assert_eq!(answered["applied"], true, "{answered}");
+    let results = answered["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the answer reports each command: {answered}"))
+        .clone();
+    assert_eq!(results.len(), 4, "{answered}");
+    for (index, op) in ["add", "reparent", "amend", "note"].iter().enumerate() {
+        assert_eq!(results[index]["index"], index, "{answered}");
+        assert_eq!(results[index]["op"], *op, "{answered}");
+        assert_eq!(results[index]["applied"], true, "{answered}");
+        assert!(results[index]["reason"].is_null(), "{answered}");
+    }
+
     world.release("slow.go");
 }
 

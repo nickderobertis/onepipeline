@@ -1422,8 +1422,16 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // step inside it — see [`crate::vcs::is_session_boundary`] — so a
         // dispatch whose session has opened and whose worker has not yet named a
         // tool still reports its count rather than a "now" nothing did.
+        // Through the same boundary a branch name and a session token go through,
+        // and for the same reason: the kind is a wire string a **producer** chose
+        // — no vocabulary of this crate's — and it is rendered into a
+        // line-oriented view, where a value carrying a newline or a control
+        // character forges a line. A kind this build cannot render leaves the
+        // line where it was rather than putting a forged one on it.
         if !crate::vcs::is_session_boundary(&event.kind) {
-            activity.doing = Some(format!("publication {}", event.kind.0));
+            if let Some(step) = crate::vcs::usable(&event.kind.0) {
+                activity.doing = Some(format!("publication {step}"));
+            }
         }
         return;
     }

@@ -4072,12 +4072,14 @@ accepted" and "the graph changed", and every reader wants the second. During one
 supervision window a monitor raised that as a defect twice, and both were correct
 observations of a misleading name.
 
-**What decides which kind.** [`edits::Operation::changes_the_graph`](../src/edits.rs)
+**What decides which kind.** [`edits::Operation::commits_a_change`](../src/edits.rs)
 — exhaustive over the operation enum, so a variant added later has to answer it.
-"The graph" there is the desired graph **and the record derived beside it**,
-because those are one durable document to every reader: an attestation, a park, a
-supersession, a note still owed to a next dispatch and a settlement from evidence
-each move a node's recorded state and are read back off this record by name. The
+It is deliberately about everything a reader folding the operation list *moves*
+rather than about the desired graph alone, because those are one durable document
+to that reader: an attestation, a park, a supersession, a note still owed to a
+next dispatch and a settlement from evidence each move a node's recorded state
+and are read back off this record by name. `edit-committed` is what such a reader
+already takes to mean "something changed", and it keeps meaning exactly that. The
 two operations that answer `false` are the two that are **reports** — the record
 of them is not what makes them true — and neither is read off an operation list
 by anything, here or downstream. That is what makes the split cost a preceding
