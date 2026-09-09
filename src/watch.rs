@@ -1125,6 +1125,100 @@ mod tests {
         );
     }
 
+    /// Every condition round-trips through the spelling a caller types.
+    ///
+    /// The spelling is a promise both ways: it is what a supervisor writes on a
+    /// command line and what this build's own help and defaults render, so a
+    /// value that parsed one way and printed another would leave a script and
+    /// this binary a word apart. The refusal is held to naming the whole
+    /// vocabulary, because that message is all a caller who mistyped one has.
+    #[test]
+    fn every_condition_round_trips_through_the_spelling_a_caller_types() {
+        use std::str::FromStr;
+
+        for (spelling, condition) in [
+            ("surface", WatchUntil::Surface),
+            ("settled", WatchUntil::Settled),
+            ("nothing-driving", WatchUntil::NothingDriving),
+            ("node-settled", WatchUntil::NodeSettled),
+            ("node=build", WatchUntil::Node("build".to_string())),
+        ] {
+            assert_eq!(WatchUntil::from_str(spelling).expect("reads"), condition);
+            assert_eq!(condition.to_string(), spelling);
+        }
+        // Every spelling the refusal offers is one this build actually accepts —
+        // `node=<ID>` for the shape rather than for a node any run holds — so a
+        // caller who types back what they were told is not refused again.
+        for condition in crate::cli::WATCH_CONDITIONS {
+            assert!(
+                WatchUntil::from_str(condition).is_ok(),
+                "the vocabulary offers `{condition}`, which this build refuses"
+            );
+        }
+        for text in ["", "node", "node=", "NODE=build", "surfaces", "0"] {
+            let refused = WatchUntil::from_str(text).expect_err("refused");
+            for condition in crate::cli::WATCH_CONDITIONS {
+                assert!(
+                    refused.contains(condition),
+                    "the refusal of {text:?} does not name `{condition}`: {refused}"
+                );
+            }
+        }
+    }
+
+    /// A wait with no bound is a different value from the one that reads once and
+    /// returns, in every spelling and in the deadline each produces.
+    ///
+    /// The pair is the point of the word: `0` is the shortest wait there is and
+    /// `none` is the longest, and one value meaning both would have made "wake me
+    /// when something happens" unsayable.
+    #[test]
+    fn a_wait_with_no_bound_is_a_different_value_from_the_one_that_reads_once() {
+        use std::str::FromStr;
+
+        let unbounded = WatchTimeout::from_str(crate::cli::WATCH_TIMEOUT_UNBOUNDED).expect("reads");
+        assert_eq!(unbounded, WatchTimeout::Unbounded);
+        assert_ne!(unbounded, WatchTimeout::Bounded(0));
+        assert_eq!(
+            unbounded.to_string(),
+            crate::cli::WATCH_TIMEOUT_UNBOUNDED,
+            "a wait with no bound does not render as the word it is read from"
+        );
+        for seconds in [0, 300] {
+            let bounded = WatchTimeout::from_str(&seconds.to_string()).expect("reads");
+            assert_eq!(bounded, WatchTimeout::Bounded(seconds));
+            assert_eq!(bounded.to_string(), seconds.to_string());
+        }
+        // What each one is in the loop: no deadline at all, against a deadline
+        // that has already passed — which is what reads the run once and returns.
+        assert!(deadline(WatchTimeout::Unbounded)
+            .expect("a wait with no bound is a wait")
+            .is_none());
+        assert!(deadline(WatchTimeout::Bounded(0))
+            .expect("a zero wait is a wait")
+            .is_some_and(|at| at <= Instant::now()));
+        for text in ["", "-1", "forever", "5s", "None"] {
+            let refused = WatchTimeout::from_str(text).expect_err("refused");
+            assert!(
+                refused.contains(crate::cli::WATCH_TIMEOUT_UNBOUNDED),
+                "the refusal of {text:?} does not name the word for no bound: {refused}"
+            );
+        }
+    }
+
+    /// A refusal names the ids a graph holds, and says so out loud when it holds
+    /// none.
+    ///
+    /// The empty case is said rather than left blank for the reason an empty
+    /// unread queue is: "it holds nothing" and "this line does not say what it
+    /// holds" would otherwise be the same sentence.
+    #[test]
+    fn a_refusal_names_the_ids_a_graph_holds_and_says_so_when_it_holds_none() {
+        let ids = ["build".to_string(), "check".to_string()];
+        assert_eq!(named(ids.iter()), "build, check");
+        assert_eq!(named(std::iter::empty()), "no nodes at all");
+    }
+
     #[test]
     fn a_wait_longer_than_the_clock_can_name_is_refused_rather_than_panicking() {
         assert!(Instant::now()

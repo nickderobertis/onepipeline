@@ -1396,6 +1396,64 @@ fn a_condition_this_verb_cannot_answer_is_refused_before_anything_is_streamed() 
     world.release("check.go");
 }
 
+/// A wait for **any** node to settle, past a run that has settled every node it
+/// has, is refused as one that could never fire.
+///
+/// The other half of the line, and the case where refusing costs something: this
+/// run would have ended the wait on the condition every wait returns on, and the
+/// refusal comes first anyway. A condition that cannot fire is a mistake in the
+/// command, and answering it with another condition's status would hide it behind
+/// an exit code the caller reads as an answer.
+#[test]
+fn a_wait_for_any_settlement_past_a_finished_run_could_never_fire_and_is_refused() {
+    let world = World::new("watch-all-done");
+    let run = running(&world, "watchalldone", vec![agent("build", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    // Everything this run will ever settle is ahead of a watch that starts at the
+    // beginning of its journal, so the condition is answerable — and what answers
+    // it is the run settling, which outranks it and ends every wait.
+    let first = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node-settled",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&first, "settled", 0);
+    let cursor = returned(&first)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+
+    let refused = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node-settled",
+        "--cursor",
+        &cursor,
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    refused
+        .exited(REFUSED)
+        .err_has("would never fire")
+        .err_has("build");
+    assert!(
+        machine(&refused).is_empty(),
+        "a refused watch wrote records before refusing:\n{}",
+        refused.stdout
+    );
+}
+
 /// A wait with no bound blocks where `--timeout 0` reads once and returns, and
 /// ends on the condition it was given rather than on a clock.
 ///
