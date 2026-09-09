@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–65 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–66 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 65 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 66 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -4213,3 +4213,61 @@ a preceding reader knows and the version-1 journal this build has to keep readin
 The envelope shape itself is held to `tests/golden/envelope-v2.json`, with
 `tests/golden/envelope-v1.json` beside it as what the version before this one
 looked like.
+
+## 66. A surface's delivery record says when it was delivered and not when its text was true — OPEN
+
+**Proposal (for the planner who owns the contract): state that
+`planner-surfaced` carries, beside the four fields it carries today, the instant
+the surface it delivers was queued.**
+
+The contract's merged-stream paragraph lists `planner-surface-queued` and
+`planner-surfaced` among this library's own kinds and says nothing about what
+either carries. `planner-surfaced` carried `kind`, `message`, `source` and
+`blocking` — the delivered surface's text and nothing about *when* that text was
+true. A surface is written in the **present tense** and is handed out whenever a
+reader gets to it, and the queue holds a backlog, so the only instant such a
+record carried was the envelope's own `ts`: the moment of the reading.
+
+**What it cost.** Draining three stale surfaces produced three `planner-surfaced`
+records 842 ms apart whose text still read `waited 2h47m, last answer:
+not-answered` about a hold that had been flipped to fast adoption fourteen
+minutes earlier. A monitor read them as one hold producing duplicate surfaces and
+raised a grounded, specific and **wrong** finding off them, and a manager spent
+the check it takes to decline one. Nothing in the three records could have told
+that reader otherwise: two of them were the *same queued surface handed out
+twice*, and their payloads were byte-identical.
+
+**The instant rather than an age.** An age is computed against the moment of the
+reading, so two hand-outs of one queued surface would carry two different ages
+and read as two conditions — which is the confusion this exists to end. The
+queued instant is a property of the surface, so one surface handed out twice
+carries one value and two surfaces carry two, and a reader tells them apart on
+the records' contents alone without holding the queue.
+
+**Epoch milliseconds**, which is how every instant this crate records is spelled
+and how the surface itself carries it —
+[`channel::Surface::queued_at`](../src/channel.rs), already durable in the queue
+since before this change and simply not passed on.
+
+**Additive, and that is the whole of the compatibility story.** The four fields
+are untouched, so every reader that predates the field reads what it always read;
+a record written before this change does not carry the key, and the crate's own
+fold — which reads a hand-out for the count and the envelope's `ts` — is
+unaffected either way. No version moves for it: the merged stream's envelope
+version says which shapes a *record* may have, and nothing a reader folds changed
+meaning.
+
+```json
+{
+  "delivery_kind": "planner-surfaced",
+  "queued_at_field": "queued_at",
+  "queued_at_units": "epoch-milliseconds",
+  "carried_beside": ["kind", "message", "source", "blocking"]
+}
+```
+
+Driven end to end by `channel::a_delivered_surface_is_recorded_with_the_instant_it_was_queued`,
+which hands one queued surface out twice and a second surface once and reads the
+three instants recorded, and held against a record from before the field by
+`tests/replay.rs`'s
+`a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads`.

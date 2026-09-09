@@ -1994,6 +1994,17 @@ fn next(args: &ReadArgs) -> Result<i32> {
             ("message", json!(surface.message)),
             ("source", json!(surface.source)),
             ("blocking", json!(surface.blocking)),
+            // **When the text was true**, beside the text. A surface is written
+            // in the present tense and is handed out whenever a reader gets to
+            // it, so a hand-out of a queue three deep says three present-tense
+            // things about three past moments — and a reader with only this
+            // record's own timestamp reads them as three live conditions. It is
+            // the queued instant rather than a duration, so two hand-outs of the
+            // **one** surface carry the one instant and are distinguishable from
+            // two surfaces on their contents alone. Epoch milliseconds, as every
+            // instant this crate records is, and as the surface itself carries
+            // it. See divergence 66.
+            ("queued_at", json!(surface.queued_at)),
         ]),
     )?;
 

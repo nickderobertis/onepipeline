@@ -976,6 +976,107 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     world.release("build.go");
 }
 
+/// The record of a hand-out says **when the text it carries was true**.
+///
+/// A surface is written in the present tense and handed out whenever a reader
+/// gets to it, so a record of the hand-out alone dates the *reading* and says
+/// nothing about the condition. Draining a backlog then reads as that many live
+/// conditions — which is how three hand-outs of one stale hold were read as one
+/// hold surfacing three times, and a monitor raised a grounded, specific, wrong
+/// finding off them. The queued instant is what tells the two apart, and it is
+/// the *instant* rather than an age precisely so that two hand-outs of one
+/// queued surface carry the same value while two surfaces carry different ones.
+#[test]
+fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued() {
+    use std::io::Write;
+
+    let world = World::new("channel-surface-instant");
+    world.script("build.wait", "hold");
+    let run = running(&world, "surfaceinstant", vec![agent("build", &[])]);
+
+    let serving = |asker: &str, frame: &str| {
+        let mut serving = world
+            .cmd(&["channel", "serve", &run])
+            .env(onepipeline::channel::ASKER_ENV, asker)
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(stdin, "{frame}").expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        drop(stdin);
+        serving
+    };
+
+    // One question, read once, and then left behind by the asker that raised it.
+    let asked = serving(
+        "the-asker-that-ended",
+        r#"{"kind":"blocker","message":"who owns this decision?","node":"build"}"#,
+    );
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let first = world.run(&["next", &run]);
+    first.exited(0).out_has("who owns this decision?");
+    let queued_at = first.json()["surface"]["queued_at"].clone();
+    assert!(queued_at.is_u64(), "{}", first.json());
+    ended(asked);
+
+    // A second question, from an asker that is waiting on it, which takes the
+    // slot the first was sitting in and puts it back among the readable ones.
+    let pressing = serving(
+        "some-other-dispatch",
+        r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
+    );
+    world.until("the second question to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+    let second = world.run(&["next", &run]);
+    second.exited(0);
+    assert_eq!(second.json()["surface"]["message"], "whose call is the base?");
+    let second_queued_at = second.json()["surface"]["queued_at"].clone();
+
+    // And the first, handed out a second time: the same queued surface, the same
+    // text, and a second delivery of it.
+    let again = world.run(&["next", &run]);
+    again.exited(0);
+    assert_eq!(again.json()["surface"]["message"], "who owns this decision?");
+
+    let handed = world.events_of(&run, "planner-surfaced");
+    assert_eq!(handed.len(), 3, "{handed:?}");
+    // Two hand-outs of one queued surface carry one instant, so a reader holding
+    // both knows it is looking at one condition delivered twice rather than at a
+    // condition that recurred.
+    assert_eq!(handed[0]["payload"]["queued_at"], queued_at, "{handed:?}");
+    assert_eq!(handed[2]["payload"]["queued_at"], queued_at, "{handed:?}");
+    // And a separate surface carries its own, which is what makes the pair above
+    // evidence of anything.
+    assert_eq!(
+        handed[1]["payload"]["queued_at"], second_queued_at,
+        "{handed:?}"
+    );
+    assert_ne!(handed[1]["payload"]["queued_at"], queued_at, "{handed:?}");
+
+    // The four fields the record already carried say exactly what the surface
+    // handed over says, which is what they said before the fifth was added.
+    let delivered = first.json();
+    for field in ["kind", "message", "source", "blocking"] {
+        assert_eq!(
+            handed[0]["payload"][field], delivered["surface"][field],
+            "the delivery record's `{field}` is no longer the delivered surface's"
+        );
+    }
+    assert_eq!(handed[0]["payload"]["kind"], "blocker");
+    assert_eq!(handed[0]["payload"]["message"], "who owns this decision?");
+    assert_eq!(handed[0]["payload"]["blocking"], json!(true));
+
+    ended(pressing);
+    world.release("build.go");
+}
+
 /// A blocking surface whose server stopped while the side that asked stayed is
 /// still there to be claimed and answered.
 ///

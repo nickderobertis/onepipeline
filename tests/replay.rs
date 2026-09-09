@@ -213,3 +213,116 @@ fn a_park_this_build_cannot_place_reads_as_a_park_rather_than_a_pending_stop() {
     );
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// When the surface below was handed to a planner, and when it had been queued.
+///
+/// Two different moments, which is the whole reason the second is recorded: the
+/// text was written at the first and read at the second.
+const SURFACED_AT: &str = "2026-08-18T04:02:00.000Z";
+const SURFACE_QUEUED_AT: u64 = 1_755_489_600_000;
+
+/// A run store whose journal ends with one surface handed to the planner,
+/// carrying exactly `payload`.
+///
+/// The payload is the caller's whole subject here — what a build wrote on that
+/// record — so it is stated rather than assembled.
+fn a_surface_was_read(root: &Path, run: &str, payload: serde_json::Value) {
+    let dir = root.join(run);
+    std::fs::create_dir_all(&dir).expect("a run directory");
+    std::fs::write(
+        dir.join("launch.json"),
+        json!({
+            "run_id": run,
+            "plan": "plan.json",
+            "launcher": "claude-code",
+            "session": "session-replay",
+            "pid": std::process::id(),
+            "host": "replay",
+            "started_at": RECORDED_AT,
+            "heartbeat_interval": 1_800,
+        })
+        .to_string(),
+    )
+    .expect("a launch record");
+
+    let journal = [
+        recorded(
+            PipelineKind::RunStarted,
+            RECORDED_AT,
+            None,
+            json!({"plan": plan()}),
+        ),
+        recorded(
+            PipelineKind::NodeDispatched,
+            RECORDED_AT,
+            Some("slow"),
+            json!({}),
+        ),
+        recorded(PipelineKind::PlannerSurfaced, SURFACED_AT, None, payload),
+    ]
+    .iter()
+    .map(|event| serde_json::to_string(event).expect("an event serialises"))
+    .collect::<Vec<_>>()
+    .join("\n");
+    std::fs::write(dir.join("events.jsonl"), format!("{journal}\n")).expect("a journal");
+}
+
+/// A hand-out recorded before the queued instant existed folds exactly as one
+/// recorded after it does.
+///
+/// The added field is additive and this is what that claim means: the same run,
+/// the same records, the same stamps, and the only difference the key a build
+/// before the change never wrote. Both journals are replayed through the reader
+/// every view is derived from — a record that fell out of the fold, or one
+/// placed differently in time, is a different state and shows up here. The
+/// comparison is on that state rather than on a rendering because a rendering
+/// carries this host's clock and its provider probe, which differ between two
+/// reads a moment apart for reasons that have nothing to do with the record.
+#[test]
+fn a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads() {
+    let root = scratch("surfaced");
+    let four = json!({
+        "kind": "check-in",
+        "message": "the workspace is still held",
+        "source": "check-in",
+        "blocking": false,
+    });
+    let mut five = four.clone();
+    five["queued_at"] = json!(SURFACE_QUEUED_AT);
+
+    // What a reader takes from a hand-out: that one was read, and when it was
+    // read — the two the fold derives from this record and nothing else.
+    let folded = |root: &Path| -> (u64, Option<u64>) {
+        let survey = Survey::of(root);
+        assert!(
+            survey.skipped.is_empty(),
+            "the replayed run was refused rather than read: {:?}",
+            survey.skipped
+        );
+        let view = survey
+            .views
+            .first()
+            .expect("the replayed run is the one under the root");
+        (view.state.surfaces_read, view.state.last_surface_at)
+    };
+
+    a_surface_was_read(&root, "surfaced", four);
+    let before = folded(&root);
+    a_surface_was_read(&root, "surfaced", five);
+    let after = folded(&root);
+
+    assert_eq!(
+        before.0, 1,
+        "the hand-out a build before the field wrote was not folded as one read"
+    );
+    assert!(
+        before.1.is_some(),
+        "the hand-out a build before the field wrote was not placed in time"
+    );
+    assert_eq!(
+        before, after,
+        "a hand-out recorded before the queued instant existed folds differently from \
+         one recorded after it"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}

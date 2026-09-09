@@ -2767,6 +2767,55 @@ fn the_divergence_record_names_the_envelope_version_this_build_writes_and_reads(
     );
 }
 
+/// What entry 66 says a delivered surface's record carries is what this build
+/// writes on it.
+///
+/// The contract names the kind and says nothing about its payload, so the
+/// divergence entry is the only place the shape is written down — and a consumer
+/// dating a surface's text reads it from there. An entry naming a kind this build
+/// does not emit, or a journey it does not run, is a document about a build that
+/// does not exist.
+#[test]
+fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
+    let block = divergence_block("66.");
+
+    let kind = block["delivery_kind"]
+        .as_str()
+        .expect("entry 66 names the kind that delivers a surface");
+    assert!(
+        PIPELINE_KINDS
+            .iter()
+            .any(|carried| carried.as_str() == kind),
+        "entry 66 names `{kind}`, which is not a kind this build emits"
+    );
+    assert_eq!(
+        block["queued_at_units"], "epoch-milliseconds",
+        "entry 66 spells the instant in units this crate does not record in"
+    );
+    // The four it is carried beside are the ones the record already carried, so
+    // the entry says what was added rather than restating the payload.
+    assert_eq!(
+        serde_json::from_value::<Vec<String>>(block["carried_beside"].clone())
+            .expect("entry 66 names the fields the instant joins"),
+        ["kind", "message", "source", "blocking"]
+    );
+    let field = block["queued_at_field"]
+        .as_str()
+        .expect("entry 66 names the field");
+    let driver = std::fs::read_to_string(repo_root().join("src/driver.rs"))
+        .expect("the driver ships");
+    assert!(
+        driver.contains(&format!("(\"{field}\", json!(surface.{field}))")),
+        "entry 66 names a field the hand-out does not write: {field}"
+    );
+    let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
+        .expect("the channel journeys ship");
+    assert!(
+        journeys.contains("fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued("),
+        "entry 66 names a journey the channel suite does not run"
+    );
+}
+
 #[test]
 fn an_envelope_round_trips_through_the_merged_streams_shape() {
     let wire = json!({
