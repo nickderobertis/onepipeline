@@ -76,19 +76,13 @@ thread_local! {
     /// The same reads again, attributed to the **thread** that performed them,
     /// and only in a test build.
     ///
-    /// [`STORE_BYTES`] above is the account the host is told, and it is per
-    /// process by design. That makes it the wrong thing for a check to measure a
-    /// *delta* across: under a runner that runs a module's tests as threads of
-    /// one process, every other thread's ledger read lands in it too, so a
-    /// bounded read reads as an unbounded one — which is how
-    /// `summary::tests::a_run_still_recording_stays_current_and_stays_bounded`
-    /// came to fail intermittently while passing alone. The reads a check means
-    /// to measure are the reads it performed, and this is where those are.
+    /// [`STORE_BYTES`] is per process by design, which makes it the wrong thing
+    /// for a check to measure a *delta* across: under a runner that runs tests
+    /// as threads of one process, every other thread's ledger read lands in it
+    /// too and a bounded read reads as an unbounded one.
     ///
-    /// Not a second account: it is the same call site below, counted twice, so a
-    /// reader added to one is added to both. And not present outside a test
-    /// build — every line of it is `cfg(test)`, so what a release compiles is
-    /// the atomic alone.
+    /// Not a second account — it is the same call site below, counted twice — and
+    /// every line of it is `cfg(test)`, so a release compiles the atomic alone.
     static THREAD_STORE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 

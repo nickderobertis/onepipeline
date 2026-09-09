@@ -179,8 +179,7 @@ describe("the release outcome record", () => {
     ]);
     assert.equal(JSON.parse(off.stdout).outcome, "shipped-verified");
 
-    // A publish that was meant to happen and failed is a different thing, and it
-    // holds the release out of the top state rather than disappearing.
+    // A publish that was meant to happen and failed is a different thing.
     const broke = await compose([
       "--version",
       "1.2.3",
@@ -188,11 +187,8 @@ describe("the release outcome record", () => {
     ]);
     const failed = JSON.parse(broke.stdout);
     assert.equal(failed.outcome, "shipped-unverified");
-    // Not `nothing-shipped`: a publish job that failed may have published some
-    // of what it was given and then failed — awaiting propagation, or partway
-    // through a set of packages — so the record must not claim the registry was
-    // never written to. `shipped-unverified` is the honest reading, and the safe
-    // one for a consumer deciding whether anything is public.
+    // Not `nothing-shipped`: a publish job that failed partway through a set of
+    // packages has already written to the registry.
     assert.equal(
       failed.targets.find((t) => t.id === "pypi:onepipeline-cli").outcome,
       "shipped-unverified",

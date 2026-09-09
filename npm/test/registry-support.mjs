@@ -53,9 +53,8 @@ export class Registry {
 
   /// Acknowledge publishes of `name` at once but serve them `ms` later.
   ///
-  /// The lag a journey uses when what it asserts on is an *order* — that the
-  /// launcher was not offered before a package it pins was resolvable — because
-  /// that comparison is between two instants and needs instants to compare.
+  /// For a journey asserting an *order* — the launcher was not offered before a
+  /// package it pins was resolvable — which is a comparison between two instants.
   lagFor(name, ms) {
     this.lag.set(name, ms);
   }
@@ -64,19 +63,14 @@ export class Registry {
   /// versions are unserved for the next `reads` packument reads that find them,
   /// and served from the one after.
   ///
-  /// The lag a journey uses when what it asserts on is that the caller *waited*.
-  /// Measured against the real npm CLI: `npm view --prefer-online` is exactly one
-  /// packument read, and every read `npm publish` makes precedes its own PUT — so
-  /// `holdUntilRead(name, 1)` means the poll after the publish finds nothing and
-  /// the next one finds it, whatever else the host is running. Said with a clock
-  /// instead, the same journey asserts that npm answered faster than the lag, and
-  /// on a loaded machine it does not: a 1000ms lag left `publish-npm.sh` finding
-  /// the version already served, waiting for nothing, and printing no propagation
-  /// warning for this to match.
+  /// For a journey asserting that the caller *waited*. `npm view --prefer-online`
+  /// is exactly one packument read and every read `npm publish` makes precedes
+  /// its own PUT, so `holdUntilRead(name, 1)` means the poll after the publish
+  /// finds nothing and the next one finds it, whatever else the host is running.
+  /// A clock says the same thing only while the host is idle enough.
   ///
-  /// One or the other per package. A held package ignores any `lagFor` on it,
-  /// because two answers to "when does this become visible" is not a registry
-  /// anything can reason about.
+  /// One or the other per package: a held package ignores any `lagFor` on it,
+  /// because two answers to "when does this become visible" is not a registry.
   holdUntilRead(name, reads) {
     this.reads.set(name, reads);
   }

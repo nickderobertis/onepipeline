@@ -271,27 +271,19 @@ describe("the npm publish order", () => {
 
   it("does not offer the launcher until the registry serves every package it pins", async () => {
     const reg = await freshRegistry();
-    // The registry acknowledges these and serves them later — which is what
-    // npmjs.org did to darwin-arm64, darwin-x64 and linux-arm64 on v0.23.0.
-    //
-    // Two lags, and they are what make this journey an assertion rather than a
-    // description. A lag on a package published early has already elapsed by the
-    // time the launcher is reached, and would leave this green with nothing
-    // waiting at all — measured: with the readback removed from
-    // `scripts/publish-npm.sh`, a 4-second lag on packages published first left
-    // this passing. So the lags sit on the *last two* packages the loop
-    // publishes, where each is longer than what remains of the loop after it:
-    // without the readback the launcher reaches the registry first, and this
-    // fails on exactly the ordering the release broke.
+    // The registry acknowledges these and serves them later, as npmjs.org did to
+    // three of the five platform packages. The lags sit on the *last two* the
+    // loop publishes, each longer than what remains of the loop after it: a lag
+    // on an early package has elapsed by the time the launcher is reached, so it
+    // would leave this green with nothing having waited.
     const order = [...platforms.values()].map(({ name }) => name);
     reg.lagFor(order.at(-2), 4000);
     reg.lagFor(order.at(-1), 12_000);
 
     const published = await publishAsTheReleaseDoes();
     assert.equal(published.code, 0, published.stderr);
-    // A stalled publish is otherwise silent for as long as it stalls, and this
-    // line is the only warning anybody gets before the run that exhausts the
-    // budget. It names which package stalled and for how long.
+    // A stalled publish is otherwise silent for as long as it stalls, so this is
+    // the only warning before the run that exhausts the budget.
     assert.match(
       published.stderr,
       new RegExp(

@@ -156,11 +156,9 @@ pinned_optional_deps() {
   '
 }
 
-# Every argument is read and checked here, before any of them is published:
-# `refuse` promises that nothing reached the registry, and discovering the fifth
-# argument unreadable after the first four are public would break that promise
-# with the one exit code that says it held. Nothing in this pass talks to the
-# registry.
+# Every argument is read and checked before any of them is published, so that
+# `refuse`'s promise — nothing reached the registry — still holds when it is the
+# last argument that is unreadable.
 identities=()
 pin_lists=()
 

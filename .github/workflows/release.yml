@@ -549,14 +549,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One leg per platform package the launcher's manifest declares, and
-        # `package:` says which one each leg is here to prove.
-        # `npm/test/platform-matrix.test.mjs` reads these names back out of this
-        # file and fails when a declared platform has no leg — so the coverage
-        # question is answerable without a runner for that platform, and a leg
-        # that stopped resolving its own package is a red square rather than a
-        # green one nobody looked at. aarch64 Linux is here because it had no leg
-        # at all while its package was one of the three the registry served late.
+        # One leg per platform package the launcher's manifest declares.
+        # `npm/test/platform-matrix.test.mjs` reconciles these `package:` names
+        # against that manifest, so a declared platform with no leg fails without
+        # needing a runner for it.
         include:
           - os: ubuntu-latest
             package: onepipeline-cli-linux-x64

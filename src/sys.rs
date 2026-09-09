@@ -2044,27 +2044,16 @@ mod tests {
     /// rather than asking once — and gives up rather than waiting for ever, so a
     /// tree that never grew is a named failure instead of a suite that hangs.
     ///
-    /// **The wait happens inside one `powershell`, and that is the whole point
-    /// of this shape.** It used to be a Rust loop that started a fresh
-    /// `powershell -Command '(Get-CimInstance Win32_Process ...)'` every 100ms —
-    /// up to three hundred process starts per level waited on, from every one of
-    /// these fixtures at once, on a two-core runner. That polling is a load the
-    /// fixture puts on the host it is measuring, and past some point it starves
-    /// the very tree it is waiting for: measured on this repository's `cross
-    /// (windows-latest)` leg, a single one of those listings took about three
-    /// minutes to return, the `cmd` tree never got scheduled inside a thirty
-    /// second patience, and four journeys reported a host that "listed no
-    /// PING.EXE" as though the platform had not started one. Asking once and
-    /// letting the shell do the waiting costs one process per level, so the
-    /// patience below bounds the tree appearing rather than the queue draining.
+    /// **The wait happens inside one `powershell`, and that is the whole point of
+    /// this shape.** A Rust loop starting a fresh `powershell` every 100ms is a
+    /// load the fixture puts on the host it is measuring, and on a two-core
+    /// runner it starved the very tree it was waiting for. One process per level
+    /// leaves the patience below bounding the tree appearing rather than the
+    /// queue draining.
     ///
     /// A listing this host would not give is still **reported** rather than read
-    /// as "no such child yet": those are opposite facts, and folding them
-    /// together is what let a `Get-CimInstance` that failed for its own reasons
-    /// come back as a tree that never started. The shell separates them with its
-    /// own exit code — [`LISTING_REFUSED`] for a listing that failed, and
-    /// [`NEVER_APPEARED`] for a listing that succeeded and stayed empty until the
-    /// deadline — so the distinction survives being hoisted, and
+    /// as "no such child yet": those are opposite facts. The shell separates them
+    /// with its own exit code — [`LISTING_REFUSED`] and [`NEVER_APPEARED`] — and
     /// `ErrorActionPreference = 'Stop'` is what puts the non-terminating half of
     /// `Get-CimInstance`'s failures into the `catch` rather than into an empty
     /// result.

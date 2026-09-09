@@ -620,12 +620,9 @@ mod tests {
     /// Serialises the tests below that set `RUNS_DIR_ENV`, which belongs to the
     /// whole process rather than to the test that set it.
     ///
-    /// nextest — the runner this repository uses — gives each test its own
-    /// process, so under it nothing here is reachable by anything else. Plain
-    /// `cargo test` runs a module's tests as *threads of one process*, and under
-    /// that runner the two tests below each set this variable and each read
-    /// whatever was last set: one of them read a path under the other's root,
-    /// which the other then removed in its own teardown. The lock costs nothing
+    /// nextest gives each test its own process; plain `cargo test` runs a
+    /// module's tests as *threads of one process*, where both tests below would
+    /// otherwise read whichever value the other set last. The lock costs nothing
     /// under nextest and makes both runners say the same thing.
     static RUNS_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
