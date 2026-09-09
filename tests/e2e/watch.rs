@@ -20,8 +20,8 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, human, plan_of, Run, World, NOTHING_DRIVING, REFUSED, SURFACE_WAITING,
-    USAGE_ERROR, WATCH_ELAPSED,
+    agent, ended, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED,
+    SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
 };
 
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
@@ -1171,6 +1171,369 @@ fn a_siblings_event_spelled_like_this_crates_own_is_not_emitted_as_one() {
         "the human form named a sibling's event as a settlement:\n{}",
         after.stderr
     );
+}
+
+/// A run with something settled, something still to settle, and a driver still
+/// driving it — the state every selector journey below needs.
+///
+/// The second node holds, so the run is live throughout: a run that had finished
+/// would end each of these waits on the condition every wait returns on, and
+/// prove nothing about the one it was asked for.
+fn settling_run(world: &World, name: &str) -> String {
+    world.script("check.wait", "hold");
+    let run = running(
+        world,
+        name,
+        vec![agent("build", &[]), agent("check", &["build"])],
+    );
+    world.until("the first node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == json!("build"))
+    });
+    run
+}
+
+/// More than one condition on one command line: the wait returns on the first to
+/// fire, and says which one did.
+///
+/// This is the half that makes a wake loop unnecessary. A supervisor that could
+/// name only one condition wrote the rest of them itself, and every hand-written
+/// loop here has gone silent in a new way.
+#[test]
+fn several_conditions_on_one_command_line_return_on_the_first_to_fire_and_say_which() {
+    let world = World::new("watch-selector");
+    let run = settling_run(&world, "watchselector");
+
+    // Two conditions, one of which the run has met. The record names the fact
+    // rather than the flag — the word, the status and the node — which is what a
+    // caller branches on without reading the line beside it.
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=check",
+        "--until",
+        "node-settled",
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&watched, "node-settled", NODE_SETTLED);
+    let last = returned(&watched);
+    assert_eq!(
+        last["node"],
+        json!("build"),
+        "the return does not name the node that settled: {last}"
+    );
+    assert!(
+        watched.stderr.contains("node-settled build"),
+        "the human form does not name the node either:\n{}",
+        watched.stderr
+    );
+
+    // The named node on its own, over the same run: `build` settled, so this is
+    // the condition firing rather than the one beside it. Without it a build that
+    // ignored a named node entirely would pass the journey above, because
+    // `node-settled` fired on the same settlement.
+    let named = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&named, "node-settled", NODE_SETTLED);
+    assert_eq!(returned(&named)["node"], json!("build"));
+
+    // And the node that has *not* settled, on its own, over the same run in the
+    // same state: the wait runs out, so a named condition answers for its own
+    // node rather than for any settlement that happens to arrive.
+    let waited = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=check",
+        "--timeout",
+        "2",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&waited, "elapsed", WATCH_ELAPSED);
+    assert!(
+        returned(&waited).get("node").is_none(),
+        "an ending that settled no node named one: {}",
+        waited.stdout
+    );
+
+    world.release("check.go");
+}
+
+/// A condition the run has **already** satisfied is answered; the same condition
+/// past the cursor that answered it is refused.
+///
+/// This is the line between "already" and "never", and it is the whole of it: a
+/// settlement at or past this watch's cursor is read on the first pass and
+/// returns immediately, and one behind the cursor was handed to the watch that
+/// printed it. Both waits below are unbounded, so a build that got either side
+/// wrong would hang here rather than fail quietly.
+#[test]
+fn a_condition_already_met_returns_at_once_and_the_same_one_past_its_cursor_is_refused() {
+    let world = World::new("watch-already-met");
+    let run = settling_run(&world, "watchalreadymet");
+
+    let met = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&met, "node-settled", NODE_SETTLED);
+    let last = returned(&met);
+    assert_eq!(last["node"], json!("build"), "{last}");
+    // The cursor is read off the record the watch wrote, and handed straight to
+    // the next invocation: a caller carries it between waits without parsing a
+    // word of the line beside it.
+    let cursor = last["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+
+    let refused = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--cursor",
+        &cursor,
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    refused
+        .exited(REFUSED)
+        .err_has("would never fire")
+        .err_has("build");
+    // Refused *before* anything was streamed, which is the property that makes a
+    // wait with no bound safe to offer at all.
+    assert!(
+        machine(&refused).is_empty(),
+        "a refused watch wrote records before refusing:\n{}",
+        refused.stdout
+    );
+
+    // And the refusal is about that node rather than about naming nodes: from the
+    // same cursor, the node that has not settled is accepted and waited on.
+    let waited = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=check",
+        "--cursor",
+        &cursor,
+        "--timeout",
+        "2",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&waited, "elapsed", WATCH_ELAPSED);
+
+    world.release("check.go");
+}
+
+/// Every condition is checked when the command is invoked: one this verb does
+/// not offer, and one naming a node this run's graph does not hold.
+///
+/// Each is asked with a wait that has **no bound**, which is what these refusals
+/// are for: a mistyped condition on an unbounded wait is a silence with no end,
+/// so a command that returns at all here returned because it refused.
+#[test]
+fn a_condition_this_verb_cannot_answer_is_refused_before_anything_is_streamed() {
+    let world = World::new("watch-unanswerable");
+    let run = settling_run(&world, "watchunanswerable");
+
+    // A condition this verb does not offer, refused naming the ones it does —
+    // read out of the crate's own vocabulary rather than restated here.
+    let unknown = world.run(&["watch", &run, "--until", "whenever", "--timeout", "none"]);
+    unknown.exited(USAGE_ERROR);
+    for condition in onepipeline::cli::WATCH_CONDITIONS {
+        assert!(
+            unknown.stderr.contains(condition),
+            "the refusal does not name `{condition}`, which this verb returns on:\n{}",
+            unknown.stderr
+        );
+    }
+    assert!(
+        unknown.stdout.trim().is_empty(),
+        "a refused watch wrote to standard output:\n{}",
+        unknown.stdout
+    );
+
+    // A node this run's graph does not hold, refused naming that node and the ids
+    // the graph does hold — so a caller who mistyped one reads what to type.
+    let stranger = world.run(&["watch", &run, "--until", "node=deploy", "--timeout", "none"]);
+    stranger
+        .exited(REFUSED)
+        .err_has("deploy")
+        .err_has("build")
+        .err_has("check");
+    assert!(
+        machine(&stranger).is_empty(),
+        "a refused watch wrote records before refusing:\n{}",
+        stranger.stdout
+    );
+
+    world.release("check.go");
+}
+
+/// A wait with no bound blocks where `--timeout 0` reads once and returns, and
+/// ends on the condition it was given rather than on a clock.
+///
+/// The two values are the point: `0` keeps exactly the meaning it was published
+/// with, and `none` — a value it is spelled differently from — is what a
+/// supervisor asks for when it wants to be woken by the run rather than by a
+/// number it guessed.
+#[test]
+fn an_unbounded_wait_blocks_where_a_zero_one_reads_once_and_ends_on_its_condition() {
+    use std::io::{BufRead, BufReader, Read};
+
+    let world = World::new("watch-unbounded");
+    world.script("build.wait", "hold");
+    world.script("keep.wait", "hold");
+    // A second node that holds throughout, so the settlement under test is not
+    // also the run finishing: the run settling ends every wait, and a journey
+    // whose node was the last one would be watching that instead.
+    let run = running(
+        &world,
+        "watchunbounded",
+        vec![agent("build", &[]), agent("keep", &[])],
+    );
+
+    let once = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node=build",
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+    ]);
+    agreed(&once, "elapsed", WATCH_ELAPSED);
+
+    let mut watching = world
+        .cmd(&[
+            "watch",
+            &run,
+            "--until",
+            "node=build",
+            "--timeout",
+            "none",
+            "--tick-interval",
+            "1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    let mut records = BufReader::new(
+        watching
+            .stdout
+            .take()
+            .expect("the watch writes its machine form to standard output"),
+    )
+    .lines()
+    .map(|line| {
+        let line = line.expect("the watch's output reads");
+        serde_json::from_str::<Value>(&line)
+            .unwrap_or_else(|e| panic!("the watch wrote a line that is not JSON ({e}): {line}"))
+    });
+
+    // Two heartbeats: the same command bounded at `0` had already returned by
+    // the first of them, so a watch still writing at the second is one the clock
+    // is not ending.
+    let mut beats = 0;
+    while beats < 2 {
+        let record = records
+            .next()
+            .expect("an unbounded watch keeps writing while it waits");
+        assert_ne!(
+            record["watch"],
+            json!("return"),
+            "an unbounded wait returned while nothing had happened: {record}"
+        );
+        if record["watch"] == json!("heartbeat") {
+            beats += 1;
+        }
+    }
+
+    world.release("build.go");
+
+    let after: Vec<Value> = records.collect();
+    let mut said = String::new();
+    watching
+        .stderr
+        .take()
+        .expect("the watch writes its human form to standard error")
+        .read_to_string(&mut said)
+        .expect("the human form reads");
+    let ended = watching.wait().expect("the watch exits");
+    let last = after
+        .last()
+        .expect("the watch says why it returned")
+        .clone();
+    assert_eq!(last["watch"], json!("return"), "{last}");
+    assert_eq!(last["condition"], json!("node-settled"), "{last}");
+    assert_eq!(last["node"], json!("build"), "{last}");
+    assert_eq!(ended.code(), Some(NODE_SETTLED), "{last}\n{said}");
+
+    world.release("keep.go");
+}
+
+/// The condition that names what every wait already returns on is accepted, and
+/// returns exactly what an unnamed one does.
+///
+/// `--until nothing-driving` adds nothing, and that is the honest reading rather
+/// than a fifth behaviour behind a word: a wait that could outlive the run it
+/// watches is the silence this verb exists to end, so the run settling and
+/// nothing driving it end every wait however it was spelled.
+#[test]
+fn naming_a_condition_every_wait_already_returns_on_returns_what_an_unnamed_one_does() {
+    let world = World::new("watch-nothing-driving");
+    let run = "watchnothingdriving";
+    world.script("build.fail", "1");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to stop being driven", |world| {
+        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+    });
+
+    for named in [
+        vec!["watch", run, "--timeout", "0", "--tick-interval", "0"],
+        vec![
+            "watch",
+            run,
+            "--until",
+            "nothing-driving",
+            "--timeout",
+            "none",
+            "--tick-interval",
+            "0",
+        ],
+    ] {
+        let watched = world.run(&named);
+        agreed(&watched, "nothing-driving", NOTHING_DRIVING);
+    }
 }
 
 fn append(journal: &std::path::Path, bytes: &str) {

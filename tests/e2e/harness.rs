@@ -374,6 +374,9 @@ pub const SURFACE_WAITING: i32 = onepipeline::error::EXIT_SURFACE_WAITING;
 /// A `watch` returning because its bounded wait ran out with the run still live.
 pub const WATCH_ELAPSED: i32 = onepipeline::error::EXIT_WATCH_ELAPSED;
 
+/// A `watch` returning because a node it was told to return on settled.
+pub const NODE_SETTLED: i32 = onepipeline::error::EXIT_NODE_SETTLED;
+
 /// clap's exit code for a usage error.
 pub const USAGE_ERROR: i32 = 2;
 
