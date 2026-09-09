@@ -2477,6 +2477,14 @@ fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
         .out_has("\"applied\"");
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the six journeys
+// below live beside the other live-edit journeys in this file, which is where a reader
+// looks for one and what `just test-e2e` already runs on its own. What they exercise is
+// the crate's own reconcile loop, its edit vocabulary and the record it writes — which any
+// change under `src/` can move, and which `src/driver.rs`'s single-writer path duplicates —
+// so a project edged narrower than the crate could not honestly run them, and edging one
+// around a behaviour's journeys would split that behaviour across two projects to no
+// reader's benefit.
 /// The text an amendment carries in the atomicity journeys below, distinctive
 /// enough that a view either shows it or does not.
 const CORRECTION: &str = "## What\nthe corrected criterion this envelope carried";
@@ -2496,6 +2504,58 @@ fn undeliverable_note_run(world: &World, name: &str) -> String {
         vec![agent("slow", &[]), agent("later", &["slow"])],
         &["slow"],
     )
+}
+
+/// The same property on the **other** writer: `reply` becomes a run's single
+/// writer when nothing is driving it, and an envelope is all of its commands or
+/// none there too.
+///
+/// Which of the two judged an envelope is an accident of whether a driver
+/// happened to be alive, so a planner reading the record afterwards must not be
+/// able to tell — the same argument `record_rejection` makes for putting a
+/// refusal in the journal from both sides. The submission check turns away every
+/// refusal `edits::compile` can raise before anything is queued, so the refusal
+/// this reaches is the one only the applying pass can make: a `live` note that
+/// will persist to no dispatch, refused where the note is *delivered*, after the
+/// command before it has already compiled.
+#[test]
+fn an_envelope_refused_by_the_only_writer_a_run_has_leaves_no_record_of_any_of_it() {
+    let world = World::new("edit-atomic-undriven");
+    let path = world.plan(
+        "atomicundriven",
+        &plan_of("atomicundriven", vec![human("approve", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "atomicundriven"],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "late", "persona": "engineer",
+                                       "task": "## What\nlate"}},
+                {"op": "note", "id": "late", "addressee": "worker",
+                 "text": "start from the fixture", "deliver": "live", "persist": false},
+            ])),
+        )
+        .exited(REFUSED)
+        .err_has("composes it into no dispatch");
+
+    assert!(
+        world
+            .events_of("atomicundriven", "edit-committed")
+            .is_empty()
+            && world
+                .events_of("atomicundriven", "command-accepted")
+                .is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds("atomicundriven")
+    );
+    // And the node the first command would have added is in no graph any reader
+    // folds.
+    world
+        .run(&["status", "atomicundriven"])
+        .exited(0)
+        .out_lacks("late");
 }
 
 /// The `live` note that node cannot take, and the amendment that rode with it.
@@ -2752,3 +2812,5 @@ fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
 
     world.release("slow.go");
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

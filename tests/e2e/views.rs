@@ -3231,6 +3231,14 @@ fn a_rejection_over_an_open_change_request_is_named_as_a_rejection() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other view journeys in this file, which is where a reader looks for one and
+// what `just test-e2e` already runs on its own. What it exercises is the fold in
+// `src/projection.rs` and the rendering in `src/views.rs`, both of which any change under
+// `src/` can move, so a project edged narrower than the crate could not honestly run it.
+// It holds a publication for the same reason
+// `telemetry_separates_publication_and_lock_time_from_agent_time` above holds one: the
+// window this is about can only be observed from outside while the node is still in it.
 /// A node inside its publication says what the *publication* is doing.
 ///
 /// A publication is the driver's own subprocess and emits no `turn-activity`, so
@@ -3304,3 +3312,5 @@ fn a_node_in_publication_names_the_step_it_reached_rather_than_a_tool_from_befor
         world.run_file("publishing", "result.json").is_file()
     });
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

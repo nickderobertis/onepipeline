@@ -98,6 +98,16 @@ fn kinds_in(journal: &str) -> BTreeSet<String> {
 
 /// Lay one journal down as a run of its own under `root`, with the launch record
 /// every view opens a run by.
+///
+// llmlint: ignore-block[tests_mirror_real_usage] a journal written by **another build** is
+// the input here, and there is no invocation a user can type that produces one: this build
+// stamps everything it writes in the one shape it accepts, so reaching the case through
+// the CLI would mean editing a live run's store underneath it — which is the suite standing
+// in for a producer rather than a replay of anything. `tests/replay.rs` states the same
+// argument at length for the same reason, and everything the journeys below then assert is
+// the real compiled binary reading a real store, which is exactly how it meets a journal a
+// preceding build left in a runs root. What is written here is the two files a run *is* to
+// a reader — its launch record and its journal — and nothing internal to either.
 fn run_of(root: &Path, run: &str, journal: &str) {
     let dir = root.join(run);
     std::fs::create_dir_all(&dir).expect("a run directory");
@@ -118,6 +128,7 @@ fn run_of(root: &Path, run: &str, journal: &str) {
     .expect("a launch record");
     std::fs::write(dir.join("events.jsonl"), journal).expect("a journal");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// What the two views say about a run laid down under its own root.
 ///
@@ -181,6 +192,12 @@ fn the_committed_fixture_is_a_journal_from_before_this_change() {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what the journeys
+// below exercise is the fold in `src/projection.rs`, the rendering in `src/views.rs` and
+// the record `src/engine.rs` and `src/driver.rs` write — which any change under `src/` can
+// move — so a project edged narrower than the crate could not honestly run them. They are
+// in the e2e binary because the property is about a **document** meeting a **build**, and
+// only the compiled binary is the build.
 /// **Direction one.** This build reads a journal written before the change
 /// exactly as it read one then: the fold that derives the run's state and the
 /// views that render it say what the committed rendering says.
@@ -277,3 +294,5 @@ fn a_refused_envelope_leaves_the_same_nothing_for_either_reader() {
     );
     world.release("slow.go");
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
