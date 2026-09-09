@@ -1995,15 +1995,11 @@ impl Staged {
     }
 }
 
-/// Offer this validated command's note, where it has one, and answer what the
-/// command commits.
+/// What one validated command commits, offering its note where it has one to
+/// offer.
 ///
-/// **This is the call that reaches outside the run**, which is why it is named
-/// for the offering rather than for the operations it returns: for a
-/// [`Staged::Note`] it hands the note to a live conversation, and a conversation
-/// has no undo. The delivery seam both writers of the graph go through, so a note
-/// reaches a conversation from exactly one place however the run is being
-/// driven. It takes
+/// The delivery seam both writers of the graph go through, so a note reaches a
+/// conversation from exactly one place however the run is being driven. It takes
 /// no address and no run paths: which conversation a note goes to was resolved by
 /// the validation that produced the [`Staged`], and a phase that resolved one
 /// could refuse for a reason the validation had not already reported.
@@ -2013,7 +2009,7 @@ impl Staged {
 /// The conversation's own refusal, for a note that reached nobody. It is the only
 /// error this phase can produce, which is the property the envelope's atomicity
 /// rests on — see [`deliver_envelope`].
-pub(crate) fn deliver_step(step: Staged) -> Result<Vec<edits::Operation>> {
+pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
@@ -2095,20 +2091,6 @@ fn validate_envelope(
 /// refusal `docs/contract.md` describes nowhere and of handing a node its own
 /// notes out of the order the envelope wrote them. A reported residue was judged
 /// the smaller cost; whoever revisits it is revisiting a decision.
-// llmlint: ignore-block[changed_behavior_has_e2e] the window documented above is the
-// one behaviour here no journey can reach, and the doc says why: it needs one node
-// with a live conversation that accepts a note and, in the same run and the same
-// envelope, a second node whose own conversation refuses one — and this repository's
-// harness double holds every turn of a run on one shared gate, so a run cannot hold
-// one of each at once. Both sides of the window are driven end to end by
-// `a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered`, for
-// the refusals decided with nothing offered to anybody, and by
-// `a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded`, for a
-// conversation refusing one — both in `tests/note/main.rs`. The word the residue is
-// reported under is held by this module's
-// `a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`,
-// and `crate::channel::CommandVerdict::Delivered` carries this same directive for this
-// same reason.
 fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Error>> {
     let mut delivered: Vec<std::result::Result<Delivery, Error>> = Vec::with_capacity(staged.len());
     for step in staged {
@@ -2119,10 +2101,10 @@ fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Er
             delivered.push(Ok(Delivery::NotAttempted));
             continue;
         }
-        delivered.push(deliver_step(step).map(Delivery::Committed));
+        delivered.push(commits_of(step).map(Delivery::Committed));
     }
     delivered
-} // llmlint: ignore-end[changed_behavior_has_e2e]
+}
 
 /// What the delivery phase did with one validated command.
 ///
@@ -2174,16 +2156,16 @@ impl Unapplied for Staged {
 }
 
 impl Unapplied for Delivery {
-    /// A note a conversation **took** is the one command a refusal cannot take
+    /// A note a conversation **read** is the one command a refusal cannot take
     /// back, and it is the only thing this phase can leave behind: a command it
     /// never reached did nothing, a compiled command commits only in the journal
-    /// phase, and a note no conversation took was carried instead.
+    /// phase, and a note nothing took was carried rather than read.
     fn unapplied_as(&self) -> crate::channel::CommandVerdict {
         if self.committed().iter().any(|operation| {
             matches!(
                 operation,
                 edits::Operation::NoteDelivered { reached, .. }
-                    if reached.a_conversation_took_it()
+                    if reached.a_conversation_read_it()
             )
         }) {
             crate::channel::CommandVerdict::Delivered
@@ -5931,8 +5913,8 @@ mod tests {
         // **One of every variant**, so a variant that changes its answer — or a
         // variant added without one — fails here rather than leaving the entry
         // describing a classification this build no longer makes. The list is
-        // held to the enum by `every_operation_kind_is_one_the_enum_carries` in
-        // `src/edits.rs`, which counts it against the enum's own declarations.
+        // held to the enum by `every_operation_variant_is_classified` in
+        // `src/edits.rs`, which counts it against the enum's own serialization.
         let node = || "later".to_string();
         let every = [
             edits::Operation::FindingRaised {

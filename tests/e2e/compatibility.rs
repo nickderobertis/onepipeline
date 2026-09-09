@@ -27,9 +27,11 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary against a real run store — and what these journeys assert is the record
+// compiled binary against a real run store; what the journeys here assert is the record
 // this crate writes and what a reader derives from it, neither of which the double
-// produces. `harness.rs` carries the same suppression and the full rationale.
+// produces. The scenario the double states is one a real sibling would need paid model
+// turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is driven
+// instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, plan_of, World, REFUSED};
 
@@ -166,11 +168,14 @@ fn records_of(journal: &str) -> Vec<Value> {
 /// every view opens a run by.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] a journal written by **another build** is
-// the input here, and no invocation a user can type produces one: this build stamps
-// everything it writes in the one shape it accepts. What is written is the two files a run
-// *is* to a reader — its launch record and its journal — and nothing internal to either,
-// which is exactly what a preceding build leaves in a runs root. `tests/replay.rs` states
-// the same argument at length for the same reason.
+// the input here, and there is no invocation a user can type that produces one: this build
+// stamps everything it writes in the one shape it accepts, so reaching the case through
+// the CLI would mean editing a live run's store underneath it — which is the suite standing
+// in for a producer rather than a replay of anything. `tests/replay.rs` states the same
+// argument at length for the same reason, and everything the journeys below then assert is
+// the real compiled binary reading a real store, which is exactly how it meets a journal a
+// preceding build left in a runs root. What is written here is the two files a run *is* to
+// a reader — its launch record and its journal — and nothing internal to either.
 fn run_of(root: &Path, run: &str, journal: &str) {
     let dir = root.join(run);
     std::fs::create_dir_all(&dir).expect("a run directory");

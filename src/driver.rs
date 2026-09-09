@@ -2652,7 +2652,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             let mut pending: Vec<Vec<edits::Operation>> =
                 Vec::with_capacity(envelope.commands.len());
             for (command, step) in envelope.commands.iter().zip(staged) {
-                let operations = match engine::deliver_step(step) {
+                let operations = match engine::commits_of(step) {
                     Ok(operations) => operations,
                     Err(error) => {
                         // The refusal is the run's record as much as the caller's
@@ -2747,7 +2747,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 /// is one this run can compose and carry at all.
 ///
 /// It offers nothing to any conversation. What a note commits is the delivery's
-/// answer, and the delivery is [`engine::deliver_step`], which this pass runs only
+/// answer, and the delivery is [`engine::commits_of`], which this pass runs only
 /// after every command of the envelope has come through here.
 fn validate_here(
     paths: &RunPaths,
