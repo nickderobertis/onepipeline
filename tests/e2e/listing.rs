@@ -17,6 +17,15 @@
 //! hand is a run's own summary document, put into the three states a reader has
 //! to meet — absent, stale, and at the schema a previous build wrote — each of
 //! which is left by a *build* or a *crash* rather than by any verb.
+//!
+//! Two journeys hold the rule, and they hold different halves of it. The
+//! portable one takes a run's store away and shows the output does not move,
+//! which rules out a fold whose result is *used* — and would still pass a process
+//! that opened the store and threw the bytes away. The other asks the **kernel**
+//! what the process opened, over a root where every store is present and every
+//! document current, and it is the one an ignored read fails: with an ignored
+//! `journal::read` put on the listing path on purpose, the first journey passed
+//! and this one failed naming the store it met.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
@@ -24,10 +33,10 @@
 // claim below is read off that binary's own stdout.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: four of the five journeys here drive one run each and the module's cheap half
-// runs in about 16 seconds, and the fifth — the scale journey — takes about 210 s and
-// writes 10.7 GiB, because a bound about a host-sized runs root cannot be stated over a
-// root that is not one. It sits in a binary that already holds three deliberately
+// assumed: every journey here but one drives a handful of runs, and the seven of them
+// together run in about 35 seconds. The exception is the scale journey, which takes about
+// 240 s and writes 10.7 GiB, because a bound about a host-sized runs root cannot be stated
+// over a root that is not one. It sits in a binary that already holds three deliberately
 // minute-long journeys in `loopcost.rs` and a whole module of them in `landing.rs`, on the
 // same grounds those carry: what this exercises is `views`, `summary` and `ledger`, which
 // any change under `src/` can move, so a project edged narrower than the crate would drop
@@ -77,6 +86,22 @@ fn document(paths: &RunPaths) -> Value {
 // state under test is the edit.
 fn put_back(paths: &RunPaths, document: &Value) {
     std::fs::write(paths.summary(), document.to_string()).expect("the document");
+}
+
+/// A journal's length and modification time, in the millisecond the crate stamps
+/// a summary document with.
+fn stamp_of(paths: &RunPaths) -> (u64, u64) {
+    let about = std::fs::metadata(paths.journal()).expect("the run's merged store");
+    let modified = about
+        .modified()
+        .expect("a modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("an instant past the epoch")
+        .as_millis();
+    (
+        about.len(),
+        u64::try_from(modified).expect("a millisecond count"),
+    )
 }
 
 /// Take the run's merged event store away, and stamp its document for a store
@@ -478,16 +503,10 @@ fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
     file.get_ref().sync_all().expect("journal records on disk");
     drop(file);
 
-    let about = std::fs::metadata(paths.journal()).expect("the journal");
-    let modified = about
-        .modified()
-        .expect("a modification time")
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("an instant past the epoch")
-        .as_millis();
+    let (len, modified) = stamp_of(paths);
     let mut summary = document(paths);
-    summary["journal_len"] = json!(about.len());
-    summary["journal_mtime_ms"] = json!(u64::try_from(modified).expect("a millisecond count"));
+    summary["journal_len"] = json!(len);
+    summary["journal_mtime_ms"] = json!(modified);
     put_back(paths, &summary);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -697,4 +716,167 @@ fn status_given_no_run_leaves_the_per_node_block_to_status_given_one() {
         "the two reads disagree about the run itself"
     );
     world.release("build.go");
+}
+
+/// Every path the process **opened**, as the kernel recorded it.
+///
+/// The command is the one `World` composes — same binary, same environment —
+/// with the tracer wrapped around it, so what is observed is the invocation a
+/// user makes rather than a second one assembled here.
+///
+/// It **refuses** rather than passes where the tracer will not run: an
+/// observation nobody made is not an observation of nothing, and this is the one
+/// journey whose whole claim is about what the process did.
+#[cfg(target_os = "linux")]
+fn opened_by(world: &World, argv: &[&str], into: &std::path::Path) -> Vec<String> {
+    let inner = world.cmd(argv);
+    let mut traced = std::process::Command::new("strace");
+    traced
+        // Children too: a listing that shelled out to read a store would have
+        // read it just the same.
+        .arg("-f")
+        .arg("-qq")
+        .arg("-e")
+        .arg("trace=openat,open")
+        .arg("-o")
+        .arg(into)
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .stdin(std::process::Stdio::null());
+    for (key, value) in inner.get_envs() {
+        match value {
+            Some(value) => traced.env(key, value),
+            None => traced.env_remove(key),
+        };
+    }
+    let observed = traced.output().unwrap_or_else(|error| {
+        panic!(
+            "this journey's whole claim is what the process opened, and the tracer would \
+             not run: strace: {error}. Install strace, or run the suite where ptrace is \
+             permitted — a journey that cannot observe is not a journey that observed \
+             nothing."
+        )
+    });
+    assert!(
+        observed.status.success(),
+        "`strace onepipeline {}` exited {:?}: {}",
+        argv.join(" "),
+        observed.status.code(),
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    let trace = std::fs::read_to_string(into).expect("the trace the tracer wrote");
+    // Each line names its path in the first quoted field, and a line carrying no
+    // path is a resumption or a signal rather than an open.
+    let opened: Vec<String> = trace
+        .lines()
+        .filter_map(|line| line.split_once('"'))
+        .filter_map(|(_, rest)| rest.split_once('"'))
+        .map(|(path, _)| path.to_owned())
+        .collect();
+    assert!(
+        !opened.is_empty(),
+        "the tracer recorded no open at all, so it observed nothing: {trace}"
+    );
+    opened
+}
+
+/// The three listing commands open **no run's merged event store**, over a root
+/// where every store is present and every document is current.
+///
+/// What this holds that
+/// [`the_listing_views_render_a_run_whose_merged_store_is_not_there`] cannot.
+/// That journey takes the store away and shows the output does not move, which
+/// rules out a fold whose result is *used* — and it would still pass a process
+/// that opened the store and threw the bytes away. On a host holding eleven
+/// gigabytes of journals, throwing them away is the whole cost. So this one asks
+/// the **kernel** what the process opened, over the state a listing meets on a
+/// live host: the stores are all there, and nothing about them is stale.
+///
+/// The **positive control** is what makes the silence a measurement: `results`
+/// over one of the same runs is a detail read, is traced the same way in the same
+/// journey, and does open the store. A tracer that saw nothing at all would pass
+/// the first half and fail the second.
+///
+/// **Linux, and deliberately not skipped anywhere.** There is no portable way to
+/// ask another process what it opened, so the observation is made on the platform
+/// this crate's deterministic tier and coverage floor are measured on, where it
+/// runs every time and refuses if it cannot; every other platform holds the same
+/// rule through the store-removal journey above, which is weaker and portable.
+#[cfg(target_os = "linux")]
+#[test]
+fn no_listing_command_opens_a_run_store_that_is_there() {
+    let world = World::new("listing-traced");
+    world.script("build.work", "the worker wrote this\n");
+    let recorded: Vec<String> = ["alpha", "beta", "gamma"]
+        .iter()
+        .map(|name| settled(&world, name, vec![agent("build", &[])]))
+        .collect();
+
+    // One listing first, so every document is current: a stale one is refolded,
+    // and this journey would then be about a fold rather than about its absence.
+    listed(&world);
+    for run in &recorded {
+        let paths = paths_of(&world, run);
+        assert!(
+            paths.journal().is_file(),
+            "{run}'s merged store is not there, which is the other journey's premise"
+        );
+        let document = document(&paths);
+        let (len, modified) = stamp_of(&paths);
+        assert_eq!(
+            (
+                document["journal_len"].as_u64(),
+                document["journal_mtime_ms"].as_u64()
+            ),
+            (Some(len), Some(modified)),
+            "{run}'s document is stale against its journal, so a fold here would be \
+             correct and this journey would be about nothing"
+        );
+    }
+
+    for (nth, argv) in LISTINGS.iter().enumerate() {
+        let opened = opened_by(&world, argv, &world.root.join(format!("trace-{nth}.txt")));
+        for run in &recorded {
+            let paths = paths_of(&world, run);
+            let summary = paths.summary().display().to_string();
+            assert!(
+                opened.contains(&summary),
+                "`onepipeline {}` never opened {run}'s summary document, so this trace is \
+                 not of the read under test: {opened:?}",
+                argv.join(" ")
+            );
+            let journal = paths.journal().display().to_string();
+            assert!(
+                !opened.contains(&journal),
+                "`onepipeline {}` opened {journal}: a listing may not read a run's merged \
+                 event store",
+                argv.join(" ")
+            );
+        }
+        // And nothing named like one, however it was reached — a store opened
+        // through a relative path or another run's root is the same read.
+        assert!(
+            !opened
+                .iter()
+                .any(|path| std::path::Path::new(path).file_name()
+                    == std::path::Path::new(&paths_of(&world, &recorded[0]).journal()).file_name()),
+            "`onepipeline {}` opened a run's merged event store: {opened:?}",
+            argv.join(" ")
+        );
+    }
+
+    // The control. `results` folds by design, so it opens exactly what the three
+    // above must not — which is what says the tracer was watching this binary's
+    // opens rather than recording an empty room.
+    let paths = paths_of(&world, &recorded[0]);
+    let opened = opened_by(
+        &world,
+        &["results", &recorded[0]],
+        &world.root.join("trace-detail.txt"),
+    );
+    let journal = paths.journal().display().to_string();
+    assert!(
+        opened.contains(&journal),
+        "`results` did not open the store it folds, so nothing above was observed: {opened:?}"
+    );
 }
