@@ -346,21 +346,40 @@ impl std::str::FromStr for WatchTimeout {
     }
 }
 
-/// Every condition `--until` accepts, spelled as a caller types it.
+/// Every condition `--until` accepts: how a caller spells it, and what this
+/// build reads it as.
 ///
-/// The vocabulary itself, so the refusal a mistyped condition gets names what is
-/// available out of the same list the parser reads — and so the README and the
-/// divergence record are reconciled against it rather than against a copy.
-pub const WATCH_CONDITIONS: [&str; 5] = [
-    "settled",
-    "surface",
-    "nothing-driving",
-    "node-settled",
-    "node=<ID>",
+/// **One table, read by the parser and by the refusal both**, so the message a
+/// mistyped condition gets cannot omit a condition this build accepts — the
+/// accepted set *is* this list, rather than a second copy of it standing beside
+/// a match. The README and the divergence record are reconciled against the
+/// spellings here too, so what a supervisor is told to type is what the parser
+/// reads.
+const CONDITIONS: [(&str, WatchUntil); 5] = [
+    ("settled", WatchUntil::Settled),
+    ("surface", WatchUntil::Surface),
+    ("nothing-driving", WatchUntil::NothingDriving),
+    ("node-settled", WatchUntil::NodeSettled),
+    // The one entry that is a **shape** rather than a word: what follows the
+    // prefix is a node id the caller supplies, so the parser reads this row by
+    // its prefix and builds the condition from the text after it. The value
+    // beside it is never returned.
+    (WATCH_NODE_CONDITION_SHAPE, WatchUntil::Node(String::new())),
 ];
 
-/// How a caller names one node to return on.
-pub const WATCH_NODE_CONDITION: &str = "node=";
+/// How a caller names one node to return on, with the id it stands in for.
+pub const WATCH_NODE_CONDITION_SHAPE: &str = "node=<ID>";
+
+/// What that shape stands in for: the id follows this.
+const NODE_ID_PLACEHOLDER: &str = "<ID>";
+
+/// Every condition `--until` accepts, spelled as a caller types it.
+///
+/// Derived from the one table above rather than restated, so a spelling this
+/// build reads is a spelling it names.
+pub fn watch_conditions() -> [&'static str; 5] {
+    CONDITIONS.map(|(spelling, _)| spelling)
+}
 
 /// What ends a `watch`, as a caller names it.
 ///
@@ -404,7 +423,13 @@ impl std::fmt::Display for WatchUntil {
             Self::Settled => out.write_str("settled"),
             Self::NothingDriving => out.write_str("nothing-driving"),
             Self::NodeSettled => out.write_str("node-settled"),
-            Self::Node(node) => write!(out, "{WATCH_NODE_CONDITION}{node}"),
+            Self::Node(node) => write!(
+                out,
+                "{}{node}",
+                WATCH_NODE_CONDITION_SHAPE
+                    .strip_suffix(NODE_ID_PLACEHOLDER)
+                    .unwrap_or(WATCH_NODE_CONDITION_SHAPE)
+            ),
         }
     }
 }
@@ -420,21 +445,25 @@ impl std::str::FromStr for WatchUntil {
     /// right and names a node this run does not hold — that one needs the run's
     /// graph, and `src/watch.rs` refuses it before it blocks.
     fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
-        Ok(match text {
-            "surface" => Self::Surface,
-            "settled" => Self::Settled,
-            "nothing-driving" => Self::NothingDriving,
-            "node-settled" => Self::NodeSettled,
-            _ => match text.strip_prefix(WATCH_NODE_CONDITION) {
-                Some(node) if !node.is_empty() => Self::Node(node.to_string()),
-                _ => {
-                    return Err(format!(
-                        "'{text}' is not a condition this verb returns on; it returns on {}",
-                        WATCH_CONDITIONS.join(", ")
-                    ))
+        for (spelling, condition) in CONDITIONS {
+            match spelling.strip_suffix(NODE_ID_PLACEHOLDER) {
+                // A row that stands for a shape matches on its prefix, and the
+                // id is what the caller wrote after it. An empty one names no
+                // node, so it falls through to the refusal rather than becoming
+                // a condition about a node with no name.
+                Some(prefix) => {
+                    if let Some(node) = text.strip_prefix(prefix).filter(|node| !node.is_empty()) {
+                        return Ok(Self::Node(node.to_string()));
+                    }
                 }
-            },
-        })
+                None if text == spelling => return Ok(condition),
+                None => {}
+            }
+        }
+        Err(format!(
+            "'{text}' is not a condition this verb returns on; it returns on {}",
+            watch_conditions().join(", ")
+        ))
     }
 }
 

@@ -1366,7 +1366,7 @@ fn a_condition_this_verb_cannot_answer_is_refused_before_anything_is_streamed() 
     // read out of the crate's own vocabulary rather than restated here.
     let unknown = world.run(&["watch", &run, "--until", "whenever", "--timeout", "none"]);
     unknown.exited(USAGE_ERROR);
-    for condition in onepipeline::cli::WATCH_CONDITIONS {
+    for condition in onepipeline::cli::watch_conditions() {
         assert!(
             unknown.stderr.contains(condition),
             "the refusal does not name `{condition}`, which this verb returns on:\n{}",
@@ -1452,6 +1452,63 @@ fn a_wait_for_any_settlement_past_a_finished_run_could_never_fire_and_is_refused
         "a refused watch wrote records before refusing:\n{}",
         refused.stdout
     );
+}
+
+/// A run whose graph holds nothing refuses a wait for any node to settle, on its
+/// own terms.
+///
+/// The third state a node condition can be in, beside "already" and "never
+/// again": there is nothing to settle at all. A graph is emptied by an edit —
+/// dropping the last node is an edit nothing refuses — and a wait for a
+/// settlement over it would be a wait for a node that does not exist, which on an
+/// unbounded timeout is the silence this verb exists to end.
+#[test]
+fn a_wait_for_any_settlement_on_a_run_holding_no_nodes_could_never_fire() {
+    let world = World::new("watch-empty-graph");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchemptygraph", vec![agent("build", &[])]);
+
+    // The planner drops the only node this run has, which leaves its graph with
+    // nothing in it. The planner's, because removing work from a graph is a
+    // decomposition decision this crate refuses the monitor.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [
+                {"op": "drop", "id": "build", "dependents": "detach"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the graph to be emptied", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+
+    let refused = world.run(&[
+        "watch",
+        &run,
+        "--until",
+        "node-settled",
+        "--timeout",
+        "none",
+        "--tick-interval",
+        "0",
+    ]);
+    refused
+        .exited(REFUSED)
+        .err_has("would never fire")
+        // On its own terms, rather than through the refusal for a run whose
+        // every node is `done`: that sentence over an empty graph would be
+        // saying that every one of no nodes had settled.
+        .err_has("holds no nodes at all")
+        .err_lacks("settled `done`");
+    assert!(
+        machine(&refused).is_empty(),
+        "a refused watch wrote records before refusing:\n{}",
+        refused.stdout
+    );
+
+    world.release("build.go");
 }
 
 /// A wait with no bound blocks where `--timeout 0` reads once and returns, and

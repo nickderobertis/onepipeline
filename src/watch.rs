@@ -12,7 +12,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use crate::cli::{WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION, WATCH_NODE_CONDITION};
+use crate::cli::{WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
     Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
     EXIT_WATCH_ELAPSED,
@@ -200,8 +200,6 @@ fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
         })
 }
 
-/// The records this watch has not read yet, in merge order, moving the cursor
-/// over exactly what it returns.
 fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
     let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
     cursor.at = at;
@@ -235,9 +233,9 @@ impl Selectors {
     ///
     /// Three refusals, all made here rather than in the loop, so a condition this
     /// run cannot answer costs a caller nothing: a node the graph does not hold,
-    /// a node that will never settle again, and — for a run whose every node is
-    /// already done — a wait for any node to settle. Each names what it would
-    /// never fire on.
+    /// a node that will never settle again, and — for a run with nothing left to
+    /// settle — a wait for any node to settle. Each names what it would never
+    /// fire on.
     ///
     /// **The line between "never" and "already".** A settlement at or past this
     /// watch's cursor is in `ahead`, is read on the very first pass, and returns
@@ -267,9 +265,19 @@ impl Selectors {
                 WatchUntil::Surface => chosen.surface = true,
                 WatchUntil::NodeSettled => {
                     let ids: Vec<&String> = statuses.keys().collect();
-                    if !ids.is_empty() && done_for_good(&ids, &statuses, ahead) {
+                    // A graph with nothing in it is refused on its own terms
+                    // rather than through the sentence below, which would be
+                    // saying that every one of no nodes settled.
+                    if ids.is_empty() {
                         return Err(Error::Invalid(format!(
-                            "`--until node-settled` would never fire: every node of run '{}' \
+                            "`--until {condition}` would never fire: run '{}' holds no nodes \
+                             at all, so nothing in it can settle",
+                            view.paths.run
+                        )));
+                    }
+                    if done_behind_the_cursor(&ids, &statuses, ahead) {
+                        return Err(Error::Invalid(format!(
+                            "`--until {condition}` would never fire: every node of run '{}' \
                              ({}) settled `done` before this watch's cursor, and nothing \
                              dispatches a `done` node again",
                             view.paths.run,
@@ -281,17 +289,17 @@ impl Selectors {
                 WatchUntil::Node(node) => {
                     if !view.state.graph.contains(node) {
                         return Err(Error::Invalid(format!(
-                            "`--until {WATCH_NODE_CONDITION}{node}` names a node run '{}' does \
-                             not hold; its graph holds {}",
+                            "`--until {condition}` names a node run '{}' does not hold; its \
+                             graph holds {}",
                             view.paths.run,
                             named(view.state.graph.ids())
                         )));
                     }
-                    if done_for_good(&[node], &statuses, ahead) {
+                    if done_behind_the_cursor(&[node], &statuses, ahead) {
                         return Err(Error::Invalid(format!(
-                            "`--until {WATCH_NODE_CONDITION}{node}` would never fire: node \
-                             '{node}' of run '{}' settled `done` before this watch's cursor, \
-                             and nothing dispatches a `done` node again",
+                            "`--until {condition}` would never fire: node '{node}' of run \
+                             '{}' settled `done` before this watch's cursor, and nothing \
+                             dispatches a `done` node again",
                             view.paths.run
                         )));
                     }
@@ -302,7 +310,6 @@ impl Selectors {
         Ok(chosen)
     }
 
-    /// Whether a settlement of this node is one this wait was told to return on.
     fn wants(&self, node: &str) -> bool {
         self.any_node || self.named.iter().any(|named| named == node)
     }
@@ -310,7 +317,11 @@ impl Selectors {
 
 /// Whether every one of these nodes has settled `done` with no settlement of any
 /// of them left for this watch to read.
-fn done_for_good(
+///
+/// Named for exactly that and not for permanence: what it answers is a status and
+/// a cursor, which is what [`Selectors::resolve`] refuses on, and a planner
+/// correcting a record can still journal a further settlement for a `done` node.
+fn done_behind_the_cursor(
     nodes: &[impl AsRef<str>],
     statuses: &std::collections::BTreeMap<String, NodeStatus>,
     ahead: &[Envelope],
@@ -324,7 +335,8 @@ fn done_for_good(
     })
 }
 
-/// A list of ids as a refusal names them.
+/// The ids a refusal names, or that there are none — said out loud, because a
+/// sentence that simply stops reads as one that forgot to name them.
 fn named<'a>(ids: impl Iterator<Item = &'a String>) -> String {
     let ids: Vec<&str> = ids.map(String::as_str).collect();
     match ids.is_empty() {
@@ -888,7 +900,7 @@ mod tests {
         // proposed, so a condition the build accepts and the proposal never
         // mentions is a value nobody ruled on — and the wait it ends is the one
         // that may now have no bound at all.
-        for condition in crate::cli::WATCH_CONDITIONS {
+        for condition in crate::cli::watch_conditions() {
             assert!(
                 entry.contains(&format!("`{condition}`")),
                 "the entry names no `{condition}` condition, which this build accepts"
@@ -1149,7 +1161,7 @@ mod tests {
         // Every spelling the refusal offers is one this build actually accepts —
         // `node=<ID>` for the shape rather than for a node any run holds — so a
         // caller who types back what they were told is not refused again.
-        for condition in crate::cli::WATCH_CONDITIONS {
+        for condition in crate::cli::watch_conditions() {
             assert!(
                 WatchUntil::from_str(condition).is_ok(),
                 "the vocabulary offers `{condition}`, which this build refuses"
@@ -1157,7 +1169,7 @@ mod tests {
         }
         for text in ["", "node", "node=", "NODE=build", "surfaces", "0"] {
             let refused = WatchUntil::from_str(text).expect_err("refused");
-            for condition in crate::cli::WATCH_CONDITIONS {
+            for condition in crate::cli::watch_conditions() {
                 assert!(
                     refused.contains(condition),
                     "the refusal of {text:?} does not name `{condition}`: {refused}"

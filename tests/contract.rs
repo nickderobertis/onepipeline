@@ -4616,7 +4616,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     // ends is the one that may now have no bound at all — while a condition the
     // README keeps past the code sends a supervisor to spell something this
     // binary refuses.
-    for condition in onepipeline::cli::WATCH_CONDITIONS {
+    for condition in onepipeline::cli::watch_conditions() {
         assert!(
             passage.contains(&format!("`--until {condition}`")),
             "the README's watch passage does not name `--until {condition}`, which the verb \
@@ -4630,7 +4630,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         .filter_map(|span| span.strip_prefix("--until "))
     {
         assert!(
-            onepipeline::cli::WATCH_CONDITIONS.contains(&named),
+            onepipeline::cli::watch_conditions().contains(&named),
             "the README's watch passage names `--until {named}`, which the verb does not accept"
         );
     }
