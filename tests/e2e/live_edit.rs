@@ -2706,7 +2706,7 @@ fn an_envelope_whose_commands_all_succeed_applies_and_records_every_one() {
     for (index, op) in ["add", "reparent", "amend", "note"].iter().enumerate() {
         assert_eq!(results[index]["index"], index, "{answered}");
         assert_eq!(results[index]["op"], *op, "{answered}");
-        assert_eq!(results[index]["applied"], true, "{answered}");
+        assert_eq!(results[index]["outcome"], "applied", "{answered}");
         assert!(results[index]["reason"].is_null(), "{answered}");
     }
 
@@ -2718,8 +2718,7 @@ fn an_envelope_whose_commands_all_succeed_applies_and_records_every_one() {
 /// One boolean and one reason could only ever name the command that refused, so
 /// the commands that were never applied — which is what a manager has to resend —
 /// were invisible in it. Both facts are still there: the envelope's own
-/// `applied`, unchanged for every reader that predates this, and one entry per
-/// command beside it.
+/// `applied`, and one entry per command beside it, each with its own word.
 #[test]
 fn an_envelope_answers_each_of_its_commands_with_that_commands_own_result() {
     let world = World::new("edit-atomic-outcomes");
@@ -2740,22 +2739,22 @@ fn an_envelope_answers_each_of_its_commands_with_that_commands_own_result() {
 
     // Each entry names the command it belongs to, by position and by op, and the
     // two do not say the same thing: the note carries the refusal it earned, and
-    // the amendment carries the different fact that it was never applied — and
-    // names the command that took it down, so a manager knows which to fix and
-    // which to resend.
+    // the amendment carries the different fact that nothing was wrong with it —
+    // so a manager knows which to fix and which to resend unchanged.
     assert_eq!(results[0]["index"], 0);
     assert_eq!(results[0]["op"], "amend");
-    assert_eq!(results[0]["applied"], false);
+    assert_eq!(results[0]["outcome"], "validated");
     let amend_said = results[0]["reason"].as_str().expect("a reason");
     assert!(
-        amend_said.contains("command 1 of this envelope ('note') was refused")
+        amend_said.contains("this command validated")
+            && amend_said.contains("command 1 ('note')")
             && amend_said.contains("resend this one on its own"),
         "the amendment's entry does not say why it was not applied: {amend_said}"
     );
 
     assert_eq!(results[1]["index"], 1);
     assert_eq!(results[1]["op"], "note");
-    assert_eq!(results[1]["applied"], false);
+    assert_eq!(results[1]["outcome"], "refused");
     assert!(
         results[1]["reason"]
             .as_str()
@@ -2765,6 +2764,151 @@ fn an_envelope_answers_each_of_its_commands_with_that_commands_own_result() {
     );
 
     world.release("slow.go");
+}
+
+/// A command **after** one that refused is evaluated on its own merits and gets
+/// its own answer.
+///
+/// The pass used to return at the first refusal, so every command after it was
+/// reported "not applied" without ever having been looked at — the same words for
+/// "this is wrong" and "we never asked". A manager reading that has no way to
+/// tell which of the two it has, and the run has no answer to give if they ask.
+///
+/// **The second command refuses too, and that is what makes this a proof.** A
+/// build that stopped at the first refusal cannot produce a second refusal with
+/// its own reason naming its own node: it never reached the command. The third
+/// command validates, so the answer also distinguishes the two things a single
+/// "not applied" could not — a command that was wrong, and one that was fine and
+/// went down with it.
+///
+/// The refusals are ones only the reconciler can make: `reply` validates every
+/// command against the projected graph before it queues anything, and its
+/// frontier carries no dispatch, so a `settle` of a node that **is** running
+/// passes submission and is refused by the loop that knows what is in flight.
+#[test]
+fn a_command_after_a_refusal_is_still_evaluated_and_answered_on_its_own() {
+    let world = World::new("edit-atomic-evaluated");
+    let run = live(
+        &world,
+        "atomicevaluated",
+        vec![
+            agent("slow", &[]),
+            agent("other", &[]),
+            agent("later", &["slow"]),
+        ],
+        &["slow", "other"],
+    );
+    world.until("both held nodes to be in flight", |world| {
+        ["slow", "other"].iter().all(|node| {
+            world
+                .events_of(&run, "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == *node)
+        })
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "settle", "id": "slow", "outcome": "done",
+                 "evidence": "the change merged while nobody was looking"},
+                {"op": "settle", "id": "other", "outcome": "done",
+                 "evidence": "so did this one"},
+                {"op": "amend", "id": "later", "text": CORRECTION},
+            ])),
+        )
+        .exited(REFUSED)
+        .err_has("still has a dispatch in flight");
+
+    let answered = world
+        .command_outcomes(&run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    let results = answered["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the answer reports each command: {answered}"))
+        .clone();
+    assert_eq!(results.len(), 3, "{answered}");
+
+    // The first refused, with its own reason.
+    assert_eq!(results[0]["op"], "settle");
+    assert_eq!(results[0]["outcome"], "refused");
+    assert!(
+        results[0]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("node 'slow' still has a dispatch in flight"),
+        "{answered}"
+    );
+
+    // And the second — which the pass reached only *after* that refusal — was
+    // really evaluated: it carries a refusal of its own, about its own node,
+    // which a pass that stopped at the first one could not have produced.
+    assert_eq!(results[1]["op"], "settle");
+    assert_eq!(
+        results[1]["outcome"], "refused",
+        "the command after a refusal was not evaluated: {answered}"
+    );
+    assert!(
+        results[1]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("node 'other' still has a dispatch in flight"),
+        "the second refusal does not carry its own reason, so it was never evaluated: \
+         {answered}"
+    );
+
+    // And the third, which nothing was wrong with, is reported as the thing a
+    // manager resends unchanged rather than as a third failure.
+    assert_eq!(results[2]["op"], "amend");
+    assert_eq!(
+        results[2]["outcome"], "validated",
+        "the command after two refusals was not evaluated: {answered}"
+    );
+    assert!(
+        results[2]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("this command validated"),
+        "{answered}"
+    );
+
+    // Every refusal is in the run's own record, not just the first: a planner
+    // reading the journal afterwards has each of them.
+    let rejected = world.events_of(&run, "edit-rejected");
+    assert_eq!(rejected.len(), 2, "{rejected:?}");
+    assert_eq!(rejected[0]["payload"]["command"]["id"], "slow");
+    assert_eq!(rejected[1]["payload"]["command"]["id"], "other");
+
+    // The envelope is still all-or-none: no command of it is in the record, and
+    // the amendment the third one carried is in no view.
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty()
+            && world.events_of(&run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(&run)
+    );
+    for verb in ["status", "results"] {
+        world
+            .run(&[verb, &run])
+            .exited(0)
+            .out_lacks("the corrected criterion this envelope carried");
+    }
+
+    // Re-sent on its own, the identical amendment commits immediately — which is
+    // what "validated" was telling the manager.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "later", "text": CORRECTION}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    world.release("slow.go");
+    world.release("other.go");
 }
 
 /// `edit-committed` means the graph changed, and a command that changed no graph

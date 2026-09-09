@@ -1777,7 +1777,7 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// build or a caller that did not check, and the reconciler is the last place a
 /// refusal still means something.
 ///
-/// # An envelope is all of its commands or none of them
+/// # Three phases, in this order and for this reason
 ///
 /// [`edits::compile`] promises that a refused edit cannot half-apply, and that
 /// promise is real and narrower than it reads: it is about **one** command's
@@ -1790,13 +1790,20 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// correction durable delivered neither and reported only the note, which is a
 /// manager believing a node's bar had changed when it had not.
 ///
-/// So the pass is in two halves. Everything that can refuse happens in the
-/// first: every command is compiled, in order, against a **staged** copy of the
-/// run's state that carries what the commands before it did, so a command that
-/// depends on its predecessor is judged against the graph its predecessor
-/// produced exactly as it was before. Nothing is journalled there. Only when the
-/// whole envelope has compiled does the second half write it — and a refusal
-/// anywhere leaves the journal, and therefore the graph, exactly as it was.
+/// 1. **Validate.** Every command is validated, in order, against a **staged**
+///    copy of the run's state that carries what the commands before it did, so a
+///    command that depends on its predecessor is judged against the state its
+///    predecessor produced. A refusal does **not** end the pass: the commands
+///    after it are validated on their own merits, so each one gets its own
+///    answer rather than "we never looked". Nothing here reaches a conversation,
+///    the journal, or the graph — see [`validate_envelope`].
+/// 2. **Deliver.** Only entered when every command validated, and the first
+///    thing in the pass that reaches outside the run: a note is offered to its
+///    node's conversation here, and what it commits is what the conversation
+///    answered.
+/// 3. **Journal.** Only entered when every delivery answered, so a refusal in
+///    either phase leaves the journal — and therefore the graph — exactly as it
+///    was.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -1808,151 +1815,320 @@ fn reconcile_edits(
     let mut changed = false;
     for envelope in channel.claim_commands()? {
         let author = envelope.author;
-        match compile_and_deliver_envelope(
-            paths,
-            state,
-            author,
-            &envelope.commands,
-            launch,
-            in_flight,
-        ) {
-            Ok(compiled) => {
-                for (command, operations) in envelope.commands.iter().zip(&compiled) {
-                    commit_command(
-                        paths, journal, state, author, command, operations, in_flight,
-                    )?;
-                    changed = true;
+        let commands = &envelope.commands;
+
+        let staged = match all_validated(validate_envelope(
+            state, author, commands, launch, in_flight,
+        )) {
+            Ok(staged) => staged,
+            Err(evaluated) => {
+                // Every command that refused is recorded on its own, because
+                // every one of them was judged on its own: a planner reading the
+                // journal afterwards has each refusal rather than the first.
+                // Nothing else of the envelope is in the record, because nothing
+                // else of it happened.
+                for (command, ruling) in commands.iter().zip(&evaluated) {
+                    if let Err(error) = ruling {
+                        record_rejection(paths, journal, author, command, error)?;
+                    }
                 }
-                channel.answer_commands(&CommandOutcome {
-                    id: envelope.id,
-                    applied: true,
-                    reason: None,
-                    results: envelope
-                        .commands
-                        .iter()
-                        .enumerate()
-                        .map(|(index, command)| crate::channel::CommandResult {
-                            index,
-                            op: crate::channel::op_of(command).to_string(),
-                            applied: true,
-                            reason: None,
-                        })
-                        .collect(),
-                })?;
+                channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
+                continue;
             }
-            Err(refusal) => {
-                // The refusal is the only thing this envelope leaves in the
-                // record, and it names one command: the others were not refused,
-                // they were never applied, and journalling a rejection for each
-                // would put edits nobody made in front of a reader.
-                record_rejection(paths, journal, author, &refusal.command, &refusal.error)?;
-                channel.answer_commands(&CommandOutcome {
-                    id: envelope.id,
-                    applied: false,
-                    reason: Some(refusal.error.to_string()),
-                    results: refusal.results,
-                })?;
+        };
+
+        let delivered = match all_validated(deliver_envelope(paths, staged, in_flight)) {
+            Ok(delivered) => delivered,
+            Err(evaluated) => {
+                for (command, ruling) in commands.iter().zip(&evaluated) {
+                    if let Err(error) = ruling {
+                        record_rejection(paths, journal, author, command, error)?;
+                    }
+                }
+                channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
+                continue;
             }
+        };
+
+        for (command, operations) in commands.iter().zip(&delivered) {
+            commit_command(
+                paths, journal, state, author, command, operations, in_flight,
+            )?;
+            changed = true;
         }
+        channel.answer_commands(&CommandOutcome {
+            id: envelope.id,
+            applied: true,
+            reason: None,
+            results: commands
+                .iter()
+                .enumerate()
+                .map(|(index, command)| crate::channel::CommandResult {
+                    index,
+                    op: crate::channel::op_of(command).to_string(),
+                    outcome: crate::channel::CommandVerdict::Applied,
+                    reason: None,
+                })
+                .collect(),
+        })?;
     }
     Ok(changed)
 }
 
-/// One refused envelope: which command refused, why, and what each command of it
-/// is told.
+/// The whole envelope, or every command's ruling where any of them refused.
 ///
-/// The command is carried rather than a position in the envelope, and the results
-/// are built where the refusal happened rather than looked up again afterwards.
-/// A position would be a number that can name no command — and the one reader
-/// that had it would index the envelope with it, which is a panic for a state
-/// nothing should be able to spell.
-struct Refused {
-    /// The command that refused, for the run's own rejection record.
-    command: Command,
-    /// Why.
-    error: Error,
-    /// What each command of the envelope is told, in the order it carried them.
-    ///
-    /// The refused one carries its own reason. Every other carries the reason it
-    /// was not applied, which is a different fact and the one a manager acts on:
-    /// nothing is wrong with those commands, and re-sending them alone is what
-    /// gets them in. Naming the command that took them down means a manager does
-    /// not have to guess which of them to fix.
-    results: Vec<crate::channel::CommandResult>,
+/// A phase either produced something for every command or it did not, and the
+/// two are different shapes rather than one shape a caller has to remember to
+/// check — so a caller cannot go on to the next phase holding a refusal, and the
+/// `Ok` side has no entry that could have been one.
+fn all_validated<T>(
+    evaluated: Vec<std::result::Result<T, Error>>,
+) -> std::result::Result<Vec<T>, Vec<std::result::Result<T, Error>>> {
+    if evaluated.iter().any(std::result::Result::is_err) {
+        return Err(evaluated);
+    }
+    Ok(evaluated.into_iter().flatten().collect())
 }
 
-impl Refused {
-    /// The refusal of the command at `index`, with every command's answer.
-    fn at(index: usize, commands: &[Command], error: Error) -> Self {
-        let refused = crate::channel::op_of(&commands[index]);
-        Self {
-            command: commands[index].clone(),
-            results: commands
-                .iter()
-                .enumerate()
-                .map(|(at, command)| crate::channel::CommandResult {
-                    index: at,
-                    op: crate::channel::op_of(command).to_string(),
-                    applied: false,
-                    reason: Some(if at == index {
-                        error.to_string()
-                    } else {
-                        format!(
-                            "not applied: command {index} of this envelope ('{refused}') was \
-                             refused, and an envelope applies all of its commands or none — \
-                             resend this one on its own once that is answered"
-                        )
-                    }),
-                })
-                .collect(),
-            error,
+/// What each command of a refused envelope is told.
+///
+/// Every command has its own entry, and the three words tell apart the two facts
+/// a single boolean could not: a command that **refused**, with what it said, and
+/// one that **validated** and went down with it. Nothing was wrong with the
+/// second kind, so a manager resends it unchanged; the first kind is the one to
+/// fix. The envelope's own `reason` names the first refusal, which is what a
+/// reader of only that field has always had.
+fn refused_envelope<T>(
+    id: u64,
+    commands: &[Command],
+    evaluated: &[std::result::Result<T, Error>],
+) -> CommandOutcome {
+    let refused: Vec<String> = commands
+        .iter()
+        .enumerate()
+        .zip(evaluated)
+        .filter(|(_, ruling)| ruling.is_err())
+        .map(|((index, command), _)| format!("{index} ('{}')", crate::channel::op_of(command)))
+        .collect();
+    let blamed = format!(
+        "not applied: this command validated, and command{} {} of the same envelope did \
+         not — an envelope applies all of its commands or none, so resend this one on \
+         its own once that is answered",
+        if refused.len() == 1 { "" } else { "s" },
+        refused.join(", ")
+    );
+    CommandOutcome {
+        id,
+        applied: false,
+        reason: evaluated
+            .iter()
+            .find_map(|ruling| ruling.as_ref().err().map(ToString::to_string)),
+        results: commands
+            .iter()
+            .enumerate()
+            .zip(evaluated)
+            .map(|((index, command), ruling)| crate::channel::CommandResult {
+                index,
+                op: crate::channel::op_of(command).to_string(),
+                outcome: match ruling {
+                    Ok(_) => crate::channel::CommandVerdict::Validated,
+                    Err(_) => crate::channel::CommandVerdict::Refused,
+                },
+                reason: Some(match ruling {
+                    Ok(_) => blamed.clone(),
+                    Err(error) => error.to_string(),
+                }),
+            })
+            .collect(),
+    }
+}
+
+/// One command of an envelope, validated against the staged state and not yet
+/// acted on.
+///
+/// A note is the one command whose record is not decided by validation — what it
+/// commits is the disposition a conversation answers with — so it is carried here
+/// as the *validated ask* rather than as operations. That is what makes the
+/// validation phase side-effect-free: there is no way to spell a delivered note
+/// in this type.
+pub(crate) enum Staged {
+    /// Everything this command does is already compiled.
+    Compiled(Vec<edits::Operation>),
+    /// A manager note, validated and composed and offered to nothing yet.
+    Note(Box<ValidatedNote>),
+}
+
+impl Staged {
+    /// What the commands after this one are validated against.
+    ///
+    /// A note contributes nothing — `edits::compile_note` says so by returning no
+    /// operations — and what it eventually commits is a disposition no validation
+    /// can know. Staging a guess at it would be validating later commands against
+    /// a delivery that has not happened.
+    pub(crate) fn staged(&self) -> &[edits::Operation] {
+        match self {
+            Self::Compiled(operations) => operations,
+            Self::Note(_) => &[],
+        }
+    }
+
+    /// The node whose conversation this command has something to say to, where it
+    /// has one — which is how the delivery finds the live turn to offer it.
+    fn addressed_node(&self) -> Option<&str> {
+        match self {
+            Self::Compiled(_) => None,
+            Self::Note(note) => Some(&note.node),
         }
     }
 }
 
-/// Compile — and, for a note, *deliver* — every command of one envelope, or name
-/// the first that refused.
+/// What one validated command commits, delivering its note where it has one.
+///
+/// The delivery seam both writers of the graph go through, so a note reaches a
+/// conversation from exactly one place however the run is being driven. `live` is
+/// the control handle of a dispatch this process is running, where there is one;
+/// the reconciler has one and `reply` never does.
+///
+/// # Errors
+///
+/// The conversation's own refusal, for a note that reached nobody.
+pub(crate) fn commits_of(
+    paths: &RunPaths,
+    step: Staged,
+    live: Option<&TurnAddress>,
+) -> Result<Vec<edits::Operation>> {
+    match step {
+        Staged::Compiled(operations) => Ok(operations),
+        Staged::Note(note) => deliver_manager_note(paths, &note, live),
+    }
+}
+
+/// Validate every command of one envelope, and stage what each of them does.
+///
+/// **Every** command, in order, whatever the ones before it said: a refusal is
+/// this command's answer and not the pass's, so the command after one that
+/// refused is judged on its own merits and reported on its own. A pass that
+/// stopped at the first refusal reported "not applied" about commands it had
+/// never looked at, which is the same word for two different facts.
 ///
 /// The staged state is a copy the journal never sees: each command's compiled
 /// operations are folded onto it through
 /// [`fold_operations`](crate::projection::fold_operations), which is the same
-/// derivation the journal's own reader applies to the record this pass is about
-/// to write. So `add extra` followed by `reparent extra` is judged exactly as it
-/// was when the loop journalled between them, and the whole envelope still
-/// refuses as one.
+/// derivation the journal's own reader applies to the record this pass may later
+/// write. So `add extra` followed by `reparent extra` is judged exactly as it was
+/// when the loop journalled between them. A command that refused stages nothing,
+/// which is what makes the commands after it judged against what actually
+/// happened rather than against what was asked for.
 ///
-/// # The one thing a refusal cannot take back
-///
-/// A note is *delivered* here, because how it reached the node is part of what
-/// the record has to say — see [`compile_and_deliver`], which this is the
-/// envelope-wide half of. A note the running turn already took is therefore a
-/// side effect that outlives a later command's refusal: the graph does not move
-/// and the journal records nothing, which is what the atomicity is about, but the
-/// worker has read the correction. That is the floor rather than a choice — a
-/// conversation has no undo — and the alternative is worse: delivering after the
-/// envelope was journalled is the half-application this exists to end. The
-/// envelope's answer says the note was not applied, so a manager resending the
-/// envelope is not surprised by it. `tests/note`'s
-/// `a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refuses`
-/// drives it, in the one tier where a live delivery can actually succeed.
-fn compile_and_deliver_envelope(
-    paths: &RunPaths,
+/// **Nothing here reaches outside the run.** No conversation is offered a note,
+/// no journal record is written, and the graph the run is executing is untouched.
+fn validate_envelope(
     state: &Projected,
     author: crate::channel::Author,
     commands: &[Command],
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
-) -> std::result::Result<Vec<Vec<edits::Operation>>, Box<Refused>> {
-    let mut staged: RunState = (**state).clone();
-    let mut compiled = Vec::with_capacity(commands.len());
-    for (index, command) in commands.iter().enumerate() {
-        let operations = crate::channel::allows(author, command)
-            .and_then(|()| compile_and_deliver(paths, &staged, author, command, launch, in_flight))
-            .map_err(|error| Box::new(Refused::at(index, commands, error)))?;
-        crate::projection::fold_operations(&mut staged, &operations, Some(sys::now_millis()));
-        compiled.push(operations);
+) -> Vec<std::result::Result<Staged, Error>> {
+    let mut staged_state: RunState = (**state).clone();
+    let mut evaluated = Vec::with_capacity(commands.len());
+    for command in commands {
+        let ruling = crate::channel::allows(author, command)
+            .and_then(|()| validate_command(&staged_state, author, command, launch, in_flight));
+        if let Ok(step) = &ruling {
+            crate::projection::fold_operations(
+                &mut staged_state,
+                step.staged(),
+                Some(sys::now_millis()),
+            );
+        }
+        evaluated.push(ruling);
     }
-    Ok(compiled)
+    evaluated
+}
+
+/// Offer every validated note to its node's conversation, and answer what each
+/// command commits.
+///
+/// The **only** phase that reaches outside the run, and it is entered only once
+/// every command of the envelope has validated — so a conversation is never
+/// offered a note on behalf of an envelope this pass already knows it will
+/// refuse. A delivery that a conversation refuses ends the phase: the deliveries
+/// after it would be side effects for an envelope nothing will journal.
+fn deliver_envelope(
+    paths: &RunPaths,
+    staged: Vec<Staged>,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Vec<std::result::Result<Vec<edits::Operation>, Error>> {
+    let mut delivered: Vec<std::result::Result<Vec<edits::Operation>, Error>> =
+        Vec::with_capacity(staged.len());
+    for step in staged {
+        if delivered.iter().any(std::result::Result::is_err) {
+            // Nothing of this envelope will be journalled now, so a note offered
+            // here would be a correction a worker read that the run has no record
+            // of. Reported as what it is: validated, and not applied.
+            delivered.push(Ok(Vec::new()));
+            continue;
+        }
+        let live = step
+            .addressed_node()
+            .and_then(|node| in_flight.get(node))
+            .and_then(|dispatch| dispatch.control.clone());
+        delivered.push(commits_of(paths, step, live.as_ref()));
+    }
+    delivered
+}
+
+/// Validate one command against the staged state, without acting on it.
+///
+/// The half of the old compile-and-deliver that decides whether the ask is one
+/// this run can act on. A note is validated and composed and offered to nothing:
+/// [`validate_manager_note`] is the whole of what can be decided before a
+/// conversation is reached, and the conversation's own answer is the delivery's.
+fn validate_command(
+    state: &RunState,
+    author: crate::channel::Author,
+    command: &Command,
+    launch: &LaunchRecord,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Result<Staged> {
+    // The loop's own frontier, which is the ledger's plus what only this process
+    // knows: which dispatches are still running. A node the journal records as
+    // parked can still have one, and an edit judged without that is the edit
+    // that returns a node to a workspace its own predecessor is holding.
+    let frontier = Frontier {
+        in_flight: in_flight
+            .iter()
+            .map(|(id, dispatch)| (id.clone(), dispatch.live()))
+            .collect(),
+        // The launch's own, read off the record this loop read strictly at the
+        // start of the pass — never out of this process's environment, which is
+        // a driver an `adopt` started somewhere else with a different one.
+        node_validator: launch.node_validator().map(str::to_owned),
+        ..state.frontier()
+    };
+    let mut candidate = state.graph.clone();
+    let operations = edits::compile(&mut candidate, &frontier, author, command)?;
+    let Command::Note {
+        id,
+        addressee,
+        text,
+        criterion,
+        deliver,
+        persist,
+    } = command
+    else {
+        return Ok(Staged::Compiled(operations));
+    };
+    // The note's own record is the delivery's, so the structural compile above
+    // contributed none: it established that the ask is one this run can act on.
+    Ok(Staged::Note(Box::new(validate_manager_note(&Offered {
+        id,
+        addressee: *addressee,
+        text,
+        criterion: criterion.as_ref(),
+        reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        dispatchable: frontier.recorded.get(id) != Some(&NodeStatus::Done),
+    })?)))
 }
 
 /// Write one compiled command into the run's record, and act on it.
@@ -2029,70 +2205,6 @@ pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
     operations.iter().map(edits::Operation::kind).collect()
 }
 
-/// Validate one command, hand a note to the node's conversation where its
-/// `deliver` asks for that, and compile what actually happened.
-///
-/// The order matters both ways. Validation first, because a note must not be
-/// offered to a live conversation on behalf of an edit the reconciler is about to
-/// refuse; delivery before the compile that is recorded, because *how* the note
-/// reached the node is part of the mutation — a note a turn took is not also owed
-/// to the next dispatch.
-fn compile_and_deliver(
-    paths: &RunPaths,
-    state: &RunState,
-    author: crate::channel::Author,
-    command: &Command,
-    launch: &LaunchRecord,
-    in_flight: &BTreeMap<String, Dispatch>,
-) -> Result<Vec<edits::Operation>> {
-    // The loop's own frontier, which is the ledger's plus what only this process
-    // knows: which dispatches are still running. A node the journal records as
-    // parked can still have one, and an edit judged without that is the edit
-    // that returns a node to a workspace its own predecessor is holding.
-    let frontier = Frontier {
-        in_flight: in_flight
-            .iter()
-            .map(|(id, dispatch)| (id.clone(), dispatch.live()))
-            .collect(),
-        // The launch's own, read off the record this loop read strictly at the
-        // start of the pass — never out of this process's environment, which is
-        // a driver an `adopt` started somewhere else with a different one.
-        node_validator: launch.node_validator().map(str::to_owned),
-        ..state.frontier()
-    };
-    let mut candidate = state.graph.clone();
-    let operations = edits::compile(&mut candidate, &frontier, author, command)?;
-    let Command::Note {
-        id,
-        addressee,
-        text,
-        criterion,
-        deliver,
-        persist,
-    } = command
-    else {
-        return Ok(operations);
-    };
-    // The note's own record is the delivery's, so the structural compile above
-    // contributed none: it established that the ask is one this run can act on,
-    // and this is the answer the conversation gave.
-    deliver_manager_note(
-        paths,
-        &Offered {
-            id,
-            addressee: *addressee,
-            text,
-            criterion: criterion.as_ref(),
-            reach: crate::note::Reach::of(id, *deliver, *persist)?,
-            dispatchable: frontier.recorded.get(id) != Some(&NodeStatus::Done),
-        },
-        in_flight
-            .get(id)
-            .and_then(|dispatch| dispatch.control.clone())
-            .as_ref(),
-    )
-}
-
 /// Put one refused edit into the run's record: the rejection, and the surface that
 /// makes sure nobody has to go looking for it.
 ///
@@ -2167,6 +2279,80 @@ pub(crate) struct Offered<'a> {
     pub dispatchable: bool,
 }
 
+/// One manager note, validated and composed and **not** offered to anything.
+///
+/// The output of [`validate_manager_note`] and the only input
+/// [`deliver_manager_note`] takes, so the two halves cannot be run out of order
+/// and a pass that has only validated cannot have delivered: there is no way to
+/// reach a conversation without this value, and the only thing that produces one
+/// touches nothing outside the run.
+///
+/// It owns what it carries rather than borrowing the command, because it outlives
+/// the validation pass: the whole envelope is validated before any of it is
+/// delivered.
+pub(crate) struct ValidatedNote {
+    /// The node whose conversation it is for.
+    node: String,
+    /// Whose task it says it is updating.
+    addressee: crate::note::Addressee,
+    /// What that party is to read.
+    text: crate::note::NoteText,
+    /// The criterion it binds, where it binds one.
+    criterion: Option<crate::note::Criterion>,
+    /// Where it may land.
+    reach: crate::note::Reach,
+    /// Whether the node has a next dispatch to carry it to.
+    // llmlint: ignore[invalid_states_unrepresentable] the same predicate
+    // `Offered::dispatchable` is, read off the frontier as `recorded != Done`, with the
+    // same reasoning: it has no third value and no invalid combination with anything
+    // beside it.
+    dispatchable: bool,
+    /// The note as the seam takes it, composed once here rather than again at
+    /// delivery — so the thing that was validated is the thing that is delivered.
+    composed: crate::note::Note,
+}
+
+/// Validate one offered note without offering it to anything.
+///
+/// Everything about a note that can be refused **before** a conversation is
+/// reached, and nothing else: the note has to compose, and a note that attempts
+/// no live turn has to have a next dispatch to be carried to. The refusal a
+/// conversation makes is the delivery's, and is not decidable here.
+///
+/// Split out from the delivery for the reason the whole envelope pass is split:
+/// a note offered on behalf of an envelope that is about to be refused is a
+/// correction a worker read and the run has no record of, and validation that
+/// can do that is validation a caller cannot run.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for a note this run cannot compose, and for one whose reach
+/// leaves it nowhere to go whatever the conversation would have said.
+pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<ValidatedNote> {
+    let Offered {
+        id,
+        addressee,
+        text,
+        criterion,
+        reach,
+        dispatchable,
+    } = *offered;
+    let composed = crate::note::of(addressee, text, criterion)
+        .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
+    if !reach.attempts_a_live_turn() && !dispatchable {
+        return Err(nowhere_to_carry(id));
+    }
+    Ok(ValidatedNote {
+        node: id.to_string(),
+        addressee,
+        text: text.clone(),
+        criterion: criterion.cloned(),
+        reach,
+        dispatchable,
+        composed,
+    })
+}
+
 /// Hand one manager note to a node's conversation where `deliver` asks for that,
 /// carry it to the node's next dispatch where no turn took it and `persist` asks
 /// for that, and compile what became of it.
@@ -2197,39 +2383,37 @@ pub(crate) struct Offered<'a> {
 /// only in the caller's exit code.
 pub(crate) fn deliver_manager_note(
     paths: &RunPaths,
-    offered: &Offered<'_>,
+    validated: &ValidatedNote,
     live: Option<&TurnAddress>,
 ) -> Result<Vec<edits::Operation>> {
-    let Offered {
-        id,
+    let ValidatedNote {
+        node: id,
         addressee,
         text,
         criterion,
         reach,
         dispatchable,
-    } = *offered;
-    let note = crate::note::of(addressee, text, criterion)
-        .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
+        composed,
+    } = validated;
+    let (addressee, reach, dispatchable) = (*addressee, *reach, *dispatchable);
     let recorded = |reached| {
         Ok(vec![edits::Operation::NoteDelivered {
-            node: id.to_string(),
+            node: id.clone(),
             addressee,
             text: text.clone(),
-            criterion: criterion.cloned(),
+            criterion: criterion.clone(),
             reached,
         }])
     };
     // `next` declines the live attempt outright, so there is no turn to ask and
-    // the note is the carried one by construction. The combination that carries
-    // it nowhere was refused at the envelope.
+    // the note is the carried one by construction. The two combinations that
+    // carry it nowhere were refused at the envelope and by
+    // [`validate_manager_note`], so what is left here has somewhere to go.
     if !reach.attempts_a_live_turn() {
-        return match dispatchable {
-            true => recorded(crate::note::Reached::Carried),
-            false => Err(nowhere_to_carry(id)),
-        };
+        return recorded(crate::note::Reached::Carried);
     }
     let attempted = match live.cloned().or_else(|| last_turn_address(paths, id)) {
-        Some(address) => agentgraph::note(&address, &note).map_err(|why| why.to_string()),
+        Some(address) => agentgraph::note(&address, composed).map_err(|why| why.to_string()),
         None => Err(
             "no dispatch of this node has reported a member yet, so there is no \
                      conversation to hand it to"

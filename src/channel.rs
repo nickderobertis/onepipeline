@@ -1000,11 +1000,12 @@ pub(crate) struct CommandOutcome {
 
 /// What became of **one** command of an envelope.
 ///
-/// The envelope is atomic, so a refusal anywhere in it leaves every entry here
-/// `applied: false` — but not for the same reason, and the difference is the
-/// whole point: one entry names the refusal, and the rest name the command whose
-/// refusal took them down with it. A manager reading them knows which command to
-/// send again and which to fix.
+/// Every command is evaluated, whatever the ones before it said, so each entry is
+/// that command's **own** answer. The envelope is still atomic — a refusal
+/// anywhere in it applies none of it — and the three words below are what tells
+/// the two facts apart: which commands were wrong, and which were fine and went
+/// down with them. A manager reading them knows which to fix and which to resend
+/// unchanged.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandResult {
     /// Where in the envelope's `commands` this one sat, from zero.
@@ -1014,11 +1015,31 @@ pub(crate) struct CommandResult {
     /// Carried so an entry names the command it belongs to rather than leaving a
     /// reader to count positions in the envelope it sent.
     pub op: String,
-    /// Whether this command was applied.
-    pub applied: bool,
-    /// Why not, when it was not.
+    /// What became of it.
+    pub outcome: CommandVerdict,
+    /// Why it refused, or what refused around it, when either happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// The three things that can become of one command of an envelope.
+///
+/// One field rather than a boolean and a sentence, because "not applied" was two
+/// facts wearing one word: a command that was wrong and a command that was fine.
+/// A reader that cannot tell them apart resends the wrong one and fixes the right
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CommandVerdict {
+    /// It was validated and committed.
+    Applied,
+    /// It was validated and nothing was wrong with it. Something else in the
+    /// envelope refused, and an envelope applies all of its commands or none, so
+    /// nothing of this one was applied — resending it on its own is what gets it
+    /// in.
+    Validated,
+    /// It refused, and [`reason`](CommandResult::reason) is what it said.
+    Refused,
 }
 
 impl ChannelState {

@@ -336,15 +336,97 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
-/// A note the live turn **took**, in an envelope a later command then refused.
+/// A note is **not** offered to a conversation on behalf of an envelope the run
+/// is going to refuse.
 ///
-/// The one thing an envelope's atomicity cannot take back. A note is delivered
-/// while the envelope is being compiled, because how it reached the node is part
-/// of what the record has to say — so a note the running turn already read
-/// outlives a later command's refusal, and a conversation has no undo. What is
-/// still kept is what the atomicity is for: the graph does not move, and the run
-/// records nothing as committed. The answer says the note was not applied, so a
-/// manager resending the envelope is not surprised by it.
+/// Validation used to deliver: compiling a `note` handed it to the node's live
+/// turn, because how it reached the node is part of what the record has to say.
+/// So a later command's refusal left a correction a worker had read and the run
+/// had no record of — the worker acting on a bar nobody moved, which is the
+/// failure the whole envelope-atomicity work is about.
+///
+/// The two halves are separate now: validation composes the note and decides
+/// whether the run can carry it, and offers it to nothing. Delivery happens only
+/// once **every** command has validated. The refusal here is one only the
+/// reconciler can make — `reply`'s submission check carries no dispatch in its
+/// frontier, so a `settle` of a running node passes it and the loop refuses it —
+/// and it comes *after* the note in the envelope, which is exactly the order that
+/// used to deliver first and refuse second.
+#[test]
+fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() {
+    let world = World::new("note-envelope-unoffered");
+    let run = "unoffered";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+
+    // The turn is released once the note is really on the queue, exactly as the
+    // journeys that *do* deliver release it — so the turn this note would have
+    // been offered to was live and reachable for the whole window, and the reason
+    // it was never offered is the pass rather than the timing.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            {"op": "settle", "id": "build", "outcome": "done",
+             "evidence": "the change merged while nobody was looking"},
+        ]})
+        .to_string(),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied
+        .exited(REFUSED)
+        .err_has("still has a dispatch in flight");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // Nothing of the envelope is in the record, and — the point — no party of the
+    // conversation was ever handed the note.
+    assert!(
+        world.events_of(run, "edit-committed").is_empty()
+            && world.events_of(run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(run)
+    );
+    let handed = prompts(&world);
+    assert!(
+        !handed.iter().any(|prompt| prompt.contains(NOTE)),
+        "validation offered the note to the conversation on behalf of an envelope the run \
+         then refused:\n{handed:#?}"
+    );
+
+    // And the answer says which command was wrong and which was not, so a manager
+    // knows the note is theirs to resend rather than theirs to fix.
+    let answered = world
+        .command_outcomes(run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    assert_eq!(answered["results"][0]["op"], json!("note"), "{answered}");
+    assert_eq!(
+        answered["results"][0]["outcome"],
+        json!("validated"),
+        "{answered}"
+    );
+    assert_eq!(
+        answered["results"][1]["outcome"],
+        json!("refused"),
+        "{answered}"
+    );
+}
+
+/// A note the live turn **took**, in an envelope whose next delivery then
+/// refused.
+///
+/// Validation offers nothing to a conversation, so a note is never delivered on
+/// behalf of an envelope the run has already decided to refuse. What is left is
+/// the delivery phase itself, which is entered only once every command has
+/// validated and which stops at the first delivery a conversation refuses — so at
+/// most the notes *before* that one were read. Nothing of the envelope is
+/// journalled, the graph does not move, and the answer reports the delivered note
+/// as validated-and-not-applied rather than as applied, so a manager resending
+/// the envelope is not surprised by it.
 ///
 /// It is here rather than in `tests/e2e` because this is the only tier where a
 /// live delivery can actually succeed: the note seam is a library call into
@@ -410,8 +492,13 @@ fn a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refus
     assert_eq!(answered["applied"], json!(false), "{answered}");
     assert_eq!(answered["results"][0]["op"], json!("note"), "{answered}");
     assert_eq!(
-        answered["results"][0]["applied"],
-        json!(false),
+        answered["results"][0]["outcome"],
+        json!("validated"),
+        "the note that landed was reported as applied, or as its own refusal: {answered}"
+    );
+    assert_eq!(
+        answered["results"][1]["outcome"],
+        json!("refused"),
         "{answered}"
     );
 }
