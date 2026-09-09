@@ -3023,16 +3023,38 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   by, the last recorded kind, the record count, each node's status word to the
   number of nodes carrying it, the two settled-run facts and the four a run's
   phase is derived from), the launch record's own account of the run so a row's
-  attribution needs no second read, the run's aggregate clock, and the stamp a
-  stale document is detected by. **Liveness is deliberately not on it**: how a run
-  is being driven is read from the host at the moment of the question, and a
-  stored answer is stale the instant it is written. What the document carries is
-  what `views::liveness` takes as *input*.
+  attribution needs no second read, the run's aggregate clock, the two node lists
+  a listing's own rows are rendered from — which nodes are parked, and which a
+  judge turned down — the landing inputs above, and the stamp a stale document is
+  detected by. **Liveness is deliberately not on it**: how a run is being driven
+  is read from the host at the moment of the question, and a stored answer is
+  stale the instant it is written. What the document carries is what
+  `views::liveness` takes as *input*, and the same holds of every landing: the
+  document carries the inputs and the view asks.
+
+  **The observer is not on it at all**, not even as inputs, because a driver
+  *rewrites* those under a live run with no record following: one that finds its
+  observer gone starts another and records the new graph run, and one that stops
+  starting another records why — both in the launch record. A document holding
+  either would name a graph run that had ended and stay silent about a run nobody
+  will watch again, so the listing asks the launch record, and only for a run its
+  driver tier leaves room to say so.
 - **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
   run roots it could not read with each root's own reason — on the same terms
   `Survey::skipped` already states, because a cheap listing that reported only
   what it could read would reintroduce at the new surface the silent omission
-  `Survey` exists to remove.
+  `Survey` exists to remove. **`runs`, `runs --mine` and `status` given no run
+  are this read**: they open no run's merged event store for a run whose summary
+  document is current, and what each node of a run is doing is `status <RUN>`'s
+  to say — a detail read, which may fold.
+- **`views::NodeLanding`**, one node's landing **inputs** — the landing its
+  settlement observed, the branch it published, the repository to narrow to, and
+  whether the change is held back as a draft. Deliberately not the answer: whether
+  a change has reached its base is decided when a view renders, because a change
+  merged after its node settled is not work nobody landed, and reading it the
+  other way sent a supervisor to re-dispatch nodes whose work was already on their
+  base. A node whose settlement recorded `landed` is the one that is never asked
+  again.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3049,7 +3071,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "fields": [
     "schema_version",
     "run_id",
@@ -3071,19 +3093,37 @@ cannot go on describing a document the build stopped writing:
     "host",
     "started",
     "timing",
+    "parked",
+    "judge_rejected",
+    "landings",
     "journal_len",
     "journal_mtime_ms"
+  ],
+  "landing_fields": [
+    "landing",
+    "branch",
+    "repo",
+    "drafted"
   ]
 }
 ```
 
-**Nothing existing changed.** `RunView`, `Survey`, and every `views` entry point
-behave exactly as before; a run with no summary document, or one stale against
-its journal's recorded length or modification time, is folded through that same
-path and cached, so a run recorded by a build that predates the document lists
-identically and only more slowly. That fallback is what makes this landing
-non-breaking, and one derivation runs over both paths, so the row a listing
-serves and the row a full fold produces are one row.
+**`RunView` and `Survey` are untouched**, and so is every view that legitimately
+folds — `results`, `monitor`, `transcript`, and `status` given one run. What
+moved is the listing path: `runs` and `status` given no run render the same facts
+about a run they rendered before, out of the document rather than out of a fold.
+The one thing `status` no longer prints without a run named is its **per-node**
+block, which is a detail read and is what `status <RUN>` is.
+
+A run with no summary document, or one stale against its journal's recorded
+length or modification time, is folded through that same path and cached, so a
+run recorded by a build that predates the document lists identically and only
+more slowly. That fallback is what makes this landing non-breaking, and one
+derivation runs over both paths, so the row a listing serves and the row a full
+fold produces are one row. **A document at schema 1 is refused and refolded
+once** for the same reason: it carries none of the three fields a row is now
+rendered from, and reading it as one of this build's would report every one of
+them as an absence nobody recorded.
 
 **The consumer this was written for pins this crate at an exact version**, so
 what lands here reaches it through a release rather than through a branch.

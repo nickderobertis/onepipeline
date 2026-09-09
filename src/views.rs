@@ -85,9 +85,12 @@ pub use crate::ledger::RunPaths;
 /// Re-exported where the views are, because it is a **view**: it answers the
 /// questions `runs` and `status` answer, in the structure a consumer building
 /// its own listing needs, and at a cost that does not grow with the run's
-/// journal. Every entry point beside it renders a `String` shaped for a terminal
-/// and reaches it by folding the whole store; this is the same account, read.
-pub use crate::summary::{Listing, RunSummary, SUMMARY_SCHEMA_VERSION};
+/// journal. `runs` and `status` given no run **are** this read; the entry points
+/// that fold are the detail reads beside them.
+///
+/// [`NodeLanding`] comes with it because [`RunSummary::landings`] carries one per
+/// node: a field a consumer cannot name is a field it cannot read.
+pub use crate::summary::{Listing, NodeLanding, RunSummary, SUMMARY_SCHEMA_VERSION};
 
 /// One run's timing and usage, with a breakdown that sums exactly to its wall
 /// clock.
@@ -181,17 +184,32 @@ impl ObserverLiveness {
 ///
 /// [`agentgraph::graph_run_ended`]: crate::agentgraph::graph_run_ended
 fn observer_liveness(launch: &LaunchRecord) -> ObserverLiveness {
-    if launch.observer_graph().is_none() {
+    watching(
+        launch.observer_graph(),
+        &launch.graph_run,
+        &launch.observer_ending,
+        &launch.run_id,
+    )
+}
+
+/// The same verdict, over the three things a record says about the observer.
+///
+/// Taken apart from the record because two documents carry them — the launch
+/// record, and the summary document a listing reads instead of it — and one
+/// reading over both is what stops a run reading `NO OBSERVER` on one view and
+/// `ACTIVE` on the other.
+fn watching(graph: Option<&str>, graph_run: &str, ending: &str, run: &str) -> ObserverLiveness {
+    if graph.is_none() {
         return ObserverLiveness::Unobserved;
     }
     // The driver's own account first, because it is the stronger evidence: a
     // driver that has stopped starting another observer *knows* the run will not
     // be watched again, where the probe below reports only what this host can
     // prove and answers everything else with "still watching".
-    if !launch.observer_ending.is_empty() {
+    if !ending.is_empty() {
         return ObserverLiveness::ObserverNotRestarted;
     }
-    if crate::agentgraph::graph_run_ended(&launch.graph_run, &launch.run_id) {
+    if crate::agentgraph::graph_run_ended(graph_run, run) {
         return ObserverLiveness::ObserverDead;
     }
     ObserverLiveness::Watching
@@ -273,28 +291,48 @@ pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
 /// each read through the accessor that turns the record's silence back into
 /// silence rather than into an answer.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
-    if state.stop_recorded() {
+    driver_liveness(
+        state.stop_recorded(),
+        launch.recorded_host(),
+        launch.driver_pid(),
+        state.last_write_at,
+        state.awaiting_human_action(),
+        paths,
+    )
+}
+
+/// The same verdict, over the five things a record says and the run's own
+/// channel.
+///
+/// Taken apart from the fold for the reason [`watching`] is: the bounded
+/// listing reads these five off a summary document rather than off a whole
+/// merged store, and a second implementation of this reading is a second run
+/// liveness to keep true.
+fn driver_liveness(
+    stop_recorded: bool,
+    recorded_host: Option<&str>,
+    pid: Option<std::num::NonZeroU32>,
+    last_write_at: Option<u64>,
+    awaiting_human_action: bool,
+    paths: &RunPaths,
+) -> DriverLiveness {
+    if stop_recorded {
         return DriverLiveness::DriverDead;
     }
-    let ours = launch.recorded_host() == Some(sys::hostname().as_str());
-    if ours
-        && launch
-            .driver_pid()
-            .is_some_and(|pid| !sys::process_may_be_live(pid.get()))
-    {
+    let ours = recorded_host == Some(sys::hostname().as_str());
+    if ours && pid.is_some_and(|pid| !sys::process_may_be_live(pid.get())) {
         return DriverLiveness::DriverDead;
     }
     // A live pid is ownership, not progress.
-    let quiet_for = state
-        .last_write_at
-        .map(|last| sys::now_millis().saturating_sub(last) / 1_000);
+    let quiet_for = last_write_at.map(|last| sys::now_millis().saturating_sub(last) / 1_000);
     match quiet_for {
         // A run holding an outstanding decision point is *waiting*, not parked:
         // the loop that would be writing is deliberately holding a subtree back
         // until a person answers, and a driver reported dead there sends an
         // operator to intervene in work that is doing exactly what it should.
         Some(seconds)
-            if seconds > parked_after_seconds() && !decision_outstanding(state, paths) =>
+            if seconds > parked_after_seconds()
+                && !(awaiting_human_action || blocking_surface(paths)) =>
         {
             DriverLiveness::Parked
         }
@@ -314,7 +352,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 /// is older than the journal beside it, and a run still going has one — but a
 /// base does not stop carrying what it carries, so taking the later answer in
 /// that direction alone cannot un-land anything.
-fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
+pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
     // Read leniently: a report this build cannot parse — one a newer build
     // wrote, at a version this one refuses — leaves the view exactly as the
     // journal left it, which is the answer it always had.
@@ -458,8 +496,35 @@ impl Reported {
 /// render is told which those are as it prints them, so a read taken for a node
 /// nobody is shown fails the bound `tests/e2e/landing.rs` holds.
 fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported {
+    reported_landing_of(
+        &view.paths.run,
+        render,
+        node,
+        view.state.landings.get(node).copied(),
+        view.state.branches.get(node).map(String::as_str),
+        view.state
+            .graph
+            .get(node)
+            .and_then(|node| node.repo.as_deref()),
+    )
+}
+
+/// The same report, over the three things a record says about one node's change.
+///
+/// Taken apart from the fold for the reason [`watching`] and [`driver_liveness`]
+/// are: a bounded listing reads the settlement's own landing, the branch it
+/// published, and the repository to narrow to off a summary document, and the
+/// *decision* has to be the same decision either way — a second one would be a
+/// second answer to "has this landed?" for a reader to meet.
+fn reported_landing_of(
+    run: &str,
+    render: &Rendering,
+    node: &str,
+    settled: Option<Landing>,
+    branch: Option<&str>,
+    repo: Option<&str>,
+) -> Reported {
     render.reported(node);
-    let settled = view.state.landings.get(node).copied();
     if settled == Some(Landing::Landed) {
         return Reported::TheRunObserved;
     }
@@ -470,12 +535,7 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
     // no repository publishes nothing at all, so it has no change to land and
     // asking after one would search every identity this host knows for a branch
     // no repository of theirs was ever asked to carry.
-    let asked = view.state.branches.get(node).zip(
-        view.state
-            .graph
-            .get(node)
-            .and_then(|node| node.repo.as_deref()),
-    );
+    let asked = branch.zip(repo);
     let settled = match settled {
         Some(Landing::Unlanded) => Settled::Unlanded,
         // `landed` is unreachable here: it returned above, which is what makes
@@ -485,7 +545,7 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
     match (asked, settled) {
         (Some((branch, repo)), settled) => Reported::ReadNow {
             settled,
-            read: read_now(view, node, branch, repo),
+            read: read_now(run, node, branch, repo),
         },
         (None, Settled::Unlanded) => Reported::UnlandedAtSettlement,
         (None, Settled::Nothing) => Reported::NoChangeToLand,
@@ -494,8 +554,8 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
 
 /// One node's landing, read now — or handed back from the read this render
 /// already took of it.
-fn read_now(view: &RunView, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
-    let key = (view.paths.run.clone(), node.to_owned());
+fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
+    let key = (run.to_owned(), node.to_owned());
     if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
         return read;
     }
@@ -604,36 +664,39 @@ impl RunView {
     pub fn summary(&self) -> String {
         let render = rendering(Rendered::Summary, &self.paths.run);
         let statuses = self.state.statuses();
-        let done = statuses
-            .values()
-            .filter(|status| **status == NodeStatus::Done)
-            .count();
-        let outstanding = outstanding_landings(self, &render);
-        let unlanded = match outstanding.not_landed.len() {
-            0 => String::new(),
-            count => format!(", {count} not landed"),
-        };
-        let undecided = match outstanding.undecided.len() {
-            0 => String::new(),
-            count => format!(", {count} landing undecided"),
-        };
-        // What is *missing* from the count above splits two ways, and only one
-        // of them is work that was attempted: `n/n done` on its own left a
-        // reader unable to tell a node the run tried and lost from one it never
-        // asked at all. Absent rather than a zero, like the clause before it.
-        let skipped = match statuses
-            .values()
-            .filter(|status| **status == NodeStatus::Skipped)
-            .count()
-        {
-            0 => String::new(),
-            count => format!(", {count} never attempted"),
-        };
-        format!(
-            "{done}/{} done{unlanded}{undecided}{skipped}",
-            statuses.len()
+        let counted = |wanted: NodeStatus| statuses.values().filter(|s| **s == wanted).count();
+        tally(
+            counted(NodeStatus::Done),
+            statuses.len(),
+            counted(NodeStatus::Skipped),
+            &outstanding_landings(self, &render),
         )
     }
+}
+
+/// The `n/m done` line, from the counts behind it.
+///
+/// One phrasing, because two readers meet it: the folding views build the counts
+/// out of a run's whole store and the bounded listing builds them out of that
+/// run's summary document, and a line worded twice is a line that drifts.
+fn tally(done: usize, total: usize, skipped: usize, outstanding: &Outstanding) -> String {
+    let unlanded = match outstanding.not_landed.len() {
+        0 => String::new(),
+        count => format!(", {count} not landed"),
+    };
+    let undecided = match outstanding.undecided.len() {
+        0 => String::new(),
+        count => format!(", {count} landing undecided"),
+    };
+    // What is *missing* from the count above splits two ways, and only one of
+    // them is work that was attempted: `n/n done` on its own left a reader
+    // unable to tell a node the run tried and lost from one it never asked at
+    // all. Absent rather than a zero, like the clause before it.
+    let skipped = match skipped {
+        0 => String::new(),
+        count => format!(", {count} never attempted"),
+    };
+    format!("{done}/{total} done{unlanded}{undecided}{skipped}")
 }
 
 /// What one run's unread surfaces are, as the one line reporting them needs them.
@@ -1016,6 +1079,32 @@ fn rejected_by_a_judge(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) 
         .collect()
 }
 
+impl WorkStanding {
+    /// What a graph leaves for somebody to do, over the four readings of it.
+    ///
+    /// One derivation, because two readers reach it: the folding views read
+    /// these off a run's whole store and the bounded listing reads them off that
+    /// run's summary document, and the reading — not the reader — is what
+    /// decides the word on the row and the advice under it.
+    fn of(
+        converged: bool,
+        complete: bool,
+        outstanding: bool,
+        parked: Vec<String>,
+        rejected: Vec<String>,
+    ) -> Self {
+        if converged && complete {
+            Self::Complete
+        } else if let Some(held) = HeldWork::of(parked, rejected) {
+            Self::Held(held)
+        } else if !converged || outstanding {
+            Self::Outstanding
+        } else {
+            Self::Settled
+        }
+    }
+}
+
 impl Standing {
     /// Read one run's standing, once.
     fn of(view: &RunView) -> Self {
@@ -1043,22 +1132,50 @@ impl Standing {
         } else {
             Vec::new()
         };
-        let work = if converged && graph::state_of(&statuses) == graph::GraphState::Complete {
-            WorkStanding::Complete
-        } else if let Some(held) = HeldWork::of(parked, rejected) {
-            WorkStanding::Held(held)
-        } else if !converged
-            || statuses
-                .values()
-                .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked))
-        {
-            WorkStanding::Outstanding
-        } else {
-            WorkStanding::Settled
-        };
         Self {
             liveness: view.liveness(),
-            work,
+            work: WorkStanding::of(
+                converged,
+                graph::state_of(&statuses) == graph::GraphState::Complete,
+                statuses
+                    .values()
+                    .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked)),
+                parked,
+                rejected,
+            ),
+            convergence: Convergence::of(converged),
+        }
+    }
+
+    /// The same standing, off one row of a bounded listing.
+    ///
+    /// The three readings the fold takes off a status map are taken off the
+    /// document's own counts instead, and they are the same readings: `complete`
+    /// is every node `done` — which an empty map answers exactly as
+    /// [`graph::state_of`] answers it — and `outstanding` is a node waiting on a
+    /// person or blocked behind one. What a status *count* cannot answer, the
+    /// document names outright: which nodes are parked, and which a judge turned
+    /// down.
+    fn of_row(row: &Row<'_>) -> Self {
+        let counts = &row.summary.node_counts;
+        let converged = row.summary.graph_complete;
+        let held = |named: &[String]| {
+            if converged {
+                named.to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        Self {
+            liveness: row.liveness(),
+            work: WorkStanding::of(
+                converged,
+                counts.keys().all(|word| word == NodeStatus::Done.as_str()),
+                counts.contains_key(NodeStatus::Waiting.as_str())
+                    || counts.contains_key(NodeStatus::Blocked.as_str()),
+                held(&row.summary.parked),
+                held(&row.summary.judge_rejected),
+            ),
             convergence: Convergence::of(converged),
         }
     }
@@ -1177,8 +1294,8 @@ pub(crate) fn has_settled(view: &RunView) -> bool {
 /// and a run nothing is driving has bigger news on the same line — reporting
 /// either as unwatched would send an operator after a graph whose absence is not
 /// the problem.
-fn observer_verdict(view: &RunView, standing: &Standing) -> Option<ObserverLiveness> {
-    (standing.word() == DriverLiveness::Driving.as_str()).then(|| observer_liveness(&view.launch))
+fn observer_verdict(standing: &Standing) -> bool {
+    standing.word() == DriverLiveness::Driving.as_str()
 }
 
 /// That word, and — where the driver recorded one — why nothing is watching.
@@ -1188,12 +1305,143 @@ fn observer_verdict(view: &RunView, standing: &Standing) -> Option<ObserverLiven
 /// reason it is: a bound that is spent is a run to take over, and a graph that
 /// would not start is a graph to fix first.
 fn observer_suffix(view: &RunView, standing: &Standing) -> String {
-    match observer_verdict(view, standing) {
+    observer_phrase(
+        observer_verdict(standing).then(|| observer_liveness(&view.launch)),
+        &view.launch.observer_ending,
+    )
+}
+
+/// The suffix itself, from the verdict and the reason it may carry.
+///
+/// One phrasing over both readers, for the reason [`tally`] is one: the listing
+/// reads the observer off a summary document and the folding views read it off a
+/// launch record, and a suffix worded twice is a suffix that drifts.
+fn observer_phrase(verdict: Option<ObserverLiveness>, ending: &str) -> String {
+    match verdict {
         None | Some(ObserverLiveness::Watching) => String::new(),
         Some(verdict @ ObserverLiveness::ObserverNotRestarted) => {
-            format!("  {}: {}", verdict.as_str(), view.launch.observer_ending)
+            format!("  {}: {}", verdict.as_str(), ending)
         }
         Some(verdict) => format!("  {}", verdict.as_str()),
+    }
+}
+
+/// One run of a **bounded listing**, as the two views that render one read it.
+///
+/// The counterpart of [`RunView`] on the cheap path, and the distinction between
+/// them is the whole of this type's reason to exist: a detail read may fold a
+/// run's merged store, and a listing may never — a host holding five hundred runs
+/// answers `runs` by reading five hundred bounded documents, not eleven gigabytes
+/// of journal. What is *not* on the document stays a read of the host at the
+/// moment of the question: whether the driver process is alive, what the run's
+/// channel is holding, and whether a change has reached its base.
+struct Row<'a> {
+    /// Where the run's durable state lives, for exactly those reads.
+    paths: RunPaths,
+    /// The run's own record of itself, read rather than folded.
+    summary: &'a RunSummary,
+}
+
+impl<'a> Row<'a> {
+    /// One row of a listing read over `root`.
+    fn of(root: &Path, summary: &'a RunSummary) -> Self {
+        Self {
+            paths: RunPaths::under(root, &summary.run_id),
+            summary,
+        }
+    }
+
+    /// How the run is being driven, read from the host now.
+    fn liveness(&self) -> DriverLiveness {
+        driver_liveness(
+            self.summary.stop_recorded,
+            self.summary.host.as_deref(),
+            self.summary.pid,
+            self.summary.last_write_at,
+            self.summary.awaiting_human_action,
+            &self.paths,
+        )
+    }
+
+    /// Whether anything is watching the run, where its driver tier leaves room
+    /// to say so.
+    ///
+    /// Read off the **launch record**, and deliberately not off the summary
+    /// document beside it: a driver rewrites what this asks under a live run and
+    /// appends nothing — one that finds its observer gone starts another and
+    /// records the new graph run, one that stops starting another records why —
+    /// so a stored answer would name a graph run that had ended and say nothing
+    /// about a run nobody will watch again. The read is a small file, it is not
+    /// the run's merged store, and it happens only for a run this listing is
+    /// already reporting as being driven.
+    ///
+    /// A record this build cannot read leaves the suffix off, which is where
+    /// every unreadable observer input resolves: a run reported unwatched invites
+    /// an operator to intervene, and doing that to a working observer is worse
+    /// than saying nothing.
+    fn observer_suffix(&self, standing: &Standing) -> String {
+        if !observer_verdict(standing) {
+            return String::new();
+        }
+        let Some(launch) = ledger::read_json_opt::<LaunchRecord>(&self.paths.launch()) else {
+            return String::new();
+        };
+        observer_phrase(Some(observer_liveness(&launch)), &launch.observer_ending)
+    }
+
+    /// The `n/m done` line, with every landing it counts decided **now**.
+    fn tally(&self) -> String {
+        let render = rendering(Rendered::Summary, &self.summary.run_id);
+        let counted = |word: NodeStatus| {
+            usize::try_from(*self.summary.node_counts.get(word.as_str()).unwrap_or(&0))
+                .unwrap_or(usize::MAX)
+        };
+        let total = self
+            .summary
+            .node_counts
+            .values()
+            .copied()
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            .sum();
+        tally(
+            counted(NodeStatus::Done),
+            total,
+            counted(NodeStatus::Skipped),
+            &self.outstanding(&render),
+        )
+    }
+
+    /// What of this run's work has not reached a base, asked of the document's
+    /// own landing inputs and answered by reading the repository now.
+    ///
+    /// The one fact on this path that is deliberately *not* served out of the
+    /// document. See [`RunSummary::landings`].
+    fn outstanding(&self, render: &Rendering) -> Outstanding {
+        let mut outstanding = Outstanding::default();
+        for (node, landing) in &self.summary.landings {
+            if landing.drafted {
+                continue;
+            }
+            let reported = reported_landing_of(
+                &self.summary.run_id,
+                render,
+                node,
+                Landing::parse(&landing.landing),
+                landing.branch.as_deref(),
+                landing.repo.as_deref(),
+            );
+            match reported.stands() {
+                Stands::NotLanded => outstanding.not_landed.push(node.clone()),
+                Stands::Undecided => outstanding.undecided.push(node.clone()),
+                Stands::Landed | Stands::NoChangeToLand => {}
+            }
+        }
+        outstanding
+    }
+
+    /// The surfaces nobody has read yet, read from the run's channel now.
+    fn unread(&self) -> Unread {
+        Unread::of(&crate::channel::ChannelState::new(&self.paths).queue())
     }
 }
 
@@ -1203,22 +1451,23 @@ fn observer_suffix(view: &RunView, standing: &Standing) -> String {
 /// than dropped: an empty listing on a host that holds runs is the reading that
 /// costs the most, because it is the one a planner acts on by starting more work.
 pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
-    let survey = Survey::of(root);
+    let listing = Listing::of(root);
     let mut out = String::new();
-    for view in &survey.views {
-        let owned = view.launch.owned_by(session);
+    for summary in listed(&listing) {
+        let owned = ledger::owned_by(&summary.session, session);
         if mine_only && !owned {
             continue;
         }
+        let row = Row::of(root, summary);
         let marker = if owned { '*' } else { ' ' };
-        let standing = Standing::of(view);
+        let standing = Standing::of_row(&row);
         out.push_str(&format!(
             "{marker} {:<24} {:<24} {}  {}{}\n",
-            view.paths.run,
-            view.launch.owner_label(session),
-            view.summary(),
+            summary.run_id,
+            ledger::owner_label(&summary.launcher, &summary.session, session),
+            row.tally(),
             standing.word(),
-            observer_suffix(view, &standing)
+            row.observer_suffix(&standing)
         ));
         // A run reported stopped keeps the line saying why it stopped rather
         // than an invitation to read updates nothing will follow up on. A run
@@ -1231,22 +1480,22 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
                     "    {} — its ledger is intact; attach a fresh driver with: \
                      onepipeline adopt {}\n",
                     standing.word(),
-                    view.paths.run
+                    summary.run_id
                 ),
                 Intervention::RequeueThenAdopt(parked) => format!(
                     "    {} — its ledger is intact; {}\n",
                     standing.word(),
-                    requeue_then_adopt(&view.paths.run, parked)
+                    requeue_then_adopt(&summary.run_id, parked)
                 ),
                 Intervention::ReviewThenSupersede(rejected) => format!(
                     "    {} — its ledger is intact; {}\n",
                     standing.word(),
-                    review_then_supersede(&view.paths.run, rejected)
+                    review_then_supersede(&summary.run_id, rejected)
                 ),
             });
             continue;
         }
-        let unread = view.unread();
+        let unread = row.unread();
         if let (count, Some(stale)) = (unread.count, unread.oldest_seconds) {
             if count > 0 {
                 out.push_str(&format!(
@@ -1254,15 +1503,160 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
                      read them with: onepipeline next {}\n",
                     unread.phrase(),
                     crate::telemetry::duration(stale * 1_000),
-                    view.paths.run
+                    summary.run_id
                 ));
             }
         }
     }
     if out.is_empty() {
-        return nothing_to_report(&survey);
+        return nothing_listed(&listing);
     }
-    out.push_str(&skipped_lines(&survey.skipped));
+    out.push_str(&skipped_lines(&listing.skipped));
+    out
+}
+
+/// The rows of a listing in the order a view renders them: **by run id**.
+///
+/// [`Listing`] serves its rows most recently written first, which is the order
+/// the ordering key on the document exists to make answerable without a fold. A
+/// view renders them by id instead, because that is the order every reader of
+/// `runs` and `status` has ever read them in and the row's own id is the thing
+/// they scan for; the recency order is there for a consumer building its own
+/// listing.
+fn listed(listing: &Listing) -> Vec<&RunSummary> {
+    let mut rows: Vec<&RunSummary> = listing.summaries.iter().collect();
+    rows.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    rows
+}
+
+/// What a bounded listing says when it has no run to report.
+///
+/// The same two facts [`nothing_to_report`] tells apart, over the listing's own
+/// account of what it refused: a root with nothing in it and a root whose every
+/// run was refused both rendered as `no runs recorded`, and only one of them
+/// means there is nothing running.
+fn nothing_listed(listing: &Listing) -> String {
+    // llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer,
+    // not a failure of the command, on the terms `skipped_lines` and its own block state:
+    // this empty case *replaces* `no runs recorded`, so it cannot live on a stream other
+    // than the answer it replaces.
+    let mut out = if listing.summaries.is_empty() && !listing.skipped.is_empty() {
+        format!(
+            "no run under {} could be read\n",
+            one_line(&listing.root.display().to_string())
+        )
+    } else {
+        "no runs recorded\n".to_string()
+    };
+    out.push_str(&skipped_lines(&listing.skipped));
+    out
+    // llmlint: ignore-end[cli_output_contract]
+}
+
+/// The **run-level** lines of `onepipeline status`: what it says about the run
+/// itself rather than about any one of its nodes.
+///
+/// One phrasing over two readers, and the split is the point. `status` given one
+/// run is a detail read and folds that run's whole store to say what each of its
+/// nodes is doing; `status` given none is a **listing**, and answers these lines
+/// out of each run's bounded summary document. Two wordings of the run's own
+/// standing would be two things to keep true, and a supervisor reads them one
+/// after the other.
+fn status_run_lines(
+    paths: &RunPaths,
+    standing: &Standing,
+    observer: &str,
+    tally: &str,
+    unread: &Unread,
+) -> String {
+    let run = &paths.run;
+    let mut out = format!("{run}  {}{observer}  {tally}\n", standing.word());
+    if let Some(intervention) = standing.intervention() {
+        out.push_str(&match intervention {
+            Intervention::Adopt => format!(
+                "  {}: nothing is driving this run; adopt it or stop it\n",
+                standing.word()
+            ),
+            Intervention::RequeueThenAdopt(parked) => format!(
+                "  {}: nothing is driving this run and {}\n",
+                standing.word(),
+                requeue_then_adopt(run, parked)
+            ),
+            Intervention::ReviewThenSupersede(rejected) => format!(
+                "  {}: nothing is driving this run and {}\n",
+                standing.word(),
+                review_then_supersede(run, rejected)
+            ),
+        });
+    }
+    // Whatever is in the slot, said either way — but not the same way. A surface
+    // nobody is waiting on any more is not a decision this run is held on, and
+    // reporting it as one is the defect this line used to have; saying nothing
+    // about it instead would lose the last place its text is shown, since it has
+    // been delivered and `next` does not hand it out twice.
+    if let Some(held) = crate::channel::ChannelState::new(paths).held() {
+        out.push_str(&format!(
+            "  {}: {} — {}\n",
+            match (held.abandoned, held.blocking) {
+                (true, _) => "a planner update nobody is waiting on any more",
+                (false, true) => "waiting for planner decision",
+                (false, false) => "waiting for planner reply",
+            },
+            held.kind,
+            held.message
+        ));
+    }
+    if unread.count > 0 {
+        out.push_str(&format!(
+            "  {} planner update(s) waiting ({}), unread for {}\n",
+            unread.count,
+            unread.phrase(),
+            crate::telemetry::duration(unread.oldest_seconds.unwrap_or(0) * 1_000)
+        ));
+    }
+    // Off the count above and said out loud anyway. Nothing is waiting for an
+    // answer to these, so counting them would inflate the one line a supervisor
+    // may not filter — but their text is still in the queue and still worth
+    // reading, and a surface that vanished without a word would be the same
+    // silence from the other direction.
+    if unread.abandoned > 0 {
+        out.push_str(&format!(
+            "  {} planner update(s) nobody is waiting on: whatever raised them ended \
+             without an answer; read them with: onepipeline next {run}\n",
+            unread.abandoned
+        ));
+    }
+    out
+}
+
+/// `onepipeline status` given **no run**: the bounded listing.
+///
+/// Every run under the root, at a cost that does not grow with any of their
+/// journals — the run-level lines alone, read out of each run's summary
+/// document. What each node of a run is doing is `status <RUN>`'s to say, and
+/// that is a detail read which folds: a per-node block for every run on a host
+/// is a fold of every store on it, which is the cost this path exists to remove.
+pub(crate) fn status_listed(listing: &Listing) -> String {
+    let mut out = String::new();
+    for summary in listed(listing) {
+        let row = Row::of(&listing.root, summary);
+        // Opened before anything under it renders, so the tally this line
+        // carries and the landings it counts are one render and ask each node
+        // once between them.
+        let _render = rendering(Rendered::Status, &summary.run_id);
+        let standing = Standing::of_row(&row);
+        out.push_str(&status_run_lines(
+            &row.paths,
+            &standing,
+            &row.observer_suffix(&standing),
+            &row.tally(),
+            &row.unread(),
+        ));
+    }
+    if out.is_empty() {
+        return nothing_listed(listing);
+    }
+    out.push_str(&skipped_lines(&listing.skipped));
     out
 }
 
@@ -1276,70 +1670,13 @@ pub fn status(survey: &Survey) -> String {
         // ask each node once between them.
         let render = rendering(Rendered::Status, &view.paths.run);
         let standing = Standing::of(view);
-        out.push_str(&format!(
-            "{}  {}{}  {}\n",
-            view.paths.run,
-            standing.word(),
-            observer_suffix(view, &standing),
-            view.summary()
+        out.push_str(&status_run_lines(
+            &view.paths,
+            &standing,
+            &observer_suffix(view, &standing),
+            &view.summary(),
+            &view.unread(),
         ));
-        if let Some(intervention) = standing.intervention() {
-            out.push_str(&match intervention {
-                Intervention::Adopt => format!(
-                    "  {}: nothing is driving this run; adopt it or stop it\n",
-                    standing.word()
-                ),
-                Intervention::RequeueThenAdopt(parked) => format!(
-                    "  {}: nothing is driving this run and {}\n",
-                    standing.word(),
-                    requeue_then_adopt(&view.paths.run, parked)
-                ),
-                Intervention::ReviewThenSupersede(rejected) => format!(
-                    "  {}: nothing is driving this run and {}\n",
-                    standing.word(),
-                    review_then_supersede(&view.paths.run, rejected)
-                ),
-            });
-        }
-        // Whatever is in the slot, said either way — but not the same way. A
-        // surface nobody is waiting on any more is not a decision this run is
-        // held on, and reporting it as one is the defect this line used to have;
-        // saying nothing about it instead would lose the last place its text is
-        // shown, since it has been delivered and `next` does not hand it out
-        // twice.
-        if let Some(held) = crate::channel::ChannelState::new(&view.paths).held() {
-            out.push_str(&format!(
-                "  {}: {} — {}\n",
-                match (held.abandoned, held.blocking) {
-                    (true, _) => "a planner update nobody is waiting on any more",
-                    (false, true) => "waiting for planner decision",
-                    (false, false) => "waiting for planner reply",
-                },
-                held.kind,
-                held.message
-            ));
-        }
-        let unread = view.unread();
-        if unread.count > 0 {
-            out.push_str(&format!(
-                "  {} planner update(s) waiting ({}), unread for {}\n",
-                unread.count,
-                unread.phrase(),
-                crate::telemetry::duration(unread.oldest_seconds.unwrap_or(0) * 1_000)
-            ));
-        }
-        // Off the count above and said out loud anyway. Nothing is waiting for
-        // an answer to these, so counting them would inflate the one line a
-        // supervisor may not filter — but their text is still in the queue and
-        // still worth reading, and a surface that vanished without a word would
-        // be the same silence from the other direction.
-        if unread.abandoned > 0 {
-            out.push_str(&format!(
-                "  {} planner update(s) nobody is waiting on: whatever raised them ended \
-                 without an answer; read them with: onepipeline next {}\n",
-                unread.abandoned, view.paths.run
-            ));
-        }
         let statuses = view.state.statuses();
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Running {

@@ -87,7 +87,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Attest(args) => attest(&args),
         Verb::Stop(args) => stop(&args),
         Verb::Runs(args) => runs(&args),
-        Verb::Status(args) => report(&args, views::status),
+        Verb::Status(args) => status(&args),
         Verb::Host => report(&OptionalRunArgs { run: None }, views::host),
         Verb::Monitor(args) => {
             let view = RunView::open(&resolve(&args.run)?)?;
@@ -3115,6 +3115,23 @@ fn runs(args: &RunsArgs) -> Result<i32> {
         "{}",
         views::runs(&ledger::runs_root(), args.mine, &sys::launching_session())
     );
+    Ok(EXIT_SUCCESS)
+}
+
+/// `onepipeline status`.
+///
+/// The two halves of this verb are two different reads, and deliberately so. A
+/// named run is a **detail** read: it folds that run's merged store and reports
+/// what each of its nodes is doing. No run named is a **listing**, and a listing
+/// may never fold — it answers the run-level lines out of each run's bounded
+/// summary document, so asking a host what is running costs a document per run
+/// rather than every byte every run has recorded.
+fn status(args: &OptionalRunArgs) -> Result<i32> {
+    let rendered = match &args.run {
+        Some(run) => views::status(&views::Survey::of_one(RunView::open(&resolve(run)?)?)),
+        None => views::status_listed(&views::Listing::of(&ledger::runs_root())),
+    };
+    print!("{rendered}");
     Ok(EXIT_SUCCESS)
 }
 

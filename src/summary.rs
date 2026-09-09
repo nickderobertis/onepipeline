@@ -36,6 +36,14 @@
 //! record's pid, host, and start token, and the run's last recorded write. The
 //! answer stays computed.
 //!
+//! **The observer.** Not even its inputs, and for a sharper reason: a driver
+//! *rewrites* them under a live run without a record following. One that finds
+//! its observer gone starts another and records the new graph run, and one that
+//! stops starting another records why — both in the launch record, and neither
+//! is a journal append, so this document would go on naming a graph run that
+//! ended and saying nothing about a run nobody will watch again. The launch
+//! record is where that question is asked, at the moment it is asked.
+//!
 //! [`views::RunView::open`]: crate::views::RunView::open
 
 // llmlint: ignore-file[invalid_states_unrepresentable] every identifier and timestamp on
@@ -47,7 +55,7 @@
 // would be a public vocabulary the contract did not ask for — and the contract that does
 // exist is enforced where it can be: `schema_version` is refused by the deserializer, and
 // the one value that could be a nonsense pid is `NonZeroU32` rather than a checked `u32`.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -76,7 +84,7 @@ use crate::telemetry::{self, RunTelemetry};
 /// know costs a fold and nothing else, and the alternative — reading a document
 /// half of whose meaning is a build's this one is not — is exactly what the
 /// version exists to refuse.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
+pub const SUMMARY_SCHEMA_VERSION: u32 = 2;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -87,6 +95,39 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
         )));
     }
     Ok(found)
+}
+
+/// One node's change, as the **inputs** a listing decides its landing from.
+///
+/// Everything here is a record of what the run observed; the decision itself is
+/// taken when a view renders. See [`RunSummary::landings`], which states why the
+/// answer is deliberately not stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeLanding {
+    /// What the node's own settlement observed: `landed` or `unlanded`, in the
+    /// run's own words.
+    ///
+    /// A word rather than a closed set, on the terms this file's own suppression
+    /// states: it is a serialized field an older build wrote and a newer one may
+    /// spell differently, and `docs/contract.md` names no type for it.
+    pub landing: String,
+    /// The branch the dispatch reported, which is the only spelling of this work
+    /// a repository can resolve. Absent for a node that published none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The repository the question is narrowed to. Absent for a node whose plan
+    /// names none — and a node with no repository publishes nothing, so asking
+    /// after its branch would search every identity this host knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Whether the run is holding this change back as a **draft**.
+    ///
+    /// Counted under neither of a listing's two headings: a draft is a change
+    /// this run is deliberately holding and will lift itself, not one nobody
+    /// merged, and it has a line of its own saying what it waits on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drafted: bool,
 }
 
 /// One run, as a listing reads it: a bounded read that does not grow with the
@@ -209,6 +250,38 @@ pub struct RunSummary {
     /// clock to drift apart. It is here so that listing a host's runs no longer
     /// costs a process per row to get it.
     pub timing: RunTelemetry,
+    /// The nodes a planner's `cancel` idled, which no later pass dispatches
+    /// until a `requeue`.
+    ///
+    /// The **names**, rather than a count, because the one thing a view says
+    /// about them is what to requeue. Recorded whatever the run's convergence —
+    /// a reader decides for itself whether a park is holding a settled run back,
+    /// which is a question about the run rather than about the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<String>,
+    /// The nodes that failed on a judge's own verdict, which nothing dispatches
+    /// as they stand.
+    ///
+    /// **Three records at once**, and the reason this is stored rather than
+    /// derived: a failed status and a task-failed outcome are on this document
+    /// already, and the verdict itself is in the run's merged store — so a
+    /// listing that had to open the store to tell a rejected node from one whose
+    /// task simply failed would be the fold this document exists to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_rejected: Vec<String>,
+    /// What each node that recorded a landing published, as the **inputs** to
+    /// the landing question rather than as its answer.
+    ///
+    /// Deliberately not a stored verdict. Whether a change has reached its base
+    /// is decided when a view renders — a change merged after its node settled is
+    /// not work nobody landed, and a count that said it was is what sent a
+    /// supervisor to re-dispatch work that was already on the base. So this
+    /// carries what the run *observed* and where to ask again, and every reader
+    /// re-asks; a node whose settlement already recorded `landed` is the one that
+    /// is never asked again, because a base does not stop carrying what it
+    /// carries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub landings: BTreeMap<String, NodeLanding>,
     /// The journal's length in bytes when this document was written.
     ///
     /// Half of the stamp a stale summary is detected by. The journal is
@@ -257,6 +330,26 @@ fn journal_stamp(paths: &RunPaths) -> (u64, u64) {
 /// answer.
 type Stamp = (u64, u64);
 
+/// What a run's **merged store** contributed to its summary.
+///
+/// One value rather than five parameters side by side, because they are read
+/// together and only ever together: both producers of this document — the
+/// journal writer folding a record at a time, and the reader folding a whole
+/// store — hand over exactly these, and a caller that took four of the five
+/// would be describing a store nobody recorded.
+struct Store<'a> {
+    /// The run's journal, folded into the plan of record.
+    state: &'a RunState,
+    /// How many records that store holds.
+    event_count: u64,
+    /// The wire string of the record the merge order ends with.
+    last_event_kind: Option<String>,
+    /// The run's aggregate wall clock and usage.
+    timing: &'a RunTelemetry,
+    /// The nodes some record carries a failing judge verdict for.
+    judged: &'a BTreeSet<String>,
+}
+
 impl RunSummary {
     /// One run's summary: the stored document where it is current, and a fold
     /// where it is not.
@@ -302,13 +395,22 @@ impl RunSummary {
     /// to: one derivation, so the two accounts of a run cannot drift apart.
     fn folded(paths: &RunPaths, stamp: Stamp) -> crate::Result<Self> {
         let view = crate::views::RunView::open(paths)?;
+        let judged: BTreeSet<String> = view
+            .events
+            .iter()
+            .filter_map(crate::report::a_judge_failed)
+            .map(str::to_string)
+            .collect();
         Ok(Self::derive(
             &paths.run,
             &view.launch,
-            &view.state,
-            view.events.len() as u64,
-            view.events.last().map(|event| event.kind.0.clone()),
-            &telemetry::of_run(paths, &view.events),
+            &Store {
+                state: &view.state,
+                event_count: view.events.len() as u64,
+                last_event_kind: view.events.last().map(|event| event.kind.0.clone()),
+                timing: &telemetry::of_run(paths, &view.events),
+                judged: &judged,
+            },
             stamp,
         ))
     }
@@ -320,17 +422,30 @@ impl RunSummary {
     fn derive(
         run: &str,
         launch: &LaunchRecord,
-        state: &RunState,
-        event_count: u64,
-        last_event_kind: Option<String>,
-        timing: &RunTelemetry,
+        store: &Store<'_>,
         (journal_len, journal_mtime_ms): Stamp,
     ) -> Self {
+        let Store {
+            state,
+            event_count,
+            last_event_kind,
+            timing,
+            judged,
+        } = store;
+        let (event_count, last_event_kind, timing) =
+            (*event_count, last_event_kind.clone(), *timing);
         let statuses = state.statuses();
         let mut node_counts: BTreeMap<String, u64> = BTreeMap::new();
         for status in statuses.values() {
             *node_counts.entry(status.as_str().to_string()).or_insert(0) += 1;
         }
+        let with_status = |wanted: graph::NodeStatus| -> Vec<String> {
+            statuses
+                .iter()
+                .filter(|(_, status)| **status == wanted)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
         Self {
             schema_version: SUMMARY_SCHEMA_VERSION,
             run_id: run.to_string(),
@@ -352,6 +467,37 @@ impl RunSummary {
             host: launch.recorded_host().map(str::to_string),
             started: (!launch.started.is_empty()).then(|| launch.started.clone()),
             timing: timing.clone(),
+            parked: with_status(graph::NodeStatus::Parked),
+            // The same three records `views::rejected_by_a_judge` reads, taken
+            // where all three are in hand: the derived status, the settlement's
+            // own outcome, and the verdict the store carries. Either record alone
+            // names the wrong nodes — a node that simply failed its task is not a
+            // node a judge turned down.
+            judge_rejected: with_status(graph::NodeStatus::Failed)
+                .into_iter()
+                .filter(|id| {
+                    matches!(
+                        state.outcomes.get(id).map(String::as_str),
+                        Some(crate::engine::TASK_FAILED | crate::engine::TASK_FAILED_CHANGE_OPEN)
+                    )
+                })
+                .filter(|id| judged.contains(id))
+                .collect(),
+            landings: state
+                .landings
+                .iter()
+                .map(|(node, landing)| {
+                    (
+                        node.clone(),
+                        NodeLanding {
+                            landing: landing.as_str().to_string(),
+                            branch: state.branches.get(node).cloned(),
+                            repo: state.graph.get(node).and_then(|node| node.repo.clone()),
+                            drafted: statuses.get(node) == Some(&graph::NodeStatus::CompleteDraft),
+                        },
+                    )
+                })
+                .collect(),
             journal_len,
             journal_mtime_ms,
         }
@@ -434,6 +580,14 @@ struct Folded {
     /// The kind of the record the **merge order** ends with, which for a store
     /// folded in that order is whatever was taken last.
     last_event_kind: Option<String>,
+    /// The nodes some record in this store carries a **failing judge verdict**
+    /// for.
+    ///
+    /// Folded a record at a time because that is all it takes: a verdict is on
+    /// the settlement that carried it and nothing later withdraws one, so the
+    /// set only grows. It is the one input to `judge_rejected` that lives in the
+    /// store rather than in the state beside it.
+    judged: BTreeSet<String>,
 }
 
 impl Folded {
@@ -454,6 +608,9 @@ impl Folded {
         self.aggregate.fold(paths, event);
         self.events += 1;
         self.last_event_kind = Some(event.kind.0.clone());
+        if let Some(node) = crate::report::a_judge_failed(event) {
+            self.judged.insert(node.to_string());
+        }
     }
 }
 
@@ -721,13 +878,35 @@ impl Maintainer {
                 .map_or_else(ledger::runs_root, Path::to_path_buf),
             &folded.state.graph,
         );
+        // The landings a closing driver re-read and wrote to its result, taken
+        // exactly where a folding reader takes them. Without it the two accounts
+        // of one run would disagree on the one field that outlives the journal:
+        // a change the run watched reach its base after the record that said it
+        // had not.
+        //
+        // Asked only where there is something for it to move. That re-read only
+        // ever turns `unlanded` into `landed`, so a run with no unlanded change
+        // has the same state either way — and this runs on the **append path**,
+        // where a file opened per record is a cost the whole run pays to answer
+        // a question almost every record has no stake in.
+        if folded
+            .state
+            .landings
+            .values()
+            .any(|landing| *landing == graph::Landing::Unlanded)
+        {
+            crate::views::landings_the_run_re_read(&mut folded.state, &self.paths);
+        }
         let summary = RunSummary::derive(
             &self.paths.run,
             &self.launch(),
-            &folded.state,
-            folded.events,
-            folded.last_event_kind.clone(),
-            &folded.aggregate.finish(&self.paths.run, &folded.state),
+            &Store {
+                state: &folded.state,
+                event_count: folded.events,
+                last_event_kind: folded.last_event_kind.clone(),
+                timing: &folded.aggregate.finish(&self.paths.run, &folded.state),
+                judged: &folded.judged,
+            },
             (self.accounted, journal_stamp(&self.paths).1),
         );
         let _ = ledger::write_json(&self.paths.summary(), &summary);
@@ -1295,7 +1474,15 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v1.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v2.json");
+
+    /// The document the build **before** the bounded listing wrote, kept exactly
+    /// as that build wrote it.
+    ///
+    /// What proves the growth is a version and not a quiet widening: this is a
+    /// real schema 1 document, and the reader below has to refuse it rather than
+    /// read it as one of its own with five fields missing.
+    const GOLDEN_V1: &str = include_str!("../tests/golden/run-summary-v1.json");
 
     /// The document the golden pins, built through the types.
     ///
@@ -1328,24 +1515,68 @@ mod tests {
             started: None,
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
+            // Nothing parked, which is an absent key rather than an empty list on
+            // the wire.
+            parked: Vec::new(),
+            judge_rejected: vec!["publish".into()],
+            landings: BTreeMap::from([
+                // Observed landed, and with nothing to ask again about: a base
+                // does not stop carrying what it carries.
+                (
+                    "build".to_string(),
+                    NodeLanding {
+                        landing: "landed".into(),
+                        branch: None,
+                        repo: None,
+                        drafted: false,
+                    },
+                ),
+                // The inputs to the question, not its answer.
+                (
+                    "publish".to_string(),
+                    NodeLanding {
+                        landing: "unlanded".into(),
+                        branch: Some("onepipeline/golden".into()),
+                        repo: Some("nickderobertis/onepipeline".into()),
+                        drafted: false,
+                    },
+                ),
+            ]),
             journal_len: 8_192,
             journal_mtime_ms: 1_786_000_000_100,
         }
     }
 
     #[test]
-    fn a_schema_1_document_is_the_shape_the_golden_pins() {
+    fn a_schema_2_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v1.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v2.json together"
+        );
+    }
+
+    /// The document a build before the bounded listing wrote is **refused**.
+    ///
+    /// The whole compatibility statement, exercised on a real document rather
+    /// than on a number: schema 1 carries none of the five fields a listing
+    /// answers a row out of, so reading it as one of this build's would report a
+    /// run with no observer, nothing parked, nothing a judge turned down, and
+    /// nothing outstanding — every one of them an absence standing in for a fact
+    /// nobody recorded. A refusal costs a fold and nothing else.
+    #[test]
+    fn the_document_the_build_before_this_one_wrote_is_refused_rather_than_read() {
+        let refused = serde_json::from_str::<RunSummary>(GOLDEN_V1).expect_err("it is refused");
+        assert!(
+            refused.to_string().contains("schema_version 1"),
+            "the refusal does not name the version it met: {refused}"
         );
     }
 
     #[test]
-    fn a_schema_1_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_2_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());
@@ -1356,6 +1587,14 @@ mod tests {
         assert_eq!(read.host, None);
         assert_eq!(read.started, None);
         assert!(read.session.is_empty());
+        assert!(read.parked.is_empty());
+        // And the one field a listing must never read as a stored verdict is on
+        // the wire as the inputs it is decided from.
+        assert_eq!(read.landings["build"].branch, None);
+        assert_eq!(
+            read.landings["publish"].branch.as_deref(),
+            Some("onepipeline/golden")
+        );
 
         // And a document from a schema this build does not read is refused
         // rather than read as one it does — which is a run that folds, not a run
