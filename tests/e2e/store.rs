@@ -252,6 +252,16 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
     }
 }
 
+/// The field a journey about a **grown** answer injects into the store's own.
+///
+/// One name rather than one per assertion, because what it has to be is a property of the
+/// installed store rather than of any one line: a field that release does not answer with.
+/// `location` was this until `onetaskgraph` 0.2.14 added it and later releases answered it,
+/// at which point the journey below was asserting growth against a field the store itself
+/// supplied. Any name the installed release does not answer serves; the journey's own guard
+/// is what says the one chosen still does.
+const GROWN_FIELD: &str = "provenance";
+
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge these three
 // need is the crate under test — each drives the compiled binary against its own write-back
 // worker — so a project of their own would declare the same dependency and skip nothing.
@@ -261,7 +271,13 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
 ///
 /// `onetaskgraph` grows its own machine answers in patch releases — `location` arrived on
 /// the project item at 0.2.14 — and this projection reads those answers through types of
-/// its own. While those types denied unknown fields, the first field the store added
+/// its own.
+///
+/// The field this journey injects is [`GROWN_FIELD`], and which name that is has to move
+/// as the store grows: it was `location` until an installed release began answering one of
+/// its own, at which point the growth this journey states was no growth at all. The guard
+/// below is what says so, and it is the reason the name is a constant rather than four
+/// literals. While those types denied unknown fields, the first field the store added
 /// turned every projection into a parse failure; and because write-back is best-effort the
 /// run still settled `complete`, so the only evidence was one line on a driver log that a
 /// detached run writes where nobody opens it. A consuming host could not adopt any release
@@ -275,6 +291,7 @@ fn settlement_preserves_everything_the_plan_does_not_declare() {
 #[test]
 fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_know() {
     let world = World::new("store-writeback-grown");
+    let grown_field = GROWN_FIELD;
     let name = "writeback-grown";
     let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
     let identifier = crate::harness::project_id(name);
@@ -318,7 +335,7 @@ fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_kn
         "onetaskgraph.delegate",
         &onetaskgraph_binary().to_string_lossy(),
     );
-    let grown = json!({"location": {"kind": "board", "url": "https://example.invalid/boards/1"}});
+    let grown = json!({grown_field: {"kind": "board", "url": "https://example.invalid/boards/1"}});
     world.script("onetaskgraph.project-show.grow", &grown.to_string());
     world.script("onetaskgraph.task-list.grow", &grown.to_string());
     let world = world.with_env(
@@ -332,9 +349,10 @@ fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_kn
     let labels_before = world.store_task_labels(&project);
     let tasks_before = preserved_tasks(&world, &project);
     assert!(
-        before["location"].is_null(),
-        "the store's own answer already carries the field this journey adds, so nothing \
-         here is about a field this build does not know: {before}"
+        before[grown_field].is_null(),
+        "the store's own answer already carries `{grown_field}`, the field this journey \
+         adds, so nothing here is about a field this build does not know — name a field \
+         the installed release does not answer with: {before}"
     );
     assert_eq!(
         before["labels"],
@@ -372,7 +390,7 @@ fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_kn
     // unknown fields, no settlement above ever arrives.
     let answered = world.run_json(name, "writeback-project-show.stdout");
     assert!(
-        answered["items"][0]["item"]["location"].is_object(),
+        answered["items"][0]["item"][grown_field].is_object(),
         "the answer this projection read carried no field this build does not know, so it \
          could not have told a tolerant write-back from a strict one: {answered}"
     );
@@ -407,7 +425,7 @@ fn a_settlement_reaches_a_store_whose_answer_grew_a_field_this_build_does_not_kn
         "the complement assertion cannot fail on a deleted field, so it proves nothing"
     );
     assert!(
-        after["location"].is_null(),
+        after[grown_field].is_null(),
         "a field this build does not know was read off one release and written onto \
          another: {after}"
     );

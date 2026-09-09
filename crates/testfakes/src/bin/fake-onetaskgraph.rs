@@ -43,7 +43,9 @@
 //!   into each item's own `item`, and into each label that item carries. This is
 //!   the other thing a real binary cannot be asked to be: an install of a release
 //!   **newer** than the one this build was written against. `location` on a
-//!   project item is the real one — onetaskgraph 0.2.14 added it.
+//!   project item is the real one — onetaskgraph 0.2.14 added it — which is why a
+//!   journey growing an answer names a field the *installed* release does not
+//!   answer with, and asserts that it does not before it grows anything.
 //! * `onetaskgraph.<verb>.shrink` — the opposite, and the reason growth may not be
 //!   answered by reading nothing at all: the whitespace-separated field names an
 //!   item or page of that verb's answer **stopped** carrying. A field the
