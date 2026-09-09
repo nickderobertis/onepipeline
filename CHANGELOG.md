@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0](https://github.com/nickderobertis/onepipeline/compare/v0.24.1...v0.25.0) - 2026-09-09
+
+### Added
+
+- *(watch)* return on a validated event selector instead of on a clock ([#219](https://github.com/nickderobertis/onepipeline/pull/219))
+
+### Fixed
+
+- *(release)* resolve every platform package before verifying the launcher, and isolate two racing tests ([#220](https://github.com/nickderobertis/onepipeline/pull/220))
+
+### Performance
+
+- *(engine)* fold a run's state from a checkpoint instead of replaying its whole journal ([#217](https://github.com/nickderobertis/onepipeline/pull/217))
+
 ## [0.24.1](https://github.com/nickderobertis/onepipeline/compare/v0.24.0...v0.24.1) - 2026-09-09
 
 ### Fixed
