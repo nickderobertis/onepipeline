@@ -2831,7 +2831,6 @@ fn a_command_after_a_refusal_is_still_evaluated_and_answered_on_its_own() {
         .clone();
     assert_eq!(results.len(), 3, "{answered}");
 
-    // The first refused, with its own reason.
     assert_eq!(results[0]["op"], "settle");
     assert_eq!(results[0]["outcome"], "refused");
     assert!(
@@ -2842,7 +2841,7 @@ fn a_command_after_a_refusal_is_still_evaluated_and_answered_on_its_own() {
         "{answered}"
     );
 
-    // And the second — which the pass reached only *after* that refusal — was
+    // The second — which the pass reached only *after* that refusal — was
     // really evaluated: it carries a refusal of its own, about its own node,
     // which a pass that stopped at the first one could not have produced.
     assert_eq!(results[1]["op"], "settle");
