@@ -304,6 +304,11 @@ onepipeline reply run-1 <<<'{"version":3,"commands":[    # edit the live graph
 onepipeline attest run-1 design-approval                 # complete a human action
 ```
 
+<!-- llmlint: ignore[cli_output_contract] the two outcomes `0` covers are told apart on
+stdout, in the receipt: `state` and `commands` spell `applied` or `queued`. The status
+answers whether the envelope was accepted, because a non-zero status from this verb is a
+rejection to correct — entry 67 of `docs/contract-divergences.md` is the proposal and says
+why an accepted envelope must not share a status with a refusal. -->
 Every edit is applied or rejected with a reason: `reply` exits `0` when the
 reconciler applied it, `0` when it is accepted and still queued — durable,
 waiting for something to drive the run, and never an instruction to send again,

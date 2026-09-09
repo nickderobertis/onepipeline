@@ -104,12 +104,17 @@ impl Error {
 /// The result of anything in this crate that can fail.
 pub type Result<T> = std::result::Result<T, Error>;
 
+// llmlint: ignore-block[cli_output_contract] this constant carries the two outcomes on
+// purpose: `reply` answers an accepted envelope as accepted, and which of the two it was
+// is on stdout in the receipt divergence 64 states. Divergence 67 is the proposal, and
+// says why a non-zero status here is reserved for a rejection to correct.
 /// The run settled, or the reply's every edit was **accepted** — applied, or
 /// durable on the run's command queue and waiting for a driver.
 ///
 /// One status for both, because both are acceptances and the receipt is where
 /// which one it was is read. See divergence 67.
 pub const EXIT_SUCCESS: i32 = 0;
+// llmlint: ignore-end[cli_output_contract]
 
 /// A run's own "unfinished": a graph that is waiting or has a failed node has
 /// not settled.

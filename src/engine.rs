@@ -702,6 +702,15 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     // edit the record does not carry, and this is the run's last word on what
     // became of it. It cannot spin, because the queue's cursor only advances.
     let channel = ChannelState::new(paths);
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey can place an edit inside
+    // the window this claim closes. It is the gap between `record_result` returning and
+    // the lock going, and neither CLI exposes an input that pauses a driver there — the
+    // one lever a journey has over a driver's teardown is the write-back close-out, which
+    // is *before* this and is where
+    // `driver::an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`
+    // drives the same `reconcile_edits` call end to end. What an edit nothing claimed at
+    // all becomes is covered too, by
+    // `driver::an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it`.
     while reconcile_edits(
         paths,
         &mut journal,
@@ -713,6 +722,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
         outcome = graph::state_of(&state.statuses());
         record_result(paths, &state, outcome)?;
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     lock.release();
     Ok(outcome)
 }

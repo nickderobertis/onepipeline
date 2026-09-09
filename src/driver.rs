@@ -2210,6 +2210,16 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         Submitted::AppliedByRun { reply } => {
             (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
+        // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares
+        // are told apart on **stdout**, in the receipt divergence 64 states: `"state"` and
+        // `"commands"` spell `applied` or `queued`, and the README says so and says a
+        // caller reading only the status is reading whether the envelope was accepted.
+        // Sharing the status is the point rather than an oversight — this verb's non-zero
+        // statuses are refusals to correct, its own documentation and the engine's comment
+        // both say so, and answering an accepted envelope with one told every status-reading
+        // wrapper to correct an edit that was already durable. Divergence 67 is the
+        // proposal, and `channel::a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway`
+        // reads both halves of what a caller gets here.
         Submitted::Queued { reply } => {
             // Accepted, so it answers as accepted: a non-zero status from this
             // verb is a rejection to correct, which a queued envelope is not.
@@ -2224,7 +2234,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 paths.run, paths.run
             );
             (Receipt::Queued { reply, verdict }, EXIT_SUCCESS)
-        }
+        } // llmlint: ignore-end[cli_output_contract]
     };
     println!(
         "{}",
@@ -2628,7 +2638,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     // and with nothing driving the run this process becomes the single writer
     // and applies the edit itself. Execution is continuous, so there is no
     // boundary at which an edit has nothing to apply to.
-    match ledger::OwnershipLock::acquire(paths, "reply") {
+    match ledger::OwnershipLock::acquire(paths, TAKING_THE_RUN_OVER) {
         Ok(lock) => {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
@@ -2795,22 +2805,55 @@ fn reconciled_here(
     channel: &ChannelState,
     id: u64,
 ) -> Result<Option<crate::channel::CommandOutcome>> {
-    let Ok(lock) = ledger::OwnershipLock::acquire(paths, "reply") else {
-        return Ok(None);
-    };
-    // Taking a lock is not instant, and the driver that had it may have answered
-    // this envelope on its own way out while it was being taken.
-    if let Some(outcome) = channel.outcome_of(id) {
-        lock.release();
-        return Ok(Some(outcome));
+    let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+    loop {
+        match ledger::OwnershipLock::acquire(paths, TAKING_THE_RUN_OVER) {
+            Ok(lock) => {
+                // Taking a lock is not instant, and whoever had it may have
+                // answered this envelope while it was being taken.
+                if let Some(outcome) = channel.outcome_of(id) {
+                    lock.release();
+                    return Ok(Some(outcome));
+                }
+                let reconciled = engine::reconcile_queued(paths);
+                lock.release();
+                reconciled?;
+                // Whatever the queue answered about *this* envelope, which is
+                // `None` where the reconciler's cursor had already passed it.
+                return Ok(channel.outcome_of(id));
+            }
+            // **Another reply is taking this run over at this instant**, and the
+            // queue it is reconciling is the one this envelope is on: two
+            // supervisors whose edits were accepted behind one driver both
+            // outlive it, and whichever reaches the lock first answers for both.
+            // So its answer is waited for rather than reported queued — an
+            // envelope being applied as this said so is the false report this
+            // whole path exists to end. Bounded by the same patience the caller
+            // already set, and the wait ends early either way: a holder that
+            // releases hands the lock over, and one that dies leaves a lock this
+            // process reclaims.
+            Err(Error::Locked { verb, .. })
+                if verb == TAKING_THE_RUN_OVER && Instant::now() < deadline =>
+            {
+                if let Some(outcome) = channel.outcome_of(id) {
+                    return Ok(Some(outcome));
+                }
+                std::thread::sleep(ATTACH_POLL);
+            }
+            // Anything else holding it is something *driving* the run, which is
+            // the honest queued answer: there is a reconciler and it has not got
+            // to this envelope.
+            Err(_) => return Ok(None),
+        }
     }
-    let reconciled = engine::reconcile_queued(paths);
-    lock.release();
-    reconciled?;
-    // Whatever the queue answered about *this* envelope, which is `None` where
-    // the reconciler's cursor had already passed it.
-    Ok(channel.outcome_of(id))
 }
+
+/// The verb a `reply` writes into the run's ownership lock while it applies what
+/// the run's driver did not.
+///
+/// Read as well as written: it is how one reply taking a run over tells itself
+/// from a driver driving it, and the two answer differently.
+const TAKING_THE_RUN_OVER: &str = "reply";
 
 /// Compile one command in the process that is applying it, delivering what only a
 /// delivery can answer.

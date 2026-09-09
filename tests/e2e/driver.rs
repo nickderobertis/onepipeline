@@ -4055,34 +4055,19 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
     );
 }
 
-/// An edit accepted by a run whose driver then **dies holding it** is applied by
-/// the process that accepted it, rather than left on the queue.
+/// A run held in the one window where its driver owns it and claims nothing.
 ///
-/// The lock-holder is the only party that can apply a queued edit, and a driver
-/// that dies releases nothing — so the commands it never claimed used to wait for
-/// an `adopt` somebody had to think to type. The `reply` that accepted them is
-/// the process that is still there, so when its wait runs out it asks again
-/// whether anything is driving the run, takes the run over when nothing is, and
-/// reconciles the queue it already put its envelope on.
+/// The run's only node has settled and the driver is inside its write-back
+/// close-out — a bounded wait it owes the store before it settles the run — held
+/// open by a capture path the store cannot write. It holds the ownership lock
+/// throughout, so an edit typed here is accepted onto the durable queue, and it
+/// claims nothing from that queue while it waits.
 ///
-/// The window is real and is entered the way a real one is: the run's write-back
-/// close-out, during which the driver holds the run and claims nothing, held open
-/// by a capture path the store cannot write. The envelope is proven onto the
-/// queue before the driver is ended, so what follows is not a race — nothing
-/// claimed it, and nothing but this reply is left to.
-///
-/// `#[cfg(unix)]` because it ends a process by pid and because the capture
-/// fixture depends on POSIX `File::create` refusing a path a directory occupies,
-/// which `store.rs`'s own capture-outage journey says the same of.
+/// Returns the run and the pid of the driver holding it.
 #[cfg(unix)]
-#[test]
-fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it() {
-    use std::io::Write;
-
-    let world = World::new("driver-queue-recovery");
+fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (String, u32) {
     world.script("work.wait", "hold");
-    let (run, driver) =
-        start_detached_announcing(&world, "queue-recovery", vec![agent("work", &[])]);
+    let (run, driver) = start_detached_announcing(world, name, vec![agent("work", &[])]);
     world.until("the run to dispatch something", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
@@ -4105,10 +4090,25 @@ fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accep
     world.until("the only node to settle", |world| {
         !world.events_of(&run, "node-settled").is_empty()
     });
+    (run, driver)
+}
 
-    // The edit is typed into that window, and waits there for a reconciler.
+/// Type one reply into that window and wait until the run's queue holds it.
+///
+/// The wait is what makes the journeys below orderings rather than races: the
+/// envelope is proven onto the durable queue, so what happens to the driver next
+/// happens to a driver that has not claimed it.
+#[cfg(unix)]
+fn queued_behind_the_driver(
+    world: &World,
+    run: &str,
+    envelope: &serde_json::Value,
+    behind: usize,
+) -> std::process::Child {
+    use std::io::Write;
+
     let mut replying = world
-        .cmd(&["reply", &run])
+        .cmd(&["reply", run])
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "3")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -4116,27 +4116,56 @@ fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accep
         .spawn()
         .expect("the reply starts");
     let mut stdin = replying.stdin.take().expect("stdin is piped");
-    write!(
-        stdin,
-        "{}",
-        json!({"version": 2, "commands": [
-            {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                   "task": "## What\nthe work the edit asked for"}}
-        ]})
-    )
-    .expect("the envelope is written");
+    write!(stdin, "{envelope}").expect("the envelope is written");
     drop(stdin);
     world.until("the envelope to reach the run's command queue", |world| {
-        world
-            .run_file(&run, "channel/commands.jsonl")
-            .is_file()
-            .then(|| std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl")))
-            .and_then(Result::ok)
-            .is_some_and(|queued| queued.contains("\"extra\""))
+        queue_of(world, run).len() == behind + 1
     });
+    replying
+}
 
-    // And the driver dies holding the run, the way a host ends a process it has
-    // run out of memory for: the lock it never released still names it, and the
+/// Every envelope on a run's durable command queue.
+#[cfg(unix)]
+fn queue_of(world: &World, run: &str) -> Vec<String> {
+    std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The node one of the edits below asks for.
+#[cfg(unix)]
+fn adding_a_node() -> serde_json::Value {
+    json!({"version": 2, "commands": [
+        {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                               "task": "## What\nthe work the edit asked for"}}
+    ]})
+}
+
+/// An edit accepted by a run whose driver then **dies holding it** is applied by
+/// the process that accepted it, rather than left on the queue.
+///
+/// The lock-holder is the only party that can apply a queued edit, and a driver
+/// that dies releases nothing — so the commands it never claimed used to wait for
+/// an `adopt` somebody had to think to type. The `reply` that accepted them is
+/// the process that is still there, so when its wait runs out it asks again
+/// whether anything is driving the run, takes the run over when nothing is, and
+/// reconciles the queue it already put its envelope on.
+///
+/// `#[cfg(unix)]` because it ends a process by pid and because its fixture
+/// depends on POSIX `File::create` refusing a path a directory occupies, which
+/// `store.rs`'s own capture-outage journey says the same of.
+#[cfg(unix)]
+#[test]
+fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it() {
+    let world = World::new("driver-queue-recovery");
+    let (run, driver) = a_driver_that_owns_a_run_and_claims_nothing(&world, "queue-recovery");
+    let replying = queued_behind_the_driver(&world, &run, &adding_a_node(), 0);
+
+    // The driver dies holding the run, the way a host ends a process it has run
+    // out of memory for: the lock it never released still names it, and the
     // envelope on the queue is one it never claimed.
     end_process(driver);
 
@@ -4154,12 +4183,7 @@ fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accep
 
     // The run's own record of it: one envelope on the queue, answered once and
     // applied once. Nothing was sent again, and nothing was applied twice.
-    let queue = std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl"))
-        .expect("the command queue");
-    let queued: Vec<&str> = queue
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    let queued = queue_of(&world, &run);
     assert_eq!(
         queued.len(),
         1,
@@ -4178,4 +4202,55 @@ fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accep
         world.events_of(&run, "driver-adopted").is_empty(),
         "something adopted the run, so this journey proves nothing about the reply"
     );
+}
+
+/// What the takeover reconciles is the **queue**, so an envelope the run refuses
+/// is refused to the process that submitted it.
+///
+/// Two edits are typed into that window and both are accepted onto the queue,
+/// because neither validating process can see the other's: each is judged against
+/// the graph the journal holds, and a queued envelope has changed nothing. The
+/// reconciler is where they meet, and it judges the second against what the first
+/// committed — which is what makes this the takeover's other answer, and the one
+/// that shows it applying a queue rather than replaying an envelope it holds.
+#[cfg(unix)]
+#[test]
+fn a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over() {
+    let world = World::new("driver-queue-recovery-refusal");
+    let (run, driver) =
+        a_driver_that_owns_a_run_and_claims_nothing(&world, "queue-recovery-refused");
+    let first = queued_behind_the_driver(&world, &run, &adding_a_node(), 0);
+    let second = queued_behind_the_driver(&world, &run, &adding_a_node(), 1);
+
+    end_process(driver);
+
+    let applied = first.wait_with_output().expect("the first reply answers");
+    let refused = second.wait_with_output().expect("the second reply answers");
+    assert!(
+        applied.status.success() && String::from_utf8_lossy(&applied.stdout).contains("applied"),
+        "the first of the two queued edits was not applied: {}{}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(REFUSED),
+        "the edit the run refuses was not refused to its author: {}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("already exists"),
+        "the refusal did not say what the run refused: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // One of each in the run's own record: the node was added once, and the
+    // second ask for it is recorded as the refusal it got.
+    assert_eq!(world.events_of(&run, "edit-committed").len(), 1);
+    assert_eq!(world.events_of(&run, "edit-rejected").len(), 1);
+    let answers = world.command_outcomes(&run);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(answers[0]["applied"], json!(true), "{answers:?}");
+    assert_eq!(answers[1]["applied"], json!(false), "{answers:?}");
 }
