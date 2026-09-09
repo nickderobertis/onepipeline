@@ -1580,7 +1580,7 @@ impl Handover {
                     // An entry whose holder is gone is cleared by whoever finds
                     // it — it is that holder's own file and names it, so two
                     // waiters clearing it both simply find it gone.
-                    if pid_of_entry(&ahead).is_some_and(|pid| !sys::process_may_be_live(pid)) {
+                    if holder_of_entry_is_gone(&ahead) {
                         match fs::remove_file(&ahead) {
                             // Cleared, or cleared by another waiter a moment ago:
                             // either way it is out of the order.
@@ -1707,10 +1707,44 @@ fn entry_named(at: u64, pid: u32, attempt: u64) -> String {
     format!("{at:013}-{pid:010}-{attempt:06}")
 }
 
-/// The pid an entry's name carries, or `None` for a name this build did not
-/// write — which is a holder it cannot show is gone, and so one it waits on.
+/// The pid an entry's name carries, or `None` for a name outside the shape
+/// [`entry_named`] writes — which is a holder this build cannot show is gone, and
+/// so one it waits on.
+///
+/// The whole name is checked rather than the one field that is read off it: a
+/// name that merely happens to have a number where the pid goes is not this
+/// build's, and reading it as one would put a stranger's file into the staleness
+/// rule below.
 fn pid_of_entry(entry: &Path) -> Option<u32> {
-    entry.file_name()?.to_str()?.split('-').nth(1)?.parse().ok()
+    let name = entry.file_name()?.to_str()?;
+    let fields: Vec<&str> = name.split('-').collect();
+    let [at, pid, attempt] = fields[..] else {
+        return None;
+    };
+    fn numeric(field: &str, width: usize) -> bool {
+        field.len() == width && field.bytes().all(|byte| byte.is_ascii_digit())
+    }
+    if !(numeric(at, 13) && numeric(pid, 10) && numeric(attempt, 6)) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Whether an entry's holder is one **this host** can prove is gone.
+///
+/// Both halves are load-bearing. A pid is only the host that wrote it to judge —
+/// a runs root two hosts share holds entries whose numbers mean nothing in this
+/// process table — so the host is read off the entry's own body and has to be
+/// this one. And a body this process cannot read is not evidence of anything, so
+/// it answers the way every other uncertainty here does: the holder stays.
+fn holder_of_entry_is_gone(entry: &Path) -> bool {
+    let Some(pid) = pid_of_entry(entry) else {
+        return false;
+    };
+    match fs::read_to_string(entry) {
+        Ok(wrote_it) => wrote_it.trim() == sys::hostname() && !sys::process_may_be_live(pid),
+        Err(_) => false,
+    }
 }
 
 impl Drop for Handover {
@@ -2001,35 +2035,41 @@ mod tests {
     /// The gate's entry name is written by one function and read by another, so
     /// the two are held to each other here rather than by a reader noticing.
     ///
-    /// Both halves matter: the pid comes back out — it is how a waiter tells a
-    /// holder that is gone from one that is working — and the order the names
-    /// sort in is the order the entries were made in, which is the whole of how
-    /// the gate decides who is inside it.
+    /// Both halves matter. The pid comes back out, which is how a waiter tells a
+    /// holder that is gone from one that is working. And the names carry a
+    /// **total order** with no ties — by the moment first, and within a moment by
+    /// the process and its attempt — which is what makes exactly one entry the
+    /// lowest, whichever entries are in the gate at once.
     #[test]
-    fn a_gate_entrys_name_carries_its_pid_and_sorts_by_when_it_was_made() {
+    fn a_gate_entrys_name_carries_its_pid_and_orders_it_against_every_other() {
         let earlier = entry_named(1_757_000_000_000, 4242, 0);
         assert_eq!(pid_of_entry(std::path::Path::new(&earlier)), Some(4242));
 
         for later in [
+            // A later moment, and — within one moment, where the moment cannot
+            // separate them — another process and another attempt of this one.
             entry_named(1_757_000_000_001, 1, 0),
             entry_named(1_757_000_000_000, 4243, 0),
             entry_named(1_757_000_000_000, 4242, 1),
         ] {
             assert!(
                 earlier < later,
-                "{earlier} does not sort before {later}, so the gate's order is not the \
-                 order its entries were made in"
+                "{earlier} and {later} are not ordered against each other, so which of \
+                 them is the lowest entry is not decided"
             );
             assert!(pid_of_entry(std::path::Path::new(&later)).is_some());
         }
 
         // And a name this build did not write carries no pid, which is what makes
-        // a waiter treat it as a holder it cannot show is gone.
-        assert_eq!(
-            pid_of_entry(std::path::Path::new("handover.lock")),
-            None,
-            "a name from outside this build's shape was read as one of its own"
-        );
+        // a waiter treat it as a holder it cannot show is gone. Including one
+        // that merely has a number where the pid goes.
+        for stranger in ["handover.lock", "anything-123", "0000000000000-42-000000"] {
+            assert_eq!(
+                pid_of_entry(std::path::Path::new(stranger)),
+                None,
+                "'{stranger}' was read as a name this build wrote"
+            );
+        }
     }
 
     use super::*;

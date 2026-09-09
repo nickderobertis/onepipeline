@@ -5116,9 +5116,14 @@ mod tests {
         // The entry a holder that died inside the section leaves behind: its own
         // name, carrying the pid nothing on this host answers for.
         std::fs::create_dir_all(paths.channel("handover")).expect("the gate's entries");
+        // Its name and its body as a holder writes them — the moment, the pid,
+        // the attempt, and the host whose process table can answer for that pid —
+        // carrying a pid nothing on this host answers for.
         std::fs::write(
-            paths.channel("handover").join("0000000000001-0000000000"),
-            "gone",
+            paths
+                .channel("handover")
+                .join(format!("{:013}-{:010}-{:06}", 1, 0, 0)),
+            sys::hostname(),
         )
         .expect("the entry is written");
 
