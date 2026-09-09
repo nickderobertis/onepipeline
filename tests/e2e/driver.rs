@@ -3952,23 +3952,21 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
 /// An edit that reaches a run whose driver is **on its way out** is applied by
 /// that driver, before it lets go of the run.
 ///
-/// The holder of the ownership lock is the only party that can apply a queued
-/// edit, so the moment it stops claiming the queue is the moment an accepted
-/// edit stops being applied by anybody — and a `reply` that lands in that window
-/// is told its commands are durable and waiting for a reconciler that is walking
-/// out of the door. The window selects for the edits worth applying: `retry` a
-/// failed node, `requeue` a parked one, settle a wrong record are all reached for
-/// on a run that is **not progressing**, which is exactly the run whose driver
-/// has nothing left to dispatch.
+/// The lock-holder is the only party that can apply a queued edit, so a `reply`
+/// landing after the loop's last pass used to sit queued until something adopted
+/// the run — on exactly the runs a `retry` or a `requeue` is typed at, which are
+/// the ones with nothing left to dispatch.
 ///
-/// The window is entered here the way a real one is — the run's write-back
-/// close-out, a bounded wait this driver owes the store before it settles — and
-/// it is held open by a capture path the store cannot write, which is the same
-/// fixture `store.rs` uses for a projection that fails and retries. The reply is
-/// typed after the run's only node has settled, so the loop has already run its
-/// last pass: what applies it is the claim the driver takes on its way out, and
-/// what proves the driver rather than the reply applied it is the run's own
-/// answer on the command queue, which only the lock-holder writes.
+/// The window is the run's write-back close-out, a bounded wait this driver owes
+/// the store before it settles, held open by a capture path the store cannot
+/// write. What proves the driver rather than the reply applied the edit is the
+/// run's own answer on the command queue, which only the lock-holder writes.
+///
+/// `#[cfg(not(windows))]` for the reason `store.rs`'s own capture-outage journey
+/// carries it: the fault injection depends on POSIX `File::create` refusing a
+/// path a directory occupies, and Windows can open that path successfully — so
+/// there would be no failing projection, no held close-out, and no window.
+#[cfg(not(windows))]
 #[test]
 fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go() {
     let world = World::new("driver-drain-on-exit");
@@ -3983,15 +3981,19 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
         !world.events_of(run, "node-dispatched").is_empty()
     });
 
-    // Every write-back from here on fails and is retried, which is what keeps the
-    // close-out at the far end of the run open for its whole bounded window
-    // rather than for as long as one store command takes.
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
+    // be written is a state a host produces on its own — a full disk, a permission change
+    // — and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
+    // states the same fixture the same way. It is here because the close-out has to stay
+    // open long enough for a planner to type a reply into it, and how long a store takes to
+    // refuse is not something the CLI exposes an input for.
     let capture = world.run_file(run, "writeback-task-list.stdout");
     world.until("the first projection to leave its capture behind", |_| {
         capture.is_file()
     });
     std::fs::remove_file(&capture).expect("the completed capture is removed");
     std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The run's only node settles, so the loop has nothing left to do and starts
     // closing the run out.

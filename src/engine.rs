@@ -946,7 +946,7 @@ fn converge(
             // over, and it leaves the same way: not before this driver has taken
             // the queue's last claim.
             if graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses) {
-                if !close_out_and_drain(
+                match close_out_and_drain(
                     paths,
                     journal,
                     state,
@@ -955,11 +955,13 @@ fn converge(
                     &mut in_flight,
                     &statuses,
                 )? {
-                    break;
+                    LastClaim::FoundNothing => break,
+                    LastClaim::MovedTheRun => {
+                        derived = None;
+                        unpublished = true;
+                        continue;
+                    }
                 }
-                derived = None;
-                unpublished = true;
-                continue;
             }
         }
 
@@ -1032,11 +1034,14 @@ fn converge(
                 &mut outside,
             )?
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] no journey can drive this arm:
+        // `wait_for_work` answers `None` only for its receiver's `Disconnected`, and this
+        // loop owns a `Sender` for its whole lifetime, so no invocation reaches it. It
+        // closes the run out and claims the queue because both exits must, and the
+        // reachable one is driven by
+        // `driver::an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`.
         let Some(arrived) = arrived else {
-            // Every dispatch thread is gone and no message can arrive again, so
-            // this loop is over for the third reason — and the queue is claimed
-            // one last time here too, for the reason it is claimed above.
-            if !close_out_and_drain(
+            match close_out_and_drain(
                 paths,
                 journal,
                 state,
@@ -1045,12 +1050,15 @@ fn converge(
                 &mut in_flight,
                 &statuses,
             )? {
-                break;
+                LastClaim::FoundNothing => break,
+                LastClaim::MovedTheRun => {
+                    derived = None;
+                    unpublished = true;
+                    continue;
+                }
             }
-            derived = None;
-            unpublished = true;
-            continue;
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
 
         // Everything that had **already arrived**, applied in this one pass:
         // narration and settlement share the channel, so taking one message a
@@ -1160,43 +1168,34 @@ fn converge(
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
 }
 
-/// Close the run out, take the command queue's **last claim**, and say whether
-/// this driver is still driving.
-///
-/// # Why the queue is claimed here
+/// What a close-out's last claim on the command queue found, and so what the
+/// loop does next.
+enum LastClaim {
+    /// Nothing was waiting: this driver is done and the run settles.
+    FoundNothing,
+    /// Commands were claimed and applied, so the run has moved on.
+    MovedTheRun,
+}
+
+/// Close the run out and take the command queue's **last claim**.
 ///
 /// The holder of the run's ownership lock is the only party that can apply a
 /// queued edit, so the moment this driver stops claiming is the moment an
-/// accepted edit stops being applied by anybody — and that moment used to be the
+/// accepted edit stops being applied by anybody. That moment used to be the
 /// middle of the pass the loop breaks out of, with the whole close-out still to
-/// run behind it. A `reply` that reaches the run in that window is told its
-/// commands are durable and waiting for a reconciler, and the reconciler it is
-/// waiting for is the one walking out of the door.
+/// run behind it — and the verbs lost there are the ones that window selects
+/// for, since `retry`, `requeue` and settling a wrong record are reached for on
+/// a run that is not progressing.
 ///
-/// The verbs that lose it are the ones the window selects for. `retry` a failed
-/// node, `requeue` a parked one, settle a wrong record: each is reached for on a
-/// run that is **not progressing**, which is exactly the run whose driver has
-/// nothing dispatchable and is on its way out. Measured twice on one host — a
-/// `retry` and a `settle`, each sitting queued until a second `adopt` applied it
-/// a minute later.
+/// [`LastClaim::MovedTheRun`] sends the loop round again rather than settling:
+/// a `retry` this driver applied is a node this driver dispatches. It cannot
+/// spin, because [`ChannelState::claim_commands`] advances its cursor as it
+/// claims.
 ///
-/// # Why it goes on driving
-///
-/// `true` says the claim found something and applied it, and the loop goes round
-/// again rather than settling: a `retry` this driver applied is a node this
-/// driver dispatches, rather than one left ready for whoever adopts the run next.
-/// It cannot spin — [`ChannelState::claim_commands`] advances its cursor as it
-/// claims, so the same envelope is never claimed twice, and a claim that finds
-/// nothing is what ends the run.
-///
-/// # What the close-out is
-///
-/// Everything the loop used to do after breaking, unchanged and in the same
-/// order, because it is now inside the loop's exit rather than after it: the
-/// run's own last statuses, the loop-cost figures, the terminal projection, and
-/// the surface a projection that failed owes the planner. A run driven on after
-/// a close-out closes out again, and its write-back goes back on the retry
-/// schedule the close-out window suspends.
+/// The close-out itself is what the loop used to do after breaking, unchanged
+/// and in the same order. `final_statuses` is the caller's, which has just
+/// derived it, and is every node's status as the teardown leaves it — not the
+/// same as every node being settled.
 fn close_out_and_drain(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -1205,7 +1204,7 @@ fn close_out_and_drain(
     writeback: &Option<crate::writeback::Writeback>,
     in_flight: &mut BTreeMap<String, Dispatch>,
     final_statuses: &BTreeMap<String, NodeStatus>,
-) -> Result<bool> {
+) -> Result<LastClaim> {
     // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
     // terminal projection failing and the surface reaching the planner before the run
     // settles. What it cannot drive is a projection *slow* enough to outlast this bounded
@@ -1213,11 +1212,6 @@ fn close_out_and_drain(
     // host-level process control rather than an input either CLI exposes, and the window
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
-    // `final_statuses` is every node's status as the teardown leaves it, which is
-    // not the same as every node being settled: this also runs when the channel
-    // disconnected under a run that still has pending and blocked nodes. It comes
-    // from the caller because the caller has just derived it, and deriving is a
-    // fixpoint over every node and edge.
     crate::loopstats::flush(paths)?;
     if let Some(writeback) = writeback {
         writeback.publish(paths, launch, state, final_statuses);
@@ -1230,26 +1224,32 @@ fn close_out_and_drain(
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    // And only now, with everything this driver owed the run written, the queue.
-    // Last, because the close-out is where the window is widest: a bounded wait
-    // on a store is time a planner's edit can arrive in, and an edit that arrives
-    // in it is one this driver can still apply.
-    // The channel is a handle on the run's own paths and holds nothing of its
-    // own, so this is the same queue the loop has been claiming from all along.
-    let moved = reconcile_edits(
+    // The queue last, because the close-out is where the window is widest: a
+    // bounded wait on a store is time an edit can arrive in. The channel is a
+    // handle on the run's own paths, so this is the queue the loop has been
+    // claiming from all along.
+    if !reconcile_edits(
         paths,
         journal,
         state,
         &ChannelState::new(paths),
         launch,
         in_flight,
-    )?;
-    if moved {
-        if let Some(writeback) = writeback {
-            writeback.driving_again();
-        }
+    )? {
+        return Ok(LastClaim::FoundNothing);
     }
-    Ok(moved)
+    if let Some(writeback) = writeback {
+        // llmlint: ignore-block[changed_behavior_has_e2e] what this restores is the
+        // *interval* between retries of a failing projection, which the close-out
+        // suspends so a terminal snapshot is not left sitting out a minute's backoff
+        // inside a two-second window. Its absence is a hot retry loop rather than a
+        // record any journey could read, and nothing a run writes differs by it —
+        // `writeback::the_close_out_phase_is_lifted_when_the_run_is_driven_again`
+        // holds it at the layer that owns the schedule.
+        writeback.driving_again();
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+    Ok(LastClaim::MovedTheRun)
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.

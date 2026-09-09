@@ -1994,16 +1994,9 @@ fn next(args: &ReadArgs) -> Result<i32> {
             ("message", json!(surface.message)),
             ("source", json!(surface.source)),
             ("blocking", json!(surface.blocking)),
-            // **When the text was true**, beside the text. A surface is written
-            // in the present tense and is handed out whenever a reader gets to
-            // it, so a hand-out of a queue three deep says three present-tense
-            // things about three past moments — and a reader with only this
-            // record's own timestamp reads them as three live conditions. It is
-            // the queued instant rather than a duration, so two hand-outs of the
-            // **one** surface carry the one instant and are distinguishable from
-            // two surfaces on their contents alone. Epoch milliseconds, as every
-            // instant this crate records is, and as the surface itself carries
-            // it. See divergence 66.
+            // When the text was true, beside the text: a surface is written in
+            // the present tense and this record's own stamp is the reading.
+            // Divergence 66 is why it is the queued instant and not an age.
             ("queued_at", json!(surface.queued_at)),
         ]),
     )?;
@@ -2217,16 +2210,10 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
         Submitted::Queued { reply } => {
-            // **Exit 0, and the sentence out loud.** A non-zero status from this
-            // verb is a rejection to correct — that is what the documentation
-            // says, and what [`Submitted::Queued`]'s own comment says — and a
-            // queued envelope is the opposite of one: accepted, durable, and
-            // never an instruction to resend. Exiting 1 on it told every caller
-            // that reads a status the one thing that is not true, on the runs
-            // where it matters most: the verbs a supervisor reaches for on a
-            // stalled run are the ones this answers. So the status says accepted
-            // and the words say what is left — which is a driver, not a resend.
-            // See divergence 67.
+            // Accepted, so it answers as accepted: a non-zero status from this
+            // verb is a rejection to correct, which a queued envelope is not.
+            // The status cannot say what is left to happen, so the words do.
+            // Divergence 67.
             eprintln!(
                 "onepipeline: the edits are on run '{}'s durable command queue and have \
                  not been reconciled yet, so something has to drive the run for them to \

@@ -104,7 +104,11 @@ impl Error {
 /// The result of anything in this crate that can fail.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The run settled, or the reply's every edit was applied.
+/// The run settled, or the reply's every edit was **accepted** — applied, or
+/// durable on the run's command queue and waiting for a driver.
+///
+/// One status for both, because both are acceptances and the receipt is where
+/// which one it was is read. See divergence 67.
 pub const EXIT_SUCCESS: i32 = 0;
 
 /// A run's own "unfinished": a graph that is waiting or has a failed node has

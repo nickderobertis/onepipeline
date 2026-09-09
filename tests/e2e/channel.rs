@@ -978,14 +978,10 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
 
 /// The record of a hand-out says **when the text it carries was true**.
 ///
-/// A surface is written in the present tense and handed out whenever a reader
-/// gets to it, so a record of the hand-out alone dates the *reading* and says
-/// nothing about the condition. Draining a backlog then reads as that many live
-/// conditions — which is how three hand-outs of one stale hold were read as one
-/// hold surfacing three times, and a monitor raised a grounded, specific, wrong
-/// finding off them. The queued instant is what tells the two apart, and it is
-/// the *instant* rather than an age precisely so that two hand-outs of one
-/// queued surface carry the same value while two surfaces carry different ones.
+/// One queued surface handed out twice carries one instant and a second surface
+/// carries its own, which is what lets a reader tell a drained backlog from a
+/// condition that recurred — the reading a monitor got wrong off three records
+/// it could not date. Divergence 66.
 #[test]
 fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued() {
     use std::io::Write;
@@ -1036,14 +1032,20 @@ fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued() {
     });
     let second = world.run(&["next", &run]);
     second.exited(0);
-    assert_eq!(second.json()["surface"]["message"], "whose call is the base?");
+    assert_eq!(
+        second.json()["surface"]["message"],
+        "whose call is the base?"
+    );
     let second_queued_at = second.json()["surface"]["queued_at"].clone();
 
     // And the first, handed out a second time: the same queued surface, the same
     // text, and a second delivery of it.
     let again = world.run(&["next", &run]);
     again.exited(0);
-    assert_eq!(again.json()["surface"]["message"], "who owns this decision?");
+    assert_eq!(
+        again.json()["surface"]["message"],
+        "who owns this decision?"
+    );
 
     let handed = world.events_of(&run, "planner-surfaced");
     assert_eq!(handed.len(), 3, "{handed:?}");

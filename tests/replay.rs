@@ -214,18 +214,14 @@ fn a_park_this_build_cannot_place_reads_as_a_park_rather_than_a_pending_stop() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// When the surface below was handed to a planner, and when it had been queued.
-///
-/// Two different moments, which is the whole reason the second is recorded: the
-/// text was written at the first and read at the second.
+/// When the surface below was handed to a planner, and when it had been queued —
+/// two moments, which is the whole reason the second is recorded.
 const SURFACED_AT: &str = "2026-08-18T04:02:00.000Z";
 const SURFACE_QUEUED_AT: u64 = 1_755_489_600_000;
 
 /// A run store whose journal ends with one surface handed to the planner,
-/// carrying exactly `payload`.
-///
-/// The payload is the caller's whole subject here — what a build wrote on that
-/// record — so it is stated rather than assembled.
+/// carrying exactly `payload` — which is the caller's whole subject, so it is
+/// stated rather than assembled.
 fn a_surface_was_read(root: &Path, run: &str, payload: serde_json::Value) {
     let dir = root.join(run);
     std::fs::create_dir_all(&dir).expect("a run directory");
@@ -270,14 +266,10 @@ fn a_surface_was_read(root: &Path, run: &str, payload: serde_json::Value) {
 /// A hand-out recorded before the queued instant existed folds exactly as one
 /// recorded after it does.
 ///
-/// The added field is additive and this is what that claim means: the same run,
-/// the same records, the same stamps, and the only difference the key a build
-/// before the change never wrote. Both journals are replayed through the reader
-/// every view is derived from — a record that fell out of the fold, or one
-/// placed differently in time, is a different state and shows up here. The
-/// comparison is on that state rather than on a rendering because a rendering
-/// carries this host's clock and its provider probe, which differ between two
-/// reads a moment apart for reasons that have nothing to do with the record.
+/// The same run, the same stamps, and the only difference the key a build before
+/// the change never wrote. On the folded state rather than a rendering, because
+/// a rendering carries this host's clock and its provider probe and so differs
+/// between two reads for reasons that have nothing to do with the record.
 #[test]
 fn a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads() {
     let root = scratch("surfaced");
@@ -290,8 +282,7 @@ fn a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads() 
     let mut five = four.clone();
     five["queued_at"] = json!(SURFACE_QUEUED_AT);
 
-    // What a reader takes from a hand-out: that one was read, and when it was
-    // read — the two the fold derives from this record and nothing else.
+    // The two things the fold derives from this record.
     let folded = |root: &Path| -> (u64, Option<u64>) {
         let survey = Survey::of(root);
         assert!(

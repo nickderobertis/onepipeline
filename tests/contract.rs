@@ -2775,11 +2775,8 @@ fn the_divergence_record_names_the_envelope_version_this_build_writes_and_reads(
 /// What entry 66 says a delivered surface's record carries is what this build
 /// writes on it.
 ///
-/// The contract names the kind and says nothing about its payload, so the
-/// divergence entry is the only place the shape is written down — and a consumer
-/// dating a surface's text reads it from there. An entry naming a kind this build
-/// does not emit, or a journey it does not run, is a document about a build that
-/// does not exist.
+/// The contract names the kind and says nothing about its payload, so that entry
+/// is the only place the shape a consumer reads is written down.
 #[test]
 fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
     let block = divergence_block("66.");
@@ -2797,8 +2794,6 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
         block["queued_at_units"], "epoch-milliseconds",
         "entry 66 spells the instant in units this crate does not record in"
     );
-    // The four it is carried beside are the ones the record already carried, so
-    // the entry says what was added rather than restating the payload.
     assert_eq!(
         serde_json::from_value::<Vec<String>>(block["carried_beside"].clone())
             .expect("entry 66 names the fields the instant joins"),
@@ -2807,8 +2802,8 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
     let field = block["queued_at_field"]
         .as_str()
         .expect("entry 66 names the field");
-    let driver = std::fs::read_to_string(repo_root().join("src/driver.rs"))
-        .expect("the driver ships");
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
     assert!(
         driver.contains(&format!("(\"{field}\", json!(surface.{field}))")),
         "entry 66 names a field the hand-out does not write: {field}"
@@ -2824,10 +2819,7 @@ fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
 /// The statuses entry 67 declares a reply exits at are this build's constants.
 ///
 /// The contract fixes three codes for this verb and the code no longer writes
-/// one of them, so the entry is where the mapping a caller branches on is
-/// written down — and a caller that read a queued envelope as a refusal is the
-/// defect it exists to close. An entry naming a status this build does not exit
-/// at is a document about a build that does not exist.
+/// one of them, so that entry is where the mapping a caller branches on lives.
 #[test]
 fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
     let block = divergence_block("67.");
@@ -2847,9 +2839,8 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_REFUSED),
         "entry 67 names a status this build does not exit at for a refused edit"
     );
-    // The whole of the proposal is that the first two are the same number: an
-    // envelope that was accepted answers as accepted, whichever writer applies
-    // it, and only a refusal answers otherwise.
+    // The whole of the proposal: an accepted envelope answers as accepted,
+    // whichever writer applies it, and only a refusal answers otherwise.
     assert_eq!(
         block["reply_queued_exit"], block["reply_applied_exit"],
         "entry 67 has a queued envelope answering with a status of its own again"
@@ -2859,10 +2850,9 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_QUEUED),
         "entry 67 has a queued reply answering with the unfinished-run status again"
     );
-    // And what the reply says beside the status, which is the half a status
-    // cannot carry: that the edits are durable and waiting for a driver.
-    let driver = std::fs::read_to_string(repo_root().join("src/driver.rs"))
-        .expect("the driver ships");
+    // And the half a status cannot carry, which the words do.
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
     assert!(
         driver.contains("durable command queue")
             && driver.contains("has to drive the run for them to")
