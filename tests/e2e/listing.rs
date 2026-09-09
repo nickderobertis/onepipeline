@@ -44,7 +44,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World};
+use crate::harness::{agent, lifecycle, plan_of, World};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION};
 
@@ -418,6 +418,32 @@ const JOURNAL_MULTIPLE: u64 = 10;
 /// of four hundred cost more than asking for all four hundred.
 const SCALED_OWNED: usize = 3;
 
+/// The tally every row cloned from the **bulk** template renders.
+///
+/// Asserted rather than assumed, and this is the assertion the whole bound rests
+/// on. A fixture can go degenerate — a clone that carried no node state would
+/// render `0/0 done`, and every other assertion in the journey would pass and
+/// pass *faster*, reporting a bound met over rows with nothing in them. That is
+/// not hypothetical: it cost this work an hour over a hand-built root whose
+/// journals were named wrong, where the rows read `0/0 done` and the folding
+/// build looked like 0.29 s against the 271.7 s it really took.
+const BULK_TALLY: &str = "2/3 done";
+
+/// The tally every row cloned from the **owned** template renders.
+///
+/// Two nodes, one of which published a change: the other half of the same guard.
+const OWNED_TALLY: &str = "1/2 done";
+
+/// The clauses a row carrying a landing to decide can end with.
+///
+/// Either is a **verdict reached as the row rendered** — the base does not carry
+/// the change, or nothing this host can read decides it — and a row that carried
+/// no landing at all would carry neither. Both are admitted because which one it
+/// is depends on whether the branch the template published is still resolvable
+/// when the row renders, and that is the repository's business rather than this
+/// journey's claim.
+const LANDING_VERDICTS: [&str; 2] = ["not landed", "landing undecided"];
+
 /// What each of the three renders may take over the unmultiplied root.
 ///
 /// **A bound rather than a ratio**, because it is what a fold cannot meet: the
@@ -573,38 +599,105 @@ fn median(world: &World, argv: &[&str]) -> std::time::Duration {
 /// figure about this host: 74.1 s was measured for `runs --mine` over a
 /// comparable root before this, and the bound is set an order of magnitude below
 /// that so only a return to folding can cross it.
+///
+/// **What the rows are is asserted, not assumed.** A clock over a degenerate
+/// fixture is the one way this journey could report green while measuring
+/// nothing, so before it times anything it reads the rendered rows back and holds
+/// them to the shape the bound is set against: every row carries a real node
+/// tally folded out of a real graph, and the rows `--mine` renders — the
+/// invocation the whole 74.1 s figure was about — each carry a landing **decided
+/// as the row rendered**, which is the per-row work a listing keeps paying. See
+/// [`BULK_TALLY`] for what that guard is for.
 #[test]
 fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it() {
     let world = World::new("listing-scale");
-    // A run whose graph did not complete, so every cloned row is reported as
-    // being driven and goes on to ask whether anything is watching it — the most
-    // expensive row this listing renders, four hundred times over.
+    // A repository, so the owned template's node can publish a change and leave
+    // it open: `change-open` is the policy that settles a node `done` with its
+    // change unlanded and a person left to merge it, which is what puts a landing
+    // on the row for the render to decide.
+    let repository = world.repository("change-open", &[]);
     world.script("build.fail", "1");
-    let template = paths_of(
+    // The published node has to leave a diff, or there is nothing to publish and
+    // the settlement records no landing at all — which is a fixture that renders
+    // a tally and no verdict, and is what the guard below caught the first time
+    // it ran.
+    world.script("publish.work", "the change this run published\n");
+
+    // Two templates, because the rows have two jobs. The bulk one is a graph that
+    // did not complete — so every row cloned from it is reported as being driven
+    // and goes on to ask whether anything is watching the run — and the owned one
+    // adds a published change, so the rows `--mine` renders each cost a landing
+    // read as they render. All four hundred rows would be the second if the
+    // repository could be asked four hundred times inside a bound; it cannot, and
+    // a fixture whose clock was dominated by a read both the old path and the new
+    // one pay identically would be a bound about the wrong thing.
+    let bulk = paths_of(
         &world,
-        &settled(&world, "template", vec![agent("build", &[])]),
+        &settled(
+            &world,
+            "bulk",
+            vec![agent("build", &[]), agent("docs", &[]), agent("ship", &[])],
+        ),
     );
-    let filler = std::fs::read(template.journal()).expect("the template's own records");
+    let owned = paths_of(
+        &world,
+        &settled(
+            &world,
+            "owned",
+            vec![agent("build", &[]), lifecycle("publish", &[])],
+        ),
+    );
+    let filler = std::fs::read(bulk.journal()).expect("the template's own records");
     assert!(!filler.is_empty(), "the template run recorded nothing");
+    // The templates are the shape the rows will be, before a single one is
+    // cloned: a fixture that never had the tally cannot clone one.
+    for (template, tally) in [(&bulk, BULK_TALLY), (&owned, OWNED_TALLY)] {
+        let row = rendered(&world, &["runs"]);
+        assert!(
+            row.lines()
+                .any(|line| line.contains(&template.run) && line.contains(tally)),
+            "the {} template does not render {tally}, so no row cloned from it will: {row}",
+            template.run
+        );
+    }
 
     let per_run = SCALED_JOURNAL_BYTES / SCALED_RUNS as u64;
     let stranger = "another-planner";
     let mut assembled: Vec<RunPaths> = Vec::new();
     for nth in 0..SCALED_RUNS {
-        let owner = if nth < SCALED_OWNED {
-            world.session.as_str()
+        // The rows this session owns are the ones carrying a landing, so the
+        // invocation the cost was worst on is the one whose every row does the
+        // per-row work.
+        let (template, owner) = if nth < SCALED_OWNED {
+            (&owned, world.session.as_str())
         } else {
-            stranger
+            (&bulk, stranger)
         };
-        let paths = cloned_run(&template, &world.runs, &format!("scaled-{nth:04}"), owner);
+        let paths = cloned_run(template, &world.runs, &format!("scaled-{nth:04}"), owner);
         journal_of(&paths, &filler, per_run);
         assembled.push(paths);
     }
-    // llmlint: ignore-block[tests_mirror_real_usage] the template is the journey's own
-    // scaffolding rather than one of the four hundred roots it measures, and leaving it on
-    // the root would make the owned count off by one. No verb sweeps a run root, and one
-    // that did would be a different journey.
-    std::fs::remove_dir_all(&template.dir).expect("the template run root");
+    // llmlint: ignore-block[tests_mirror_real_usage] the templates are the journey's own
+    // scaffolding rather than two of the four hundred roots it measures, and leaving them on
+    // the root would make both the run count and the owned count wrong. No verb sweeps a run
+    // root, and one that did would be a different journey. The checkout below is a **host**
+    // state rather than a record: a machine that no longer holds the repository a run
+    // published to is what a run recorded elsewhere looks like from here, and it is the
+    // state `Stands::Undecided` exists for.
+    for template in [&bulk, &owned] {
+        std::fs::remove_dir_all(&template.dir).expect("the template run root");
+    }
+    // The repository the owned rows published to, gone from this host.
+    //
+    // The rows keep their landing and every render still decides it — which is
+    // the per-row work this journey has to be measuring rows that do. What
+    // changes is the *answer*: a host that cannot reach the repository says so
+    // rather than claiming the change did or did not land, and it says so in
+    // about a millisecond. Left in place, three real repository walks are the
+    // whole of the clock — 215 ms of a 275 ms render — and they go cold when ten
+    // gibibytes are written beside them, so the ratio below would be a reading of
+    // this host's page cache rather than of the one input a fold is linear in.
+    std::fs::remove_dir_all(&repository.checkout).expect("the repository's checkout");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let held = |assembled: &[RunPaths]| -> u64 {
@@ -620,14 +713,56 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
          measures over"
     );
 
-    // Exactly the runs this session owns, out of the four hundred on the root.
+    // Exactly the runs this session owns, out of the four hundred on the root —
+    // and each of those rows carries a landing this render decided.
+    let owned_rows = rendered(&world, &["runs", "--mine"]);
     assert_eq!(
-        rendered(&world, &["runs", "--mine"]).lines().count(),
+        owned_rows.lines().count(),
         SCALED_OWNED,
         "--mine over {SCALED_RUNS} run roots rendered something other than the {SCALED_OWNED} \
          this session owns"
     );
-    assert_eq!(rendered(&world, &["runs"]).lines().count(), SCALED_RUNS);
+    for row in owned_rows.lines() {
+        assert!(
+            row.contains(OWNED_TALLY),
+            "an owned row does not carry the node tally the bound is set against, so this \
+             fixture is not the shape it measures: {row}"
+        );
+        assert!(
+            LANDING_VERDICTS.iter().any(|verdict| row.contains(verdict)),
+            "an owned row carries no landing verdict, so nothing on this root costs the \
+             per-row read a listing keeps paying — one of {LANDING_VERDICTS:?} was expected: \
+             {row}"
+        );
+    }
+
+    // Said out loud, because the whole bound below is a clock over these rows and
+    // a reader who cannot see what they are cannot weigh it.
+    println!(
+        "  the rows this bound is measured over:\n    {}\n    {}",
+        owned_rows.lines().next().unwrap_or("(no owned row)"),
+        rendered(&world, &["runs"])
+            .lines()
+            .find(|row| row.contains(BULK_TALLY))
+            .unwrap_or("(no bulk row)")
+    );
+
+    // And every row on the root, owned or not, is a row folded out of a real
+    // graph rather than an empty one.
+    let all_rows = rendered(&world, &["runs"]);
+    assert_eq!(all_rows.lines().count(), SCALED_RUNS);
+    for row in all_rows.lines() {
+        assert!(
+            row.contains(BULK_TALLY) || row.contains(OWNED_TALLY),
+            "a row carries neither tally, so the fixture has gone degenerate and the bound \
+             below would be a clock over nothing: {row}"
+        );
+        assert!(
+            !row.contains("0/0 done"),
+            "a row reports an empty graph, which is what a clone that stopped carrying node \
+             state looks like: {row}"
+        );
+    }
 
     let mut before = Vec::new();
     for argv in LISTINGS {
@@ -651,6 +786,17 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
             .expect("the journal")
             .len();
         journal_of(paths, &filler, held * JOURNAL_MULTIPLE);
+    }
+    // The documents the listing reads, back in the cache the first measurement
+    // found them in. Writing ten gibibytes evicts six hundred kilobytes of small
+    // files, and a median taken over cold documents is a reading of the host's
+    // page cache rather than of the listing: what the ratio below is about is the
+    // one input a fold is linear in, and the cache state either measurement
+    // happens to start in is not it.
+    for paths in &assembled {
+        for document in [paths.summary(), paths.launch()] {
+            let _ = std::fs::read(document);
+        }
     }
     let grown = held(&assembled);
     assert!(
