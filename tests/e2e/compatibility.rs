@@ -10,12 +10,13 @@
 //!   and renders it, and the rendering is committed beside it — so a later change
 //!   to how a pre-change record is read fails here rather than quietly changing
 //!   what an old run says.
-//! * **A reader from before the change reads a journal this build writes.** Such
-//!   a reader knows exactly the record kinds the committed fixture carries and no
-//!   others, so it is *modelled* by taking a journal this build wrote and
-//!   removing every record of a kind that fixture does not carry — the new
-//!   `command-accepted` included. What it reports has to be what it reported,
-//!   which here means: the same as the whole journal says.
+//! * **A reader from before the change reads a journal this build writes.**
+//!   [`derived_by_a_preceding_reader`] is that reader, written here rather than
+//!   asked of the build under test: it keys on exactly the record kinds the
+//!   committed fixture carries and reads an `edit-committed`'s operations the way
+//!   a consumer had to before `operation_kinds` existed. What it derives from a
+//!   journal this build writes has to be what it derives from the fixture — the
+//!   **same run**, so "what it reported" is a value in hand rather than a claim.
 //!
 //! [`FIXTURE`] is the immutable reference for what a preceding reader knows: the
 //! journal of a real run of [`recorded_run`], carrying the record shapes the
@@ -31,7 +32,7 @@
 use crate::harness::{agent, plan_of, World, REFUSED};
 
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// A run's whole journal as the build before this change wrote it.
@@ -78,6 +79,17 @@ fn recorded_run(world: &World, name: &str) -> String {
             .to_string(),
         )
         .exited(0);
+    // The other command that changes no graph, so both of them cross the
+    // compatibility boundary rather than one.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [
+                {"op": "complete", "reason": "the publication is verified"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
@@ -87,12 +99,32 @@ fn recorded_run(world: &World, name: &str) -> String {
 }
 
 /// Every event kind one journal carries.
+///
+/// A line that is not an envelope carrying a kind fails here rather than being
+/// passed over: both journals this reads are documents a check depends on, and a
+/// fixture quietly edited into something unreadable would weaken every assertion
+/// below without failing one.
 fn kinds_in(journal: &str) -> BTreeSet<String> {
+    records_of(journal)
+        .iter()
+        .map(|event| {
+            event["kind"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a journal record names its kind: {event}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// One journal's records, refusing a line that is not one.
+fn records_of(journal: &str) -> Vec<Value> {
     journal
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|event| event["kind"].as_str().map(str::to_string))
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|why| panic!("a journal line is an envelope: {why}: {line}"))
+        })
         .collect()
 }
 
@@ -154,20 +186,113 @@ fn views_of(world: &World, root: &Path, run: &str) -> String {
     format!("{}\n{}", read("status"), read("results"))
 }
 
-/// A journal with every record of a kind `known` does not carry removed: what a
-/// reader written against exactly those kinds sees of it.
-fn as_a_preceding_reader_sees(journal: &str, known: &BTreeSet<String>) -> String {
-    let mut kept = String::new();
-    for line in journal.lines().filter(|line| !line.trim().is_empty()) {
-        let event: Value = serde_json::from_str(line).expect("a journal line is JSON");
-        let kind = event["kind"].as_str().unwrap_or_default();
-        if event["source"] == "pipeline" && !known.contains(kind) {
+/// The record kinds a reader written before this change knows about.
+///
+/// Held to the fixture by
+/// [`the_preceding_reader_knows_only_the_kinds_the_fixture_carries`], so it
+/// cannot quietly learn a kind this change added.
+const KNOWN_TO_A_PRECEDING_READER: [&str; 5] = [
+    "edit-committed",
+    "node-settled",
+    "node-dispatched",
+    "completion-requested",
+    "planner-surface-queued",
+];
+
+/// What a reader written before this change derives from one run's journal.
+///
+/// Not a rendering and not a count of records: what such a reader is *for* is
+/// the state it folds, which is why the split can be right even though the
+/// number of `edit-committed` records moved. A consumer that counted them would
+/// see one fewer; one that acts on them sees the same run, because the records
+/// that moved carried nothing it acts on.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Derived {
+    /// Every node a committed edit put into the graph, and the dependencies it
+    /// arrived with.
+    added: BTreeMap<String, Vec<String>>,
+    /// Every dependency edge a committed edit added, as `from -> to`.
+    edges: BTreeSet<(String, String)>,
+    /// The amendment each node's task was last bound by.
+    amendments: BTreeMap<String, String>,
+    /// What each node settled as.
+    settled: BTreeMap<String, String>,
+    /// Which nodes were dispatched, and how many times.
+    dispatched: BTreeMap<String, usize>,
+    /// Every completion the run was asked for, with its reason.
+    completions: Vec<String>,
+    /// Every surface raised to the planner, as `kind: message`.
+    surfaces: Vec<String>,
+}
+
+/// A reader written against exactly [`KNOWN_TO_A_PRECEDING_READER`] and nothing
+/// else — a consumer downstream of this crate, as one looked before this change.
+///
+/// This file's own, and deliberately not the build under test: what the claim is
+/// about is what *such a reader* reports, and asking this build would be asking
+/// the thing the claim is about. It reads the operation list off `edit-committed`
+/// the way a consumer written before `operation_kinds` existed had to — there was
+/// no field to key on — so it is blind to everything this change added.
+fn derived_by_a_preceding_reader(journal: &str) -> Derived {
+    let mut read = Derived::default();
+    for event in records_of(journal) {
+        if event["source"] != "pipeline" {
             continue;
         }
-        kept.push_str(line);
-        kept.push('\n');
+        let kind = event["kind"].as_str().unwrap_or_default().to_string();
+        if !KNOWN_TO_A_PRECEDING_READER.contains(&kind.as_str()) {
+            continue;
+        }
+        let node = event["labels"]["node"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let payload = &event["payload"];
+        match kind.as_str() {
+            "edit-committed" => {
+                for operation in payload["operations"].as_array().into_iter().flatten() {
+                    match operation["kind"].as_str().unwrap_or_default() {
+                        "node-added" => {
+                            read.added.insert(
+                                text(&operation["node"]["id"]),
+                                operation["node"]["deps"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(text)
+                                    .collect(),
+                            );
+                        }
+                        "edge-added" => {
+                            read.edges
+                                .insert((text(&operation["from"]), text(&operation["to"])));
+                        }
+                        "task-amended" => {
+                            read.amendments
+                                .insert(text(&operation["node"]), text(&operation["text"]));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "node-settled" => {
+                read.settled.insert(node, text(&payload["status"]));
+            }
+            "node-dispatched" => *read.dispatched.entry(node).or_default() += 1,
+            "completion-requested" => read.completions.push(text(&payload["reason"])),
+            "planner-surface-queued" => read.surfaces.push(format!(
+                "{}: {}",
+                text(&payload["kind"]),
+                text(&payload["message"])
+            )),
+            _ => {}
+        }
     }
-    kept
+    read
+}
+
+fn text(value: &Value) -> String {
+    value.as_str().unwrap_or_default().to_string()
 }
 
 /// The fixture is what it claims to be: a journal from **before** this change,
@@ -214,9 +339,33 @@ fn this_build_reads_a_journal_from_before_the_change_as_it_did() {
     );
 }
 
-/// **Direction two.** A reader that knows only the kinds the fixture carries
-/// still reports what it reported when it meets a journal this build writes —
-/// the new kind for an accepted command that changed no graph included.
+/// The reader below is one written before this change: it knows exactly the
+/// record kinds the committed fixture carries, and it cannot have learned the
+/// kind this change adds.
+#[test]
+fn the_preceding_reader_knows_only_the_kinds_the_fixture_carries() {
+    let carried = kinds_in(FIXTURE);
+    for kind in KNOWN_TO_A_PRECEDING_READER {
+        assert!(
+            carried.contains(kind),
+            "the reader keys on '{kind}', which the fixture does not carry, so it is not \
+             a reader written against that journal"
+        );
+    }
+    assert!(
+        !KNOWN_TO_A_PRECEDING_READER.contains(&"command-accepted"),
+        "the preceding reader has learned the kind this change adds"
+    );
+}
+
+/// **Direction two.** A reader written against only the record kinds the fixture
+/// carries still reports what it reported when it meets a journal this build
+/// writes — the new kind for an accepted command that changed no graph included.
+///
+/// The two journals are the **same run**: the fixture is one recording of
+/// [`recorded_run`] and this drives another. So "what it reported" is a value
+/// this check has in hand rather than a claim, and the reader has to derive it
+/// from both.
 #[test]
 fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
     let world = World::new("compat-after");
@@ -232,22 +381,11 @@ fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
         "the run wrote no record this change added, so nothing here is tested: {kinds:?}"
     );
 
-    // Laid down twice under one root: whole, and as a reader written against only
-    // the fixture's kinds sees it. Rendered by the same binary, so what differs
-    // is the journal and nothing else.
-    let root = world.fakes.join("after-root");
-    run_of(&root, "whole", &journal);
-    run_of(
-        &root,
-        "preceding",
-        &as_a_preceding_reader_sees(&journal, &kinds_in(FIXTURE)),
-    );
-
     assert_eq!(
-        views_of(&world, &root, "preceding").replace("preceding", "whole"),
-        views_of(&world, &root, "whole"),
-        "a reader that knows only the kinds a pre-change journal carries reports something \
-         else when it meets a journal this build writes"
+        derived_by_a_preceding_reader(&journal),
+        derived_by_a_preceding_reader(FIXTURE),
+        "a reader written against only the kinds a pre-change journal carries derives a \
+         different run when it meets a journal this build writes"
     );
 }
 
@@ -291,6 +429,13 @@ fn a_refused_envelope_leaves_the_same_nothing_for_either_reader() {
     assert!(
         !kinds.contains("edit-committed") && !kinds.contains("command-accepted"),
         "a refused envelope left a committed record for a reader to find: {kinds:?}"
+    );
+    // And a reader written before the change derives nothing of it either: no
+    // node added, no amendment bound.
+    let read = derived_by_a_preceding_reader(&journal);
+    assert!(
+        read.added.is_empty() && read.amendments.is_empty(),
+        "a refused envelope reached a preceding reader: {read:?}"
     );
     world.release("slow.go");
 }

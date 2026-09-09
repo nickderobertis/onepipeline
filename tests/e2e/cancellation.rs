@@ -618,6 +618,15 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
             "the grace period {grace:?} was honoured instead of falling back to the \
              default: {message}"
         );
+        // And it says that deadline is the only bound there is, for the reason
+        // `every_member_that_has_named_a_turn_is_asked_to_stop` asserts the same
+        // of the other branch: nothing here limits what the dispatch may still
+        // run, and a sentence that reads as though something does is what sent a
+        // manager away expecting a stop that did not come.
+        assert!(
+            message.contains("the only bound on what it may still run is the deadline"),
+            "the cancellation does not say the deadline is the only bound: {message}"
+        );
         assert!(
             !world.was_invoked("oneagentgraph", &["interrupt"]),
             "an interrupt was addressed at a turn nothing had named: {:?}",

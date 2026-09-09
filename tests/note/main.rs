@@ -336,6 +336,86 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
+/// A note the live turn **took**, in an envelope a later command then refused.
+///
+/// The one thing an envelope's atomicity cannot take back. A note is delivered
+/// while the envelope is being compiled, because how it reached the node is part
+/// of what the record has to say — so a note the running turn already read
+/// outlives a later command's refusal, and a conversation has no undo. What is
+/// still kept is what the atomicity is for: the graph does not move, and the run
+/// records nothing as committed. The answer says the note was not applied, so a
+/// manager resending the envelope is not surprised by it.
+///
+/// It is here rather than in `tests/e2e` because this is the only tier where a
+/// live delivery can actually succeed: the note seam is a library call into
+/// `oneagentgraph`, and a suite that substitutes that sibling as an *executable*
+/// gets an undelivered note by construction — which
+/// `a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable` is
+/// about.
+#[test]
+fn a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refuses() {
+    let world = World::new("note-envelope-refused");
+    let run = "envelope";
+    // A second node that never dispatches: a `live` note to it that will persist
+    // to no dispatch is the refusal only the reconciler can make, so it is what
+    // reaches the applying pass after the first note has already been delivered.
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            note_op_with("later", "start from the fixture", "live", false),
+        ]})
+        .to_string(),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied
+        .exited(REFUSED)
+        .err_has("composes it into no dispatch");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The worker really did read it: the note reached a turn that was live, which
+    // is the side effect the refusal cannot undo.
+    let worker = worked(&world);
+    assert!(
+        worker.iter().any(|prompt| prompt.contains(NOTE)),
+        "the live note never reached the worker, so this journey is not about the case \
+         it names:\n{worker:#?}"
+    );
+
+    // And the run committed nothing of the envelope — neither the note that
+    // landed nor the one that refused.
+    assert!(
+        world.events_of(run, "edit-committed").is_empty()
+            && world.events_of(run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(run)
+    );
+    // The answer says so of the delivered note too, rather than reporting it
+    // applied because it happened to land.
+    let answered = world
+        .command_outcomes(run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    assert_eq!(answered["applied"], json!(false), "{answered}");
+    assert_eq!(answered["results"][0]["op"], json!("note"), "{answered}");
+    assert_eq!(
+        answered["results"][0]["applied"],
+        json!(false),
+        "{answered}"
+    );
+}
+
 /// A note that changes what the finished tree must contain enters the acceptance
 /// criteria the judge decides against — and reaches the judge as an update to the
 /// **worker's** task rather than as work for itself.

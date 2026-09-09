@@ -1808,7 +1808,14 @@ fn reconcile_edits(
     let mut changed = false;
     for envelope in channel.claim_commands()? {
         let author = envelope.author;
-        match compile_envelope(paths, state, author, &envelope.commands, launch, in_flight) {
+        match compile_and_deliver_envelope(
+            paths,
+            state,
+            author,
+            &envelope.commands,
+            launch,
+            in_flight,
+        ) {
             Ok(compiled) => {
                 for (command, operations) in envelope.commands.iter().zip(&compiled) {
                     commit_command(
@@ -1897,15 +1904,32 @@ impl Refused {
     }
 }
 
-/// Compile every command of one envelope, or name the first that refused.
+/// Compile — and, for a note, *deliver* — every command of one envelope, or name
+/// the first that refused.
 ///
 /// The staged state is a copy the journal never sees: each command's compiled
-/// operations are folded onto it through [`projection::fold_operations`], which
-/// is the same derivation the journal's own reader applies to the record this
-/// pass is about to write. So `add extra` followed by `reparent extra` is judged
-/// exactly as it was when the loop journalled between them, and the whole
-/// envelope still refuses as one.
-fn compile_envelope(
+/// operations are folded onto it through
+/// [`fold_operations`](crate::projection::fold_operations), which is the same
+/// derivation the journal's own reader applies to the record this pass is about
+/// to write. So `add extra` followed by `reparent extra` is judged exactly as it
+/// was when the loop journalled between them, and the whole envelope still
+/// refuses as one.
+///
+/// # The one thing a refusal cannot take back
+///
+/// A note is *delivered* here, because how it reached the node is part of what
+/// the record has to say — see [`compile_and_deliver`], which this is the
+/// envelope-wide half of. A note the running turn already took is therefore a
+/// side effect that outlives a later command's refusal: the graph does not move
+/// and the journal records nothing, which is what the atomicity is about, but the
+/// worker has read the correction. That is the floor rather than a choice — a
+/// conversation has no undo — and the alternative is worse: delivering after the
+/// envelope was journalled is the half-application this exists to end. The
+/// envelope's answer says the note was not applied, so a manager resending the
+/// envelope is not surprised by it. `tests/note`'s
+/// `a_note_a_live_turn_took_leaves_no_committed_record_when_a_later_command_refuses`
+/// drives it, in the one tier where a live delivery can actually succeed.
+fn compile_and_deliver_envelope(
     paths: &RunPaths,
     state: &Projected,
     author: crate::channel::Author,
