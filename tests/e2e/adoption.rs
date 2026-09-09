@@ -3619,3 +3619,735 @@ fn a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft() {
     });
     world.run(&["stop", &run]).exited(0);
 }
+
+/// Rule the engine repository's publications to **open a change request** a
+/// person is left to merge, and everything else to land with git.
+///
+/// The dependency's work has to really reach a base branch for `onevcs` to
+/// resolve it as landed, and a `change-*` publication lands through the `gh`
+/// stand-in, which moves no git ref — so the merge is this journey's own, made
+/// the way a person's is: with git, carrying the trailer `onevcs` reads.
+fn the_engine_publishes_by_opening_a_change(world: &World) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        format!(
+            "version: 3\n\
+             rules:\n\
+             \x20 - match: {{host: github.com, owner: owner, name: {ENGINE}}}\n\
+             \x20   publication: change-open\n\
+             \x20   approvals: none\n\
+             default:\n\
+             \x20 publication: local-direct\n\
+             \x20 approvals: none\n"
+        ),
+    )
+    .expect("the rules file is written");
+}
+
+/// Give this checkout the commits one branch carries.
+///
+/// A publication pushes the branch here, so most of the time it is already a ref
+/// of this checkout; a push still on its way has not arrived yet, which is what
+/// the wait is for.
+fn bring_the_branch_here(world: &World, checkout: &Path, branch: &str) {
+    world.until(
+        &format!("a copy of {branch} to reach this world"),
+        |world| {
+            !crate::harness::git(world, checkout, &["branch", "--list", branch])
+                .trim()
+                .is_empty()
+                || std::process::Command::new("git")
+                    .args([
+                        "fetch",
+                        "--force",
+                        "origin",
+                        &format!("refs/heads/{branch}:refs/heads/{branch}"),
+                    ])
+                    .current_dir(checkout)
+                    .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+                    .output()
+                    .is_ok_and(|fetched| fetched.status.success())
+        },
+    );
+}
+
+/// Take one branch onto its base, the way the person a `change-open` publication
+/// leaves it to does: `--no-ff`, carrying the `Onevcs-Landed-Commit:` trailer
+/// that names the commit the landing landed.
+fn land(world: &World, checkout: &Path, branch: &str) {
+    bring_the_branch_here(world, checkout, branch);
+    let tip = tip_of(world, checkout, branch);
+    crate::harness::git(
+        world,
+        checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+            branch,
+        ],
+    );
+    crate::harness::git(world, checkout, &["push", "origin", "main"]);
+}
+
+/// The commit one branch is at, which is the commit spelling of a landing: the
+/// work itself, rather than the merge that took it onto the base.
+fn tip_of(world: &World, checkout: &Path, branch: &str) -> String {
+    crate::harness::git(world, checkout, &["rev-parse", branch])
+        .trim()
+        .to_owned()
+}
+
+/// The change request's URL one node's publication opened, as the run recorded
+/// it: the spelling of a landing a person reads a change in.
+fn change_url_of(world: &World, run: &str, node: &str) -> String {
+    world
+        .journal(run)
+        .into_iter()
+        .find(|event| event["kind"] == "change-opened" && event["labels"]["node"] == node)
+        .and_then(|event| event["payload"]["url"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("nothing recorded the change request {node} opened"))
+}
+
+/// Which of the two spellings of a landing a settle names.
+#[derive(Clone, Copy)]
+enum Spelling {
+    /// The commit the work is at.
+    Commit,
+    /// The change request a person reads it in.
+    ChangeRequest,
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
+/// A node settled from evidence says **where the work landed**, and that is what
+/// the release question is put about — re-read as the run goes on, rather than
+/// frozen at the moment the node settled.
+///
+/// The ordering is the point: an operator states a landing after the fact by
+/// definition, so the settle comes first here, the merge second, and what the run
+/// answers is read after each. `docs/contract-divergences.md` entry 40 records
+/// what a frozen answer cost.
+fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spelling: Spelling) {
+    let world = watching(name);
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // No answer file at all: the target has no release yet, which is an answer
+    // and is what the baseline at the landing is captured against.
+
+    // `landed` opens the change request that carries the work. `broken` is the
+    // node whose *record* goes wrong — its dispatch fails, so the run holds a
+    // branch that never reached a base and no landing at all — and `consumer` is
+    // what that costs: it may not start until the release carrying its
+    // dependency's work is out.
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut broken = engine();
+    broken["id"] = json!("broken");
+    broken["deps"] = json!(["landed"]);
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!(["broken"]);
+    world.script("broken.fail", "1");
+    world.script("hold.wait", "hold");
+    let run = start(
+        &world,
+        name,
+        vec![landed, broken, consumer, agent("hold", &[])],
+    );
+
+    world.until("the broken node to settle", |world| {
+        settled_status(world, &run, "broken") == Some("failed".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a node whose dependency failed was dispatched"
+    );
+    let branch = branch_of(&world, &run, "landed");
+    bring_the_branch_here(&world, &engine_repo.checkout, &branch);
+    let landing = match spelling {
+        Spelling::Commit => tip_of(&world, &engine_repo.checkout, &branch),
+        Spelling::ChangeRequest => change_url_of(&world, &run, "landed"),
+    };
+
+    // Both envelope versions this build reads are driven through the real binary
+    // here, one on each spelling: the version this build writes, and the version
+    // before it — which is what every caller written before the landing existed
+    // still sends, this repository's own journeys and the orchestration
+    // repository's pass-through wrapper included. Neither the settle nor the
+    // correlation may notice which of the two arrived.
+    let version = match spelling {
+        Spelling::Commit => onepipeline::channel::REPLY_ENVELOPE_VERSION,
+        Spelling::ChangeRequest => 2,
+    };
+
+    // Settled at what an operator can see it reached, naming where the work is.
+    // Everything the run itself recorded about `broken` still points at a branch
+    // of its own that never landed and never will.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": version, "commands": [{
+                "op": "settle", "id": "broken", "outcome": "done",
+                "evidence": "the change carrying this work is open; the dispatch died before \
+                             it merged, and the run recorded the death and never the change",
+                "landing": landing,
+            }]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    // The landing resolves to the work it names, and the answer is about *that*:
+    // not landed, because nobody has merged it yet. A reference nothing could
+    // resolve answers `not-answered`, which is a different word and a different
+    // thing to do next.
+    world.until("the wait to answer about the landing", |world| {
+        answered(world, &run, "consumer") == Some("not-landed".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node started with its dependency's work unlanded"
+    );
+
+    // Then a person merges it, which is the only thing that changes: the run's
+    // own record of `broken` still names a branch that never landed. A
+    // correlation that froze what it read when the node settled would go on
+    // answering `not-landed` for ever.
+    let asked = world.probe_runs(ENGINE);
+    land(&world, &engine_repo.checkout, &branch);
+    world.until("the merged landing to be probed", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    assert!(
+        world.probe_runs(ENGINE) > asked,
+        "the landing this settle named was never probed, so nothing asked about it"
+    );
+
+    // And the release itself is what starts the node, which is the whole of what
+    // naming the landing bought: a hold that ends because a release carrying
+    // *that work* is out.
+    releases_at(&answer, "0.2.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    let arrived = world
+        .events_of(&run, "release-arrived")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "consumer")
+        .expect("the arrival of the release the node waited on was reported");
+    assert_eq!(arrived["payload"]["dep"], json!("broken"));
+    assert_eq!(arrived["payload"]["version"], json!("0.2.0"));
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// The commit spelling of a landing, driven end to end.
+#[test]
+fn a_node_settled_from_evidence_is_correlated_through_the_commit_it_names() {
+    a_settled_landing_is_what_the_release_is_correlated_through(
+        "adoption-settled-commit",
+        Spelling::Commit,
+    );
+}
+
+/// The change-request spelling of the same landing, driven the same way: one
+/// field, both spellings `onevcs` resolves work by.
+#[test]
+fn a_node_settled_from_evidence_is_correlated_through_the_change_request_it_names() {
+    a_settled_landing_is_what_the_release_is_correlated_through(
+        "adoption-settled-change",
+        Spelling::ChangeRequest,
+    );
+}
+
+/// Say that the probe can no longer answer, whole or not at all.
+///
+/// An answer file that is there and holds nothing is what a probe caught
+/// mid-write looks like, and the shipped probe reports it as a probe that could
+/// not answer — non-zero, which `onevcs` reads as `not-answered` and never as a
+/// release that has not happened. Which is the case this exists for: it is the
+/// answer that must never follow a version.
+fn stops_answering(answer: &Path) {
+    let whole = answer.with_extension("unanswerable");
+    std::fs::write(&whole, "").expect("the unanswerable probe answer is written");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match std::fs::rename(&whole, answer) {
+            Ok(()) => return,
+            Err(failure) if std::time::Instant::now() >= deadline => panic!(
+                "the probe's answer {} could not be replaced: {failure}",
+                answer.display()
+            ),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
+/// The wait surfaces one node's hold has raised, in the order they were raised.
+fn wait_surfaces_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == node
+        })
+        .collect()
+}
+
+/// The waits one node has been told about, in the order they were raised.
+fn waits_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "release-wait")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
+/// A release that has arrived is **never awaited again**, however the probe
+/// answers afterwards — and the wait a supervisor is shown is the hold that is
+/// running. What a resurrected one cost is recorded in
+/// `docs/contract-divergences.md` entry 40.
+///
+/// Two repositories release here because the node has to go on being **held**
+/// after one of its releases arrives: a node nothing is waiting for raises no
+/// wait at all, and what this journey is about is what the next wait says.
+#[test]
+fn a_release_that_arrived_is_not_awaited_again_when_its_probe_stops_answering() {
+    let world = watching("adoption-latched");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (engine_script, engine_answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_release(&engine_script, "tool", &tool_script));
+
+    let mut tool = lifecycle("tool", &[]);
+    tool["repo"] = json!("tool");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([ENGINE, "tool"]);
+    let run = start(&world, "adoption-latched", vec![engine(), tool, consumer]);
+
+    // Held on both, each answered by a probe that ran against its own landing and
+    // said the target has not released past the baseline captured there.
+    world.until("both releases to be awaited and answered", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 2
+            && awaited
+                .iter()
+                .all(|entry| entry["last_answer"] == json!("not-released"))
+    });
+
+    // One of them releases, which ends that hold and nothing else: the node is
+    // still held by the other, so waits go on being raised about it.
+    releases_at(&engine_answer, "0.2.0");
+    world.until("the engine's release to end its own wait", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 1 && awaited[0]["dep"] == json!("tool")
+    });
+    let raised = waits_of(&world, &run, "consumer").len();
+    let surfaced = wait_surfaces_of(&world, &run, "consumer").len();
+    let asked_before = world.probe_runs(ENGINE);
+
+    // Then that probe answers **no release**, and then stops answering at all.
+    // Both are statements about the probe's own moment and neither is about the
+    // release, which has happened: what the run does with either is the same,
+    // because the question is not put again.
+    std::fs::remove_file(&engine_answer).expect("the probe's answer is taken away");
+    world.until("a wait raised after the answer went", |world| {
+        waits_of(world, &run, "consumer").len() > raised
+    });
+    stops_answering(&engine_answer);
+    // Past whatever question was already in flight when the release arrived, so
+    // what the tally below counts is asks made *after* it.
+    world.until("the run to go on waiting for the other release", |world| {
+        waits_of(world, &run, "consumer").len() >= raised + 3
+    });
+    assert_eq!(
+        world.probe_runs(ENGINE),
+        asked_before,
+        "the release that arrived was asked about again, so neither answer above \
+         reached the run through a question it put"
+    );
+    let asked = world.probe_runs(ENGINE);
+    world.until("several more waits to be raised", |world| {
+        waits_of(world, &run, "consumer").len() >= raised + 5
+    });
+
+    // Every wait raised since names the hold that is running and only it. The
+    // satisfied one is not on the list, is not asked about again, and does not
+    // come back carrying the seconds the first hold accumulated.
+    for wait in waits_of(&world, &run, "consumer").into_iter().skip(raised) {
+        let awaited = wait["payload"]["awaiting"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            awaited.len(),
+            1,
+            "a satisfied hold was resurrected by a probe that stopped answering: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["dep"],
+            json!("tool"),
+            "the wait names the release that arrived rather than the one still on: {wait}"
+        );
+    }
+    assert_eq!(
+        world.probe_runs(ENGINE),
+        asked,
+        "a release that had arrived was asked about again"
+    );
+    for surface in wait_surfaces_of(&world, &run, "consumer")
+        .into_iter()
+        .skip(surfaced)
+    {
+        let message = surface["payload"]["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("not-answered"),
+            "a supervisor was shown a wait whose last answer was a probe that could not \
+             answer, about a release that had arrived:\n{message}"
+        );
+    }
+
+    // And the node starts on the hold that was really running.
+    releases_at(&tool_answer, "0.3.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// How long a hold is let run before this journey does anything to it.
+///
+/// The clock a satisfied hold leaves behind is the whole subject, so it has to be
+/// **visibly** bigger than nothing by the time that hold has ended: four seconds
+/// is four of this world's probe intervals, and a wait reporting them for a hold
+/// that had been satisfied is the defect this journey is about.
+const OLD_ENOUGH_TO_SEE: u64 = 4;
+
+/// How long this world's asker goes on asking a question the loop withdrew.
+///
+/// Long enough that the withdrawn question is asked several times over after this
+/// journey takes its probe's answer away, so the answer that carries no version
+/// reaches the loop *after* the one that carried one — the ordering the latch
+/// exists for, and the one thing about it a journey cannot schedule from outside.
+///
+/// The window opens at the **withdrawal**, which is an event this journey learns
+/// about only at the next wait raised — so it has to cover that latency and two
+/// more probe cycles on top, and a value that merely covers them on this host is
+/// a bet against the slowest one. Measured on the Windows runner: taking a
+/// release up adds a probe subprocess to every poll, which stretched the wait
+/// cadence from ~1.5s to ~3.5s, so the journey read the withdrawal 4.3s late and
+/// then needed ~7s more for its two cycles — ~11s of work inside an 8s window,
+/// which reached `asked + 1` and stalled there until the harness deadline. A
+/// minute is several times the whole of that stretch and still well inside the
+/// bound the build itself puts on this seam.
+const WITHDRAWN_ASK_SECONDS: &str = "60";
+
+/// One awaited entry off the last wait raised about a node.
+fn awaited_entry(world: &World, run: &str, node: &str, dep: &str) -> Option<Value> {
+    awaiting(world, run, node)
+        .into_iter()
+        .find(|entry| entry["dep"] == json!(dep))
+}
+
+/// How long one awaited entry says its hold has been running.
+fn waited_seconds(entry: &Value) -> u64 {
+    entry["waited_seconds"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a wait says how long it has been: {entry}"))
+}
+
+/// The seconds a supervisor is shown for a hold are **that hold's own**, and a
+/// hold that has been satisfied is never counted beside it or after it.
+///
+/// The node is held on two releases. The first arrives, and its probe then stops
+/// answering — so the question the loop withdrew when it took up the release
+/// answers, on the run after, with no version at all. That ordering is what the
+/// latch is for: the wait a supervisor reads next must be the hold that is
+/// **running**, timed from the start the run recorded for it. Then the second
+/// release arrives too and the node starts; its probe is taken away as well; and
+/// a node whose every release has arrived is shown no wait at all, however the
+/// probes answer afterwards.
+///
+/// Measured, before the latch: a hold was satisfied and its node dispatched, and
+/// fifty-two minutes later the same run raised a wait about that node reporting
+/// 4394 seconds waited with a last answer of `not-answered` — a decision put to a
+/// supervisor, one of whose three options is stopping the run, whose premise had
+/// expired an hour earlier.
+///
+/// **Both of a node's holds open in one pass** — the set of releases it awaits is
+/// frozen the first time every one of them resolves — so a hold that opens later
+/// than its node's others is not a state this engine can reach: the second hold
+/// here is the one still running when the first is satisfied, and the second
+/// putting of the whole question is the node's own dispatch.
+///
+/// The ordering is scheduled by [`WITHDRAWN_ASK_SECONDS`], the one seam this needs:
+/// the asker takes up the loop's newest question set at the top of every
+/// iteration, so a key the loop has answered is out of the set before the probe's
+/// interval comes round again, and no sequence of writes to a probe's answer
+/// reaches the ordering without it. `probe_runs` is read on both sides of each
+/// answer being taken away, so a journey whose seam did not fire fails saying so
+/// rather than passing on a question nobody put.
+#[test]
+fn the_elapsed_wait_a_supervisor_is_shown_counts_from_the_hold_that_is_running() {
+    // llmlint: ignore[tests_mirror_real_usage] the seam stands in for no layer of this
+    // journey: the binary, the release watch, the probe subprocess and both answers are the
+    // real ones, and what it sets is *when* the second real answer is asked for. The thing
+    // being reproduced is a race — an answer carrying no version taken up after one that
+    // carried it — and the ordinary interface cannot express an ordering, because the asker
+    // takes up the loop's newest question set at the top of every iteration. Measured: with
+    // no seam, this journey and the one below it both pass with the latch and the dropped
+    // clock reverted, so a journey that "reached the condition through realistic probe
+    // behaviour" is one that reaches it never.
+    let world = watching("adoption-wait-clock").with_env(
+        "ONEPIPELINE_RELEASE_WITHDRAWN_ASK_SECONDS",
+        WITHDRAWN_ASK_SECONDS,
+    );
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
+    let (engine_script, engine_answer) = world.probe_in(&engine_repo, ENGINE);
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_release(&engine_script, "tool", &tool_script));
+
+    let mut tool = lifecycle("tool", &[]);
+    tool["repo"] = json!("tool");
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([ENGINE, "tool"]);
+    // The held node's own dispatch is held open, so it is still **running** —
+    // and so still watched — when its probes are taken away below, which is the
+    // state the node in the incident was in.
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let run = start(
+        &world,
+        "adoption-wait-clock",
+        vec![engine(), tool, consumer],
+    );
+
+    // Both holds are put, and are let run until the clock they share is big
+    // enough that showing it for a hold that had ended would be unmistakable.
+    world.until("both holds to have run long enough to see", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 2
+            && awaited
+                .iter()
+                .all(|entry| waited_seconds(entry) >= OLD_ENOUGH_TO_SEE)
+    });
+    let running_since = awaited_entry(&world, &run, "consumer", "tool")
+        .expect("the tool hold is awaited")["since"]
+        .clone();
+    let ended_clock = waited_seconds(
+        &awaited_entry(&world, &run, "consumer", ENGINE).expect("the engine hold is awaited"),
+    );
+
+    // The first hold is satisfied, which ends that hold and nothing else.
+    releases_at(&engine_answer, "0.2.0");
+    world.until("the satisfied hold to leave the awaited set", |world| {
+        let awaited = awaiting(world, &run, "consumer");
+        awaited.len() == 1 && awaited[0]["dep"] == json!("tool")
+    });
+
+    // Its probe then stops answering, and the question the loop withdrew when it
+    // took the release up is still being asked — so an answer carrying no version
+    // reaches the loop *after* the one that carried one, for that same key.
+    let asked = world.probe_runs(ENGINE);
+    stops_answering(&engine_answer);
+    world.until("the withdrawn question to be asked again", |world| {
+        world.probe_runs(ENGINE) > asked
+    });
+    world.until("its answer to have been taken up", |world| {
+        world.probe_runs(ENGINE) > asked + 1
+    });
+
+    // Every wait raised since names the hold that is **running** and only it, and
+    // the seconds beside it are counted from the start the run recorded for that
+    // hold rather than from a hold that has ended.
+    let raised = waits_of(&world, &run, "consumer").len();
+    world.until("several waits after the release arrived", |world| {
+        waits_of(world, &run, "consumer").len() >= raised + 3
+    });
+    for wait in waits_of(&world, &run, "consumer").into_iter().skip(raised) {
+        let awaited = wait["payload"]["awaiting"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            awaited.len(),
+            1,
+            "a hold that had been satisfied was counted beside the one that is running: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["dep"],
+            json!("tool"),
+            "the wait names a release that had arrived rather than the hold that is on: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["since"], running_since,
+            "the hold that is running was timed from another hold's start: {wait}"
+        );
+        assert_eq!(
+            awaited[0]["last_answer"],
+            json!("not-released"),
+            "the hold that is running took a probe's silence about another release: {wait}"
+        );
+        assert!(
+            waited_seconds(&awaited[0]) >= ended_clock,
+            "the running hold's clock was restarted rather than gone on with: {wait}"
+        );
+    }
+
+    // And the surface a supervisor actually reads says the same: one wait, with
+    // the seconds of the hold that is running beside it and no second figure from
+    // the hold that ended.
+    let message = wait_surface(&world, &run, "consumer");
+    assert_eq!(
+        message.matches("waited ").count(),
+        1,
+        "a supervisor was shown more elapsed waits than the node has holds:\n{message}"
+    );
+    assert!(
+        message.contains("tool") && !message.contains("not-answered"),
+        "the wait a supervisor reads is not the hold that is running:\n{message}"
+    );
+
+    // The second hold arrives too, so the node starts — and then its probe is
+    // taken away as well, with that question freshly withdrawn.
+    releases_at(&tool_answer, "0.3.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    let dispatched_at = waits_of(&world, &run, "consumer").len();
+    let surfaced_at = wait_surfaces_of(&world, &run, "consumer").len();
+    let asked_tool = world.probe_runs("tool");
+    stops_answering(&tool_answer);
+    world.until("the second withdrawn question to be asked again", |world| {
+        world.probe_runs("tool") > asked_tool + 1
+    });
+
+    // A node whose every release has arrived is shown **no** wait at all,
+    // however its probes answer afterwards. This is the incident itself: a wait
+    // raised here would be about a node that is fifty minutes into its dispatch,
+    // and would carry every second since the first hold opened.
+    if let Some(wait) = waits_of(&world, &run, "consumer")
+        .into_iter()
+        .nth(dispatched_at)
+    {
+        panic!(
+            "a running node whose releases had all arrived was waited on again, carrying \
+             the clock of a hold that had ended: {wait}"
+        );
+    }
+    assert_eq!(
+        wait_surfaces_of(&world, &run, "consumer").len(),
+        surfaced_at,
+        "a supervisor was asked about a hold that had ended, for a node that was running"
+    );
+
+    world.release("consumer.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
+/// The same, across runs: a **cross-DAG** dependency whose upstream node was
+/// settled from evidence is correlated through the landing that settle named.
+///
+/// The reference is another run's ledger, so the landing is on another run's
+/// journal — and a consumer of it is held by exactly the same rule, with exactly
+/// the same absence of a timeout. The upstream settles first and its change is
+/// merged after the downstream run is already waiting, which is the ordering an
+/// operator's correction always has.
+#[test]
+fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landing() {
+    let world = watching("adoption-settled-crossdag");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+
+    // The upstream run: work that opens a change request, and a node whose own
+    // record goes wrong.
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut broken = engine();
+    broken["id"] = json!("broken");
+    broken["deps"] = json!(["landed"]);
+    world.script("broken.fail", "1");
+    // A node held open, so the upstream run is still being driven when the
+    // settle reaches it — the ordinary path, where the loop applies a queued
+    // command rather than the `reply` applying it itself.
+    world.script("hold.wait", "hold");
+    let upstream = start(
+        &world,
+        "adoption-settled-upstream",
+        vec![landed, broken, agent("hold", &[])],
+    );
+    world.until("the upstream node to settle", |world| {
+        settled_status(world, &upstream, "broken") == Some("failed".to_owned())
+    });
+    let branch = branch_of(&world, &upstream, "landed");
+    bring_the_branch_here(&world, &engine_repo.checkout, &branch);
+    let landing = tip_of(&world, &engine_repo.checkout, &branch);
+    world
+        .run_with_stdin(
+            &["reply", &upstream],
+            &json!({"version": 2, "commands": [{
+                "op": "settle", "id": "broken", "outcome": "done",
+                "evidence": "the change carrying this work is open; the dispatch died \
+                             before it merged",
+                "landing": landing,
+            }]})
+            .to_string(),
+        )
+        // Applied by the loop, or queued for it: which of the two a `reply`
+        // reports is the driver's timing rather than this journey's subject, and
+        // the settlement below is what says it landed either way.
+        .out_has("\"reply\":0");
+    world.until("the upstream settlement to be recorded", |world| {
+        settled_status(world, &upstream, "broken") == Some("done".to_owned())
+    });
+    world.release("hold.go");
+    world.until("the upstream run to settle", |world| {
+        world.run_file(&upstream, "result.json").is_file()
+    });
+
+    // The downstream run, which may not start until a release carrying that
+    // work is out.
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!([format!("run:{upstream}#broken")]);
+    let run = start(&world, "adoption-settled-crossdag", vec![consumer]);
+    world.until("the wait to answer about the landing", |world| {
+        answered(world, &run, "consumer") == Some("not-landed".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    land(&world, &engine_repo.checkout, &branch);
+    world.until("the merged landing to be probed", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+    releases_at(&answer, "0.2.0");
+    world.until("the held node to run", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

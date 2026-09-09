@@ -299,7 +299,7 @@ The planner supervises over the channel:
 
 ```bash
 onepipeline next run-1                                   # read the next surface
-onepipeline reply run-1 <<<'{"version":2,"commands":[    # edit the live graph
+onepipeline reply run-1 <<<'{"version":3,"commands":[    # edit the live graph
   {"op":"retry","id":"failed","node":{"id":"retry","task":"..."}}]}'
 onepipeline attest run-1 design-approval                 # complete a human action
 ```
@@ -312,10 +312,10 @@ Two of those ops reach a node that is already running, and they are deliberately
 not the same lever:
 
 ```bash
-onepipeline reply run-1 <<<'{"version":2,"commands":[    # tell the live dispatch
+onepipeline reply run-1 <<<'{"version":3,"commands":[    # tell the live dispatch
   {"op":"note","id":"build","addressee":"worker",
    "text":"the fixture moved to tests/data"}]}'
-onepipeline reply run-1 <<<'{"version":2,"commands":[    # move the bar
+onepipeline reply run-1 <<<'{"version":3,"commands":[    # move the bar
   {"op":"amend","id":"build","text":"The comment lines are out of scope: leave them."}]}'
 ```
 

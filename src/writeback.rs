@@ -15,7 +15,11 @@
 //!
 //! * **A task's title, body, status, dependency edges and engine metadata are declared** —
 //!   by the node the plan holds and the graph the run folded — so the projection replaces
-//!   them. That is the whole point of the projection.
+//!   them. That is the whole point of the projection. A node carrying no title is written
+//!   under its **id**: a destination that requires one refuses an item with none, and the
+//!   copy is a whole-project write, so one untitled node stops every item of the run
+//!   reaching the board. Untitled nodes are ordinary — see
+//!   `graph::check_declared_version` for why an edited graph carries them.
 //! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
 //!   never the board's own heading, so the destination's title is read and written back. In
 //!   particular it is *not* the project's native identifier: on a store where those two
@@ -894,7 +898,8 @@ fn write_shadow(
         let title = wire
             .remove("title")
             .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
         let content = wire
             .remove("task")
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -1738,6 +1743,36 @@ mod tests {
         let (design, _) = fixture.task_document("design");
         assert_eq!(design["title"], "feat: design it");
         assert_eq!(design["metadata"]["onepipeline.id"], "design");
+    }
+
+    /// A node carrying no title is written under its **id**, and a blank one is
+    /// the same absence spelled differently.
+    #[test]
+    fn a_node_with_no_title_is_projected_under_its_id() {
+        let mut fixture = Fixture::new("untitled");
+        for (id, title) in [("build", Value::Null), ("design", json!("   "))] {
+            let node = fixture
+                .snapshot
+                .nodes
+                .get_mut(id)
+                .expect("the fixture holds it");
+            node.title = title.as_str().map(str::to_owned);
+        }
+        fixture.project();
+
+        for id in ["build", "design"] {
+            let (front, _) = fixture.task_document(id);
+            assert_eq!(
+                front["title"],
+                json!(id),
+                "an untitled node reached the board with no label a destination would take"
+            );
+            assert_eq!(
+                front["metadata"]["onepipeline.id"],
+                json!(id),
+                "the derived title moved which node this item is"
+            );
+        }
     }
 
     /// The rule's second, third and fourth consequences at once, as one

@@ -450,6 +450,19 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.ignores-the-ask")).exists() {
         fake::ignore_the_polite_ask();
     }
+    // Held until the number of dispatches `<key>.concurrent` names are all
+    // inside their own, which is how "these ran at the same time" is observed
+    // rather than inferred: a hold released from outside proves only that one
+    // dispatch was somewhere.
+    if let Some(parties) = fake::node_script(dir, &key, "concurrent") {
+        let parties = parties
+            .trim()
+            .parse::<std::num::NonZeroUsize>()
+            .unwrap_or_else(|error| {
+                fake::fail(&format!("{key}.concurrent is not a party count: {error}"))
+            });
+        fake::barrier(&dir.join("concurrent.arrived"), &key, parties);
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {
@@ -544,6 +557,19 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     if let Some(body) = fake::node_script(dir, &key, "work") {
         write_work(args, &fake::segment(&key), &body);
+    }
+
+    // The same, except that every dispatch writes something the one before it
+    // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
+    // one fixed body leaves a continued branch with nothing to commit, which is a
+    // different thing for the engine than a worker that produced a new tree.
+    if let Some(body) = fake::node_script(dir, &key, "work-anew") {
+        let nth = fake::count(dir, &format!("{key}.work-anew"));
+        write_work(
+            args,
+            &fake::segment(&key),
+            &format!("{body}\ndispatch {nth}\n"),
+        );
     }
 
     // A worker that stops and puts a question to its manager, which is what the

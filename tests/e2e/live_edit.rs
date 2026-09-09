@@ -21,6 +21,7 @@ use crate::harness::{agent, human, plan_of, World, REFUSED};
 use crate::harness::lifecycle;
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Start a run whose nodes are held open, so edits land against a live loop.
 fn live(world: &World, name: &str, nodes: Vec<Value>, hold: &[&str]) -> String {
@@ -1660,6 +1661,125 @@ fn from_entry_57(field: &str) -> Value {
     block[field].clone()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey exercises is the crate's own edit vocabulary, reconciler and projection, which any change under `src/` can move, so a narrower project could not honestly run it.
+/// A run holding nodes a live edit created **projects**, and each of them reaches
+/// the board under its own id.
+///
+/// A node an `add` or a `retry` introduces carries no title unless the envelope
+/// names one — deliberately, for the reason `graph::check_declared_version`
+/// records — and the projection is a whole-project write, so an item a
+/// destination refuses for having no title is every item of the run missing.
+#[test]
+fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
+    let world = World::new("edit-untitled");
+    let mut titled = agent("titled", &[]);
+    titled["title"] = json!("feat: the node the plan titled");
+    let run = live(
+        &world,
+        "untitled",
+        vec![agent("slow", &[]), titled],
+        &["slow"],
+    );
+
+    // Three of them, as a live edit produces them: an `add` naming no title at
+    // all, an `add` naming a blank one, and the replacement a `retry` of the held
+    // node clones.
+    let added = |id: &str, title: Option<&str>| {
+        let mut node =
+            json!({"id": id, "persona": "engineer", "task": format!("## What\nDo {id}.")});
+        if let Some(title) = title {
+            node["title"] = json!(title);
+        }
+        json!({"op": "add", "node": node})
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                added("no-title", None),
+                added("blank-title", Some("   ")),
+                {"op": "retry", "id": "slow",
+                 "node": {"id": "slow-again", "persona": "engineer", "task": "## What\nDo slow again."}},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let board = |world: &World| -> BTreeMap<String, String> {
+        world
+            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+            .into_iter()
+            .filter_map(|task| {
+                Some((
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()?
+                        .to_owned(),
+                    task["item"]["title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                ))
+            })
+            .collect()
+    };
+    let projected = |world: &World| board(world).contains_key("slow-again");
+    world.until_store("the edited graph to reach the project", projected);
+
+    // The untitled three are on the board under their own ids, and the title the
+    // plan gave the fourth is untouched.
+    let titles = |world: &World, id: &str| {
+        board(world)
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} never reached the board: {:?}", board(world)))
+    };
+    for id in ["no-title", "blank-title", "slow-again"] {
+        assert_eq!(
+            titles(&world, id),
+            id,
+            "a node a live edit created reached the board with no label a destination \
+             requiring one would take"
+        );
+    }
+    assert_eq!(titles(&world, "titled"), "feat: the node the plan titled");
+
+    // And the projection the incident was about: after the run settles, **every**
+    // node its own record holds is on the board, each with a title. The copy is a
+    // whole-project write, so one item a destination refuses is every item of the
+    // run missing — which is what six untitled nodes did to a run of twenty-five.
+    world.release("slow.go");
+    world.release("slow-again.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    world.until_store("the settlement to reach the project", |world| {
+        world
+            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+            .iter()
+            .any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "slow-again"
+                    && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+            })
+    });
+    let projected = board(&world);
+    let result = world.run_json(&run, "result.json");
+    let recorded: Vec<String> = result["nodes"]
+        .as_array()
+        .expect("the run's own record names its nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str().map(str::to_owned))
+        .collect();
+    assert!(recorded.len() >= 4, "{result}");
+    for id in &recorded {
+        assert!(
+            projected.get(id).is_some_and(|title| !title.is_empty()),
+            "the settlement projection has no titled item for '{id}': {projected:?}"
+        );
+    }
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
 // beside the twenty-seven other live-edit journeys in this file, which is where a reader
 // looks for one and what `just test-e2e` already runs on its own. What it exercises is the
@@ -1855,9 +1975,43 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         )
         .exited(REFUSED)
         .err_has("no evidence at all");
+    // Nor a landing nothing could resolve. It is handed back to `onevcs` as the
+    // reference a release is measured against and printed into the views, so a
+    // value carrying whitespace or a control character asks an unanswerable
+    // question and forges a line where it lands.
+    for unusable in [
+        "",
+        "3f9a1c2 and the one before it",
+        "the-change-that-merged",
+    ] {
+        let mut named = settle("publish", evidence);
+        named["landing"] = json!(unusable);
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([named])))
+            .exited(REFUSED)
+            .err_has("neither the commit the change reached its base at")
+            .err_has("nor the change request's URL")
+            .err_has("omit the field");
+    }
 
     // The planner's settle is applied to a node the run recorded **failed** —
-    // the case this op exists for — and the node is left exactly as it was.
+    // the case this op exists for — and the node is left exactly as it was. Its
+    // own identity on the board is what replacing it with a stand-in destroys:
+    // the same task, under the same qualified id.
+    let identified = |world: &World| {
+        world
+            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
+            .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
+    };
+    // Read once the run has projected, so what is compared either side of the
+    // settle is the projection rather than the items the plan store was authored
+    // with: the copy is a whole-project write, so the node this waits for
+    // arriving means every node of the run has.
+    world.until_store("the run to be projected", |world| {
+        identified(world).is_some_and(|node| node["title"] == json!("publish"))
+    });
     let announce = world
         .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
         .into_iter()
@@ -1871,15 +2025,6 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .store_deps(announce["id"].as_str().expect("a qualified task id"))
         .len();
     assert_eq!(wired, 1, "the fixture's dependent is not wired to anything");
-    // And the node's own identity on the board, which is what replacing it with
-    // a stand-in destroys: the same task, under the same qualified id.
-    let identified = |world: &World| {
-        world
-            .store_tasks(&format!("plans:{}", crate::harness::project_id(&run)))
-            .into_iter()
-            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "publish")
-            .map(|task| json!({"id": task["id"], "title": task["item"]["title"]}))
-    };
     let was = identified(&world).expect("the settled node is on the board");
 
     world
@@ -1900,6 +2045,15 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         compiled,
         vec![json!({"kind": "settled-from-evidence", "node": "publish",
                     "outcome": "done", "evidence": evidence})]
+    );
+    // A settle naming no landing attributes none, so the record is the three
+    // facts such a settlement has always carried and no fourth beside them.
+    assert!(
+        operations(&world, &run)
+            .iter()
+            .all(|operation| operation["kind"] != "landing-from-evidence"),
+        "a settle that named no landing recorded one: {:?}",
+        operations(&world, &run)
     );
     assert!(
         operations(&world, &run).iter().all(|operation| {
