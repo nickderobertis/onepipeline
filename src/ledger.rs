@@ -86,11 +86,14 @@ use crate::sys;
 // and not the other, leaving the number the checks hold and the number the host is
 // told describing different sets of reads.
 
-/// What that counter stands at.
+/// What this thread's share of that counter stands at.
 ///
 /// Read by the tests that hold the bounded read bounded, and by nothing else —
 /// a number this crate acted on would be a second account of a run's cost, and
-/// there is no second account here to keep true.
+/// there is no second account here to keep true. Per thread rather than per
+/// process for the reason [`crate::loopstats::store_bytes`] gives: a check
+/// measuring a delta wants the reads it performed, not the ones a test beside it
+/// performed at the same time.
 #[cfg(test)]
 pub(crate) fn bytes_read() -> u64 {
     crate::loopstats::store_bytes()

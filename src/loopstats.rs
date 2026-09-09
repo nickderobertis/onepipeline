@@ -71,23 +71,47 @@ pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The same reads again, attributed to the **thread** that performed them,
+    /// and only in a test build.
+    ///
+    /// [`STORE_BYTES`] above is the account the host is told, and it is per
+    /// process by design. That makes it the wrong thing for a check to measure a
+    /// *delta* across: under a runner that runs a module's tests as threads of
+    /// one process, every other thread's ledger read lands in it too, so a
+    /// bounded read reads as an unbounded one — which is how
+    /// `summary::tests::a_run_still_recording_stays_current_and_stays_bounded`
+    /// came to fail intermittently while passing alone. The reads a check means
+    /// to measure are the reads it performed, and this is where those are.
+    ///
+    /// Not a second account: it is the same call site below, counted twice, so a
+    /// reader added to one is added to both. And not present outside a test
+    /// build — every line of it is `cfg(test)`, so what a release compiles is
+    /// the atomic alone.
+    static THREAD_STORE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    #[cfg(test)]
+    THREAD_STORE_BYTES.with(|counted| counted.set(counted.get() + bytes));
 }
 
 pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }
 
-/// What that counter stands at, for the checks that hold a bounded read bounded.
+/// What this thread's account stands at, for the checks that hold a bounded read
+/// bounded.
 ///
-/// The loop's own report reads it through [`flush`] instead. This is the same
-/// account under a second name rather than a second account: `ledger::bytes_read`
-/// is what the summary's checks measure with, and the whole point of pointing it
-/// here is that they measure the number the host is actually told.
+/// The loop's own report reads the process-wide counter through [`flush`]
+/// instead. Both are the same reads counted at the same call site, so a check
+/// measuring across this one is still measuring the number the host is told —
+/// only without the reads no test of it performed.
 #[cfg(test)]
 pub(crate) fn store_bytes() -> u64 {
-    STORE_BYTES.load(Ordering::Relaxed)
+    THREAD_STORE_BYTES.with(std::cell::Cell::get)
 }
 
 /// Whether this process was launched to report what its loop did.

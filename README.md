@@ -51,6 +51,75 @@ so an unqualified command fails with `multiple packages with binaries found`.
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every release, with `sha256` checksums.
 
+## How the npm launcher is published
+
+`npm install -g onepipeline-cli` installs a launcher that carries no binary. The
+binary lives in a per-platform package the launcher pins to an exact version and
+npm installs as an *optional* dependency — and **an install silently skips an
+optional dependency it cannot resolve**, leaving an `onepipeline` on `PATH` with
+nothing to exec.
+
+**`npm publish` exiting 0 means the registry accepted the upload, not that it
+serves the version.** The gap was measured at 75 seconds on one release and
+around eight minutes on another. So the order a release publishes in is not the
+order the registry becomes able to answer in, and offering the launcher on the
+strength of five exit codes is what put a broken install in front of users for a
+window after each release.
+
+`scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
+it does not return until the version it just published is served, and it refuses
+to publish any package before the exact versions that package's own manifest
+pins are served. `verify-npm` then installs and starts the launcher on every
+platform the manifest declares a package for, so a release that would ship that
+window is red rather than green.
+
+## Release outcome
+
+Every release attaches **`release-outcome.json`** to its GitHub Release. It
+answers one question in three states, so a consumer can tell a publication that
+was verified from one that was not without opening a job log:
+
+- `nothing-shipped` — no publish job ran, so no artifact can have reached a
+  registry. A publish that *failed* does not say this: it may have published
+  part of what it was given, so it reads as `shipped-unverified`.
+- `shipped-unverified` — artifacts are public, and installing one of them was
+  not proven to work.
+- `shipped-verified` — every artifact taking part in the release published *and*
+  installed and ran on every platform it declares a package for.
+
+Ask for it by URL. No credential, and `latest` needs no version:
+
+```bash
+curl -fsSL https://github.com/nickderobertis/onepipeline/releases/latest/download/release-outcome.json
+curl -fsSL https://github.com/nickderobertis/onepipeline/releases/download/v1.2.3/release-outcome.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "version": "1.2.3",
+  "outcome": "shipped-unverified",
+  "run_url": "https://github.com/nickderobertis/onepipeline/actions/runs/1",
+  "targets": [
+    { "id": "crate:onepipeline", "outcome": "shipped-verified", "published": "success", "verified": "success" },
+    { "id": "pypi:onepipeline-cli", "outcome": "shipped-verified", "published": "success", "verified": "success" },
+    { "id": "npm:onepipeline-cli", "outcome": "shipped-unverified", "published": "success", "verified": "failure" }
+  ]
+}
+```
+
+Each `id` is the registry-qualified identifier
+[`release-targets.toml`](release-targets.toml) declares and
+`scripts/release-probe.sh` answers for, so the two are asked in the same
+vocabulary — the probe says *which version* a registry serves, and this says
+*whether anything proved it works*. `schema_version` changes only alongside the
+golden records under `npm/test/golden/`.
+
+The middle state is the one that matters, and it is why verification is not a
+workflow of its own: a workflow whose green meant only that the publishing steps
+exited without error would have been green for every release whose npm launcher
+could not start.
+
 ## Where a plan lives
 
 A plan is one **onetaskgraph project**, and a node is one task in it. A run is

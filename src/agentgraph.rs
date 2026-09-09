@@ -2301,6 +2301,28 @@ pub fn health() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Serialises every test below that reads or writes one of this module's
+    /// process-global variables — `STATE_DIR_ENV`, `BINARY_ENV`, and
+    /// `ONEHARNESS_BIN_ENV`.
+    ///
+    /// nextest — the runner this repository uses — gives each test its own
+    /// process, so under it these variables reach nothing else. Plain `cargo
+    /// test` runs a module's tests as *threads of one process*, and under that
+    /// runner a test reads whichever value another test set last:
+    /// `an_oneagentgraph_that_cannot_be_started_is_a_failed_delivery` points
+    /// `BINARY_ENV` at a binary that does not exist, and `state_dir_holding`
+    /// clears it, so either one can decide the other's assertion. The lock costs
+    /// nothing under nextest and makes both runners say the same thing.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Held for the length of a test that touches those variables. A poisoned
+    /// lock is recovered rather than propagated: the test that panicked holding
+    /// it has already failed, and refusing to run the next one would report a
+    /// second failure belonging to nobody.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// A state directory holding one real `oneagentgraph` run record.
     ///
     /// The sibling's **own** [`Record`](oneagentgraph::run::Record), serialized
@@ -2311,8 +2333,11 @@ mod tests {
     /// a field — the exact drift the subprocess doubles used to hide.
     ///
     /// The variable is set rather than passed because these entry points read
-    /// the process's environment, which is what a run of the binary gives them;
-    /// nextest runs each test in its own process, so it reaches nothing else.
+    /// the process's environment, which is what a run of the binary gives them.
+    /// Its root is unique to the *call* rather than to the process, and every
+    /// caller holds [`env_lock`] for the length of the test, so the variable a
+    /// call sets is still the one that call's assertions read however the suite
+    /// is run.
     fn state_dir_holding(run: &str, members: &[&str]) -> PathBuf {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -2374,6 +2399,7 @@ mod tests {
     /// says so.
     #[test]
     fn a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone() {
+        let _env = env_lock();
         let root = state_dir_holding("node-scope-1786304152340-30", &["worker"]);
         let probe = "ONEPIPELINE_GRAPH_ENV_PROBE";
         std::env::remove_var(probe);
@@ -2424,6 +2450,7 @@ mod tests {
              the run, this test has done its job and the concurrency note above is stale"
         );
         std::env::remove_var(probe);
+        std::env::remove_var(ONEHARNESS_BIN_ENV);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3033,6 +3060,7 @@ mod tests {
     /// sibling grew `declared_members` to close.
     #[test]
     fn a_reset_leaves_the_signal_the_run_watches_for() {
+        let _env = env_lock();
         let root = state_dir_holding("node-scope-1786304152340-19", &[CHECK_IN_MEMBER]);
         let graph_run = recorded_graph_run("node-scope-1786304152340-19", "demo")
             .expect("the sibling accepts its own run id");
@@ -3061,6 +3089,7 @@ mod tests {
     /// and `views::an_observer_this_host_cannot_ask_about_is_never_reported_dead`.
     #[test]
     fn a_recorded_value_that_is_not_an_address_leaves_the_observer_watching() {
+        let _env = env_lock();
         let root = state_dir_holding("dag-scope-1786304152340-19", &["monitor"]);
         for recorded in ["   ", "../elsewhere"] {
             assert!(
@@ -3107,6 +3136,7 @@ mod tests {
     /// signal file nothing will read.
     #[test]
     fn a_reset_for_a_member_the_run_never_declared_is_refused() {
+        let _env = env_lock();
         let root = state_dir_holding("node-scope-1786304152340-20", &["worker"]);
         let graph_run = recorded_graph_run("node-scope-1786304152340-20", "demo")
             .expect("the sibling accepts its own run id");
@@ -3127,6 +3157,7 @@ mod tests {
     /// an interrupt into the merged store that never happened.
     #[test]
     fn an_interrupt_against_a_run_that_is_not_there_is_a_failed_delivery_that_publishes_nothing() {
+        let _env = env_lock();
         let root = state_dir_holding("node-scope-1786304152340-21", &["worker"]);
         let interrupt = interrupt(
             &TurnAddress::of("node-scope-1786304152340-99", "worker").expect("an address"),
@@ -3154,6 +3185,7 @@ mod tests {
     /// crate composed.
     #[test]
     fn an_interrupt_with_no_turn_to_reach_still_publishes_what_the_lever_did() {
+        let _env = env_lock();
         let root = state_dir_holding("node-scope-1786304152340-22", &["worker"]);
         let interrupt = interrupt(
             &TurnAddress::of("node-scope-1786304152340-22", "worker").expect("an address"),
@@ -3195,7 +3227,9 @@ mod tests {
     #[test]
     fn the_binary_comes_from_the_environment_or_falls_back() {
         // The variable is read per call rather than cached, so a test harness
-        // and an operator both reach the executable they named.
+        // and an operator both reach the executable they named. Read under the
+        // lock, because a sibling test points it at a binary that is not there.
+        let _env = env_lock();
         assert_eq!(
             std::env::var(BINARY_ENV)
                 .ok()
@@ -3308,10 +3342,12 @@ mod tests {
     ///
     /// The seam is named rather than left to `PATH` — `oneagentgraph` is a
     /// published CLI, so a host that has it installed would otherwise decide
-    /// this assertion. nextest runs each test in its own process, so the
-    /// variable reaches nothing else.
+    /// this assertion. The variable is this whole process's, so it is set under
+    /// [`env_lock`] and removed again: under a runner that runs tests as threads
+    /// it would otherwise decide every sibling's assertion too.
     #[test]
     fn an_oneagentgraph_that_cannot_be_started_is_a_failed_delivery() {
+        let _env = env_lock();
         std::env::set_var(BINARY_ENV, "oneagentgraph-that-is-not-installed");
         let interrupt = interrupt(
             &TurnAddress {
@@ -3330,6 +3366,9 @@ mod tests {
             interrupt.events.is_empty(),
             "a delivery nothing ran produced envelopes"
         );
+        // Put back what this test pointed at a binary that is not there, so it
+        // decides nothing but its own assertions.
+        std::env::remove_var(BINARY_ENV);
     }
 
     #[test]
