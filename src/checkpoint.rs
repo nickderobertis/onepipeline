@@ -581,21 +581,22 @@ fn fold_in_merge_order(state: &mut RunState, records: &[(Option<Envelope>, u64)]
     }
 }
 
-/// Resume a run's fold from its checkpoint, and **leave the checkpoint where this
-/// fold reached** — named for the second half because a reader that wrote nothing
-/// would leave the next one paying what this one just paid.
-pub(crate) fn resume(paths: &RunPaths) -> RunState {
+/// Fold a run from its checkpoint, and leave the checkpoint where this fold
+/// reached.
+///
+/// Both halves are in the name because a caller gets both: a reader that folded
+/// from a document and wrote none back would leave the next one paying exactly
+/// what this one just paid, which is the whole of what this module is for.
+pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
 /// The checkpoint document, where the run root holds one **this build can read as
 /// this run's**.
 ///
-/// Exactly that and no more: three of the four conditions in the module note are
-/// decided here — absent, unreadable or unparseable, and written at a version this
-/// build does not read — and so is a document that names another run, which is one
-/// copied between run roots. Whether the marker it carries still describes the
-/// journal is the fourth, and is [`Coverage::corroborated_by`]'s.
+/// Every unusable condition in the module note but the last is decided here, and so
+/// is a document naming another run — one copied between run roots. The last, whether
+/// the marker still describes the journal, is [`Coverage::corroborated_by`]'s.
 fn readable(paths: &RunPaths) -> Option<Checkpoint> {
     ledger::read_json_opt::<Checkpoint>(&paths.checkpoint())
         .filter(|checkpoint| checkpoint.run_id == paths.run)
@@ -746,13 +747,11 @@ mod tests {
 
     /// A scratch runs root of this journey's own.
     ///
-    /// Named after the journey **and after the moment it opened**, which is the
-    /// whole of what the name has to do: several worktrees of this repository run
-    /// their suites on one host and they share `/tmp`, so a name only the journey
-    /// decides is one another invocation removes and recreates under this one —
-    /// which reads as a store that lost records rather than as two runs sharing a
-    /// path. Not the process id, which is the same fact spelled the way this
-    /// repository is separately fixing.
+    /// Named after the journey **and the moment it opened**: worktrees of this
+    /// repository share one host's `/tmp`, so a name only the journey decides is one
+    /// another invocation removes out from under this one — which reads as a store
+    /// that lost records. Not the process id, which keys on a value this repository
+    /// is separately taking out of its tests.
     fn scratch(name: &str) -> PathBuf {
         let opened = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -909,7 +908,7 @@ mod tests {
     fn without_a_checkpoint(paths: &RunPaths) -> Value {
         let held = std::fs::read(paths.checkpoint()).ok();
         let _ = std::fs::remove_file(paths.checkpoint());
-        let whole = folded_as(&resume(paths));
+        let whole = folded_as(&fold_and_checkpoint(paths));
         match held {
             Some(bytes) => std::fs::write(paths.checkpoint(), bytes).expect("put back"),
             None => {
@@ -957,13 +956,13 @@ mod tests {
         let root = scratch("resumed-is-whole");
         let paths = a_recorded_run(&root, "r-resumed");
         // One read writes the checkpoint; the store then grows past it.
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
         settle(&paths, "build", "done");
         relayed(&paths, "graph-1", 0, "2099-01-01T00:00:01.000Z", "ship");
         settle(&paths, "ship", "done");
         assert!(paths.checkpoint().is_file(), "no checkpoint was written");
 
-        let resumed = folded_as(&resume(&paths));
+        let resumed = folded_as(&fold_and_checkpoint(&paths));
         assert_eq!(resumed, without_a_checkpoint(&paths));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -980,7 +979,7 @@ mod tests {
         let root = scratch("takes-only-the-tail");
         let paths = a_recorded_run(&root, "r-tail");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
 
         let held = crate::ledger::read_records(&paths.journal()).len() as u64;
         let stored = super::readable(&paths).expect("the checkpoint this read wrote");
@@ -1061,7 +1060,7 @@ mod tests {
         let root = scratch(name);
         let paths = a_recorded_run(&root, "r-fallback");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
         let mut planted = document(&paths);
         planted["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
         seal_and_write(&paths, &mut planted);
@@ -1131,12 +1130,12 @@ mod tests {
         let root = scratch("rearranged");
         let paths = a_recorded_run(&root, "r-rearranged");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
         let covered = super::readable(&paths).expect("a checkpoint").coverage;
         assert!(covered.records > 0, "nothing was accounted for");
 
         relayed(&paths, "graph-0", 0, "1999-01-01T00:00:00.000Z", "build");
-        let resumed = folded_as(&resume(&paths));
+        let resumed = folded_as(&fold_and_checkpoint(&paths));
         assert_eq!(resumed, without_a_checkpoint(&paths));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1149,7 +1148,7 @@ mod tests {
         let paths = a_run(&root, "r-unplaceable");
         relayed(&paths, "graph-b", 0, "2099-01-01T00:00:03.000Z", "build");
         relayed(&paths, "graph-a", 0, "2099-01-01T00:00:01.000Z", "build");
-        let state = folded_as(&resume(&paths));
+        let state = folded_as(&fold_and_checkpoint(&paths));
         let covered = super::readable(&paths).map(|stored| stored.coverage);
         assert!(
             covered.is_none_or(|covered| covered.records == 0),
@@ -1182,7 +1181,7 @@ mod tests {
         ] {
             relayed(&paths, stream, 0, ts, "build");
         }
-        let state = folded_as(&resume(&paths));
+        let state = folded_as(&fold_and_checkpoint(&paths));
         let covered = super::readable(&paths)
             .expect("a checkpoint")
             .coverage
@@ -1214,7 +1213,7 @@ mod tests {
         settle(&paths, "ship", "done");
 
         let held = crate::ledger::read_records(&paths.journal()).len() as u64;
-        let state = folded_as(&resume(&paths));
+        let state = folded_as(&fold_and_checkpoint(&paths));
         let covered = super::readable(&paths).expect("a checkpoint").coverage;
         assert_eq!(
             covered.bytes,
@@ -1247,7 +1246,7 @@ mod tests {
         let root = scratch("checked-on-the-way-back");
         let paths = a_recorded_run(&root, "r-checked");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
         let whole = without_a_checkpoint(&paths);
 
         for (planting, named) in [
@@ -1279,7 +1278,7 @@ mod tests {
             // the state the whole store folds to.
             crate::ledger::write_json(&paths.checkpoint(), &planted).expect("written");
             assert_eq!(
-                folded_as(&resume(&paths)),
+                folded_as(&fold_and_checkpoint(&paths)),
                 whole,
                 "a document carrying {planting} was folded from"
             );
@@ -1297,7 +1296,7 @@ mod tests {
         for line in ["not a record", "nor is this"] {
             crate::ledger::append_line(&paths.journal(), line).expect("appended");
         }
-        let state = folded_as(&resume(&paths));
+        let state = folded_as(&fold_and_checkpoint(&paths));
         let covered = super::readable(&paths).expect("a checkpoint").coverage;
         assert_eq!(
             covered.records, 2,
@@ -1322,7 +1321,7 @@ mod tests {
         let root = scratch("prefix-changed");
         let paths = a_recorded_run(&root, "r-changed");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
 
         let marker = super::readable(&paths)
             .expect("the checkpoint that read wrote")
@@ -1366,7 +1365,7 @@ mod tests {
         // taken after the rewrite rather than before it: what the criterion asks is
         // that the two agree about the journal as it now stands.
         let whole = without_a_checkpoint(&paths);
-        let read = folded_as(&resume(&paths));
+        let read = folded_as(&fold_and_checkpoint(&paths));
         assert_eq!(
             read.get("outcomes")
                 .and_then(|outcomes| outcomes.get("build")),
@@ -1581,7 +1580,7 @@ mod tests {
         let root = scratch("state-edited");
         let paths = a_recorded_run(&root, "r-edited");
         settle(&paths, "build", "done");
-        let _ = resume(&paths);
+        let _ = fold_and_checkpoint(&paths);
         settle(&paths, "ship", "done");
         let whole = without_a_checkpoint(&paths);
 
@@ -1590,7 +1589,7 @@ mod tests {
         edited["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
         crate::ledger::write_json(&paths.checkpoint(), &edited).expect("written");
 
-        let read = folded_as(&resume(&paths));
+        let read = folded_as(&fold_and_checkpoint(&paths));
         assert_eq!(
             read.get("outcomes")
                 .and_then(|outcomes| outcomes.get("build")),
@@ -1607,7 +1606,7 @@ mod tests {
     fn a_run_that_has_recorded_nothing_leaves_no_checkpoint() {
         let root = scratch("nothing-recorded");
         let paths = a_run(&root, "r-empty");
-        let state = resume(&paths);
+        let state = fold_and_checkpoint(&paths);
         assert!(state.strict, "the empty fold is not the fold's own start");
         assert!(state.graph.is_empty());
         assert!(

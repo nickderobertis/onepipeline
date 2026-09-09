@@ -335,12 +335,8 @@ pub struct Frontier {
 /// and why. Its [`Default`] is the planner's park with no reason, which is what
 /// every park recorded before this existed was.
 ///
-/// A checkpoint of the fold carries this value, and a document carrying the one
-/// state this type must not hold — a reason that is present and says nothing — is
-/// **refused** rather than read: [`Park::of`] never writes one, so a document
-/// with one in it is a document no writer here produced, and refusing it costs
-/// the reader a whole-store fold and nothing else. `vcs::DispatchSession` refuses
-/// a token or a branch it would not have written for the same reason.
+/// A checkpoint of the fold carries this value, and one carrying a reason that is
+/// present and says nothing is refused rather than read — see [`stated`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Park {

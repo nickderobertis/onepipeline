@@ -540,7 +540,7 @@ impl RunView {
         // events above are the merged store this view hands to its caller, and what
         // no longer grows with them is the fold over them. See
         // [`crate::checkpoint`].
-        let mut state = crate::checkpoint::resume(paths);
+        let mut state = crate::checkpoint::fold_and_checkpoint(paths);
         landings_the_run_re_read(&mut state, paths);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
