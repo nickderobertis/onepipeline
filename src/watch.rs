@@ -12,13 +12,14 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use crate::cli::{WatchArgs, WatchUntil, WATCH_CURSOR_VERSION};
+use crate::cli::{WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION, WATCH_NODE_CONDITION};
 use crate::error::{
-    Error, Result, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING, EXIT_WATCH_ELAPSED,
+    Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
+    EXIT_WATCH_ELAPSED,
 };
 use crate::event::{Envelope, PipelineKind, Source};
 use crate::filter::EventFilter;
-use crate::graph::{self, GraphState};
+use crate::graph::{self, GraphState, NodeStatus};
 use crate::journal;
 use crate::ledger::RunPaths;
 use crate::views::{self, RunView, Unread};
@@ -49,85 +50,109 @@ const MEANINGFUL: [PipelineKind; 8] = [
 
 /// A closed set with a code each, so a caller branches on the status and never
 /// on the words beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Ending {
     Settled,
     SurfaceWaiting,
     NothingDriving,
+    /// A node the wait named settled, and this is the one that did.
+    ///
+    /// The node rides the ending rather than being looked up beside it, because
+    /// the two conditions that produce this — any node settling, and one named
+    /// node settling — return the same word, and *which node* is the fact a
+    /// caller acts on.
+    NodeSettled(String),
     Elapsed,
 }
 
 impl Ending {
-    const fn as_str(self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
             Self::Settled => "settled",
             Self::SurfaceWaiting => "surface-waiting",
             Self::NothingDriving => "nothing-driving",
+            Self::NodeSettled(_) => "node-settled",
             Self::Elapsed => "elapsed",
         }
     }
 
-    const fn exit_code(self) -> i32 {
+    const fn exit_code(&self) -> i32 {
         match self {
             Self::Settled => EXIT_SUCCESS,
             Self::SurfaceWaiting => EXIT_SURFACE_WAITING,
             Self::NothingDriving => EXIT_NOTHING_DRIVING,
+            Self::NodeSettled(_) => EXIT_NODE_SETTLED,
             Self::Elapsed => EXIT_WATCH_ELAPSED,
+        }
+    }
+
+    /// The human form's own words for this ending.
+    ///
+    /// The machine form's `condition` and its own `node` field are what a caller
+    /// branches on; this is the line beside it, which names the node in the same
+    /// breath so a person reading the terminal is not sent to the JSON for it.
+    fn phrase(&self) -> String {
+        match self {
+            Self::NodeSettled(node) => format!("{} {node}", self.as_str()),
+            settled => settled.as_str().to_string(),
         }
     }
 }
 
-/// The two wire fields a return record states about why it ended, written from
-/// the one value the process exits with.
+/// The wire fields a return record states about why it ended, written from the
+/// one value the process exits with.
 ///
 /// Hand-written rather than derived because the pair is the whole promise: a
 /// record that took `condition` and `exit` as two fields could be given a word
-/// and a status that disagree, which is the caller reading prose again.
+/// and a status that disagree, which is the caller reading prose again. `node`
+/// is written by the one ending that has one, and absent from the rest rather
+/// than null — a return that names no node did not end on one.
 impl serde::Serialize for Ending {
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut record = serializer.serialize_map(Some(2))?;
+        let settled = match self {
+            Self::NodeSettled(node) => Some(node),
+            _ => None,
+        };
+        let mut record = serializer.serialize_map(Some(2 + usize::from(settled.is_some())))?;
         record.serialize_entry("condition", self.as_str())?;
         record.serialize_entry("exit", &self.exit_code())?;
+        if let Some(node) = settled {
+            record.serialize_entry("node", node)?;
+        }
         record.end()
     }
 }
 
 /// Block until the run needs a supervisor, or until the wait runs out.
 ///
-/// The run and the profile are resolved by the caller, so a run that does not
-/// exist or a profile this run does not have refuses **before** anything blocks:
-/// a watch that waited five minutes to report a typo would be worse than the
-/// loop it replaces.
+/// The run and the profile are resolved by the caller, and everything else this
+/// verb can refuse is refused here before a line is written or a second is
+/// waited: the cursor, and every condition the wait was told to return on. A
+/// watch that waited five minutes — or, now that a wait may have no bound at all,
+/// forever — to report a typo would be worse than the loop it replaces.
 pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) -> Result<i32> {
     let mut cursor = match args.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
     };
-    // Checked, because the seconds are a caller's: `Instant` addition panics on
-    // overflow, and a wait longer than this host's clock can hold is a value to
-    // refuse rather than a reason to abort the process.
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(args.timeout))
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "a wait of {} seconds is further ahead than this host's clock can name; \
-                 give `--timeout` a value it can reach",
-                args.timeout
-            ))
-        })?;
+    let deadline = deadline(args.timeout)?;
     let tick = Duration::from_secs(args.tick_interval);
     let mut quiet_since = Instant::now();
     let mut out = Emitter::new();
 
+    // The first pass's reads, taken before anything is emitted, because the
+    // conditions are validated against them: what this watch will read is what
+    // decides whether a condition the run has already met returns immediately or
+    // could never be met at all.
+    let mut view = RunView::open(paths)?;
+    let mut fresh = tail(paths, &mut cursor);
+    let selectors = Selectors::resolve(&args.until, &view, &fresh)?;
+
     loop {
-        let view = RunView::open(paths)?;
-        let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
-        cursor.at = at;
-        journal::merge_order(&mut fresh);
         for event in fresh
             .iter()
             .filter(|event| meaningful(event) && filter.matches(event))
@@ -136,10 +161,10 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
             quiet_since = Instant::now();
         }
 
-        if let Some(ending) = concluded(&view, paths, args.until) {
+        if let Some(ending) = concluded(&view, paths, &selectors, &fresh) {
             return out.returned(&view, ending, &cursor);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return out.returned(&view, Ending::Elapsed, &cursor);
         }
         if !tick.is_zero() && quiet_since.elapsed() >= tick {
@@ -147,7 +172,177 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
             quiet_since = Instant::now();
         }
         std::thread::sleep(POLL);
+        view = RunView::open(paths)?;
+        fresh = tail(paths, &mut cursor);
     }
+}
+
+/// The instant this wait gives up at, or `None` for a wait with no bound.
+///
+/// Checked, because the seconds are a caller's: `Instant` addition panics on
+/// overflow, and a wait longer than this host's clock can hold is a value to
+/// refuse rather than a reason to abort the process. A wait with **no** bound
+/// never reaches that arithmetic at all — it is the absence of a deadline rather
+/// than one far away, which is what keeps `0`'s published meaning, read once and
+/// return, the value it always was.
+fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
+    let WatchTimeout::Bounded(seconds) = timeout else {
+        return Ok(None);
+    };
+    Instant::now()
+        .checked_add(Duration::from_secs(seconds))
+        .map(Some)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "a wait of {seconds} seconds is further ahead than this host's clock can name; \
+                 give `--timeout` a value it can reach"
+            ))
+        })
+}
+
+/// The records this watch has not read yet, in merge order, moving the cursor
+/// over exactly what it returns.
+fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
+    let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
+    cursor.at = at;
+    journal::merge_order(&mut fresh);
+    fresh
+}
+
+/// The conditions this watch returns on, resolved against the run before it
+/// blocks.
+///
+/// Two of the terminal conditions are not held here at all: a run that settles
+/// `complete` and a run nothing is driving end every wait whether or not they
+/// were named, because a wait that could outlive the run it watches is the
+/// unbounded silence this verb exists to end. So `--until settled` and `--until
+/// nothing-driving` name what the verb already does — which is why the first of
+/// them keeps its meaning exactly, "report a blocking surface and wait through
+/// it" — and what is chosen here is everything else.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Selectors {
+    /// Return on a blocking surface waiting to be answered.
+    surface: bool,
+    /// Return when any node of the run settles.
+    any_node: bool,
+    /// Return when one of these nodes settles.
+    named: Vec<String>,
+}
+
+impl Selectors {
+    /// Read the conditions this wait was given, or refuse one it could not
+    /// return on.
+    ///
+    /// Three refusals, all made here rather than in the loop, so a condition this
+    /// run cannot answer costs a caller nothing: a node the graph does not hold,
+    /// a node that will never settle again, and — for a run whose every node is
+    /// already done — a wait for any node to settle. Each names what it would
+    /// never fire on.
+    ///
+    /// **The line between "never" and "already".** A settlement at or past this
+    /// watch's cursor is in `ahead`, is read on the very first pass, and returns
+    /// immediately: a condition the run has already satisfied is answered, never
+    /// refused. A settlement *behind* the cursor was handed to the watch that
+    /// printed that cursor and is not handed over twice — so what is left, a node
+    /// that settled `done` with nothing of it ahead, is a wait for a dispatch
+    /// that will not happen, because `done` is the one status nothing schedules
+    /// out of again. Every other settled status can settle again: a failed or
+    /// cancelled node is retried, a parked one requeued, a waiting one attested,
+    /// a draft-complete one dispatched by the release it waits on. (A planner
+    /// *correcting* a record with `settle` can journal a further settlement for a
+    /// done node. That is an intervention in the run rather than the run's own
+    /// life, and it is not what the refusal claims: what it claims is that
+    /// nothing will dispatch the node again.)
+    ///
+    /// A condition that cannot fire is refused whether or not some other
+    /// condition would have ended the same watch anyway. It is a mistake in the
+    /// command, and answering it with a different condition's status would hide
+    /// it behind an exit code the caller would read as an answer.
+    fn resolve(until: &[WatchUntil], view: &RunView, ahead: &[Envelope]) -> Result<Self> {
+        let mut chosen = Self::default();
+        let statuses = view.state.statuses();
+        for condition in until {
+            match condition {
+                WatchUntil::Settled | WatchUntil::NothingDriving => {}
+                WatchUntil::Surface => chosen.surface = true,
+                WatchUntil::NodeSettled => {
+                    let ids: Vec<&String> = statuses.keys().collect();
+                    if !ids.is_empty() && done_for_good(&ids, &statuses, ahead) {
+                        return Err(Error::Invalid(format!(
+                            "`--until node-settled` would never fire: every node of run '{}' \
+                             ({}) settled `done` before this watch's cursor, and nothing \
+                             dispatches a `done` node again",
+                            view.paths.run,
+                            named(ids.into_iter())
+                        )));
+                    }
+                    chosen.any_node = true;
+                }
+                WatchUntil::Node(node) => {
+                    if !view.state.graph.contains(node) {
+                        return Err(Error::Invalid(format!(
+                            "`--until {WATCH_NODE_CONDITION}{node}` names a node run '{}' does \
+                             not hold; its graph holds {}",
+                            view.paths.run,
+                            named(view.state.graph.ids())
+                        )));
+                    }
+                    if done_for_good(&[node], &statuses, ahead) {
+                        return Err(Error::Invalid(format!(
+                            "`--until {WATCH_NODE_CONDITION}{node}` would never fire: node \
+                             '{node}' of run '{}' settled `done` before this watch's cursor, \
+                             and nothing dispatches a `done` node again",
+                            view.paths.run
+                        )));
+                    }
+                    chosen.named.push(node.clone());
+                }
+            }
+        }
+        Ok(chosen)
+    }
+
+    /// Whether a settlement of this node is one this wait was told to return on.
+    fn wants(&self, node: &str) -> bool {
+        self.any_node || self.named.iter().any(|named| named == node)
+    }
+}
+
+/// Whether every one of these nodes has settled `done` with no settlement of any
+/// of them left for this watch to read.
+fn done_for_good(
+    nodes: &[impl AsRef<str>],
+    statuses: &std::collections::BTreeMap<String, NodeStatus>,
+    ahead: &[Envelope],
+) -> bool {
+    nodes.iter().all(|node| {
+        statuses.get(node.as_ref()).copied() == Some(NodeStatus::Done)
+            && !ahead
+                .iter()
+                .filter_map(settlement_of)
+                .any(|settled| settled == node.as_ref())
+    })
+}
+
+/// A list of ids as a refusal names them.
+fn named<'a>(ids: impl Iterator<Item = &'a String>) -> String {
+    let ids: Vec<&str> = ids.map(String::as_str).collect();
+    match ids.is_empty() {
+        true => "no nodes at all".to_string(),
+        false => ids.join(", "),
+    }
+}
+
+/// The node an event settled, when the event is one of **this crate's** own
+/// settlements.
+///
+/// Asked of the source and the kind together, for the reason [`meaningful`]
+/// gives: a sibling that one day spells `node-settled` the way this one does
+/// would otherwise end a wait over a node that settled nothing.
+fn settlement_of(event: &Envelope) -> Option<&str> {
+    (meaningful(event) && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::NodeSettled))
+        .then_some(event.labels.node.as_deref())
+        .flatten()
 }
 
 /// Whether this is an event a supervisor acts on.
@@ -177,8 +372,23 @@ fn meaningful(event: &Envelope) -> bool {
 /// The order after it is what a supervisor does about each, hardest fact first.
 /// Nothing driving outranks a waiting surface for the same reason `reply`
 /// refuses one: an answer handed to a run nobody will drive again is delivered
-/// to nothing, and `adopt` comes first.
-fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Ending> {
+/// to nothing, and `adopt` comes first. A node settling is last of the four,
+/// because it is a fact *within* a run the three above it are facts *about*: a
+/// settlement read out of a run nobody is driving is not the thing to act on.
+///
+/// The settlement is taken from `fresh` — the records this pass read — rather
+/// than from the state folded out of them, so it is the same event the caller was
+/// just handed a line for, and so the whole journal ahead of the cursor is what
+/// answers a condition the run met before this watch started. It is **not** put
+/// through the caller's profile: a profile shapes which events this reader is
+/// shown, and a condition the wait returns on is a fact about the run rather than
+/// about the view over it.
+fn concluded(
+    view: &RunView,
+    paths: &RunPaths,
+    selectors: &Selectors,
+    fresh: &[Envelope],
+) -> Option<Ending> {
     let statuses = view.state.statuses();
     if !statuses.is_empty() && graph::state_of(&statuses) == GraphState::Complete {
         return Some(Ending::Settled);
@@ -186,10 +396,14 @@ fn concluded(view: &RunView, paths: &RunPaths, until: WatchUntil) -> Option<Endi
     if view.liveness().is_undriven() {
         return Some(Ending::NothingDriving);
     }
-    if until == WatchUntil::Surface && views::blocking_surface(paths) {
+    if selectors.surface && views::blocking_surface(paths) {
         return Some(Ending::SurfaceWaiting);
     }
-    None
+    fresh
+        .iter()
+        .filter_map(settlement_of)
+        .find(|node| selectors.wants(node))
+        .map(|node| Ending::NodeSettled(node.to_string()))
 }
 
 /// A place in one run's journal, as a later invocation is handed it.
@@ -343,11 +557,12 @@ enum Record<'a> {
     },
     Return {
         run_id: &'a str,
-        /// The word and the status, both written from the one [`Ending`] the
-        /// process is about to exit with, so the record cannot name a condition
-        /// its own exit code contradicts.
+        /// The word, the status and — for the one ending that has a node — the
+        /// node, all written from the one [`Ending`] the process is about to exit
+        /// with, so the record cannot name a condition its own exit code
+        /// contradicts.
         #[serde(flatten)]
-        ending: Ending,
+        ending: &'a Ending,
         cursor: &'a Cursor,
         unread: UnreadRecord<'a>,
     },
@@ -431,21 +646,22 @@ impl Emitter {
     /// cursor the next one resumes from.
     fn returned(&mut self, view: &RunView, ending: Ending, cursor: &Cursor) -> Result<i32> {
         let unread = view.unread();
+        let code = ending.exit_code();
         self.say(
             &format!(
                 "-- watch {} {}  {}  cursor {cursor}",
                 view.paths.run,
-                ending.as_str(),
+                ending.phrase(),
                 unread_phrase(&unread)
             ),
             &Record::Return {
                 run_id: &view.paths.run,
-                ending,
+                ending: &ending,
                 cursor,
                 unread: UnreadRecord::of(&unread),
             },
         )?;
-        Ok(ending.exit_code())
+        Ok(code)
     }
 
     /// Write one line of each form, flushing both.
@@ -526,6 +742,7 @@ mod tests {
             Ending::Settled,
             Ending::SurfaceWaiting,
             Ending::NothingDriving,
+            Ending::NodeSettled("build".to_string()),
             Ending::Elapsed,
         ];
         let codes: std::collections::BTreeSet<i32> =
@@ -539,13 +756,37 @@ mod tests {
         assert_eq!(Ending::NothingDriving.exit_code(), EXIT_NOTHING_DRIVING);
         assert_eq!(Ending::SurfaceWaiting.exit_code(), EXIT_SURFACE_WAITING);
         assert_eq!(Ending::Elapsed.exit_code(), EXIT_WATCH_ELAPSED);
+        assert_eq!(
+            Ending::NodeSettled("build".to_string()).exit_code(),
+            EXIT_NODE_SETTLED
+        );
 
         // On the wire the word and the status are one value's two spellings, so
         // a record can never state a condition its own exit code contradicts.
-        for ending in endings {
+        for ending in &endings {
             let rendered = serde_json::to_value(ending).expect("an ending serializes");
             assert_eq!(rendered["condition"], serde_json::json!(ending.as_str()));
             assert_eq!(rendered["exit"], serde_json::json!(ending.exit_code()));
+        }
+
+        // The one ending that names a node carries it as a field of its own —
+        // the two conditions that produce it return the same word, so *which
+        // node* is only readable here — and every other ending leaves the key
+        // out rather than writing a null a caller would have to test for. The
+        // human line says it too, so a person is not sent to the JSON for the
+        // one fact the word omits.
+        let settled = Ending::NodeSettled("build".to_string());
+        let rendered = serde_json::to_value(&settled).expect("an ending serializes");
+        assert_eq!(rendered["node"], serde_json::json!("build"));
+        assert_eq!(settled.phrase(), "node-settled build");
+        for ending in endings.iter().filter(|end| **end != settled) {
+            let rendered = serde_json::to_value(ending).expect("an ending serializes");
+            assert!(
+                rendered.get("node").is_none(),
+                "`{}` named a node it did not end on: {rendered}",
+                ending.as_str()
+            );
+            assert_eq!(ending.phrase(), ending.as_str());
         }
     }
 
@@ -625,10 +866,32 @@ mod tests {
             format!("`{}`", Ending::NothingDriving.exit_code()),
             format!("`{}`", Ending::SurfaceWaiting.exit_code()),
             format!("`{}`", Ending::Elapsed.exit_code()),
+            format!("`{}`", Ending::NodeSettled("any".to_string()).exit_code()),
+            // The unbounded wait's spelling, and the vocabulary it made
+            // necessary. Both are read out of the constants a caller's command
+            // line is parsed against, so a word changed in the code and left
+            // standing in the proposal fails here rather than misinforming the
+            // person ruling on it.
+            format!(
+                "`--timeout SECONDS|{}`",
+                crate::cli::WATCH_TIMEOUT_UNBOUNDED
+            ),
         ] {
             assert!(
                 entry.contains(&stated),
                 "the entry no longer states {stated}, which this build does"
+            );
+        }
+
+        // And the selector's whole vocabulary, out of the constant the parser
+        // reads a caller's condition against. The entry is where this surface is
+        // proposed, so a condition the build accepts and the proposal never
+        // mentions is a value nobody ruled on — and the wait it ends is the one
+        // that may now have no bound at all.
+        for condition in crate::cli::WATCH_CONDITIONS {
+            assert!(
+                entry.contains(&format!("`{condition}`")),
+                "the entry names no `{condition}` condition, which this build accepts"
             );
         }
     }
@@ -693,6 +956,11 @@ mod tests {
         let entry = divergence_entry();
 
         let unread = Unread::default();
+        // The return is rendered on the ending that **names a node**, because
+        // that record is the superset: `node` is the one key a base condition's
+        // return leaves out, and the reconciliation below runs both ways — a
+        // record rendered without it would read the entry's `node` as a key
+        // nothing writes.
         let written = [
             Record::Heartbeat {
                 run_id: "demo",
@@ -700,7 +968,7 @@ mod tests {
             },
             Record::Return {
                 run_id: "demo",
-                ending: Ending::Settled,
+                ending: &Ending::NodeSettled("build".to_string()),
                 cursor: &Cursor::start("demo"),
                 unread: UnreadRecord::of(&unread),
             },
@@ -820,9 +1088,11 @@ mod tests {
                 run_id: "demo",
                 unread: UnreadRecord::of(&unread),
             },
+            // The node-naming return, for the reason the divergence entry's own
+            // reconciliation renders that one: it is the record with every key.
             Record::Return {
                 run_id: "demo",
-                ending: Ending::Settled,
+                ending: &Ending::NodeSettled("build".to_string()),
                 cursor: &Cursor::start("demo"),
                 unread: UnreadRecord::of(&unread),
             },

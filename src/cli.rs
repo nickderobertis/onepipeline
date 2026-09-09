@@ -297,33 +297,151 @@ pub const DEFAULT_WATCH_TICK_SECONDS: u64 = 30;
 /// rather than resumed from as though it meant a byte count.
 pub const WATCH_CURSOR_VERSION: &str = "1";
 
-/// What ends a `watch` short of the run finishing.
+/// The word a caller spells [`WatchTimeout::Unbounded`] with.
 ///
-/// Two of the four terminal conditions are not choices — nothing is driving the
-/// run, and the wait elapsed — so this names the one that is: whether a blocking
-/// surface is something to return on, or something to report and go on waiting
-/// through.
+/// A word rather than a number, and deliberately not `0`: that value's published
+/// meaning is to read the run once and return, so spelling "no bound" with it
+/// would have made one value mean both the shortest wait there is and the
+/// longest.
+pub const WATCH_TIMEOUT_UNBOUNDED: &str = "none";
+
+/// How long a `watch` waits before giving up.
 ///
-/// Spelled for the surface rather than for a "decision", which in this crate is
-/// the wider fact `status` reports: a ready human action is a decision point too,
-/// and a value that claimed to cover both while returning on one of them would be
-/// the prose-shaped promise this verb exists to replace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-#[value(rename_all = "kebab-case")]
+/// The two spellings answer two different questions, which is why they are not
+/// one number. A caller that wants a look at the run and not a wait asks for `0`;
+/// a supervisor that wants to be woken when something worth knowing happens asks
+/// for [`WATCH_TIMEOUT_UNBOUNDED`] and is not woken by a clock at all. Every
+/// number in between bounds the wait as it always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchTimeout {
+    /// Give up after this many seconds. `0` reads once and returns.
+    Bounded(u64),
+    /// Never give up on the clock: the wait ends on a condition or not at all.
+    Unbounded,
+}
+
+impl std::fmt::Display for WatchTimeout {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bounded(seconds) => write!(out, "{seconds}"),
+            Self::Unbounded => out.write_str(WATCH_TIMEOUT_UNBOUNDED),
+        }
+    }
+}
+
+impl std::str::FromStr for WatchTimeout {
+    type Err = String;
+
+    fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
+        if text == WATCH_TIMEOUT_UNBOUNDED {
+            return Ok(Self::Unbounded);
+        }
+        text.parse().map(Self::Bounded).map_err(|_| {
+            format!(
+                "'{text}' is not a wait this verb can take: a wait is a number of seconds, \
+                 where `0` reads the run once and returns, or `{WATCH_TIMEOUT_UNBOUNDED}`, \
+                 which does not bound the wait at all"
+            )
+        })
+    }
+}
+
+/// Every condition `--until` accepts, spelled as a caller types it.
+///
+/// The vocabulary itself, so the refusal a mistyped condition gets names what is
+/// available out of the same list the parser reads — and so the README and the
+/// divergence record are reconciled against it rather than against a copy.
+pub const WATCH_CONDITIONS: [&str; 5] = [
+    "settled",
+    "surface",
+    "nothing-driving",
+    "node-settled",
+    "node=<ID>",
+];
+
+/// How a caller names one node to return on.
+pub const WATCH_NODE_CONDITION: &str = "node=";
+
+/// What ends a `watch`, as a caller names it.
+///
+/// **Repeatable, and additive to what the verb always returns on.** A run that
+/// settles `complete` and a run nothing is driving end every wait whether or not
+/// they were asked for, because a wait that could outlive the run it watches is
+/// the unbounded silence this verb exists to end — so [`Settled`](Self::Settled)
+/// and [`NothingDriving`](Self::NothingDriving) name conditions rather than
+/// switch them on, and what `--until settled` *adds* is nothing, which is why it
+/// still means "do not return on a blocking surface".
+///
+/// [`Surface`](Self::Surface) is spelled for the surface rather than for a
+/// "decision", which in this crate is the wider fact `status` reports: a ready
+/// human action is a decision point too, and a value that claimed to cover both
+/// while returning on one of them would be the prose-shaped promise this verb
+/// exists to replace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum WatchUntil {
-    /// Return on the first of the two a supervisor answers: a blocking surface
-    /// waiting to be answered, or the run finishing. The default.
+    /// Return on a blocking surface waiting to be answered. The default, and on
+    /// its own it is the pair a supervisor answers: this or the run finishing.
     #[default]
     Surface,
-    /// Return only when the run finishes. A blocking surface is still emitted
-    /// and still counted on every heartbeat; it does not end the wait.
+    /// Return when the run finishes. Named on its own it adds nothing, so it is
+    /// still how a caller says a blocking surface should be reported and waited
+    /// through rather than returned on.
     Settled,
+    /// Return when nothing is driving the run. Always returned on, named here so
+    /// a caller can spell the whole vocabulary.
+    NothingDriving,
+    /// Return when any node of the run settles.
+    NodeSettled,
+    /// Return when this node of the run settles. Validated against the run's own
+    /// graph when the command is invoked.
+    Node(String),
+}
+
+impl std::fmt::Display for WatchUntil {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Surface => out.write_str("surface"),
+            Self::Settled => out.write_str("settled"),
+            Self::NothingDriving => out.write_str("nothing-driving"),
+            Self::NodeSettled => out.write_str("node-settled"),
+            Self::Node(node) => write!(out, "{WATCH_NODE_CONDITION}{node}"),
+        }
+    }
+}
+
+impl std::str::FromStr for WatchUntil {
+    type Err = String;
+
+    /// Read one condition, or refuse it naming the vocabulary.
+    ///
+    /// The refusal is made by the parser, so it happens as the command line is
+    /// read: nothing is streamed and nothing waits behind a condition this verb
+    /// does not have. What it cannot judge here is a condition that is *spelled*
+    /// right and names a node this run does not hold — that one needs the run's
+    /// graph, and `src/watch.rs` refuses it before it blocks.
+    fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match text {
+            "surface" => Self::Surface,
+            "settled" => Self::Settled,
+            "nothing-driving" => Self::NothingDriving,
+            "node-settled" => Self::NodeSettled,
+            _ => match text.strip_prefix(WATCH_NODE_CONDITION) {
+                Some(node) if !node.is_empty() => Self::Node(node.to_string()),
+                _ => {
+                    return Err(format!(
+                        "'{text}' is not a condition this verb returns on; it returns on {}",
+                        WATCH_CONDITIONS.join(", ")
+                    ))
+                }
+            },
+        })
+    }
 }
 
 /// The streaming verb's own run and profile selection, plus the four things a
-/// supervisor needs to write a wake loop without inventing one: a bound on the
-/// wait, a heartbeat so silence and death are tellable apart, a cursor to
-/// resume from, and the condition it returns on.
+/// supervisor needs to write no wake loop at all: a bound on the wait — or none
+/// — a heartbeat so silence and death are tellable apart, a cursor to resume
+/// from, and the conditions it returns on.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct WatchArgs {
     /// The run, and the profile its event view is shaped through — exactly as
@@ -331,9 +449,9 @@ pub struct WatchArgs {
     #[command(flatten)]
     pub read: ReadArgs,
     /// How long to wait before giving up, in seconds. `0` reads once and
-    /// returns.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WATCH_TIMEOUT_SECONDS)]
-    pub timeout: u64,
+    /// returns; `none` does not bound the wait at all.
+    #[arg(long, value_name = "SECONDS|none", default_value_t = WatchTimeout::Bounded(DEFAULT_WATCH_TIMEOUT_SECONDS))]
+    pub timeout: WatchTimeout,
     /// How long a silence may last before this stream says it is still there,
     /// in seconds. `0` turns the heartbeat off.
     ///
@@ -347,9 +465,11 @@ pub struct WatchArgs {
     /// already did.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
-    /// What ends the wait short of the run finishing.
-    #[arg(long, value_name = "CONDITION", value_enum, default_value_t = WatchUntil::Surface)]
-    pub until: WatchUntil,
+    /// What ends the wait, beside the run finishing and nothing driving it.
+    /// Repeatable: the wait returns on the first of them that fires, and says
+    /// which one did.
+    #[arg(long, value_name = "CONDITION", default_values_t = [WatchUntil::Surface])]
+    pub until: Vec<WatchUntil>,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.
