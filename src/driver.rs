@@ -2214,10 +2214,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         // told apart on stdout, by the receipt's `state`; the status answers whether the
         // envelope was accepted, which sharing it is the whole point of. Divergence 67.
         Submitted::Queued { reply } => {
-            // Accepted, so it answers as accepted: a non-zero status from this
-            // verb is a rejection to correct, which a queued envelope is not.
             // The status cannot say what is left to happen, so the words do.
-            // Divergence 67.
             eprintln!(
                 "onepipeline: the edits are on run '{}'s durable command queue and have \
                  not been reconciled yet, so something has to drive the run for them to \

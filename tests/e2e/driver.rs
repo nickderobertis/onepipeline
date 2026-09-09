@@ -4149,6 +4149,13 @@ fn adding_a_node() -> serde_json::Value {
 
 /// A gate record naming a host this one cannot reason about, which is what a runs
 /// root shared between hosts produces.
+// llmlint: ignore-block[tests_mirror_real_usage] the state is real and a user reaches it
+// without typing anything: a runs root two hosts share, or a peer stopped inside the
+// section, leaves exactly this record — and the whole point of the two journeys below is
+// that neither party may act on a gate it does not hold, which cannot be observed without
+// a gate that cannot be taken. There is no invocation that produces one, for the same
+// reason there is none that makes a store's capture path unwritable, and `store.rs` states
+// that fixture the same way.
 #[cfg(unix)]
 fn a_gate_this_host_cannot_take(world: &World, run: &str) {
     std::fs::write(
@@ -4163,6 +4170,7 @@ fn a_gate_this_host_cannot_take(world: &World, run: &str) {
     )
     .expect("the gate record is written");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// An edit that cannot be **gated** is refused rather than accepted.
 ///
