@@ -1748,6 +1748,14 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
         .run(&["watch", &run, "--timeout", &u64::MAX.to_string()])
         .exited(REFUSED)
         .err_has("this host's clock");
+    // A wait that is neither a number of seconds nor the word for no bound at
+    // all, refused naming both of the values that are not simply seconds.
+    world
+        .run(&["watch", &run, "--timeout", "later"])
+        .exited(USAGE_ERROR)
+        .err_has("is not a wait this verb can take")
+        .err_has("reads the run once and returns")
+        .err_has("none");
 
     // The two clocks are on two verbs and neither takes the other's flag: this
     // stream's interval, and the pacemaker cadence a launch sets.
