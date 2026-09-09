@@ -2570,6 +2570,94 @@ fn an_envelope_refused_by_the_only_writer_a_run_has_leaves_no_record_of_any_of_i
         .out_lacks("late");
 }
 
+/// The applying half of that property on the same writer: an envelope `reply`
+/// judges alone applies **every** command of it.
+///
+/// The refusal above and the driven all-succeed journey either side of this each
+/// leave a gap the other does not close. `reply`'s own commit loop validates
+/// every command and only then journals them one at a time, and until this it was
+/// exercised for a multi-command *refusal* and for a *single* command that
+/// applied — so the loop that walks a validated envelope emitting a record per
+/// command had never run past its first iteration on this writer. A driver
+/// happening to be alive is what decides which of the two loops runs, so the
+/// property has to hold on both.
+#[test]
+fn an_envelope_the_only_writer_a_run_has_applies_is_recorded_command_by_command() {
+    let world = World::new("edit-applied-undriven");
+    let path = world.plan(
+        "appliedundriven",
+        &plan_of("appliedundriven", vec![human("approve", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "appliedundriven"],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nextra"}},
+                {"op": "reparent", "id": "extra", "deps": ["approve"]},
+                {"op": "amend", "id": "extra", "text": CORRECTION},
+                {"op": "finding", "message": "the branch has no commits yet"},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    // One graph-change record per command that changed the graph, in the order
+    // the envelope carried them — and the `finding`, which changes none, is not
+    // among them.
+    assert_eq!(
+        committed(&world, "appliedundriven"),
+        vec!["add", "reparent", "amend"],
+        "the single writer did not record every command it applied: {:?}",
+        world.kinds("appliedundriven")
+    );
+    // The command that mutates nothing is recorded, under the other kind.
+    let accepted = world.events_of("appliedundriven", "command-accepted");
+    assert_eq!(accepted.len(), 1, "{:?}", world.kinds("appliedundriven"));
+    assert_eq!(accepted[0]["payload"]["command"]["op"], "finding");
+    assert_eq!(
+        accepted[0]["payload"]["operation_kinds"],
+        json!(["finding-raised"])
+    );
+
+    // Each record names the operation kinds it committed, so a reader keys on
+    // them without knowing which of the two writers judged the envelope — and the
+    // `reparent`, which commits **two** operations, names both of them rather
+    // than the first or the command's own word.
+    let kinds: Vec<Value> = world
+        .events_of("appliedundriven", "edit-committed")
+        .into_iter()
+        .map(|event| event["payload"]["operation_kinds"].clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            json!(["node-added"]),
+            json!(["edge-added", "reparent"]),
+            json!(["task-amended"]),
+        ],
+        "the single writer's records do not name what each committed"
+    );
+
+    // And the graph a fresh reader folds carries every one of the mutations.
+    world
+        .run(&["status", "appliedundriven"])
+        .exited(0)
+        .out_has("extra")
+        .out_has("the corrected criterion this envelope carried");
+
+    // This writer answers with a receipt rather than with the channel's
+    // per-command record — `command_outcomes` is the reconciler's, and an
+    // envelope applied here never reaches the queue that writes it — so what is
+    // read back is the receipt's own word for the whole envelope.
+    world
+        .run(&["status", "appliedundriven"])
+        .exited(0)
+        .out_has("extra");
+}
+
 /// The `live` note that node cannot take, and the amendment that rode with it.
 ///
 /// The pairing the documentation effectively prescribes — a correction said into
