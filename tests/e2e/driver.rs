@@ -3949,11 +3949,13 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     );
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
-// exercise is the crate's own ownership lock, handover gate and command queue — the three
-// things every writer of a run touches — which any change under `src/` can move, so a
-// narrower project could not honestly run them. `live_edit.rs` and `store.rs` carry the
-// same directive for the same reason.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this asks for
+// does not exist here. `nx.json`'s `noteJourneySource` — the input of the one separately
+// edged Rust test project — itself begins `{workspaceRoot}/src/**/*`, so a journey moved
+// behind it is invalidated by exactly the unrelated source changes the rule is about. And
+// these journeys are of the crate's own ownership lock, handover gate and command queue,
+// which any change under `src/` can move, so they would be run anyway. `live_edit.rs` and
+// `store.rs` carry the same directive.
 /// An edit that reaches a run whose driver is **on its way out** is applied by
 /// that driver, before it lets go of the run.
 ///
