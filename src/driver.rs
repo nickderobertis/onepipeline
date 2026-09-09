@@ -3446,8 +3446,9 @@ mod tests {
     /// whose owner has gone, and this process cannot establish that nothing is
     /// about to accept one — so the claim stays, naming a process that is ending,
     /// and the next writer reclaims it exactly as it reclaims a run whose driver
-    /// died. The gate is refused here the way a shared runs root refuses one: a
-    /// record naming a host this one cannot reason about.
+    /// died. The gate is refused here the way a run store an operator has been in
+    /// refuses one: where its entries belong there is something that is not a
+    /// directory.
     #[test]
     fn a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing() {
         let dir = std::env::temp_dir().join(format!("onepipeline-letgo-{}", sys::pid()));
@@ -3459,17 +3460,8 @@ mod tests {
         };
         let held = ledger::OwnershipLock::acquire(&paths, ledger::REPLY_VERB)
             .expect("this process took the run over");
-        std::fs::write(
-            paths.channel("handover.lock"),
-            json!({
-                "pid": 1,
-                "host": "somewhere-else",
-                "acquired_at": "2026-09-09T00:00:00.000Z",
-                "verb": "handover",
-            })
-            .to_string(),
-        )
-        .expect("the gate record is written");
+        std::fs::write(paths.channel("handover"), "not a directory")
+            .expect("the gate's place is taken by something else");
 
         let_go(&paths, held);
 

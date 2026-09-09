@@ -5106,20 +5106,12 @@ mod tests {
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
-    /// A gate record naming another host: a holder this host cannot reason about
-    /// and will not wait on, which is what a shared runs root produces.
-    fn held_by_another_host(paths: &RunPaths) {
-        std::fs::write(
-            paths.channel("handover.lock"),
-            serde_json::json!({
-                "pid": 1,
-                "host": "somewhere-else",
-                "acquired_at": "2026-09-09T00:00:00.000Z",
-                "verb": "handover",
-            })
-            .to_string(),
-        )
-        .expect("the gate record is written");
+    /// A gate this host will not take at all: where its entries belong there is
+    /// something that is not a directory, which is what a run store an operator
+    /// has been in — or a filesystem that has run out — leaves behind.
+    fn a_gate_that_cannot_be_taken(paths: &RunPaths) {
+        std::fs::write(paths.channel("handover"), "not a directory")
+            .expect("the gate's place is taken by something else");
     }
 
     /// A gate whose holder this host can prove is gone is reclaimed, and holding
@@ -5134,17 +5126,14 @@ mod tests {
     #[test]
     fn a_gate_whose_holder_is_gone_is_reclaimed_and_then_held_like_any_other() {
         let paths = handover_scratch("gate-stale");
+        // The entry a holder that died inside the section leaves behind: its own
+        // name, carrying the pid nothing on this host answers for.
+        std::fs::create_dir_all(paths.channel("handover")).expect("the gate's entries");
         std::fs::write(
-            paths.channel("handover.lock"),
-            serde_json::json!({
-                "pid": 0,
-                "host": sys::hostname(),
-                "acquired_at": "2026-09-09T00:00:00.000Z",
-                "verb": "handover",
-            })
-            .to_string(),
+            paths.channel("handover").join("0000000000001-0000000000"),
+            "gone",
         )
-        .expect("the gate record is written");
+        .expect("the entry is written");
 
         let reclaimed = ledger::Handover::hold_within(&paths, Duration::from_millis(50))
             .expect("a gate whose holder is gone is reclaimed");
@@ -5167,7 +5156,7 @@ mod tests {
     fn a_gate_this_process_cannot_take_stops_the_submission_and_the_release() {
         let paths = handover_scratch("gate-refused");
         let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
-        held_by_another_host(&paths);
+        a_gate_that_cannot_be_taken(&paths);
 
         let refused = match accept(
             &paths,

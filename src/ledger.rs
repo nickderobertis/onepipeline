@@ -1378,24 +1378,22 @@ pub struct LockRecord {
 
 /// Take `path` as this process's claim, or report who holds it.
 ///
-/// The one place a lock file is taken in this crate, so the two locks over a run
-/// — [`OwnershipLock`] over the run itself and [`Handover`] over letting go of it
-/// — are taken the same way and reclaimed on the same terms.
+/// [`OwnershipLock`]'s own acquisition: a run has one writer, and this is the
+/// file that says which process it is.
 ///
-/// **Exclusive on the path that matters and best-effort on the other, and the
-/// difference is stated rather than papered over.** Taking a claim nobody holds
-/// is exclusive because creating a file exclusively is what the filesystem
-/// decides, and every contended acquisition goes down that path. *Reclaiming* the
-/// claim of a holder this host can prove is gone does not: the record is written
-/// and read back, which turns away a contender that arrives after the winner, but
-/// two that both meet the same dead holder can each write and each read their own
-/// back. That is the one case two processes can come away holding this, and what
-/// would close it is an advisory lock the operating system releases when a
-/// process dies rather than a file this crate reasons about — which is a change
-/// to how every lock here is taken, not to this function.
+/// Taking a claim nobody holds is exclusive, because creating a file exclusively
+/// is what the filesystem decides. *Reclaiming* the claim of a holder this host
+/// can prove is gone is not one operation and cannot be: the record is written
+/// and read back, which turns away a contender arriving after the winner, but two
+/// that meet the same dead holder at the same moment can each write and each read
+/// their own back.
 ///
-/// It is bounded by how the case arises: a holder that died *inside* a section of
-/// two file operations, met by two contenders at that moment.
+/// **That is this lock's own long-standing shape and what `adopt` recovers a dead
+/// driver's run by**, and the answer to it is a decision about how every lock in
+/// this crate is taken — an advisory lock the operating system drops when a
+/// process dies — rather than about this function. What does not rest on it is
+/// [`Handover`], which orders two sections against each other and so had to be
+/// exclusive without breaking anything: it elects a lowest entry instead.
 fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
@@ -1501,19 +1499,36 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
 /// an edit: the sections it serializes are a file read and a file remove, so a
 /// holder of this is never inside a subprocess, a conversation or a graph fold.
 ///
-/// Held for the run rather than for the queue, because releasing the run is one
-/// of the two things it orders and that is not the channel's file.
-///
 /// A party that cannot take it does neither of its two things and says so: see
 /// [`Handover::hold`].
+///
+/// # How it is exclusive, and why it is not a lock file
+///
+/// Every attempt writes an entry of **its own**, named so the entries sort into
+/// the order they were made, and the lowest entry holds the gate. So no process
+/// ever writes, removes or overwrites another's claim, and nothing has to be
+/// broken: the file a dead holder leaves behind names that holder and nobody
+/// else, so any waiter may clear it, and two waiters that clear the same one
+/// both simply find it gone. Exclusion is then a comparison rather than a
+/// creation, and it holds because exactly one entry is the lowest.
+///
+/// A single lock file cannot do that. Taking one nobody holds is exclusive —
+/// the filesystem decides who creates it — but *reclaiming* one whose holder is
+/// gone is a read, a write and a check with no atomicity across them, so two
+/// processes meeting the same dead holder can each come away believing they
+/// hold it. That is the one shape this had to avoid, since a gate two parties
+/// are inside is the race it exists to close.
 #[derive(Debug)]
 pub(crate) struct Handover {
-    path: PathBuf,
+    /// This process's own entry, which nothing else writes or removes while its
+    /// holder is alive.
+    entry: PathBuf,
 }
 
-/// The verb a handover writes into its own record, for an operator reading one
-/// that outlived its holder.
-const HANDING_OVER: &str = "handover";
+/// Where the entries live: one directory per run, beside its channel.
+fn handover_entries(paths: &RunPaths) -> PathBuf {
+    paths.channel("handover")
+}
 
 /// The verb a `reply` writes into a run's ownership lock while it applies what
 /// the run's driver did not.
@@ -1525,7 +1540,7 @@ pub(crate) const REPLY_VERB: &str = "reply";
 /// The verb a driver writes into a run's ownership lock while it drives it.
 pub(crate) const DRIVE_VERB: &str = "drive";
 
-/// How long a party waits for a **live holder on this host** before refusing.
+/// How long a party waits for a **live holder** before refusing.
 ///
 /// A bound on patience and never a licence: what waits it out is a peer inside a
 /// section of two file operations, so reaching it means something is wrong with
@@ -1538,12 +1553,12 @@ const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30
 impl Handover {
     /// Hold the gate for this run, or report that this process is not inside it.
     ///
-    /// Waits out a holder this host can see is a live process of its own, since
-    /// that is a peer in a section that ends in microseconds, and reclaims one it
-    /// can prove is gone. Anything else — a record naming another host, a gate
-    /// this host will not create at all — is refused **at once**: no amount of
-    /// waiting turns those into a gate this process holds, and the whole point of
-    /// the wait is that it ends in one of the two honest answers.
+    /// Waits out an entry ahead of this one whose holder is a live process, since
+    /// that is a peer in a section that ends in microseconds. An entry whose
+    /// holder is gone is cleared — it names that holder and nothing else, so
+    /// clearing it takes nothing from anybody — and a directory this host will
+    /// not write to at all is refused, because no amount of waiting turns that
+    /// into a gate this process holds.
     pub(crate) fn hold(paths: &RunPaths) -> Result<Self> {
         Self::hold_within(paths, HANDOVER_PATIENCE)
     }
@@ -1551,40 +1566,105 @@ impl Handover {
     /// The same, with the patience stated — which is how a test drives a
     /// contention that outlasts it without waiting out the shipped bound.
     pub(crate) fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
-        let path = paths.channel("handover.lock");
+        let dir = handover_entries(paths);
+        let held = Self::take_a_place(paths, &dir)?;
         let deadline = std::time::Instant::now() + patience;
         loop {
-            let refused = match claim_or_report_the_holder(&path, &paths.run, HANDING_OVER) {
-                Ok(()) => return Ok(Self { path }),
-                Err(refused) => refused,
-            };
-            // A holder that is a live process of this host is a peer, and a peer
-            // is worth waiting for. A record from another host is not this host's
-            // to reason about, and an error creating the file is not a wait's to
-            // fix, so neither is waited on at all.
-            let a_peer_on_this_host = matches!(
-                &refused,
-                Error::Locked { host, .. } if *host == sys::hostname()
-            );
-            if !a_peer_on_this_host || std::time::Instant::now() >= deadline {
-                return Err(Error::Refused(format!(
-                    "the handover gate of run '{}' could not be taken, so nothing was \
-                     accepted onto its command queue and nothing was released: {refused}. \
-                     This process is not inside the gate, and going on without it is what \
-                     would let an edit be accepted by a run whose owner has already left",
-                    paths.run
-                )));
+            match ahead_of(&dir, &held.entry) {
+                // Nothing is ahead: this entry is the lowest, so this process is
+                // the one inside the gate.
+                None => return Ok(held),
+                Some(ahead) => {
+                    // An entry whose holder is gone is cleared by whoever finds
+                    // it — it is that holder's own file and names it, so two
+                    // waiters clearing it both simply find it gone.
+                    if pid_of_entry(&ahead).is_some_and(|pid| !sys::process_may_be_live(pid)) {
+                        let _ = fs::remove_file(&ahead);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(not_taken(
+                            &paths.run,
+                            &format!(
+                                "it has been held for {}s by a live process ({})",
+                                patience.as_secs(),
+                                ahead.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// Write this attempt's own entry, which is what gives it a place in the
+    /// order — and is the only file it ever writes.
+    fn take_a_place(paths: &RunPaths, dir: &Path) -> Result<Self> {
+        fs::create_dir_all(dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+        // Unique per attempt and not only per process, so two attempts of one
+        // process contend the way two processes do rather than colliding.
+        static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let entry = dir.join(format!(
+            "{:013}-{:010}-{:06}",
+            sys::now_millis(),
+            u64::from(sys::pid()),
+            ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1_000_000
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&entry)
+            .map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+        use std::io::Write;
+        let _ = file.write_all(sys::hostname().as_bytes());
+        Ok(Self { entry })
     }
 }
 
+/// The one answer a party that is not inside the gate gets, whatever kept it
+/// out: what it must not do, and why.
+fn not_taken(run: &str, because: &str) -> Error {
+    Error::Refused(format!(
+        "the handover gate of run '{run}' could not be taken, so nothing was accepted onto \
+         its command queue and nothing was released: {because}. This process is not inside \
+         the gate, and going on without it is what would let an edit be accepted by a run \
+         whose owner has already left"
+    ))
+}
+
+/// The entry ahead of `ours`, or `None` where `ours` is the lowest.
+///
+/// Unreadable directory entries are passed over rather than waited on: an entry
+/// this build cannot place in the order is one it cannot say is ahead.
+fn ahead_of(dir: &Path, ours: &Path) -> Option<PathBuf> {
+    let ours = ours.file_name()?;
+    let mut lowest: Option<std::ffi::OsString> = None;
+    for entry in fs::read_dir(dir).ok()? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if pid_of_entry(Path::new(&name)).is_none() {
+            continue;
+        }
+        if lowest.as_ref().is_none_or(|low| name < *low) {
+            lowest = Some(name);
+        }
+    }
+    let lowest = lowest?;
+    (lowest != ours).then(|| dir.join(lowest))
+}
+
+/// The pid an entry's name carries, or `None` for a name this build did not
+/// write.
+fn pid_of_entry(entry: &Path) -> Option<u32> {
+    entry.file_name()?.to_str()?.split('-').nth(1)?.parse().ok()
+}
+
 impl Drop for Handover {
-    /// A `Handover` exists only where this process took the gate, so a drop
-    /// always has one to give back.
+    /// A `Handover` exists only where this process wrote its own entry, so a drop
+    /// always has one to take away — and takes away no other.
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.entry);
     }
 }
 

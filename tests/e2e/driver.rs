@@ -4147,28 +4147,19 @@ fn adding_a_node() -> serde_json::Value {
     ]})
 }
 
-/// A gate record naming a host this one cannot reason about, which is what a runs
-/// root shared between hosts produces.
+/// A gate this host will not take at all: where its entries belong there is
+/// something that is not a directory.
 // llmlint: ignore-block[tests_mirror_real_usage] the state is real and a user reaches it
-// without typing anything: a runs root two hosts share, or a peer stopped inside the
-// section, leaves exactly this record — and the whole point of the two journeys below is
-// that neither party may act on a gate it does not hold, which cannot be observed without
-// a gate that cannot be taken. There is no invocation that produces one, for the same
-// reason there is none that makes a store's capture path unwritable, and `store.rs` states
-// that fixture the same way.
+// without typing anything: a run store an operator has been in, or a filesystem that has
+// run out, leaves exactly this. The whole point of the two journeys below is that neither
+// party may act on a gate it does not hold, which cannot be observed without a gate that
+// cannot be taken, and there is no invocation that produces one — for the same reason
+// there is none that makes a store's capture path unwritable, which `store.rs` states the
+// same way.
 #[cfg(unix)]
 fn a_gate_this_host_cannot_take(world: &World, run: &str) {
-    std::fs::write(
-        world.run_file(run, "channel/handover.lock"),
-        json!({
-            "pid": 1,
-            "host": "somewhere-else",
-            "acquired_at": "2026-09-09T00:00:00.000Z",
-            "verb": "handover",
-        })
-        .to_string(),
-    )
-    .expect("the gate record is written");
+    std::fs::write(world.run_file(run, "channel/handover"), "not a directory")
+        .expect("the gate's place is taken by something else");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -4231,8 +4222,8 @@ fn a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed() {
     // The claim names a process that is gone, so once the gate is takeable again
     // the next writer reclaims the run and applies what it is given — the same
     // path that recovers a run whose driver died.
-    std::fs::remove_file(world.run_file(&run, "channel/handover.lock"))
-        .expect("the gate this host could not take is gone");
+    std::fs::remove_file(world.run_file(&run, "channel/handover"))
+        .expect("the gate's place is its own again");
     world
         .run_with_stdin(&["reply", &run], &adding_a_node().to_string())
         .exited(0)
