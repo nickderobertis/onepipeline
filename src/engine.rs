@@ -1817,7 +1817,7 @@ fn reconcile_edits(
         let author = envelope.author;
         let commands = &envelope.commands;
 
-        let staged = match all_validated(validate_envelope(
+        let staged = match all_or_each_ruling(validate_envelope(
             state, author, commands, launch, in_flight,
         )) {
             Ok(staged) => staged,
@@ -1837,7 +1837,7 @@ fn reconcile_edits(
             }
         };
 
-        let delivered = match all_validated(deliver_envelope(paths, staged, in_flight)) {
+        let delivered = match all_or_each_ruling(deliver_envelope(paths, staged, in_flight)) {
             Ok(delivered) => delivered,
             Err(evaluated) => {
                 for (command, ruling) in commands.iter().zip(&evaluated) {
@@ -1875,13 +1875,17 @@ fn reconcile_edits(
     Ok(changed)
 }
 
-/// The whole envelope, or every command's ruling where any of them refused.
+/// Every command's value where a phase produced one for all of them, or every
+/// command's ruling where any of them refused.
 ///
-/// A phase either produced something for every command or it did not, and the
-/// two are different shapes rather than one shape a caller has to remember to
-/// check — so a caller cannot go on to the next phase holding a refusal, and the
-/// `Ok` side has no entry that could have been one.
-fn all_validated<T>(
+/// Phase-agnostic on purpose: both the validation pass and the delivery pass
+/// produce one ruling per command and both have to answer the same question, so
+/// the shape they are read through is one function rather than two that could
+/// come to differ. A phase either produced something for every command or it did
+/// not, and the two are different types rather than one a caller has to remember
+/// to check — so a caller cannot go on to the next phase holding a refusal, and
+/// the `Ok` side has no entry that could have been one.
+fn all_or_each_ruling<T>(
     evaluated: Vec<std::result::Result<T, Error>>,
 ) -> std::result::Result<Vec<T>, Vec<std::result::Result<T, Error>>> {
     if evaluated.iter().any(std::result::Result::is_err) {
