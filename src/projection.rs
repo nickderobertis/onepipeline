@@ -1396,7 +1396,9 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
 ///
 /// The last envelope to name something wins, which is what makes the two
 /// compose: a session opens, the worker's turns run and name their tools, the
-/// publication steps follow, and the line names whichever came last.
+/// publication steps follow, and the line names whichever came last. The session
+/// *opening* is the one `onevcs` record that is not a step — a dispatch that has
+/// opened one and named no tool has started and done nothing.
 fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
@@ -1418,21 +1420,32 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // whose step it is, so `push` on this line is not read as a tool a turn
         // reached for.
         //
-        // The session's own opening and closing are the bracket rather than a
-        // step inside it — see [`crate::vcs::is_session_boundary`] — so a
-        // dispatch whose session has opened and whose worker has not yet named a
-        // tool still reports its count rather than a "now" nothing did.
-        // Through the same boundary a branch name and a session token go through,
-        // and for the same reason: the kind is a wire string a **producer** chose
-        // — no vocabulary of this crate's — and it is rendered into a
-        // line-oriented view, where a value carrying a newline or a control
-        // character forges a line. A kind this build cannot render leaves the
-        // line where it was rather than putting a forged one on it.
-        if !crate::vcs::is_session_boundary(&event.kind) {
+        // The session *opening* is the one record that is not a step: a dispatch
+        // whose session has opened and whose worker has not yet named a tool has
+        // started and done nothing, which is what its line has always said and is
+        // not a readout worth inventing a "now" for. Everything after it — the
+        // session closing included — is a step the publication reached.
+        //
+        // The step goes through the same boundary a branch name and a session
+        // token go through, and for the same reason: the kind is a wire string a
+        // **producer** chose — no vocabulary of this crate's — and it is rendered
+        // into a line-oriented view, where a value carrying a newline or a
+        // control character forges a line. A kind this build cannot render leaves
+        // the line where it was rather than putting a forged one on it.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] that `None` half needs a kind
+        // carrying a newline, a control character, or `MAX_PAYLOAD_TEXT_BYTES` of text —
+        // an envelope no producer in this stack writes, reachable only from a store
+        // something wearing a producer's clothes left behind. It is the same half this
+        // module suppresses on `fold_refusal`, for the same reason, and it is held by this
+        // module's own `a_publication_step_this_build_cannot_render_leaves_the_line_alone`.
+        // What a user *can* reach — a real publication naming its real steps — is driven
+        // end to end by `tests/e2e/views.rs`.
+        if !crate::vcs::is_session_opened(&event.kind) {
             if let Some(step) = crate::vcs::usable(&event.kind.0) {
                 activity.doing = Some(format!("publication {step}"));
             }
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         return;
     }
     if event.kind.0 != TURN_ACTIVITY {
@@ -2826,6 +2839,109 @@ mod tests {
         assert_eq!(
             Some(seen.progress.expect("the activities counted").last_at()),
             millis_of(&activity(3, "Read", "x").ts)
+        );
+    }
+
+    /// A publication step this build cannot render leaves the activity line
+    /// exactly where it was, rather than putting a forged one on it.
+    ///
+    /// The activity line is line-oriented and a kind is a wire string a
+    /// **producer** chose, so a kind carrying a newline would put a second line
+    /// under a node — a record that appears to be about work nobody did. No
+    /// producer in this stack writes one, which is why this is here rather than
+    /// in a journey: a store holding one was left by something wearing a
+    /// producer's clothes.
+    #[test]
+    fn a_publication_step_this_build_cannot_render_leaves_the_line_alone() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let step = |seq: u64, kind: &str| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Vcs;
+            event.kind = crate::event::EventKind(kind.into());
+            event
+        };
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, "push"),
+            step(3, "merge-queued\nnode-settled"),
+        ]);
+
+        let seen = &state.activity["build"];
+        assert_eq!(
+            seen.doing.as_deref(),
+            Some("publication push"),
+            "a kind carrying a newline reached the line a supervisor reads"
+        );
+        // It still counted as progress: what the record could not say is what the
+        // node is *doing*, not that the dispatch recorded something.
+        assert_eq!(
+            seen.progress.expect("the steps counted").events(),
+            2,
+            "a step this build could not render stopped counting as progress"
+        );
+    }
+
+    /// A session opening is the one `onevcs` record that is not a step, and its
+    /// closing is not exempt: a publication that reached its end says so.
+    #[test]
+    fn a_session_opening_names_no_step_and_everything_after_it_does() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let step = |seq: u64, kind: crate::event::EventKind| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Vcs;
+            event.kind = kind;
+            event
+        };
+        // The sibling's own spelling, off the same derivation the fold reads it
+        // through, so this cannot be a test asserting against its own literal.
+        let opened = crate::vcs::session_opened_kind();
+        let closed = crate::event::EventKind("session-closed".into());
+        let after_opening = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan.clone()))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, opened.clone()),
+        ]);
+        assert_eq!(
+            after_opening.activity["build"].doing, None,
+            "a dispatch that has only opened a session was reported doing something"
+        );
+
+        let after_closing = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, opened),
+            step(3, closed),
+        ]);
+        assert_eq!(
+            after_closing.activity["build"].doing.as_deref(),
+            Some("publication session-closed"),
+            "the last step of a publication was read as the bracket around it"
         );
     }
 

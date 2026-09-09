@@ -1550,6 +1550,19 @@ fn an_edit_to_a_run_no_loop_is_driving_is_applied_under_the_lock() {
         "the edit was not committed: {:?}",
         world.kinds("undrivengraph")
     );
+    // The record this writer leaves names what it committed, exactly as the
+    // reconciler's does: a reader keys on the operation kinds without knowing
+    // which of the two writers judged the envelope.
+    let record = world
+        .events_of("undrivengraph", "edit-committed")
+        .into_iter()
+        .find(|event| event["payload"]["command"]["op"] == "add")
+        .expect("the add was committed");
+    assert_eq!(
+        record["payload"]["operation_kinds"],
+        json!(["node-added"]),
+        "the single writer's record does not name what it committed: {record}"
+    );
 
     world
         .run_with_stdin(

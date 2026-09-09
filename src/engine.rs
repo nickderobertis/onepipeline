@@ -1845,18 +1845,12 @@ fn reconcile_edits(
                 // record, and it names one command: the others were not refused,
                 // they were never applied, and journalling a rejection for each
                 // would put edits nobody made in front of a reader.
-                record_rejection(
-                    paths,
-                    journal,
-                    author,
-                    &envelope.commands[refusal.index],
-                    &refusal.error,
-                )?;
+                record_rejection(paths, journal, author, &refusal.command, &refusal.error)?;
                 channel.answer_commands(&CommandOutcome {
                     id: envelope.id,
                     applied: false,
                     reason: Some(refusal.error.to_string()),
-                    results: refusal.results(&envelope.commands),
+                    results: refusal.results,
                 })?;
             }
         }
@@ -1864,43 +1858,55 @@ fn reconcile_edits(
     Ok(changed)
 }
 
-/// The one command of an envelope that refused, and what it said.
+/// One refused envelope: which command refused, why, and what each command of it
+/// is told.
+///
+/// The command is carried rather than a position in the envelope, and the results
+/// are built where the refusal happened rather than looked up again afterwards.
+/// A position would be a number that can name no command — and the one reader
+/// that had it would index the envelope with it, which is a panic for a state
+/// nothing should be able to spell.
 struct Refused {
-    /// Where in the envelope it sat.
-    index: usize,
+    /// The command that refused, for the run's own rejection record.
+    command: Command,
     /// Why.
     error: Error,
-}
-
-impl Refused {
-    /// What each command of the refused envelope is told.
+    /// What each command of the envelope is told, in the order it carried them.
     ///
     /// The refused one carries its own reason. Every other carries the reason it
     /// was not applied, which is a different fact and the one a manager acts on:
     /// nothing is wrong with those commands, and re-sending them alone is what
     /// gets them in. Naming the command that took them down means a manager does
     /// not have to guess which of them to fix.
-    fn results(&self, commands: &[Command]) -> Vec<crate::channel::CommandResult> {
-        let refused = crate::channel::op_of(&commands[self.index]);
-        commands
-            .iter()
-            .enumerate()
-            .map(|(index, command)| crate::channel::CommandResult {
-                index,
-                op: crate::channel::op_of(command).to_string(),
-                applied: false,
-                reason: Some(if index == self.index {
-                    self.error.to_string()
-                } else {
-                    format!(
-                        "not applied: command {} of this envelope ('{refused}') was refused, and \
-                         an envelope applies all of its commands or none — resend this one \
-                         on its own once that is answered",
-                        self.index
-                    )
-                }),
-            })
-            .collect()
+    results: Vec<crate::channel::CommandResult>,
+}
+
+impl Refused {
+    /// The refusal of the command at `index`, with every command's answer.
+    fn at(index: usize, commands: &[Command], error: Error) -> Self {
+        let refused = crate::channel::op_of(&commands[index]);
+        Self {
+            command: commands[index].clone(),
+            results: commands
+                .iter()
+                .enumerate()
+                .map(|(at, command)| crate::channel::CommandResult {
+                    index: at,
+                    op: crate::channel::op_of(command).to_string(),
+                    applied: false,
+                    reason: Some(if at == index {
+                        error.to_string()
+                    } else {
+                        format!(
+                            "not applied: command {index} of this envelope ('{refused}') was \
+                             refused, and an envelope applies all of its commands or none — \
+                             resend this one on its own once that is answered"
+                        )
+                    }),
+                })
+                .collect(),
+            error,
+        }
     }
 }
 
@@ -1936,13 +1942,13 @@ fn compile_and_deliver_envelope(
     commands: &[Command],
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
-) -> std::result::Result<Vec<Vec<edits::Operation>>, Refused> {
+) -> std::result::Result<Vec<Vec<edits::Operation>>, Box<Refused>> {
     let mut staged: RunState = (**state).clone();
     let mut compiled = Vec::with_capacity(commands.len());
     for (index, command) in commands.iter().enumerate() {
         let operations = crate::channel::allows(author, command)
             .and_then(|()| compile_and_deliver(paths, &staged, author, command, launch, in_flight))
-            .map_err(|error| Refused { index, error })?;
+            .map_err(|error| Box::new(Refused::at(index, commands, error)))?;
         crate::projection::fold_operations(&mut staged, &operations, Some(sys::now_millis()));
         compiled.push(operations);
     }
@@ -5519,8 +5525,12 @@ mod tests {
     fn the_kind_an_accepted_command_is_journalled_under_is_the_one_entry_65_names() {
         let block = divergence_block("65.");
 
-        // The two operations the entry calls reports are exactly the two this
-        // build journals apart from a committed edit.
+        // **One of every variant**, so a variant that changes its answer — or a
+        // variant added without one — fails here rather than leaving the entry
+        // describing a classification this build no longer makes. The list is
+        // held to the enum by `every_operation_variant_is_classified` in
+        // `src/edits.rs`, which counts it against the enum's own serialization.
+        let node = || "later".to_string();
         let every = [
             edits::Operation::FindingRaised {
                 node: None,
@@ -5530,14 +5540,77 @@ mod tests {
             edits::Operation::CompletionRequested {
                 reason: "publication verified".into(),
             },
-            edits::Operation::HumanAttested {
-                node: "sign-off".into(),
+            edits::Operation::NodeAdded {
+                node: Box::new(crate::plan::Node {
+                    id: node(),
+                    ..crate::plan::Node::default()
+                }),
+                retry_of: None,
+            },
+            edits::Operation::EdgeAdded {
+                from: "slow".into(),
+                to: node(),
+                target: None,
+            },
+            edits::Operation::EdgeRemoved {
+                from: "slow".into(),
+                to: node(),
+            },
+            edits::Operation::NodeDropped {
+                node: node(),
+                dependents: crate::channel::Dependents::Detach,
+            },
+            edits::Operation::Reparent {
+                node: node(),
+                from: vec![],
+                to: vec!["slow".into()],
+            },
+            edits::Operation::RetryRequested {
+                node: node(),
+                replacement: "later2".into(),
+                reset: vec![],
+            },
+            edits::Operation::NodeParked {
+                node: node(),
+                by: crate::channel::Author::Planner,
+                reason: Some("the disk is full".into()),
+            },
+            edits::Operation::NodeRequeued {
+                node: node(),
+                amend: None,
+            },
+            edits::Operation::HumanAttested { node: node() },
+            edits::Operation::SettledFromEvidence {
+                node: node(),
+                outcome: crate::channel::SettleOutcome::Done,
+                evidence: "the change merged".into(),
+            },
+            edits::Operation::LandingFromEvidence {
+                node: node(),
+                landing: "merged".into(),
             },
             edits::Operation::TaskAmended {
-                node: "later".into(),
+                node: node(),
                 text: "the corrected criterion".into(),
             },
+            edits::Operation::ContextAdded {
+                node: node(),
+                note: "the fixture moved".into(),
+                delivery: edits::Delivery::Deferred,
+            },
+            edits::Operation::NoteDelivered {
+                node: node(),
+                addressee: crate::note::Addressee::Worker,
+                text: "the fixture moved".parse().expect("a usable note"),
+                criterion: None,
+                reached: crate::note::Reached::Carried,
+            },
         ];
+        assert_eq!(
+            every.iter().map(edits::Operation::kind).collect::<Vec<_>>(),
+            edits::every_operation_kind(),
+            "the classification above is not one of every operation this build can commit"
+        );
         let reports: Vec<String> = every
             .iter()
             .filter(|operation| !operation.commits_a_change())
@@ -5570,20 +5643,13 @@ mod tests {
         );
 
         // The field is written under the name the entry states, and carries every
-        // operation's kind in the order it was committed.
+        // operation's kind in the order it was committed — none omitted, and none
+        // rewritten.
         let field = block["operation_kinds_field"]
             .as_str()
             .expect("entry 65 names the field");
         let payload = journal::payload(&[(field, json!(operation_kinds(&every)))]);
-        assert_eq!(
-            payload[field],
-            json!([
-                "finding-raised",
-                "completion-requested",
-                "human-attested",
-                "task-amended"
-            ])
-        );
+        assert_eq!(payload[field], json!(edits::every_operation_kind()));
     }
 
     /// The four reasons and their fields are the ones the divergence record

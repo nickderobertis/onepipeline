@@ -326,6 +326,48 @@ impl Operation {
     }
 }
 
+/// Every kind [`Operation`] can be recorded under, in declaration order.
+///
+/// The list a classification of the operations has to be **complete** against:
+/// `edit-committed` means something changed, and which operations answer to that
+/// is restated in entry 65 of `docs/contract-divergences.md`, so a variant added
+/// or reclassified without reconciling that entry is a document describing a
+/// build that no longer exists. Kept beside the enum rather than in the test that
+/// reads it, so there is one list, and held to the enum by
+/// `every_operation_kind_is_one_the_enum_carries`, which counts it against the
+/// variants `Operation` actually declares.
+///
+/// Beside the enum rather than in a test module, because what it is *for* is the
+/// document: entry 65 names these, and the one place a reader looks for the set
+/// is the file that declares them. Nothing in the crate's own paths reads it —
+/// the classification is [`Operation::commits_a_change`], which is exhaustive on
+/// its own — so it is compiled for the checks that hold the two together.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn every_operation_kind() -> Vec<String> {
+    [
+        "finding-raised",
+        "completion-requested",
+        "node-added",
+        "edge-added",
+        "edge-removed",
+        "node-dropped",
+        "reparent",
+        "retry-requested",
+        "node-parked",
+        "node-requeued",
+        "human-attested",
+        "settled-from-evidence",
+        "landing-from-evidence",
+        "task-amended",
+        "context-added",
+        "note-delivered",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 /// How a planner note actually reached its node.
 ///
 /// The fact `edit-committed` records, and what tells replay whether the note is
@@ -2007,6 +2049,70 @@ mod tests {
 
     use super::*;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
+
+    /// [`every_operation_kind`] is every kind the enum carries, and no others.
+    ///
+    /// Counted against the **source file's** own variant declarations rather than
+    /// against a second list, because there is no way to enumerate an enum's
+    /// variants at run time: a variant added to `Operation` without a line in
+    /// that list fails here, which is what makes the classification entry 65
+    /// states complete rather than a sample.
+    #[test]
+    fn every_operation_kind_is_one_the_enum_carries() {
+        let source = include_str!("edits.rs");
+        let declared = source
+            .split("pub enum Operation {")
+            .nth(1)
+            .expect("the enum is declared here")
+            .split("\n}\n")
+            .next()
+            .expect("the declaration ends")
+            .lines()
+            // A variant is the only thing declared at four spaces and starting
+            // upper-case: the doc lines, the attributes and the fields are all
+            // either indented further or start with `/`, `#` or lower-case.
+            .filter(|line| {
+                line.starts_with("    ")
+                    && !line.starts_with("     ")
+                    && line
+                        .trim_start()
+                        .starts_with(|c: char| c.is_ascii_uppercase())
+            })
+            .count();
+        assert_eq!(
+            every_operation_kind().len(),
+            declared,
+            "`Operation` declares {declared} variants and `every_operation_kind` names {}",
+            every_operation_kind().len()
+        );
+
+        // And each named kind is one a variant of the enum really serializes to,
+        // so a rename fails here rather than leaving the list spelling a tag
+        // nothing writes.
+        let written: BTreeSet<String> = every_operation_kind().into_iter().collect();
+        assert_eq!(written.len(), declared, "the list repeats a kind");
+        for kind in &written {
+            assert!(
+                variant_of(source, kind),
+                "no variant of `Operation` serializes to '{kind}'"
+            );
+        }
+    }
+
+    /// Whether the enum declares a variant whose kebab-case tag is `kind`.
+    fn variant_of(source: &str, kind: &str) -> bool {
+        let camel: String = kind
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+        source.contains(&format!("    {camel} {{"))
+    }
 
     /// The reconciler as the planner reaches it.
     ///
