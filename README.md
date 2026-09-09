@@ -407,19 +407,41 @@ heartbeat says how many planner surfaces are unread and of which kinds**, so a c
 matching only on event lines cannot lose the one signal that a question is waiting.
 The human lines go to standard error and one NDJSON record per line to standard
 output — a `watch` of `event`, of `heartbeat`, and one final `return` carrying
-`run_id`, `condition`, `exit`, `cursor` and `unread` — so nothing has to match
-prose.
+`run_id`, `condition`, `exit`, `node` when the condition names one, `cursor` and
+`unread` — so nothing has to match prose.
 
-It returns on four conditions, each with a status of its own: exit `0` when the
-run settled complete, `3` when nothing is driving it — the same code every other
-verb here uses for that — `4` when a blocking surface is waiting to be answered,
-and `5` when the `--timeout SECONDS` wait elapsed with the run still live. It
-prints a cursor on exit, and `--cursor` resumes from one without re-emitting what
-the earlier watch already did. `--until settled` waits through a blocking surface
-rather than returning on it, still counting it on every heartbeat.
+It returns on the first of five conditions to fire, each with a status of its own:
+exit `0` when the run settled complete, `3` when nothing is driving it — the same
+code every other verb here uses for that — `4` when a blocking surface is waiting
+to be answered, `5` when the `--timeout SECONDS` wait elapsed with the run still
+live, and `6` when a node the wait was told to return on settled, the `return`
+record's `node` naming which one. It prints a cursor on exit, and `--cursor`
+resumes from one without re-emitting what the earlier watch already did.
 `--tick-interval` is **this stream's** clock and is not `start`'s
 `--heartbeat-interval`, which sets the pacemaker agent's cadence; neither verb
 accepts the other's flag.
+
+**`--until` is repeatable, and it is how a supervisor says what the wait is for** —
+so that waiting for something is this verb's job rather than a loop somebody writes
+around it. The default, `--until surface`, returns on a blocking surface;
+`--until settled` waits through one, still reporting it and counting it on every
+heartbeat; `--until nothing-driving` names a condition every wait already returns
+on; `--until node-settled` returns when any node of the run settles; and
+`--until node=<ID>` returns when that node does. The run settling and nothing
+driving it end every wait whether they were asked for or not — a wait that could
+outlive the run it watches is the silence this verb exists to end — which is why
+naming them adds nothing, and why the two conditions that predate this selector
+mean exactly what they always did. **Every condition is checked when the command is
+invoked**, before anything is streamed and before anything waits: one this verb does
+not offer is refused naming the ones it does; one naming a node the run's graph does
+not hold is refused naming that node and the ids the graph holds; and one nothing in
+the run's remaining life could satisfy — a node that settled `done` before this
+watch's cursor, which nothing dispatches again — is refused naming that node, rather
+than becoming a wait that never returns. A condition the run has *already* satisfied
+is answered rather than refused: a settlement at or past the cursor is read on the
+first pass and returns straight away. And `--timeout none` does not bound the wait at
+all, which is a different value from `--timeout 0`, whose published meaning is
+unchanged: read the run once and return.
 
 ## Where a dispatch runs
 
