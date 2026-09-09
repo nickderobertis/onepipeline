@@ -1351,14 +1351,16 @@ pub(crate) fn has_settled(view: &RunView) -> bool {
     Standing::of(view).convergence == Convergence::Settled
 }
 
-/// What a view prints about the graph **watching** the run, beside the word for
-/// the one driving it.
+/// Whether this run's driver tier leaves room to say anything about the graph
+/// **watching** it.
 ///
-/// Only for a run that is actually executing. A settled run needs no observer,
+/// Only a run that is actually executing does. A settled run needs no observer,
 /// and a run nothing is driving has bigger news on the same line — reporting
 /// either as unwatched would send an operator after a graph whose absence is not
-/// the problem.
-fn observer_verdict(standing: &Standing) -> bool {
+/// the problem. The verdict itself is [`watching`]; this is the gate in front of
+/// asking for one, which is also what keeps the launch record unread for every
+/// row that could not print the answer.
+fn may_report_an_observer(standing: &Standing) -> bool {
     standing.word() == DriverLiveness::Driving.as_str()
 }
 
@@ -1370,7 +1372,7 @@ fn observer_verdict(standing: &Standing) -> bool {
 /// would not start is a graph to fix first.
 fn observer_suffix(view: &RunView, standing: &Standing) -> String {
     observer_phrase(
-        observer_verdict(standing).then(|| observer_liveness(&view.launch)),
+        may_report_an_observer(standing).then(|| observer_liveness(&view.launch)),
         &view.launch.observer_ending,
     )
 }
@@ -1443,7 +1445,7 @@ impl<'a> Row<'a> {
     /// an operator to intervene, and doing that to a working observer is worse
     /// than saying nothing.
     fn observer_suffix(&self, standing: &Standing) -> String {
-        if !observer_verdict(standing) {
+        if !may_report_an_observer(standing) {
             return String::new();
         }
         let Some(launch) = ledger::read_json_opt::<LaunchRecord>(&self.paths.launch()) else {

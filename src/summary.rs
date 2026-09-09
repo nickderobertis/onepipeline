@@ -1514,7 +1514,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The checked-in shape of a schema-1 document.
+    /// The checked-in shape of a document at [`SUMMARY_SCHEMA_VERSION`].
     ///
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
