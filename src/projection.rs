@@ -786,6 +786,29 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_landing_commit(state, event);
         return;
     }
+    // This library's own record, at an envelope schema this build does not know.
+    // Only a *newer* build writes one, and what its kinds and payload mean is
+    // that build's to say — an `edit-committed` at a version this one has never
+    // read may be a shape this fold would take for something else. Reported
+    // rather than guessed at, exactly as an operation list this build cannot
+    // parse is: `strict` is what tells an operator the graph they are looking at
+    // may be missing a committed edit, and a driver says so before it converges.
+    //
+    // Asked only of this crate's own records. A sibling's version is that
+    // library's own vocabulary, and the branch above never reaches here.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs a journal a
+    // **newer build** wrote, which no invocation a user can type produces: this build
+    // stamps `ENVELOPE_VERSION` on everything it writes. It is the same half this module
+    // suppresses on `fold_refusal` and on the unrenderable publication step, for the same
+    // reason, and it is held by this module's own
+    // `a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported`.
+    // What a user *can* reach — a journal at version 1 — is driven end to end by
+    // `tests/e2e/compatibility.rs`.
+    if !event.written_at_a_known_version() {
+        state.strict = false;
+        return;
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
     let payload = &event.payload;
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
@@ -2840,6 +2863,105 @@ mod tests {
             Some(seen.progress.expect("the activities counted").last_at()),
             millis_of(&activity(3, "Read", "x").ts)
         );
+    }
+
+    /// A record at an envelope version this build does not read is **reported**,
+    /// not folded.
+    ///
+    /// Only a newer build writes one, and what its kinds and payload mean is that
+    /// build's to say — so folding it would be this build deciding a run's graph
+    /// from a shape it has never read. `strict` is what a driver says out loud
+    /// before it converges, and what an operator reads as "the graph you are
+    /// looking at may be missing a committed edit".
+    ///
+    /// The record before it is folded, and the run's own evidence that something
+    /// wrote to it is still taken from it: what is refused is the *meaning*, not
+    /// the record.
+    #[test]
+    fn a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let ahead = |seq: u64| {
+            let mut event = pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([{"kind": "node-dropped", "node": "build", "dependents": "drop"}]),
+                )],
+            );
+            event.v = crate::event::ENVELOPE_VERSION + 1;
+            event
+        };
+
+        let read = fold(&[started.clone(), ahead(1)]);
+        assert!(
+            !read.strict,
+            "a record at an unread envelope version was folded without saying so"
+        );
+        assert!(
+            read.graph.contains("build"),
+            "a drop this build could not read was applied anyway"
+        );
+        assert!(
+            read.last_write_at.is_some(),
+            "the record stopped counting as evidence that something wrote to the run"
+        );
+
+        // The control: the same record at a version this build reads is folded.
+        let mut known = ahead(1);
+        known.v = crate::event::ENVELOPE_VERSION;
+        let folded = fold(&[started, known]);
+        assert!(folded.strict);
+        assert!(
+            !folded.graph.contains("build"),
+            "the case above passes for a reason other than the version"
+        );
+    }
+
+    /// Every version this build says it reads folds a record the same way.
+    ///
+    /// The read set is a promise a runs root depends on: a journal at version 1
+    /// is the ordinary contents of one, and a build that quietly stopped folding
+    /// it would report those runs as graphs they are not.
+    #[test]
+    fn every_envelope_version_this_build_reads_folds_a_record_the_same_way() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        for version in crate::event::ENVELOPE_VERSIONS_READ {
+            let mut started = pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan.clone()))],
+            );
+            started.v = *version;
+            let mut dropped = pipeline(
+                journal::PipelineKind::EditCommitted,
+                1,
+                None,
+                &[(
+                    "operations",
+                    json!([{"kind": "node-dropped", "node": "build", "dependents": "drop"}]),
+                )],
+            );
+            dropped.v = *version;
+
+            let state = fold(&[started, dropped]);
+            assert!(
+                state.strict,
+                "version {version} read as one this build cannot"
+            );
+            assert!(
+                !state.graph.contains("build"),
+                "version {version} did not fold the edit it carries"
+            );
+        }
     }
 
     /// A publication step this build cannot render leaves the activity line

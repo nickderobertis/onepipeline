@@ -18,6 +18,13 @@
 //!   journal this build writes has to be what it derives from the fixture — the
 //!   **same run**, so "what it reported" is a value in hand rather than a claim.
 //!
+//! The record shapes carry a **version line**, and it is what makes the two
+//! directions checkable rather than argued: everything this build writes is
+//! stamped [`ENVELOPE_VERSION`], the fixture is stamped the version before it,
+//! and both are in [`ENVELOPE_VERSIONS_READ`]. A relayed envelope keeps its
+//! producer's own number in either journal, which is why the assertions below
+//! ask the version only of this library's own records.
+//!
 //! [`FIXTURE`] is the immutable reference for what a preceding reader knows: the
 //! journal of a real run of [`recorded_run`], carrying the record shapes the
 //! build at `4db4e7e` — the commit this work forked from — wrote. The two things
@@ -39,6 +46,7 @@
 
 use crate::harness::{agent, plan_of, World, REFUSED};
 
+use onepipeline::event::{ENVELOPE_VERSION, ENVELOPE_VERSIONS_READ};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -120,6 +128,37 @@ fn kinds_in(journal: &str) -> BTreeSet<String> {
                 .as_str()
                 .unwrap_or_else(|| panic!("a journal record names its kind: {event}"))
                 .to_string()
+        })
+        .collect()
+}
+
+/// The envelope versions **this library's own** records in one journal carry.
+///
+/// Only `pipeline` records: a relayed envelope keeps its producer's own number,
+/// and asking this crate's version line of a sibling's record would be judging
+/// that library for moving at its own pace.
+fn own_versions_in(journal: &str) -> BTreeSet<u64> {
+    records_of(journal)
+        .iter()
+        .filter(|event| event["source"] == "pipeline")
+        .map(|event| {
+            event["v"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("a journal record names its envelope version: {event}"))
+        })
+        .collect()
+}
+
+/// The envelope versions everything **else** in one journal carries — the relayed
+/// records, which keep their producer's own.
+fn relayed_versions_in(journal: &str) -> BTreeSet<u64> {
+    records_of(journal)
+        .iter()
+        .filter(|event| event["source"] != "pipeline")
+        .map(|event| {
+            event["v"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("a journal record names its envelope version: {event}"))
         })
         .collect()
 }
@@ -323,6 +362,21 @@ fn the_committed_fixture_is_a_journal_from_before_this_change() {
         !FIXTURE.contains("operation_kinds"),
         "the fixture carries the field this change adds, so it is not from before it"
     );
+
+    // And it says so in its own version line, which is the machine-readable half
+    // of everything above: every record of this library's own in it is at the
+    // version before the one this build writes, and that version is one this
+    // build still reads.
+    assert_eq!(
+        own_versions_in(FIXTURE),
+        BTreeSet::from([1]),
+        "the fixture is not a version-1 journal, so it is not from before this change"
+    );
+    assert!(
+        ENVELOPE_VERSION > 1 && ENVELOPE_VERSIONS_READ.contains(&1),
+        "this build either writes the fixture's own version or no longer reads it, and \
+         either way the fixture proves nothing about an older one"
+    );
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what the journeys
@@ -339,6 +393,12 @@ fn this_build_reads_a_journal_from_before_the_change_as_it_did() {
     let world = World::new("compat-before");
     let root = world.fakes.join("before-root");
     run_of(&root, "before", FIXTURE);
+
+    // The journal being read is a **version 1** journal, which is the ordinary
+    // contents of a runs root this build did not write into: the bump is a
+    // statement about what a new record promises, not a line drawn under the old
+    // ones.
+    assert_eq!(own_versions_in(FIXTURE), BTreeSet::from([1]));
 
     assert_eq!(
         views_of(&world, &root, "before"),
@@ -381,19 +441,47 @@ fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
     let journal = std::fs::read_to_string(world.run_file(&run, "events.jsonl"))
         .expect("the run's journal reads");
 
-    // The journal really is one this build writes: it carries the new kind and
-    // the new field, so what follows is about a reader meeting them.
+    // The journal really is one this build writes: it carries the new kind, the
+    // new field, and the version that says both are there — so what follows is
+    // about a reader meeting them.
     let kinds = kinds_in(&journal);
     assert!(
         kinds.contains("command-accepted") && journal.contains("operation_kinds"),
         "the run wrote no record this change added, so nothing here is tested: {kinds:?}"
     );
+    assert_eq!(
+        own_versions_in(&journal),
+        BTreeSet::from([u64::from(ENVELOPE_VERSION)]),
+        "this build wrote a record of its own at a version other than the one it declares"
+    );
+    // And the records it **relayed** keep their producer's own version, which is
+    // what makes the two numbers in one journal a fact about who wrote each
+    // envelope rather than a disagreement.
+    assert_eq!(
+        relayed_versions_in(&journal),
+        BTreeSet::from([1]),
+        "a relayed envelope was restamped with this crate's own version"
+    );
 
+    // The preceding reader meets all of that — the new kind included — and
+    // derives the same run it derives from the version-1 fixture. Both journals
+    // are the same scenario, so "what it reported" is a value in hand.
     assert_eq!(
         derived_by_a_preceding_reader(&journal),
         derived_by_a_preceding_reader(FIXTURE),
         "a reader written against only the kinds a pre-change journal carries derives a \
          different run when it meets a journal this build writes"
+    );
+
+    // And this build reads both, which is the promise the version line is for: a
+    // runs root holding one journal of each renders both, and neither is refused.
+    let root = world.fakes.join("both-versions-root");
+    run_of(&root, "written-at-2", &journal);
+    run_of(&root, "written-at-1", FIXTURE);
+    assert_eq!(
+        views_of(&world, &root, "written-at-2").replace("written-at-2", "run"),
+        views_of(&world, &root, "written-at-1").replace("written-at-1", "run"),
+        "the same run written at the two versions this build reads renders differently"
     );
 }
 

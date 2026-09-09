@@ -4102,19 +4102,45 @@ them. And a reader written against only the kinds a journal from before this
 change carries still reports what it reported when it meets a journal this build
 writes: the records it no longer sees were inert to it.
 
+**The merged stream's envelope version moves to 2 for it, and the move is
+additive.** A runs root outlives the build that wrote into it and holds journals
+from every build that ever ran on the host, so "which shapes may this record
+have" is a question a reader really has and prose cannot answer. At `1`, an
+`edit-committed` may be an accepted command that changed nothing and carries no
+`operation_kinds`; at `2` it means something changed and names what. Nothing was
+removed, so version `1` is read **whole** and folds exactly as it always did —
+[`ENVELOPE_VERSIONS_READ`](../src/event.rs) is that promise, and
+`Envelope::written_at_a_known_version` is where it is asked. A record at a version
+this build does not read is **reported rather than folded**: only a newer build
+writes one, and what its kinds mean is that build's to say, so the fold sets
+`strict` and a driver says so before it converges.
+
+A **relayed** envelope keeps its producer's own version, exactly as it keeps that
+producer's `stream`, `seq`, `source` and kind. So one run's journal carries both
+numbers, and that is not a disagreement: the version says which build wrote the
+envelope, and the read set is asked only of this library's own records.
+
 It arrives with a **minor** version bump, cut by `release-plz` from the `feat`
 commit that introduces it, exactly as entries 39, 40, 47, 53 and 55's additions
 did. A consumer in another repository reads these names, so the block below is
 the source: `tests/contract.rs` parses it out of this file, every event kind named
-here must be one `PipelineKind` carries and the contract's own list does not, and
-the field must be one both records carry.
+here must be one `PipelineKind` carries and the contract's own list does not, the
+field must be one both records carry, and the two version numbers must be the
+constants this crate publishes.
+
+The keys are `journal_`-prefixed because the merged stream's envelope and the
+**reply** envelope are two documents with two version lines: entries 57 and 60
+move the second one, and a consumer reading these blocks must not take either for
+the other.
 
 ```json
 {
   "event_kinds": ["command-accepted"],
   "operation_kinds_field": "operation_kinds",
   "carried_on": ["edit-committed", "command-accepted"],
-  "reporting_operations": ["finding-raised", "completion-requested"]
+  "reporting_operations": ["finding-raised", "completion-requested"],
+  "journal_envelope_version": 2,
+  "journal_envelope_versions_read": [2, 1]
 }
 ```
 
@@ -4122,6 +4148,9 @@ Driven end to end by `tests/e2e/live_edit.rs`'s
 `a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does` — a real
 `finding`, and a real `add` naming a dependency, which commits two operations of
 two kinds — and
-held in both compatibility directions by `tests/journal_compatibility.rs` against
+held in both compatibility directions by `tests/e2e/compatibility.rs` against
 `tests/golden/journal-before-command-accepted.jsonl`, the immutable record of what
-a preceding reader knows.
+a preceding reader knows and the version-1 journal this build has to keep reading.
+The envelope shape itself is held to `tests/golden/envelope-v2.json`, with
+`tests/golden/envelope-v1.json` beside it as what the version before this one
+looked like.
