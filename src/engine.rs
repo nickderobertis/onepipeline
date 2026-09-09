@@ -1995,11 +1995,15 @@ impl Staged {
     }
 }
 
-/// What one validated command commits, offering its note where it has one to
-/// offer.
+/// Offer this validated command's note, where it has one, and answer what the
+/// command commits.
 ///
-/// The delivery seam both writers of the graph go through, so a note reaches a
-/// conversation from exactly one place however the run is being driven. It takes
+/// **This is the call that reaches outside the run**, which is why it is named
+/// for the offering rather than for the operations it returns: for a
+/// [`Staged::Note`] it hands the note to a live conversation, and a conversation
+/// has no undo. The delivery seam both writers of the graph go through, so a note
+/// reaches a conversation from exactly one place however the run is being
+/// driven. It takes
 /// no address and no run paths: which conversation a note goes to was resolved by
 /// the validation that produced the [`Staged`], and a phase that resolved one
 /// could refuse for a reason the validation had not already reported.
@@ -2009,7 +2013,7 @@ impl Staged {
 /// The conversation's own refusal, for a note that reached nobody. It is the only
 /// error this phase can produce, which is the property the envelope's atomicity
 /// rests on — see [`deliver_envelope`].
-pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
+pub(crate) fn deliver_step(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
@@ -2115,7 +2119,7 @@ fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Er
             delivered.push(Ok(Delivery::NotAttempted));
             continue;
         }
-        delivered.push(commits_of(step).map(Delivery::Committed));
+        delivered.push(deliver_step(step).map(Delivery::Committed));
     }
     delivered
 } // llmlint: ignore-end[changed_behavior_has_e2e]
