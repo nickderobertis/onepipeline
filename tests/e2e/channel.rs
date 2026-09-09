@@ -50,7 +50,18 @@ fn until_still_supervising(world: &World, what: &str, mut ready: impl FnMut(&Wor
 /// Only the pacemaker journeys need one: the clock a surface resets belongs to a
 /// member of that graph, and a run launched with `--dag-graph off` — the shipped
 /// default — has no member to address.
+///
+/// The observer is **held** at its first instruction, which is what keeps the id
+/// it answers to still. A double that is not held announces itself and exits at
+/// once, the driver starts another in its place, and the launch record's
+/// `graph_run` moves to the replacement — so a journey that reads that value and
+/// then consumes a surface is addressing whichever observer the restart loop
+/// happened to be on, and on a slow host it has read one and seen the reset use
+/// the other. A real monitor member stays up for the run it watches, which is
+/// also the only state in which resetting its clock means anything. Callers
+/// release it with `observer.go`.
 fn observed(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
+    world.script("observer.wait", "hold");
     let path = world.plan(name, &plan_of(name, nodes));
     world
         .run(&[
@@ -194,6 +205,17 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
     );
 
     world.run(&["next", &run]).exited(0);
+    // The premise of the assertion below, stated rather than assumed: one
+    // observer, so the id read above is still the id a reset addresses. A
+    // replacement started between the two would move `graph_run` on to it, and
+    // the mismatch that follows reads as the crate having addressed the wrong
+    // run rather than as this journey having read a superseded one.
+    assert_eq!(
+        world.observer_saw().len(),
+        1,
+        "the observer was replaced mid-journey, so the id read above is not the one addressed: {:?}",
+        world.observer_saw()
+    );
     // llmlint: ignore-block[tests_mirror_real_usage] the id a reset is addressed by never
     // appears on a product surface — `next` prints the surface whether or not the clock
     // restarted, deliberately — so the argv the double recorded is where that value exists.
@@ -210,6 +232,7 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
         world.invocations()
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
     world.release("build.go");
 }
 
@@ -3489,6 +3512,7 @@ fn a_read_survives_a_pacemaker_it_could_not_reset_and_says_so() {
     read.exited(0).out_has("steady");
     read.err_has("could not reset the check-in pacemaker");
     assert_eq!(world.events_of(&run, "planner-surfaced").len(), 1);
+    world.release("observer.go");
     world.release("build.go");
 }
 
