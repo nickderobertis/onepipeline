@@ -27,7 +27,7 @@ use onepipeline::error::{
 };
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Phase, PipelineKind, Source,
-    ENVELOPE_VERSION, PIPELINE_KINDS,
+    ENVELOPE_VERSION, ENVELOPE_VERSIONS_READ, PIPELINE_KINDS,
 };
 use onepipeline::executor::{
     CancelMode, CancellationToken, Capabilities, CapacityReport, DispatchRequest, Executor,
@@ -2721,6 +2721,52 @@ fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
     assert_eq!(unique.len(), spent.len(), "two verdicts share an exit code");
 }
 
+/// The two version numbers entry 65 declares are the constants this build
+/// publishes.
+///
+/// A consumer in another repository decides what a record may contain from that
+/// entry, and the merged stream's version is the whole of what tells a v1
+/// `edit-committed` from a v2 one. An entry naming a version this build does not
+/// write, or a read set it does not honour, is a document describing a build that
+/// does not exist.
+#[test]
+fn the_divergence_record_names_the_envelope_version_this_build_writes_and_reads() {
+    let block = divergence_block("65.");
+
+    assert_eq!(
+        block["journal_envelope_version"],
+        json!(ENVELOPE_VERSION),
+        "entry 65 names an envelope version this build does not write"
+    );
+    assert_eq!(
+        serde_json::from_value::<Vec<u32>>(block["journal_envelope_versions_read"].clone())
+            .expect("entry 65 names the versions this build reads"),
+        ENVELOPE_VERSIONS_READ,
+        "entry 65 names a different read set from the one this build honours"
+    );
+    // The move is additive, which is what makes reading the older one whole a
+    // promise rather than a hope: the version this build writes is ahead of every
+    // other one it reads, and the one before it is still in the set.
+    assert!(
+        ENVELOPE_VERSIONS_READ.contains(&ENVELOPE_VERSION)
+            && ENVELOPE_VERSIONS_READ.contains(&1)
+            && ENVELOPE_VERSIONS_READ
+                .iter()
+                .all(|version| *version <= ENVELOPE_VERSION),
+        "the read set is not the versions up to the one this build writes: \
+         {ENVELOPE_VERSIONS_READ:?}"
+    );
+
+    // And it is not the *reply* envelope's version line, which entries 57 and 60
+    // move on their own cadence. Two documents, two numbers, and a consumer that
+    // took one for the other would refuse every edit envelope it was sent.
+    assert!(
+        block.get("envelope_version").is_none(),
+        "entry 65 spells its version under the key entries 57 and 60 use for the reply \
+         envelope's, which a consumer reads as that one"
+    );
+}
+
 #[test]
 fn an_envelope_round_trips_through_the_merged_streams_shape() {
     let wire = json!({
@@ -2794,7 +2840,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 26, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 27, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2803,7 +2849,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

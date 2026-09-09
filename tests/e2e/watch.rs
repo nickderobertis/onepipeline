@@ -125,6 +125,17 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
         )
         .exited(0)
         .out_has("\"applied\"");
+    // And an accepted command that changes no graph, which is journalled under
+    // its own kind and is as much a thing to act on as one that moved the graph.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "author": "monitor", "commands": [
+                {"op": "finding", "id": "build", "message": "the branch has no commits yet"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
     // A surface raised, before anybody has read it.
     world
         .run(&[
@@ -146,6 +157,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
 
     for line in [
         "edit-committed",
+        "command-accepted",
         "planner-surface-queued",
         "node-settled",
         "the base moved under us",
@@ -158,7 +170,12 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     }
 
     let kinds = emitted(&watched);
-    for kind in ["edit-committed", "planner-surface-queued", "node-settled"] {
+    for kind in [
+        "edit-committed",
+        "command-accepted",
+        "planner-surface-queued",
+        "node-settled",
+    ] {
         assert!(
             kinds.iter().any(|emitted| emitted == kind),
             "the machine form carries no `{kind}`, only {kinds:?}"
@@ -190,7 +207,12 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
         let again = world.run(&selection);
         agreed(&again, "settled", 0);
         let kinds = emitted(&again);
-        for kind in ["edit-committed", "planner-surface-queued", "node-settled"] {
+        for kind in [
+            "edit-committed",
+            "command-accepted",
+            "planner-surface-queued",
+            "node-settled",
+        ] {
             assert!(
                 kinds.iter().any(|emitted| emitted == kind),
                 "{selection:?} lost `{kind}`, leaving {kinds:?}"

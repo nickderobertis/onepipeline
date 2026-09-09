@@ -974,6 +974,13 @@ fn mark(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
 }
 
 /// The reconciler's answer to one submitted envelope.
+///
+/// An envelope is all-or-nothing, so [`applied`](Self::applied) is still the
+/// whole envelope's answer and every reader that predates
+/// [`results`](Self::results) keeps reading exactly what it read. What that
+/// boolean could never say is *which* command decided it, which is what left a
+/// manager believing a node's bar had changed when the command that would have
+/// changed it was never compiled.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandOutcome {
     /// The envelope this answers.
@@ -983,6 +990,72 @@ pub(crate) struct CommandOutcome {
     /// Why not, when it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// One entry per command the envelope carried, in the order it carried them.
+    ///
+    /// Omitted when empty, so a record this build writes for an envelope with no
+    /// commands is byte-for-byte the record an older build wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<CommandResult>,
+}
+
+/// What became of **one** command of an envelope.
+///
+/// Every command is evaluated, whatever the ones before it said, so each entry is
+/// that command's **own** answer. The envelope is still atomic — a refusal
+/// anywhere in it applies none of it — and the four words below are what tells
+/// apart the facts a single boolean could not: which commands were wrong, which
+/// were fine and went down with them, and which of those had already been read by
+/// a conversation that cannot unread it. A manager reading them knows which to
+/// fix, which to resend unchanged, and which not to resend at all.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CommandResult {
+    /// Where in the envelope's `commands` this one sat, from zero.
+    pub index: usize,
+    /// The command's op, as the envelope spelled it.
+    ///
+    /// Carried so an entry names the command it belongs to rather than leaving a
+    /// reader to count positions in the envelope it sent.
+    pub op: String,
+    /// What became of it.
+    pub outcome: CommandVerdict,
+    /// Why it refused, or what refused around it, when either happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The four things that can become of one command of an envelope.
+///
+/// One field rather than a boolean and a sentence, because "not applied" was two
+/// facts wearing one word: a command that was wrong and a command that was fine.
+/// A reader that cannot tell them apart resends the wrong one and fixes the right
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CommandVerdict {
+    /// It was validated and committed.
+    Applied,
+    /// It was validated and nothing was wrong with it, and **nothing of it
+    /// happened**: no conversation was offered anything on its behalf, no graph
+    /// moved, and no record was written for it. Something else in the envelope
+    /// refused, and an envelope applies all of its commands or none. Resending it
+    /// on its own is what gets it in, and resending it costs nothing, because it
+    /// had no effect to repeat.
+    Validated,
+    /// A `note` whose conversation **took it**, in an envelope refused after that.
+    ///
+    /// Nothing of this command was committed — the same nothing
+    /// [`Validated`](Self::Validated) reports — but a conversation has no undo, so
+    /// resending the envelope hands that party the note a second time.
+    /// `engine::deliver_envelope` states the one window this is reachable through.
+    // llmlint: ignore[changed_behavior_has_e2e] no journey can arrange that
+    // window: it takes a live conversation accepting a note and, in the same run
+    // and envelope, a second node whose member has settled — and the harness
+    // double holds every turn of a run on one shared gate. Its two sides are
+    // driven end to end in `tests/note/main.rs` and the word itself by
+    // `engine::tests::a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`.
+    Delivered,
+    /// It refused, and [`reason`](CommandResult::reason) is what it said.
+    Refused,
 }
 
 impl ChannelState {

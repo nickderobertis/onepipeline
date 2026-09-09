@@ -786,6 +786,29 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_landing_commit(state, event);
         return;
     }
+    // This library's own record, at an envelope schema this build does not know.
+    // Only a *newer* build writes one, and what its kinds and payload mean is
+    // that build's to say — an `edit-committed` at a version this one has never
+    // read may be a shape this fold would take for something else. Reported
+    // rather than guessed at, exactly as an operation list this build cannot
+    // parse is: `strict` is what tells an operator the graph they are looking at
+    // may be missing a committed edit, and a driver says so before it converges.
+    //
+    // Asked only of this crate's own records. A sibling's version is that
+    // library's own vocabulary, and the branch above never reaches here.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs a journal a
+    // **newer build** wrote, which no invocation a user can type produces: this build
+    // stamps `ENVELOPE_VERSION` on everything it writes. It is the same half this module
+    // suppresses on `fold_refusal` and on the unrenderable publication step, for the same
+    // reason, and it is held by this module's own
+    // `a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported`.
+    // What a user *can* reach — a journal at version 1 — is driven end to end by
+    // `tests/e2e/compatibility.rs`.
+    if !event.written_at_a_known_version() {
+        state.strict = false;
+        return;
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
     let payload = &event.payload;
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
@@ -909,7 +932,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 pin_preserved_branch(state, node, status);
             }
         }
-        Some(journal::PipelineKind::EditCommitted) => {
+        // Both kinds fold the same way, and deliberately: which of them a
+        // command is journalled under is decided by the **emitter**, from
+        // whether any operation it compiled changes anything a reader folds, and
+        // a reader that folds both is right whatever a newer build decides to
+        // put where. Today a `command-accepted` carries only operations this
+        // fold ignores, so folding it costs nothing and cannot be wrong.
+        Some(journal::PipelineKind::EditCommitted | journal::PipelineKind::CommandAccepted) => {
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
@@ -919,107 +948,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.strict = false;
                 return;
             };
-            for operation in &operations {
-                edits::apply(&mut state.graph, operation);
-                match operation {
-                    Operation::HumanAttested { node } => {
-                        state.attestations.insert(node.clone());
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(NodeStatus::Done));
-                    }
-                    // A completion request is recorded as its own event by
-                    // whichever side took it, so folding it here too would
-                    // count one request twice.
-                    Operation::CompletionRequested { .. } => {}
-                    Operation::RetryRequested {
-                        node, replacement, ..
-                    } => {
-                        // What the supersession did to the node it replaced. The
-                        // node itself leaves the graph with the same edit, so
-                        // this is what the run's record says became of it.
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
-                        // And which node carries its work now, which is the half
-                        // no status word can say: `cancelled` is also what a
-                        // `drop` leaves, and the two take opposite actions.
-                        state.superseded.insert(node.clone(), replacement.clone());
-                    }
-                    Operation::NodeParked { node, by, reason } => {
-                        // Who decided, and why. The park is what a later
-                        // `requeue` is judged against, so this is folded rather
-                        // than left in the record for a reader to go and find.
-                        state
-                            .parks
-                            .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
-                        // What the node was *before* the park decides which park
-                        // this is: a cancel of a running node asks a dispatch to
-                        // stop and leaves it running, and one of a node that
-                        // never started stops nothing. Both become `parked`, and
-                        // the difference rides the same single write.
-                        let was = state.recorded.get(node).map(|recorded| recorded.status());
-                        let parked = match (was, millis_of(&event.ts)) {
-                            (Some(NodeStatus::Running), Some(since)) => {
-                                Recorded::Cancelling { since }
-                            }
-                            _ => Recorded::At(NodeStatus::Parked),
-                        };
-                        state.recorded.insert(node.clone(), parked);
-                    }
-                    Operation::NodeRequeued { node, .. } => {
-                        state.recorded.remove(node);
-                        // The park is over, so nothing is held by whoever made
-                        // it: a later park of the same node is judged on its own
-                        // author rather than on this one's.
-                        state.parks.remove(node);
-                    }
-                    // The record moving without the graph moving, which is the
-                    // whole of what a settlement from evidence does. Its own
-                    // `node-settled` says the same thing to a reader that does
-                    // not fold operations; folding it here is what makes replay
-                    // of the edit alone reconstruct what the reconciler did.
-                    Operation::SettledFromEvidence {
-                        node,
-                        outcome,
-                        evidence: _,
-                    } => {
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(edits::settled_status(*outcome)));
-                        state
-                            .outcomes
-                            .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
-                    }
-                    // Only a note that is still owed to a dispatch. One the
-                    // running turn already took has been read, and holding it
-                    // for the next dispatch would re-state a correction the
-                    // worker has acted on.
-                    Operation::ContextAdded {
-                        node,
-                        note,
-                        delivery: edits::Delivery::Deferred,
-                    } => {
-                        state.pending_context.insert(node.clone(), note.clone());
-                    }
-                    Operation::ContextAdded { .. } => {}
-                    // The same fact under the op that replaced `context`: a note
-                    // no turn took is owed to the node's next dispatch, and the
-                    // four dispositions beside it are notes a live conversation
-                    // read, which owe nothing forward.
-                    Operation::NoteDelivered {
-                        node,
-                        text,
-                        reached: crate::note::Reached::Carried,
-                        ..
-                    } => {
-                        state
-                            .pending_context
-                            .insert(node.clone(), text.as_str().to_string());
-                    }
-                    _ => {}
-                }
-            }
+            fold_operations(state, &operations, millis_of(&event.ts));
         }
         // A note delivered onto the node's *next* dispatch is owed to it, exactly
         // as a deferred planner note is, and this record is the only thing that
@@ -1356,12 +1285,143 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
     node.branch = Some(branch);
 }
 
+/// Fold one committed command's operations into the run's state.
+///
+/// The single derivation of what an accepted command *did*, so the reconciler's
+/// own view of the envelope it is halfway through compiling and a reader
+/// replaying that envelope out of the journal cannot come to differ: the loop
+/// stages each command against this before it compiles the next one, and the
+/// fold above replays the record it eventually wrote through the same code.
+///
+/// `at` is when the record was stamped, which only the park needs — a cancel of
+/// a *running* node leaves a dispatch out there, and how long it has been
+/// converging is measured from here.
+pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at: Option<u64>) {
+    for operation in operations {
+        edits::apply(&mut state.graph, operation);
+        match operation {
+            Operation::HumanAttested { node } => {
+                state.attestations.insert(node.clone());
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Done));
+            }
+            // A completion request is recorded as its own event by
+            // whichever side took it, so folding it here too would
+            // count one request twice.
+            Operation::CompletionRequested { .. } => {}
+            Operation::RetryRequested {
+                node, replacement, ..
+            } => {
+                // What the supersession did to the node it replaced. The
+                // node itself leaves the graph with the same edit, so
+                // this is what the run's record says became of it.
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
+                // And which node carries its work now, which is the half
+                // no status word can say: `cancelled` is also what a
+                // `drop` leaves, and the two take opposite actions.
+                state.superseded.insert(node.clone(), replacement.clone());
+            }
+            Operation::NodeParked { node, by, reason } => {
+                // Who decided, and why. The park is what a later
+                // `requeue` is judged against, so this is folded rather
+                // than left in the record for a reader to go and find.
+                state
+                    .parks
+                    .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
+                // What the node was *before* the park decides which park
+                // this is: a cancel of a running node asks a dispatch to
+                // stop and leaves it running, and one of a node that
+                // never started stops nothing. Both become `parked`, and
+                // the difference rides the same single write.
+                let was = state.recorded.get(node).map(|recorded| recorded.status());
+                let parked = match (was, at) {
+                    (Some(NodeStatus::Running), Some(since)) => Recorded::Cancelling { since },
+                    _ => Recorded::At(NodeStatus::Parked),
+                };
+                state.recorded.insert(node.clone(), parked);
+            }
+            Operation::NodeRequeued { node, .. } => {
+                state.recorded.remove(node);
+                // The park is over, so nothing is held by whoever made
+                // it: a later park of the same node is judged on its own
+                // author rather than on this one's.
+                state.parks.remove(node);
+            }
+            // The record moving without the graph moving, which is the
+            // whole of what a settlement from evidence does. Its own
+            // `node-settled` says the same thing to a reader that does
+            // not fold operations; folding it here is what makes replay
+            // of the edit alone reconstruct what the reconciler did.
+            Operation::SettledFromEvidence {
+                node,
+                outcome,
+                evidence: _,
+            } => {
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(edits::settled_status(*outcome)));
+                state
+                    .outcomes
+                    .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
+            }
+            // Only a note that is still owed to a dispatch. One the
+            // running turn already took has been read, and holding it
+            // for the next dispatch would re-state a correction the
+            // worker has acted on.
+            Operation::ContextAdded {
+                node,
+                note,
+                delivery: edits::Delivery::Deferred,
+            } => {
+                state.pending_context.insert(node.clone(), note.clone());
+            }
+            Operation::ContextAdded { .. } => {}
+            // The same fact under the op that replaced `context`: a note
+            // no turn took is owed to the node's next dispatch, and the
+            // four dispositions beside it are notes a live conversation
+            // read, which owe nothing forward.
+            Operation::NoteDelivered {
+                node,
+                text,
+                reached: crate::note::Reached::Carried,
+                ..
+            } => {
+                state
+                    .pending_context
+                    .insert(node.clone(), text.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Fold one relayed envelope into the node's live activity.
 ///
-/// Every envelope [`evidences_progress`] admits counts, and only a
-/// `turn-activity` names a tool, because that is the only kind carrying one. A
-/// heartbeat is recorded as the separate fact it is: the node still reads as
-/// one something is driving, without its arrival reading as work.
+/// Every envelope [`evidences_progress`] admits counts. Two kinds of envelope
+/// say what the node is **doing**: an `oneagentgraph` `turn-activity`, which
+/// names the tool a turn reached for, and any of `onevcs`'s own, which are the
+/// steps of a publication. A heartbeat is recorded as the separate fact it is:
+/// the node still reads as one something is driving, without its arrival reading
+/// as work.
+///
+/// The second of those is why this is not only about turns. A publication is the
+/// driver's own subprocess and emits no `turn-activity`, so a node eleven
+/// minutes into a push reported the last worker command from *before* it
+/// settled — `now Bash git status --porcelain (67 event(s), 3m43s ago)`, which
+/// is the exact shape a supervisor is taught to read as a stalled dispatch, and
+/// a monitor read it as one. The sibling's events were in the run's journal the
+/// whole time, labelled with the node; nothing had to start emitting anything.
+/// Publication is the longest and most failure-prone stretch of a lifecycle
+/// node's life, because the whole gate runs inside that push.
+///
+/// The last envelope to name something wins, which is what makes the two
+/// compose: a session opens, the worker's turns run and name their tools, the
+/// publication steps follow, and the line names whichever came last. The session
+/// *opening* is the one `onevcs` record that is not a step — a dispatch that has
+/// opened one and named no tool has started and done nothing.
 fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
@@ -1376,6 +1436,41 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         Some(progress) => Some(progress.and(at)),
         None => Progress::first(at),
     };
+    if event.source == Source::Vcs {
+        // The sibling's own word for the step, unrewritten — how a kind is
+        // spelled is that library's to decide, and a table of this crate's own
+        // words for them would keep naming a step after it was renamed. Said as
+        // whose step it is, so `push` on this line is not read as a tool a turn
+        // reached for.
+        //
+        // The session *opening* is the one record that is not a step: a dispatch
+        // whose session has opened and whose worker has not yet named a tool has
+        // started and done nothing, which is what its line has always said and is
+        // not a readout worth inventing a "now" for. Everything after it — the
+        // session closing included — is a step the publication reached.
+        //
+        // The step goes through the same boundary a branch name and a session
+        // token go through, and for the same reason: the kind is a wire string a
+        // **producer** chose — no vocabulary of this crate's — and it is rendered
+        // into a line-oriented view, where a value carrying a newline or a
+        // control character forges a line. A kind this build cannot render leaves
+        // the line where it was rather than putting a forged one on it.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] that `None` half needs a kind
+        // carrying a newline, a control character, or `MAX_PAYLOAD_TEXT_BYTES` of text —
+        // an envelope no producer in this stack writes, reachable only from a store
+        // something wearing a producer's clothes left behind. It is the same half this
+        // module suppresses on `fold_refusal`, for the same reason, and it is held by this
+        // module's own `a_publication_step_this_build_cannot_render_leaves_the_line_alone`.
+        // What a user *can* reach — a real publication naming its real steps — is driven
+        // end to end by `tests/e2e/views.rs`.
+        if !crate::vcs::is_session_opened(&event.kind) {
+            if let Some(step) = crate::vcs::usable(&event.kind.0) {
+                activity.doing = Some(format!("publication {step}"));
+            }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+        return;
+    }
     if event.kind.0 != TURN_ACTIVITY {
         return;
     }
@@ -2767,6 +2862,208 @@ mod tests {
         assert_eq!(
             Some(seen.progress.expect("the activities counted").last_at()),
             millis_of(&activity(3, "Read", "x").ts)
+        );
+    }
+
+    /// A record at an envelope version this build does not read is **reported**,
+    /// not folded.
+    ///
+    /// Only a newer build writes one, and what its kinds and payload mean is that
+    /// build's to say — so folding it would be this build deciding a run's graph
+    /// from a shape it has never read. `strict` is what a driver says out loud
+    /// before it converges, and what an operator reads as "the graph you are
+    /// looking at may be missing a committed edit".
+    ///
+    /// The record before it is folded, and the run's own evidence that something
+    /// wrote to it is still taken from it: what is refused is the *meaning*, not
+    /// the record.
+    #[test]
+    fn a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let ahead = |seq: u64| {
+            let mut event = pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([{"kind": "node-dropped", "node": "build", "dependents": "drop"}]),
+                )],
+            );
+            event.v = crate::event::ENVELOPE_VERSION + 1;
+            event
+        };
+
+        let read = fold(&[started.clone(), ahead(1)]);
+        assert!(
+            !read.strict,
+            "a record at an unread envelope version was folded without saying so"
+        );
+        assert!(
+            read.graph.contains("build"),
+            "a drop this build could not read was applied anyway"
+        );
+        assert!(
+            read.last_write_at.is_some(),
+            "the record stopped counting as evidence that something wrote to the run"
+        );
+
+        // The control: the same record at a version this build reads is folded.
+        let mut known = ahead(1);
+        known.v = crate::event::ENVELOPE_VERSION;
+        let folded = fold(&[started, known]);
+        assert!(folded.strict);
+        assert!(
+            !folded.graph.contains("build"),
+            "the case above passes for a reason other than the version"
+        );
+    }
+
+    /// Every version this build says it reads folds a record the same way.
+    ///
+    /// The read set is a promise a runs root depends on: a journal at version 1
+    /// is the ordinary contents of one, and a build that quietly stopped folding
+    /// it would report those runs as graphs they are not.
+    #[test]
+    fn every_envelope_version_this_build_reads_folds_a_record_the_same_way() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        for version in crate::event::ENVELOPE_VERSIONS_READ {
+            let mut started = pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan.clone()))],
+            );
+            started.v = *version;
+            let mut dropped = pipeline(
+                journal::PipelineKind::EditCommitted,
+                1,
+                None,
+                &[(
+                    "operations",
+                    json!([{"kind": "node-dropped", "node": "build", "dependents": "drop"}]),
+                )],
+            );
+            dropped.v = *version;
+
+            let state = fold(&[started, dropped]);
+            assert!(
+                state.strict,
+                "version {version} read as one this build cannot"
+            );
+            assert!(
+                !state.graph.contains("build"),
+                "version {version} did not fold the edit it carries"
+            );
+        }
+    }
+
+    /// A publication step this build cannot render leaves the activity line
+    /// exactly where it was, rather than putting a forged one on it.
+    ///
+    /// The activity line is line-oriented and a kind is a wire string a
+    /// **producer** chose, so a kind carrying a newline would put a second line
+    /// under a node — a record that appears to be about work nobody did. No
+    /// producer in this stack writes one, which is why this is here rather than
+    /// in a journey: a store holding one was left by something wearing a
+    /// producer's clothes.
+    #[test]
+    fn a_publication_step_this_build_cannot_render_leaves_the_line_alone() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let step = |seq: u64, kind: &str| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Vcs;
+            event.kind = crate::event::EventKind(kind.into());
+            event
+        };
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, "push"),
+            step(3, "merge-queued\nnode-settled"),
+        ]);
+
+        let seen = &state.activity["build"];
+        assert_eq!(
+            seen.doing.as_deref(),
+            Some("publication push"),
+            "a kind carrying a newline reached the line a supervisor reads"
+        );
+        // It still counted as progress: what the record could not say is what the
+        // node is *doing*, not that the dispatch recorded something.
+        assert_eq!(
+            seen.progress.expect("the steps counted").events(),
+            2,
+            "a step this build could not render stopped counting as progress"
+        );
+    }
+
+    /// A session opening is the one `onevcs` record that is not a step, and its
+    /// closing is not exempt: a publication that reached its end says so.
+    #[test]
+    fn a_session_opening_names_no_step_and_everything_after_it_does() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let step = |seq: u64, kind: crate::event::EventKind| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Vcs;
+            event.kind = kind;
+            event
+        };
+        // The sibling's own spelling, off the same derivation the fold reads it
+        // through, so this cannot be a test asserting against its own literal.
+        let opened = crate::vcs::session_opened_kind();
+        let closed = crate::event::EventKind("session-closed".into());
+        let after_opening = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan.clone()))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, opened.clone()),
+        ]);
+        assert_eq!(
+            after_opening.activity["build"].doing, None,
+            "a dispatch that has only opened a session was reported doing something"
+        );
+
+        let after_closing = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            step(2, opened),
+            step(3, closed),
+        ]);
+        assert_eq!(
+            after_closing.activity["build"].doing.as_deref(),
+            Some("publication session-closed"),
+            "the last step of a publication was read as the bracket around it"
         );
     }
 

@@ -336,6 +336,164 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 }
 
+/// A note is **not** offered to a conversation on behalf of an envelope the run
+/// is going to refuse.
+///
+/// Compiling a `note` used to hand it to the node's live turn, so a later
+/// command's refusal left a correction a worker had read and the run had no
+/// record of. The refusal here is one only the reconciler can make — `reply`'s
+/// submission check carries no dispatch in its frontier, so a `settle` of a
+/// running node passes it and the loop refuses it — and it comes *after* the note
+/// in the envelope, which is the order that used to deliver first and refuse
+/// second.
+#[test]
+fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() {
+    let world = World::new("note-envelope-unoffered");
+    let run = "unoffered";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+
+    // The turn is released once the note is really on the queue, exactly as the
+    // journeys that *do* deliver release it — so the turn this note would have
+    // been offered to was live and reachable for the whole window, and the reason
+    // it was never offered is the pass rather than the timing.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            {"op": "settle", "id": "build", "outcome": "done",
+             "evidence": "the change merged while nobody was looking"},
+        ]})
+        .to_string(),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied
+        .exited(REFUSED)
+        .err_has("still has a dispatch in flight");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // Nothing of the envelope is in the record, and — the point — no party of the
+    // conversation was ever handed the note.
+    assert!(
+        world.events_of(run, "edit-committed").is_empty()
+            && world.events_of(run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(run)
+    );
+    let handed = prompts(&world);
+    assert!(
+        !handed.iter().any(|prompt| prompt.contains(NOTE)),
+        "validation offered the note to the conversation on behalf of an envelope the run \
+         then refused:\n{handed:#?}"
+    );
+
+    // And the answer says which command was wrong and which was not, so a manager
+    // knows the note is theirs to resend rather than theirs to fix.
+    let answered = world
+        .command_outcomes(run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    assert_eq!(answered["results"][0]["op"], json!("note"), "{answered}");
+    assert_eq!(
+        answered["results"][0]["outcome"],
+        json!("validated"),
+        "{answered}"
+    );
+    assert_eq!(
+        answered["results"][1]["outcome"],
+        json!("refused"),
+        "{answered}"
+    );
+}
+
+/// A note to a node the run has **no conversation for** refuses before any note of
+/// its envelope has been offered to anybody.
+///
+/// The last refusal that could follow a delivery, and the one this journey used to
+/// record as unavoidable: "nothing takes it" for a node that has never reported a
+/// member is not a fact about a conversation at all, and the pass used to discover
+/// it only after handing the note before it to a live turn. Deciding it in
+/// validation leaves the delivery refusable by one thing alone — a conversation
+/// that was asked and said no, which `engine::deliver_envelope` bounds.
+///
+/// This tier is the only one where a live delivery can succeed at all, since a
+/// suite substituting `oneagentgraph` as an *executable* gets an undelivered note
+/// by construction. That is what makes the assertion below load-bearing: a note
+/// that never reaches the worker here is one the pass did not offer.
+#[test]
+fn a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered() {
+    let world = World::new("note-envelope-refused");
+    let run = "envelope";
+    // A second node that never dispatches, so the run has no member for it and
+    // no conversation to offer its note to.
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            note_op_with("later", "start from the fixture", "live", false),
+        ]})
+        .to_string(),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied
+        .exited(REFUSED)
+        .err_has("composes it into no dispatch");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The point: the worker's turn was live and reachable for the whole window —
+    // the release above waited for the note to be queued before ending it — and
+    // the note was never handed to it, because the envelope was already refused.
+    let worker = worked(&world);
+    assert!(
+        !worker.iter().any(|prompt| prompt.contains(NOTE)),
+        "a note of an envelope the run refused was offered to the live turn anyway:\n\
+         {worker:#?}"
+    );
+
+    // And the run committed nothing of the envelope — neither the note that would
+    // have landed nor the one that refused.
+    assert!(
+        world.events_of(run, "edit-committed").is_empty()
+            && world.events_of(run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(run)
+    );
+    // And the answer tells the two apart: nothing was wrong with the first, so a
+    // manager resends it — which costs nothing, because nothing of it happened.
+    let answered = world
+        .command_outcomes(run)
+        .last()
+        .cloned()
+        .expect("the envelope was answered");
+    assert_eq!(answered["applied"], json!(false), "{answered}");
+    assert_eq!(answered["results"][0]["op"], json!("note"), "{answered}");
+    assert_eq!(
+        answered["results"][0]["outcome"],
+        json!("validated"),
+        "the note nobody was offered was reported as delivered or as its own refusal: \
+         {answered}"
+    );
+    assert_eq!(
+        answered["results"][1]["outcome"],
+        json!("refused"),
+        "{answered}"
+    );
+}
+
 /// A note that changes what the finished tree must contain enters the acceptance
 /// criteria the judge decides against — and reaches the judge as an update to the
 /// **worker's** task rather than as work for itself.

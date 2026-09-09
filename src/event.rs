@@ -15,18 +15,48 @@
 // `EventKind` is the wire string because this crate relays another library's kinds as
 // well as its own and `docs/contract.md` enumerates neither set — an enum here would
 // invent the interface rather than compile it, and would reject a kind a sibling already
-// emits. And the envelope's semantic checks — that `v` is 1, that `ts` is
-// millisecond-precision UTC RFC 3339, that a text field was truncated at
-// `MAX_PAYLOAD_TEXT_BYTES` — belong to the reader seam that parses a stream, which is
-// exactly what this stage does not implement. The structural boundary *is* enforced: an
-// unknown `source`, a `seq` that is not a `u64`, or a missing field is rejected by serde
-// and asserted in `tests/contract.rs`.
+// emits. And the envelope's semantic checks — that `ts` is millisecond-precision UTC
+// RFC 3339, that a text field was truncated at `MAX_PAYLOAD_TEXT_BYTES` — belong to the
+// reader seam that parses a stream, which is exactly what this stage does not implement.
+// The structural boundary *is* enforced: an unknown `source`, a `seq` that is not a
+// `u64`, or a missing field is rejected by serde and asserted in `tests/contract.rs`.
+// `v` is deliberately **not** refused here either: a runs root holds journals from every
+// build that ever wrote into it, so a version this build does not read is a record to
+// report rather than a line to reject — `Envelope::written_at_a_known_version` is the
+// question, and `src/projection.rs`'s fold is what answers it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// The envelope version this crate produces and understands.
-pub const ENVELOPE_VERSION: u32 = 1;
+/// The envelope version this crate stamps on everything it writes.
+///
+/// **2** since the journal's record shapes moved: at `1` an `edit-committed` may
+/// be an accepted command that changed nothing; at `2` it means something changed,
+/// an accepted command that did not is [`PipelineKind::CommandAccepted`], and both
+/// kinds carry `operation_kinds` so a reader keys on what happened without
+/// deserializing the command. A runs root outlives the build that wrote into it,
+/// which is why the number is the question a reader of one has. Entry 65 of
+/// `docs/contract-divergences.md` proposes the move.
+///
+/// A **relayed** envelope keeps its producer's own number, exactly as it keeps
+/// that producer's `stream`, `seq`, `source` and kind: the version says which
+/// build wrote the envelope, and a sibling's is that library's to declare. So one
+/// run's journal carries both, and that is not a disagreement.
+pub const ENVELOPE_VERSION: u32 = 2;
+
+/// Every envelope version this build reads, newest first.
+///
+/// The number an envelope declares is the schema its author wrote it against;
+/// what a reader asks is whether this build knows that schema. A runs root holds
+/// journals from every build that ever wrote into it, so reading the older one is
+/// not a courtesy — it is the ordinary case, and
+/// [`Envelope::written_at_a_known_version`] is where it is asked.
+///
+/// Version `1` is read whole: nothing was removed from the envelope or from a
+/// record's payload, so a `1` folds exactly as it always did. What `2` adds is
+/// what a v1 record cannot promise, which is why the number is worth carrying at
+/// all.
+pub const ENVELOPE_VERSIONS_READ: &[u32] = &[ENVELOPE_VERSION, 1];
 
 /// The byte bound on a payload text field, past which it is truncated and the
 /// payload carries `truncated: true`.
@@ -41,7 +71,8 @@ pub const MAX_PAYLOAD_TEXT_BYTES: usize = 4096;
 /// cross-stream ordering promises beyond the timestamps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
-    /// Envelope version; [`ENVELOPE_VERSION`] for anything this crate writes.
+    /// Envelope version: [`ENVELOPE_VERSION`] for anything this crate writes, and
+    /// the producer's own for anything it relayed.
     pub v: u32,
     /// RFC 3339 timestamp, millisecond precision, UTC.
     pub ts: String,
@@ -79,6 +110,25 @@ pub struct Envelope {
     /// Evidence stored by the producing library and referenced by id.
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+}
+
+impl Envelope {
+    /// Whether this build knows the envelope schema this record was written at.
+    ///
+    /// Asked of **this library's own** records and never of a relayed one: a
+    /// sibling's version is that library's own vocabulary, and judging it by this
+    /// crate's table would refuse a producer for moving at its own pace.
+    ///
+    /// A reader that meets `false` has met a record a *newer* build wrote, whose
+    /// kinds or payload may mean something this build would read wrongly. What
+    /// the fold does with that is report rather than guess — it marks the run as
+    /// one it could not read whole, and a driver says so before it converges —
+    /// because a record mis-folded silently is worse than a run said to be
+    /// incompletely understood.
+    #[must_use]
+    pub fn written_at_a_known_version(&self) -> bool {
+        ENVELOPE_VERSIONS_READ.contains(&self.v)
+    }
 }
 
 /// Which part of a change's life an event belongs to.
@@ -179,8 +229,29 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
-    /// A live edit was accepted and applied to the desired graph.
+    /// A live edit was accepted, and committing it is what made the change it
+    /// records.
+    ///
+    /// Emitted only where at least one operation the command compiled to
+    /// **changed** something a reader folding this record moves —
+    /// `Operation::commits_a_change` decides that, exhaustively over the
+    /// operations. That is the desired graph *and* the node record derived beside
+    /// it, because those are one durable document to such a reader: an
+    /// attestation, a park and a settlement from evidence move a node's recorded
+    /// state without moving the graph, and are read back off this record by name.
+    /// "Something changed" is what a reader has always taken this kind to mean,
+    /// and it is exactly what it still means. The kinds of the operations it
+    /// committed ride on the record as `operation_kinds`, so a reader keys on
+    /// what happened without parsing the command that produced it.
     EditCommitted,
+    /// A command was accepted and committed nothing a reader folds.
+    ///
+    /// The other half of the split above: a `finding` and a `complete` are
+    /// accepted, are answered `applied`, and change nothing — each is a
+    /// **report**, whose own record is a planner surface and a
+    /// `completion-requested` respectively — so journalling them as committed
+    /// edits made one kind carry two meanings.
+    CommandAccepted,
     /// A live edit was refused, with the reason its submitter was told.
     EditRejected,
     /// A surface was *sent*. Delivery is a separate fact.
@@ -258,6 +329,7 @@ impl PipelineKind {
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
             Self::EditCommitted => "edit-committed",
+            Self::CommandAccepted => "command-accepted",
             Self::EditRejected => "edit-rejected",
             Self::PlannerSurfaceQueued => "planner-surface-queued",
             Self::PlannerSurfaced => "planner-surfaced",
@@ -313,6 +385,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
     PipelineKind::EditCommitted,
+    PipelineKind::CommandAccepted,
     PipelineKind::EditRejected,
     PipelineKind::PlannerSurfaceQueued,
     PipelineKind::PlannerSurfaced,
@@ -350,3 +423,134 @@ pub struct ArtifactRef {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ArtifactId(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The envelope this build writes, as a document.
+    const GOLDEN: &str = include_str!("../tests/golden/envelope-v2.json");
+
+    /// One this build did **not** write, at the version before the bump.
+    const GOLDEN_BEFORE: &str = include_str!("../tests/golden/envelope-v1.json");
+
+    /// The shape this build stamps its own records with, held to a committed
+    /// document.
+    ///
+    /// A runs root outlives the build that wrote into it and is read by things
+    /// outside this repository, so the envelope is a published document rather
+    /// than an internal struct: a field renamed, an optional one becoming an
+    /// explicit null, or the version moving without anyone deciding to move it
+    /// are all things a consumer finds out about by breaking.
+    #[test]
+    fn the_envelope_this_build_writes_is_the_committed_golden() {
+        let golden: serde_json::Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        assert_eq!(
+            golden["v"],
+            json!(ENVELOPE_VERSION),
+            "the golden is not at the version this build writes. Bump ENVELOPE_VERSION and \
+             add tests/golden/envelope-v<n>.json together, keeping the older file as the \
+             read-compatibility reference"
+        );
+
+        let envelope: Envelope = serde_json::from_value(golden.clone()).expect("it parses");
+        assert_eq!(envelope.v, ENVELOPE_VERSION);
+        assert_eq!(envelope.source, Source::Pipeline);
+        assert_eq!(envelope.kind, EventKind("edit-committed".into()));
+        assert!(envelope.written_at_a_known_version());
+        assert_eq!(
+            serde_json::to_value(&envelope).expect("it serializes"),
+            golden,
+            "the envelope changed shape. Bump ENVELOPE_VERSION, add the golden for the new \
+             one, and keep this file as what the older version looked like"
+        );
+    }
+
+    /// And the one before it still reads, whole, and comes back out unchanged.
+    ///
+    /// The version bump is a statement about what a **new** record promises, not
+    /// a line drawn under the old ones: a v1 journal is the ordinary contents of
+    /// a runs root, and this build folds it. It is also not restamped — reading a
+    /// record does not make it this build's — so a store round-trips as its
+    /// writer wrote it.
+    #[test]
+    fn the_envelope_version_before_this_one_is_still_read_and_never_restamped() {
+        let before: serde_json::Value =
+            serde_json::from_str(GOLDEN_BEFORE).expect("the golden is JSON");
+        assert_eq!(before["v"], json!(1));
+        assert!(
+            ENVELOPE_VERSIONS_READ.contains(&1),
+            "this build no longer reads the version its committed fixture is written at"
+        );
+
+        let envelope: Envelope = serde_json::from_value(before.clone()).expect("it parses");
+        assert!(envelope.written_at_a_known_version());
+        assert_eq!(envelope.v, 1, "a version this build read was rewritten");
+        assert_eq!(
+            serde_json::to_value(&envelope).expect("it serializes"),
+            before
+        );
+
+        // And a version nothing has published is not read, which is what makes
+        // the set above a statement rather than a comment.
+        let ahead: Envelope = serde_json::from_value(json!({
+            "v": ENVELOPE_VERSION + 1,
+            "ts": "2026-09-09T04:00:00.000Z",
+            "stream": "onepipeline-7f3a",
+            "seq": 43,
+            "source": "pipeline",
+            "kind": "edit-committed",
+            "labels": {},
+            "payload": {},
+            "artifacts": []
+        }))
+        .expect("a newer build's record still parses structurally");
+        assert!(!ahead.written_at_a_known_version());
+    }
+
+    /// The optional fields are optional in both directions: absent stays absent
+    /// on the wire, and present survives the trip.
+    ///
+    /// `phase` is the one an envelope declares, and it is the field a store
+    /// written before there was a phase depends on: a build that serialized it as
+    /// an explicit null would rewrite every such record the first time it read
+    /// one back.
+    #[test]
+    fn an_envelopes_optional_fields_round_trip_and_are_omitted_when_empty() {
+        let bare = json!({
+            "v": ENVELOPE_VERSION,
+            "ts": "2026-09-09T04:00:00.000Z",
+            "stream": "onepipeline-7f3a",
+            "seq": 1,
+            "source": "pipeline",
+            "kind": "node-ready",
+            "labels": {},
+            "payload": {},
+            "artifacts": []
+        });
+        let envelope: Envelope = serde_json::from_value(bare.clone()).expect("it parses");
+        assert_eq!(envelope.phase, None);
+        assert_eq!(serde_json::to_value(&envelope).expect("serializes"), bare);
+
+        let mut with = bare.clone();
+        with["phase"] = json!("release");
+        let envelope: Envelope = serde_json::from_value(with.clone()).expect("it parses");
+        assert_eq!(envelope.phase, Some(Phase::Release));
+        assert_eq!(serde_json::to_value(&envelope).expect("serializes"), with);
+
+        // The three defaulted containers are the same promise: a record that
+        // omitted them reads, and comes back out omitting nothing it carried.
+        let minimal = json!({
+            "v": ENVELOPE_VERSION,
+            "ts": "2026-09-09T04:00:00.000Z",
+            "stream": "onepipeline-7f3a",
+            "seq": 2,
+            "source": "pipeline",
+            "kind": "node-ready"
+        });
+        let envelope: Envelope = serde_json::from_value(minimal).expect("it parses");
+        assert!(envelope.payload.is_empty() && envelope.artifacts.is_empty());
+        assert_eq!(envelope.labels, Labels::default());
+    }
+}

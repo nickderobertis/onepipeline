@@ -618,6 +618,15 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
             "the grace period {grace:?} was honoured instead of falling back to the \
              default: {message}"
         );
+        // And it says that deadline is the only bound there is, for the reason
+        // `every_member_that_has_named_a_turn_is_asked_to_stop` asserts the same
+        // of the other branch: nothing here limits what the dispatch may still
+        // run, and a sentence that reads as though something does is what sent a
+        // manager away expecting a stop that did not come.
+        assert!(
+            message.contains("the only bound on what it may still run is the deadline"),
+            "the cancellation does not say the deadline is the only bound: {message}"
+        );
         assert!(
             !world.was_invoked("oneagentgraph", &["interrupt"]),
             "an interrupt was addressed at a turn nothing had named: {:?}",
@@ -697,8 +706,25 @@ fn every_member_that_has_named_a_turn_is_asked_to_stop() {
         .as_str()
         .expect("the surface says what it did");
     assert!(
-        message.contains("asked 2 turn(s)"),
+        message.contains("interrupted the 2 running turn(s)"),
         "only one member of a two-member dispatch was asked to stop: {message}"
+    );
+    // The sentence says what was *done*, not what the dispatch is still
+    // permitted. "asked 2 turn(s) to stop, commit, and end without starting new
+    // work" read as a budget granted: a manager parked a node under disk
+    // pressure, was told it would stop after one turn, and got a completed turn,
+    // another started and completed, a third started, and a hard kill five
+    // minutes later with everything uncommitted lost. There is no turn budget,
+    // and the deadline in the same sentence is the only bound there is.
+    assert!(
+        message.contains("not a budget of turns")
+            && message.contains("nothing bounds how many it starts")
+            && message.contains("the only bound there is is the deadline"),
+        "the cancellation reads as an allowance of turns rather than as what it did: {message}"
+    );
+    assert!(
+        message.contains("killed in") && message.contains("s if it has not exited by then"),
+        "the cancellation does not name the deadline it says is the only bound: {message}"
     );
     assert!(
         message.contains("worker: the running turn took the redirection")

@@ -2617,37 +2617,80 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // This pass's own copy, walked forward as each command commits, for
             // the reason the checking pass above holds one.
             let mut frontier = frontier.clone();
+            // The same three phases the reconcile loop runs, and for the same
+            // reason: which writer judged an envelope is an accident of whether
+            // anything was driving the run, so an envelope is all of its commands
+            // or none of them on both. **Validate every command first**, touching
+            // no conversation — the checking pass above turns away every refusal
+            // `edits::compile` can raise, but a note's own validation is not one
+            // of those and belongs here rather than beside a delivery.
+            let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
             for command in &envelope.commands {
-                // Nothing is driving this run, so nothing of it is in flight —
-                // the note is still asked of the member the node's last dispatch
-                // reported, and the conversation's own account of how it ended is
-                // what refuses it.
-                let operations = match apply_here(
-                    paths,
-                    &mut journal,
-                    &mut graph,
-                    &frontier,
-                    envelope.author,
-                    command,
-                ) {
+                let step =
+                    match validate_here(paths, &mut graph, &frontier, envelope.author, command) {
+                        Ok(step) => step,
+                        Err(error) => {
+                            engine::record_rejection(
+                                paths,
+                                &mut journal,
+                                envelope.author,
+                                command,
+                                &error,
+                            )?;
+                            lock.release();
+                            return Err(error);
+                        }
+                    };
+                edits::advance(&mut frontier, step.staged());
+                staged.push(step);
+            }
+            // Then deliver, which is the first thing here that reaches outside
+            // the run. Nothing is driving it, so nothing of it is in flight — the
+            // note is still asked of the member the node's last dispatch
+            // reported, and the conversation's own account of how it ended is
+            // what refuses it.
+            let mut pending: Vec<Vec<edits::Operation>> =
+                Vec::with_capacity(envelope.commands.len());
+            for (command, step) in envelope.commands.iter().zip(staged) {
+                let operations = match engine::commits_of(step) {
                     Ok(operations) => operations,
                     Err(error) => {
+                        // The refusal is the run's record as much as the caller's
+                        // answer: a note that reached nobody is exactly what a
+                        // manager needs to find in the journal afterwards, and
+                        // with nothing driving the run this is the only writer
+                        // that can put it there.
+                        engine::record_rejection(
+                            paths,
+                            &mut journal,
+                            envelope.author,
+                            command,
+                            &error,
+                        )?;
                         lock.release();
                         return Err(error);
                     }
                 };
-                edits::advance(&mut frontier, &operations);
+                pending.push(operations);
+            }
+            // And only then journal, so a refusal in either phase leaves the
+            // record exactly as it was.
+            for (command, operations) in envelope.commands.iter().zip(&pending) {
                 compiled.extend(operations.iter().cloned());
                 journal.emit(
-                    journal::PipelineKind::EditCommitted,
+                    engine::journalled_as(operations),
                     journal::labels(&paths.run, None),
                     journal::payload(&[
                         ("author", json!(envelope.author)),
                         ("command", json!(command)),
                         ("operations", json!(operations)),
+                        (
+                            "operation_kinds",
+                            json!(engine::operation_kinds(operations)),
+                        ),
                     ]),
                 )?;
-                engine::record_operation_facts(paths, &mut journal, envelope.author, &operations)?;
+                engine::record_operation_facts(paths, &mut journal, envelope.author, operations)?;
                 // The planner is told what the monitor did here as well as in
                 // the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the
@@ -2698,18 +2741,21 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 /// Compile one command in the process that is applying it, delivering what only a
 /// delivery can answer.
 ///
-/// The reconciler's [`compile_and_deliver`](crate::engine) for the other side of
-/// the same fork: when nothing is driving a run, `reply` becomes its single writer
-/// and has to do everything the loop would have done — including handing a note to
-/// the node's conversation, and recording the refusal when it will never be read.
-fn apply_here(
+/// The reconciler's [`validate_command`](crate::engine) for the other side of the
+/// same fork: when nothing is driving a run, `reply` becomes its single writer and
+/// has to judge everything the loop would have judged — including whether the note
+/// is one this run can compose and carry at all.
+///
+/// It offers nothing to any conversation. What a note commits is the delivery's
+/// answer, and the delivery is [`engine::commits_of`], which this pass runs only
+/// after every command of the envelope has come through here.
+fn validate_here(
     paths: &RunPaths,
-    journal: &mut Journal,
     graph: &mut crate::graph::Graph,
     frontier: &Frontier,
     author: Author,
     command: &Command,
-) -> Result<Vec<edits::Operation>> {
+) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
     let Command::Note {
         id,
@@ -2720,30 +2766,24 @@ fn apply_here(
         persist,
     } = command
     else {
-        return Ok(operations);
+        return Ok(engine::Staged::Compiled(operations));
     };
-    let offered = engine::Offered {
+    engine::validate_manager_note(&engine::Offered {
         id,
         addressee: *addressee,
         text,
         criterion: criterion.as_ref(),
         reach: crate::note::Reach::of(id, *deliver, *persist)?,
-        // Nothing is driving the run, so the frontier this was validated against
-        // is the whole of what says whether the node has a dispatch left to carry
-        // the note to.
+        // Nothing is driving the run, so the frontier this was validated
+        // against is the whole of what says whether the node has a dispatch
+        // left to carry the note to.
         dispatchable: frontier.recorded.get(id) != Some(&crate::graph::NodeStatus::Done),
-    };
-    match engine::deliver_manager_note(paths, &offered, None) {
-        Ok(operations) => Ok(operations),
-        Err(error) => {
-            // The refusal is the run's record as much as the caller's answer: a
-            // note that reached nobody is exactly what a manager needs to find in
-            // the journal afterwards, and with nothing driving the run this is the
-            // only writer that can put it there.
-            engine::record_rejection(paths, journal, author, command, &error)?;
-            Err(error)
-        }
-    }
+        // And nothing is in flight either, so the only conversation there can be
+        // is the member the node's last dispatch reported. Resolved here rather
+        // than at the delivery below, so that a node this run has no member for
+        // is answered before anything is offered to anybody.
+        address: engine::last_turn_address(paths, id),
+    })
 }
 
 fn reply_timeout_seconds() -> u64 {

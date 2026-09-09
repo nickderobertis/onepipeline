@@ -264,6 +264,111 @@ pub enum Operation {
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
+impl Operation {
+    /// The wire tag this operation is recorded under.
+    ///
+    /// Read back out of the operation's own serialization rather than restated
+    /// as a table of literals beside it: the enum is `#[serde(tag = "kind")]`, so
+    /// the tag a record carries and the tag this answers are one derivation and
+    /// cannot drift apart when a variant is renamed. The fallback is unreachable
+    /// for a fieldless-tagged enum and carries the variant's own name rather than
+    /// panicking, because losing a journal record is a worse answer than an
+    /// unfamiliar tag in one.
+    #[must_use]
+    pub fn kind(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.get("kind").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| format!("{self:?}"))
+    }
+
+    /// Whether committing this operation is what *makes* the change it records.
+    ///
+    /// The question `edit-committed` exists to answer. Deliberately **not** "does
+    /// it move the desired graph": it is about everything a reader folding this
+    /// operation list moves, graph or not, because a park, an attestation and a
+    /// settlement-from-evidence each move a node's recorded state and are read
+    /// back off this record by name.
+    ///
+    /// The two that answer `false` are the two **reports** — a `finding-raised`
+    /// went to the planner's surface queue and a `completion-request` is
+    /// journalled as its own `completion-requested` — and nothing here or
+    /// downstream reads either off an operation list, which is what makes moving
+    /// them cost a preceding reader nothing. Entry 65 of
+    /// `docs/contract-divergences.md` is where that classification is proposed.
+    ///
+    /// Exhaustive on purpose: a variant added later has to decide this rather
+    /// than inherit an answer.
+    #[must_use]
+    pub fn commits_a_change(&self) -> bool {
+        match self {
+            Self::FindingRaised { .. } | Self::CompletionRequested { .. } => false,
+            Self::NodeAdded { .. }
+            | Self::EdgeAdded { .. }
+            | Self::EdgeRemoved { .. }
+            | Self::NodeDropped { .. }
+            | Self::Reparent { .. }
+            | Self::RetryRequested { .. }
+            | Self::NodeParked { .. }
+            | Self::NodeRequeued { .. }
+            | Self::HumanAttested { .. }
+            | Self::SettledFromEvidence { .. }
+            | Self::LandingFromEvidence { .. }
+            | Self::TaskAmended { .. }
+            // llmlint: ignore-block[names_match_behavior] both are `true` for
+            // every disposition on purpose, though only `ContextAdded`'s
+            // `Deferred` and `NoteDelivered`'s `Carried` move anything a fold
+            // moves. The test the two `false` answers above pass is that nothing
+            // reads them off `edit-committed`; these fail it — `recorded` in
+            // `tests/note/main.rs` reads a delivered note off that kind and
+            // predates the split — so moving them is the regression the split was
+            // written to avoid. Splitting them *by disposition* is worse again: one
+            // op word would land under two kinds depending on what a conversation
+            // answered, and no reader could key on `note` at all. Which operations
+            // answer this is entry 65 of `docs/contract-divergences.md`, still open
+            // and the planner's to resolve.
+            | Self::ContextAdded { .. }
+            | Self::NoteDelivered { .. } => true,
+            // llmlint: ignore-end[names_match_behavior]
+        }
+    }
+}
+
+/// Every kind [`Operation`] can be recorded under, in declaration order.
+///
+/// The list entry 65 of `docs/contract-divergences.md` names, so a variant added
+/// or reclassified without reconciling that entry fails rather than leaving the
+/// document describing a build that no longer exists. It lives beside the enum
+/// because that is where a reader looks for the set, and is held to it by
+/// `every_operation_kind_is_one_the_enum_carries`. Nothing in the crate's own
+/// paths reads it: the classification is [`Operation::commits_a_change`], which is
+/// exhaustive on its own.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn every_operation_kind() -> Vec<String> {
+    [
+        "finding-raised",
+        "completion-requested",
+        "node-added",
+        "edge-added",
+        "edge-removed",
+        "node-dropped",
+        "reparent",
+        "retry-requested",
+        "node-parked",
+        "node-requeued",
+        "human-attested",
+        "settled-from-evidence",
+        "landing-from-evidence",
+        "task-amended",
+        "context-added",
+        "note-delivered",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 /// How a planner note actually reached its node.
 ///
 /// The fact `edit-committed` records, and what tells replay whether the note is
@@ -1945,6 +2050,70 @@ mod tests {
 
     use super::*;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
+
+    /// [`every_operation_kind`] is every kind the enum carries, and no others.
+    ///
+    /// Counted against the **source file's** own variant declarations rather than
+    /// against a second list, because there is no way to enumerate an enum's
+    /// variants at run time: a variant added to `Operation` without a line in
+    /// that list fails here, which is what makes the classification entry 65
+    /// states complete rather than a sample.
+    #[test]
+    fn every_operation_kind_is_one_the_enum_carries() {
+        let source = include_str!("edits.rs");
+        let declared = source
+            .split("pub enum Operation {")
+            .nth(1)
+            .expect("the enum is declared here")
+            .split("\n}\n")
+            .next()
+            .expect("the declaration ends")
+            .lines()
+            // A variant is the only thing declared at four spaces and starting
+            // upper-case: the doc lines, the attributes and the fields are all
+            // either indented further or start with `/`, `#` or lower-case.
+            .filter(|line| {
+                line.starts_with("    ")
+                    && !line.starts_with("     ")
+                    && line
+                        .trim_start()
+                        .starts_with(|c: char| c.is_ascii_uppercase())
+            })
+            .count();
+        assert_eq!(
+            every_operation_kind().len(),
+            declared,
+            "`Operation` declares {declared} variants and `every_operation_kind` names {}",
+            every_operation_kind().len()
+        );
+
+        // And each named kind is one a variant of the enum really serializes to,
+        // so a rename fails here rather than leaving the list spelling a tag
+        // nothing writes.
+        let written: BTreeSet<String> = every_operation_kind().into_iter().collect();
+        assert_eq!(written.len(), declared, "the list repeats a kind");
+        for kind in &written {
+            assert!(
+                variant_of(source, kind),
+                "no variant of `Operation` serializes to '{kind}'"
+            );
+        }
+    }
+
+    /// Whether the enum declares a variant whose kebab-case tag is `kind`.
+    fn variant_of(source: &str, kind: &str) -> bool {
+        let camel: String = kind
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+        source.contains(&format!("    {camel} {{"))
+    }
 
     /// The reconciler as the planner reaches it.
     ///

@@ -1530,7 +1530,14 @@ pub(crate) fn usable(value: &str) -> Option<String> {
 /// sibling's to decide, and a literal here would keep matching after a rename
 /// and silently stop folding anything.
 pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
-    *kind == kind_of(onevcs::EventKind::SessionOpened)
+    *kind == session_opened_kind()
+}
+
+/// How `onevcs` spells a session opening, for a caller that has to *write* one
+/// rather than recognise it. One derivation with [`is_session_opened`], so a
+/// test that builds the record and the fold that reads it cannot disagree.
+pub(crate) fn session_opened_kind() -> crate::event::EventKind {
+    kind_of(onevcs::EventKind::SessionOpened)
 }
 
 /// Whether an envelope is a publication reaching its base, in `onevcs`'s own

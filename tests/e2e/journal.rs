@@ -40,12 +40,31 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
     let events = world.journal("sequenced");
     assert!(events.len() > 4, "{events:?}");
 
-    // Every envelope is version 1, timestamped in the one format, and says which
-    // run it belongs to. A relayed one says so under this crate's own namespace:
-    // the sibling's `run_id` is its *graph* run, a different identity that the
-    // merged store keeps rather than overwrites.
+    // Every envelope carries a version this build reads, is timestamped in the one
+    // format, and says which run it belongs to. **This crate's own** records carry
+    // the version it writes; a relayed one keeps its producer's, because the
+    // version says which build wrote the envelope and a sibling's is that
+    // library's to declare. A relayed one also says which run it belongs to under
+    // this crate's own namespace: the sibling's `run_id` is its *graph* run, a
+    // different identity that the merged store keeps rather than overwrites.
     for event in &events {
-        assert_eq!(event["v"], 1, "{event}");
+        let version = event["v"].as_u64().expect("an envelope version") as u32;
+        assert!(
+            onepipeline::event::ENVELOPE_VERSIONS_READ.contains(&version),
+            "an envelope at a version this build does not read: {event}"
+        );
+        if event["source"] == "pipeline" {
+            assert_eq!(
+                version,
+                onepipeline::event::ENVELOPE_VERSION,
+                "this crate wrote a record of its own at another version: {event}"
+            );
+        } else {
+            assert_eq!(
+                version, 1,
+                "a relayed envelope was restamped with this crate's own version: {event}"
+            );
+        }
         let ts = event["ts"].as_str().expect("a timestamp");
         assert_eq!(ts.len(), 24, "{ts} is not RFC 3339 millisecond UTC");
         assert!(ts.ends_with('Z'), "{ts} is not UTC");
