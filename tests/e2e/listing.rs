@@ -23,6 +23,16 @@
 // compiled binary; `harness.rs` carries the same suppression and the full rationale. Every
 // claim below is read off that binary's own stdout.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: four of the five journeys here drive one run each and the module's cheap half
+// runs in about 16 seconds, and the fifth — the scale journey — takes about 210 s and
+// writes 10.7 GiB, because a bound about a host-sized runs root cannot be stated over a
+// root that is not one. It sits in a binary that already holds three deliberately
+// minute-long journeys in `loopcost.rs` and a whole module of them in `landing.rs`, on the
+// same grounds those carry: what this exercises is `views`, `summary` and `ledger`, which
+// any change under `src/` can move, so a project edged narrower than the crate would drop
+// it out of `nx affected` for the very changes it exists to catch.
+
 use serde_json::{json, Value};
 
 use crate::harness::{agent, plan_of, World};
@@ -337,4 +347,291 @@ fn mine_renders_the_runs_this_session_owns_and_says_whose_the_rest_are() {
         "--mine rendered a run this session does not own: {}",
         owned.stdout
     );
+}
+
+/// How many run roots the scale journey assembles.
+///
+/// Four hundred, because that is the shape the bound is about: a supervisory
+/// host accumulates run roots and never sheds them, and the one measured when
+/// this was written held 491.
+const SCALED_RUNS: usize = 400;
+
+/// How many bytes of journal those roots hold together at the first measurement.
+///
+/// One gibibyte, spread evenly. The host this was written on held 11 GB across
+/// 491 roots; a gibibyte is the smallest total at which a fold is unmistakably
+/// the thing being paid for rather than process start.
+const SCALED_JOURNAL_BYTES: u64 = 1 << 30;
+
+/// What the second measurement multiplies that total by, with the run count held
+/// fixed.
+///
+/// The two measurements together are the claim: the first says the listing is
+/// fast, and the second says what it is fast *because of* — a tenfold change in
+/// the one input a fold is linear in barely moves it.
+const JOURNAL_MULTIPLE: u64 = 10;
+
+/// How many of those runs the reading session owns.
+const SCALED_OWNED: usize = 3;
+
+/// What each of the three renders may take over the unmultiplied root.
+///
+/// **A bound rather than a ratio**, because it is what a fold cannot meet: the
+/// same question over a comparable root took 74.1 s on the host this was measured
+/// on. It is generous against what the listing actually costs, deliberately — a
+/// threshold on wall clock is a fact about the host's load as much as about the
+/// code, and this one is set where only a return to folding could cross it.
+const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What the same render may take once those journals hold ten times as much.
+///
+/// Twice its own median over the unmultiplied root. Whatever the host was doing
+/// is in both figures, so this compares the listing with itself rather than with
+/// a clock.
+const GROWTH_BOUND: u32 = 2;
+
+/// How many renders each median is taken over, after one warm-up.
+const TIMED: usize = 5;
+
+/// One run root cloned from a real one, under a new id and a new owner.
+///
+/// Everything but the journal is the template's own file, because everything but
+/// the journal is what a listing reads: the launch record and the summary
+/// document are this build's own, written by a real run driven through the
+/// binary, and only the two facts that must name *this* run rather than the one
+/// it was copied from are rewritten.
+// llmlint: ignore-block[tests_mirror_real_usage] four hundred run roots is a *host*, not a
+// command: no verb makes one and the only honest way to hold the shape is to assemble it.
+// What is assembled is this build's own output — one real run driven through the compiled
+// binary, cloned — rather than documents invented here.
+fn cloned_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &str) -> RunPaths {
+    let paths = RunPaths::under(root, id);
+    std::fs::create_dir_all(&paths.dir).expect("a run root");
+    let journal = template
+        .journal()
+        .file_name()
+        .expect("the journal has a name")
+        .to_owned();
+    for entry in std::fs::read_dir(&template.dir).expect("the template run") {
+        let entry = entry.expect("an entry of the template run");
+        if !entry.file_type().expect("its kind").is_file() || entry.file_name() == journal {
+            continue;
+        }
+        std::fs::copy(entry.path(), paths.dir.join(entry.file_name())).expect("a copied file");
+    }
+    for path in [paths.launch(), paths.summary()] {
+        let mut held: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("a copied document"))
+                .expect("a document");
+        held["run_id"] = json!(id);
+        held["session"] = json!(session);
+        // A pid means nothing across machines, so a run recorded elsewhere reads
+        // as the live work it is — which is the **expensive** row to render, the
+        // one that goes on to ask whether anything is watching the run.
+        held["host"] = json!("another-host");
+        std::fs::write(&path, held.to_string()).expect("the document");
+    }
+    paths
+}
+
+/// Grow one run's journal to `bytes` and stamp its document for the store that
+/// leaves.
+///
+/// The filler is the template run's **own records**, repeated: real journal
+/// lines, so a fold of one of these would do the work a fold of a real run does.
+/// The stamp is written after the bytes, so what the document claims is what the
+/// file holds — which is what makes it *current*, and the state the bound is
+/// about.
+fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
+    use std::io::Write;
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths.journal())
+            .expect("the run's journal"),
+    );
+    let mut held = std::fs::metadata(paths.journal()).map_or(0, |about| about.len());
+    while held < bytes {
+        file.write_all(filler).expect("journal records");
+        held += filler.len() as u64;
+    }
+    file.flush().expect("journal records");
+    // Forced to the device before this returns, rather than left as dirty pages
+    // for the kernel to write back **while the next measurement runs**. Ten
+    // gibibytes of writeback competing with the reads being timed is the host's
+    // clock, not the listing's, and it moved a 27 ms median to 88 ms without the
+    // binary doing anything differently.
+    file.get_ref().sync_all().expect("journal records on disk");
+    drop(file);
+
+    let about = std::fs::metadata(paths.journal()).expect("the journal");
+    let modified = about
+        .modified()
+        .expect("a modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("an instant past the epoch")
+        .as_millis();
+    let mut summary = document(paths);
+    summary["journal_len"] = json!(about.len());
+    summary["journal_mtime_ms"] = json!(u64::try_from(modified).expect("a millisecond count"));
+    put_back(paths, &summary);
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// One invocation's stdout, taken **without** the harness's own look at the
+/// world.
+///
+/// `World::run` captures a dump of every run root beside the output, which is
+/// exactly the read this journey is about the binary no longer making — over four
+/// hundred roots it is the harness that would be reading the gigabyte, and every
+/// figure below would be its.
+fn rendered(world: &World, argv: &[&str]) -> String {
+    let out = world.cmd(argv).output().expect("the binary runs");
+    assert!(
+        out.status.success(),
+        "`onepipeline {}` exited {:?}: {}",
+        argv.join(" "),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The median of [`TIMED`] renders of one invocation, after one warm-up.
+fn median(world: &World, argv: &[&str]) -> std::time::Duration {
+    let mut took: Vec<std::time::Duration> = Vec::with_capacity(TIMED);
+    for nth in 0..=TIMED {
+        let began = std::time::Instant::now();
+        let out = world.cmd(argv).output().expect("the binary runs");
+        let elapsed = began.elapsed();
+        assert!(
+            out.status.success(),
+            "`onepipeline {}` exited {:?}: {}",
+            argv.join(" "),
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The first is the warm-up: what it measures is mostly a debug binary
+        // nobody has paged in.
+        if nth > 0 {
+            took.push(elapsed);
+        }
+    }
+    took.sort_unstable();
+    println!("  {:<16} {took:?}", argv.join(" "));
+    took[TIMED / 2]
+}
+
+/// Over a host-sized runs root, each of the three renders in seconds — and
+/// tenfold the journal bytes barely moves any of them.
+///
+/// The two halves are one claim. The **bound** says the listing is fast over a
+/// root a fold could not survive; the **ratio** says why, by moving the one input
+/// a fold is linear in and watching the clock stay where it was. Neither is a
+/// figure about this host: 74.1 s was measured for `runs --mine` over a
+/// comparable root before this, and the bound is set an order of magnitude below
+/// that so only a return to folding can cross it.
+#[test]
+fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it() {
+    let world = World::new("listing-scale");
+    // A run whose graph did not complete, so every cloned row is reported as
+    // being driven and goes on to ask whether anything is watching it — the most
+    // expensive row this listing renders, four hundred times over.
+    world.script("build.fail", "1");
+    let template = paths_of(
+        &world,
+        &settled(&world, "template", vec![agent("build", &[])]),
+    );
+    let filler = std::fs::read(template.journal()).expect("the template's own records");
+    assert!(!filler.is_empty(), "the template run recorded nothing");
+
+    let per_run = SCALED_JOURNAL_BYTES / SCALED_RUNS as u64;
+    let stranger = "another-planner";
+    let mut assembled: Vec<RunPaths> = Vec::new();
+    for nth in 0..SCALED_RUNS {
+        let owner = if nth < SCALED_OWNED {
+            world.session.as_str()
+        } else {
+            stranger
+        };
+        let paths = cloned_run(&template, &world.runs, &format!("scaled-{nth:04}"), owner);
+        journal_of(&paths, &filler, per_run);
+        assembled.push(paths);
+    }
+    // llmlint: ignore[tests_mirror_real_usage] the template is not one of the four hundred
+    // this measures, and leaving it in would make the owned count off by one.
+    std::fs::remove_dir_all(&template.dir).expect("the template run root");
+
+    let held = |assembled: &[RunPaths]| -> u64 {
+        assembled
+            .iter()
+            .map(|paths| std::fs::metadata(paths.journal()).map_or(0, |about| about.len()))
+            .sum()
+    };
+    let bytes = held(&assembled);
+    assert!(
+        bytes >= SCALED_JOURNAL_BYTES,
+        "the root holds {bytes} journal byte(s), short of the {SCALED_JOURNAL_BYTES} this \
+         measures over"
+    );
+
+    // Exactly the runs this session owns, out of the four hundred on the root.
+    assert_eq!(
+        rendered(&world, &["runs", "--mine"]).lines().count(),
+        SCALED_OWNED,
+        "--mine over {SCALED_RUNS} run roots rendered something other than the {SCALED_OWNED} \
+         this session owns"
+    );
+    assert_eq!(rendered(&world, &["runs"]).lines().count(), SCALED_RUNS);
+
+    let mut before = Vec::new();
+    for argv in LISTINGS {
+        let took = median(&world, argv);
+        assert!(
+            took < LISTING_BOUND,
+            "`onepipeline {}` took {took:?} over {SCALED_RUNS} run roots holding {bytes} \
+             journal byte(s), past the {LISTING_BOUND:?} a listing is held to",
+            argv.join(" ")
+        );
+        before.push(took);
+    }
+
+    // The same root, with the one input a fold is linear in multiplied by ten and
+    // the run count held exactly where it was.
+    for paths in &assembled {
+        // Ten times **this journal's own** length rather than ten times the
+        // even share, so the total that comes out is ten times the total that
+        // went in rather than ten times what was aimed at.
+        let held = std::fs::metadata(paths.journal())
+            .expect("the journal")
+            .len();
+        journal_of(paths, &filler, held * JOURNAL_MULTIPLE);
+    }
+    let grown = held(&assembled);
+    assert!(
+        grown >= bytes * JOURNAL_MULTIPLE,
+        "the grown root holds {grown} journal byte(s), short of {JOURNAL_MULTIPLE} times the \
+         {bytes} it held"
+    );
+    assert_eq!(
+        rendered(&world, &["runs"]).lines().count(),
+        SCALED_RUNS,
+        "the run count did not stay where it was"
+    );
+
+    for (argv, was) in LISTINGS.iter().zip(before) {
+        let took = median(&world, argv);
+        assert!(
+            took <= was * GROWTH_BOUND,
+            "`onepipeline {}` took {took:?} over {grown} journal byte(s) against {was:?} over \
+             {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
+             bounded read is held to",
+            argv.join(" ")
+        );
+        println!(
+            "  {:<12} {was:?} over {bytes} journal byte(s), {took:?} over {grown}",
+            argv.join(" ")
+        );
+    }
 }

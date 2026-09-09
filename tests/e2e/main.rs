@@ -53,6 +53,13 @@ mod journal;
 // changes it exists to catch.
 mod landing;
 mod lifecycle;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
+// `tests/e2e/listing.rs`, and is carried here too because this declaration is the other
+// site the rule reads: one journey in the module assembles a host-sized runs root — four
+// hundred run roots holding a gibibyte of journals, then ten — because the bound it states
+// is about exactly that shape and cannot be stated over a smaller one. What it exercises is
+// `views`, `summary` and `ledger`, so a project edged narrower than the crate would drop it
+// out of `nx affected` for the very changes it exists to catch.
 mod listing;
 mod live_edit;
 mod loopcost;
