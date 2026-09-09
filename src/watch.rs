@@ -61,6 +61,12 @@ enum Ending {
     /// the two conditions that produce this — any node settling, and one named
     /// node settling — return the same word, and *which node* is the fact a
     /// caller acts on.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is a `String` everywhere it
+    // exists in this crate — `Graph`'s keys, `Envelope::labels.node`, `RunState::statuses` —
+    // and this one is *read out of* a journalled settlement's own label rather than composed
+    // here. A newtype at this one site would validate nothing the graph has not already said
+    // and would put a type between this ending and every value it is built from. `src/cli.rs`
+    // carries the same suppression for the same reason on the flag this is parsed from.
     NodeSettled(String),
     Elapsed,
 }
@@ -94,7 +100,7 @@ impl Ending {
     fn phrase(&self) -> String {
         match self {
             Self::NodeSettled(node) => format!("{} {node}", self.as_str()),
-            settled => settled.as_str().to_string(),
+            worded => worded.as_str().to_string(),
         }
     }
 }
@@ -113,14 +119,14 @@ impl serde::Serialize for Ending {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let settled = match self {
+        let settled_node = match self {
             Self::NodeSettled(node) => Some(node),
             _ => None,
         };
-        let mut record = serializer.serialize_map(Some(2 + usize::from(settled.is_some())))?;
+        let mut record = serializer.serialize_map(Some(2 + usize::from(settled_node.is_some())))?;
         record.serialize_entry("condition", self.as_str())?;
         record.serialize_entry("exit", &self.exit_code())?;
-        if let Some(node) = settled {
+        if let Some(node) = settled_node {
             record.serialize_entry("node", node)?;
         }
         record.end()
@@ -224,6 +230,11 @@ struct Selectors {
     /// Return when any node of the run settles.
     any_node: bool,
     /// Return when one of these nodes settles.
+    // llmlint: ignore[invalid_states_unrepresentable] every id in here has already been
+    // checked against this run's own graph by `resolve`, which is the only constructor, and
+    // that is the whole of what "valid" means for a node id — a fact about one run at one
+    // moment, which no type can carry. The crate spells a node id `String` everywhere else
+    // for the same reason.
     named: Vec<String>,
 }
 

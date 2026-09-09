@@ -1633,7 +1633,7 @@ fn naming_a_condition_every_wait_already_returns_on_returns_what_an_unnamed_one_
         world.run(&["status", run]).stdout.contains("DRIVER DEAD")
     });
 
-    for named in [
+    for invocation in [
         vec!["watch", run, "--timeout", "0", "--tick-interval", "0"],
         vec![
             "watch",
@@ -1646,7 +1646,7 @@ fn naming_a_condition_every_wait_already_returns_on_returns_what_an_unnamed_one_
             "0",
         ],
     ] {
-        let watched = world.run(&named);
+        let watched = world.run(&invocation);
         agreed(&watched, "nothing-driving", NOTHING_DRIVING);
     }
 }
