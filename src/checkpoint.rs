@@ -558,7 +558,12 @@ impl Projected {
     }
 }
 
-/// Fold a run of records into a state, in the order the merge puts them.
+/// Fold records **onto a state that already accounts for everything in front of
+/// them**, which is what lets one fold be split at the marker and resumed.
+///
+/// The sort belongs here rather than at the read: the file's order is not the
+/// fold's, and a record this build cannot read drops out of the run entirely —
+/// it folds to nothing, and placing it would need a timestamp it does not have.
 fn fold_in_merge_order(state: &mut RunState, records: &[(Option<Envelope>, u64)]) {
     let mut ordered: Vec<Envelope> = records
         .iter()
@@ -643,7 +648,7 @@ fn length_of(journal: &std::path::Path) -> u64 {
 /// uncovered is what lets an ordinary one sort in front of something without
 /// making the marker unusable.
 fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
-    let cap = held_open(grown);
+    let cap = before_the_open_instant(grown);
     // One more than the boundaries there are, so a span ending at the last of
     // them closes inside the array rather than off the end of it.
     let mut ruled_out = vec![0i64; cap + 2];
@@ -715,7 +720,7 @@ fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
 /// stamped out of order does not hold an earlier instant open too — those records
 /// are placed already, and taking them with the tail would move a boundary
 /// nothing arriving next can reach.
-fn held_open(grown: &[(Option<Envelope>, u64)]) -> usize {
+fn before_the_open_instant(grown: &[(Option<Envelope>, u64)]) -> usize {
     let Some(last) = grown
         .iter()
         .rev()
@@ -933,7 +938,6 @@ mod tests {
         crate::ledger::write_json(&paths.checkpoint(), document).expect("written");
     }
 
-    /// The stored document, as a value a journey can edit.
     fn document(paths: &RunPaths) -> Value {
         crate::ledger::read_json_opt(&paths.checkpoint()).expect("the checkpoint this run carries")
     }
