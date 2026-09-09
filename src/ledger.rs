@@ -1432,11 +1432,12 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
                 Some(held)
                     if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
                 {
-                    // Two contenders can read the same dead holder, and both
-                    // would write over it — so the write is not what decides
-                    // this. The record is **read back**, and only the process the
-                    // record then names has it; the other reads the winner's and
-                    // is refused, exactly as it would have been by a live holder.
+                    // Read back rather than written and assumed: a contender
+                    // that arrives after the winner reads the winner's record and
+                    // is refused, exactly as a live holder would have refused it.
+                    // Two that write at the same moment can each read their own
+                    // back — this narrows that window rather than closing it, and
+                    // the doc above says what rests on it and what does not.
                     write_atomic(path, body.as_bytes())?;
                     match read_json_opt::<LockRecord>(path) {
                         Some(now) if now.pid == record.pid && now.host == record.host => Ok(()),
@@ -1666,11 +1667,12 @@ fn not_taken(run: &str, because: &str) -> Error {
 /// **Every uncertainty here counts as an entry ahead**, because the only thing
 /// this answers is whether this process may go in: a directory it cannot read, an
 /// entry it cannot read, and a name it cannot place in the order are each a claim
-/// it cannot rule out — and a later build's naming would be exactly that. So
-/// unreadable is `Err`, which the caller reports as a gate it did not take, and a
-/// name from outside this build's own shape sorts ahead of everything and is
-/// waited on until its holder can be shown to be gone, which nothing about it
-/// can — so it ends in a refusal rather than in a second party inside the gate.
+/// it cannot rule out — and a later build's naming would be exactly that. So an
+/// unreadable listing is `Err`, which the caller reports as a gate it did not
+/// take, and a name from outside this build's shape is answered as ahead whatever
+/// it would have sorted as. Nothing can show such a holder is gone, so it is
+/// waited on and the wait ends in a refusal rather than in a second party inside
+/// the gate.
 fn ahead_of(dir: &Path, ours: &Path) -> Result<Option<PathBuf>> {
     let ours = ours.file_name().unwrap_or_default().to_os_string();
     let listing = fs::read_dir(dir).map_err(|e| Error::Ledger {
@@ -1685,6 +1687,13 @@ fn ahead_of(dir: &Path, ours: &Path) -> Result<Option<PathBuf>> {
                 source: e,
             })?
             .file_name();
+        // A name outside this build's own shape is answered **before** the order
+        // is consulted, because it has no place in that order: where it sorts is
+        // an accident of its spelling, and reading it as behind this entry would
+        // be ruling out a claim on the strength of that accident.
+        if pid_of_entry(Path::new(&name)).is_none() {
+            return Ok(Some(dir.join(name)));
+        }
         if lowest.as_ref().is_none_or(|low| name < *low) {
             lowest = Some(name);
         }

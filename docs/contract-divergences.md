@@ -4274,6 +4274,10 @@ three instants recorded, and held against a record from before the field by
 
 ## 67. A queued reply exits non-zero, which the contract fixes as `1` — OPEN
 
+<!-- llmlint: ignore[cli_output_contract] this entry *is* the proposal to give an accepted
+envelope and an applied one one status: which of the two it was is on stdout, in the
+receipt entry 64 states, and the status answers acceptance because a non-zero one from this
+verb is a rejection to correct. -->
 **Proposal (for the planner who owns the contract): amend the channel
 paragraph's "reply exit 0 = applied, 1 = accepted-not-yet-reconciled, 2 =
 refused/malformed" to `0 = applied or accepted-and-queued, 2 =
