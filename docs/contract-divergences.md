@@ -3336,8 +3336,8 @@ the frontier and not one the planner made.
 ## 58. Watching a run is the one supervisory duty with no verb behind it — OPEN
 
 **Proposal (for the contract this repository implements): add `onepipeline watch
-RUN [--filter NAME|SPEC] [--all] [--timeout SECONDS] [--tick-interval SECONDS]
-[--cursor CURSOR] [--until surface|settled]` to the views line, with the two exit
+RUN [--filter NAME|SPEC] [--all] [--timeout SECONDS|none] [--tick-interval SECONDS]
+[--cursor CURSOR] [--until CONDITION]...` to the views line, with the three exit
 codes it needs beside the three the contract already assigns.**
 
 `docs/contract.md` fixes the read surface as `Views (CLI): runs, status, host,
@@ -3364,14 +3364,21 @@ and the profile selection `monitor` takes — the same `ReadArgs`, so a profile
 this run does not have refuses the command before anything blocks — and four
 more:
 
-- `--timeout SECONDS` (default 300) bounds the wait. `0` reads once and returns.
+- `--timeout SECONDS|none` (default 300) bounds the wait. `0` reads once and
+  returns; `none` does not bound it at all, so a supervisor asking to be woken
+  when something happens is not woken by a clock instead. The two are spelled
+  differently on purpose: collapsing "no bound" onto `0` would have made one
+  value mean both the shortest wait there is and the longest.
 - `--tick-interval SECONDS` (default 30) is how long a silence may last before
   the stream says it is still there. `0` turns the heartbeat off. Deliberately
   **not** `--heartbeat-interval`: that flag is `start`'s and sets the pacemaker
   agent's cadence. The two are different clocks on different verbs, and clap
   refuses each on the other.
 - `--cursor CURSOR` resumes from what an earlier watch printed.
-- `--until surface|settled` names the one terminal condition that is a choice.
+- `--until CONDITION` names what the wait returns on, and is **repeatable**: the
+  wait returns on the first of them to fire and the return record says which one
+  did. The vocabulary is `settled`, `surface`, `nothing-driving`, `node-settled`
+  and `node=<ID>`, and it is validated when the command is invoked — see below.
 
 It writes one line per meaningful event and one heartbeat line per interval of
 silence. **Meaningful** is a closed set of this crate's own kinds —
@@ -3396,14 +3403,57 @@ nothing is happening* is what makes it unfilterable by a caller matching events.
 A zero is said out loud — "0 unread planner surfaces" — because "nothing is
 waiting" and "this line does not mention what is waiting" read identically.
 
-**Four terminal conditions, four exit statuses.** The run settled `complete` is
+**Five terminal conditions, five exit statuses.** The run settled `complete` is
 `0`. Nothing is driving the run is `3`, which is the code this crate already
 assigns to that condition and is reused rather than given a number of its own. A
-blocking surface waiting to be answered is `4` and the wait elapsing with the run
-still live is `5` — two new public constants in `src/error.rs`,
-`EXIT_SURFACE_WAITING` and `EXIT_WATCH_ELAPSED`, because `1` and `2` are each
+blocking surface waiting to be answered is `4`, the wait elapsing with the run
+still live is `5`, and a node the wait was told to return on settling is `6` —
+three new public constants in `src/error.rs`, `EXIT_SURFACE_WAITING`,
+`EXIT_WATCH_ELAPSED` and `EXIT_NODE_SETTLED`, because `1` and `2` are each
 spoken for by a different question and overloading either would put a caller back
 to reading prose.
+
+**The selector, and why the wait may now have no bound.** Everything above was
+built for a wait a caller *bounded*, and a bound is a number nobody knows: the run
+this entry comes from went forty-five minutes without a line while its driver died
+of a full disk, three dispatches stalled and two findings went unread, and what
+was watching it was a loop somebody wrote because the verb could not be told what
+to wait for. So `--until` is repeatable and its vocabulary is
+`settled`, `surface`, `nothing-driving`, `node-settled` and `node=<ID>`; the wait
+returns on the first of them to fire, and the return record's `condition`, `exit`
+and — for the two that name a settlement — `node` say which one did, so a caller
+branches on a status and a field rather than on prose. **The two values that
+predate this keep their meanings exactly**, and the default is still `surface`.
+
+`--until settled` and `--until nothing-driving` name conditions this verb returns
+on whether or not they were asked for, because a wait that could outlive the run
+it watches is the silence the verb exists to end — so what naming them *adds* is
+nothing, which is precisely why `--until settled` still means "report a blocking
+surface, and wait through it". `--until node-settled` fires on any node of the run
+settling, and `--until node=<ID>` on that node settling; both are read from this
+crate's own `node-settled` records ahead of the watch's cursor, and neither is put
+through the caller's profile — a profile shapes what this reader is *shown*, and
+what the wait returns on is a fact about the run rather than about the view over
+it.
+
+**Every condition is validated when the command is invoked**, before anything is
+streamed and before anything waits, because a wait with no bound turns a mistyped
+condition into a silence with no end. A condition this verb does not offer is
+refused by the parser naming the ones it does. A `node=<ID>` naming a node the
+run's graph does not hold is refused naming that node and the ids the graph holds.
+And a condition nothing in the run's remaining life could satisfy is refused
+naming what it would never fire on, rather than becoming a wait that never
+returns: that is a node which settled `done` with no settlement of it left for
+this watch to read, because `done` is the one status nothing dispatches out of
+again — every other settled status can settle once more, a failed or cancelled
+node by a retry, a parked one by a requeue, a waiting one by an attestation, a
+draft-complete one by the release it waits on. A condition the run has **already**
+satisfied is on the other side of that line and is answered rather than refused: a
+settlement at or past the cursor is read on the very first pass and returns
+immediately. A condition that cannot fire is refused whether or not some other
+condition would have ended the same watch anyway — it is a mistake in the command,
+and answering it with a different condition's status would hide it behind an exit
+code the caller reads as an answer.
 
 **Settled here is the graph being `complete`, not the loop having nothing left to
 do.** A run whose one node failed has converged, and returning `0` over it would
@@ -3414,8 +3464,8 @@ The two forms go out on the two descriptors an attached `start` already splits:
 the human lines on standard error, and one NDJSON record per line on standard
 output — `{"watch":"event","event":{…}}`,
 `{"watch":"heartbeat","run_id":…,"unread":…}`, and a final
-`{"watch":"return","run_id":…,"condition":…,"exit":…,"cursor":…,"unread":…}` — each
-flushed
+`{"watch":"return","run_id":…,"condition":…,"exit":…,"node":…,"cursor":…,"unread":…}`
+— each flushed
 as it is written, because a blocking verb whose consumer sees nothing until it
 exits is the silence this verb exists to end. The machine form carries the whole
 envelope rather than a rendering of it, as `next` already hands its caller the
@@ -3446,18 +3496,27 @@ waiting for a person. This crate's own `decision_outstanding` is wider — a rea
 watch over a run parked on an attestation runs to its timeout and returns `5`.
 That is honest rather than complete: the value is spelled `surface` and not
 `decision` precisely so it does not claim the wider fact. Whether the verb should
-grow a fifth terminal condition for a ready human action, or whether
+grow a terminal condition of its own for a ready human action, or whether
 `surface-waiting` should widen to mean every decision point, is the contract
-owner's call and not this repository's.
+owner's call and not this repository's. What the selector adds is narrower and
+does not settle it: a human action reaching `waiting` is journalled as that node
+settling, so `--until node=<ID>` naming it does wake a caller on the ready action —
+but only one that knew which node to name, which a supervisor asking "is anything
+waiting for a person?" does not.
 
 `monitor` and `status` are untouched: no flag, no output, and no exit code of
 either changed, so an existing caller of them is unaffected.
 `tests/e2e/watch.rs` drives the verb through the compiled binary — a line for a
 graph edit the monitor issued, for a node settling and for a surface being raised;
-a heartbeat carrying an unread count and its kinds; each of the four returns with
+a heartbeat carrying an unread count and its kinds; each of the five returns with
 its own status; a resumed watch that repeats nothing; and the machine form
 carrying the same events, counts, kinds and terminal condition as the human form
-beside it.
+beside it. The selector is driven there too: several `--until` values on one
+command line returning on the first to fire and naming which; a node condition the
+run has already satisfied returning immediately; the same condition past its
+cursor refused as one that could never fire; a node the graph does not hold refused
+naming what it does hold; a wait with no bound returning only when a node settled
+under it; and `--timeout 0` still reading once and returning.
 
 ## 59. A settlement projection cannot leave the destination's own `onetaskgraph.origin` alone — OPEN
 

@@ -133,6 +133,15 @@ pub const EXIT_SURFACE_WAITING: i32 = 4;
 /// watch printed.
 pub const EXIT_WATCH_ELAPSED: i32 = 5;
 
+/// A node the wait was told to return on settled.
+///
+/// `watch`'s fifth return, and a status of its own for the same reason the two
+/// above it are: a caller that asked to be woken when a node settles has to be
+/// able to tell that from the run settling, from a surface waiting and from the
+/// wait running out — and the record beside it names *which* node, so neither
+/// answer is read out of prose.
+pub const EXIT_NODE_SETTLED: i32 = 6;
+
 #[cfg(test)]
 mod tests {
     use super::*;
