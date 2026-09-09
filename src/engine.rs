@@ -2437,6 +2437,14 @@ pub(crate) struct Offered<'a> {
     /// offer this to" a refusal decided **before** any note of the envelope has
     /// been offered to anything, rather than one made after an earlier one has
     /// already been read.
+    ///
+    /// Resolving it early also means a member that first reports itself *between*
+    /// this pass and the delivery is not reached. That is the trade the atomicity
+    /// asks for and it costs almost nothing: for a node with a next dispatch the
+    /// note is carried to it rather than lost, and the only ask it turns into a
+    /// refusal is `deliver: live` with `persist: false` — which is a caller saying
+    /// "the running turn or nobody" about a node that had no running turn when the
+    /// envelope was judged.
     pub address: Option<TurnAddress>,
 }
 
