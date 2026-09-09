@@ -1498,12 +1498,16 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
 ///
 /// # Why it is entries rather than a lock file
 ///
-/// Every attempt writes an entry of **its own**, named so entries sort into the
-/// order they were made, and the lowest holds the gate. Nothing writes over or
-/// removes another party's claim, so nothing has to be broken: a dead holder's
-/// entry names that holder alone, any waiter may clear it, and two that clear the
-/// same one both find it gone. Exclusion is a comparison — exactly one entry is
-/// lowest.
+/// Every attempt writes an entry of **its own**, and the lowest entry holds the
+/// gate. Nothing writes over or removes another party's claim, so nothing has to
+/// be broken: a dead holder's entry names that holder alone, any waiter may clear
+/// it, and two that clear the same one both find it gone. Exclusion is a
+/// comparison, and what it rests on is that the names carry a **total order with
+/// no ties** — so exactly one entry is the lowest, whichever entries are in the
+/// gate at once. Which of two entries that is is not a claim about which was made
+/// first: two processes sample their own clocks, and nothing here says whose read
+/// came first. It does not need to. The gate is exclusion, not fairness, and an
+/// entry that loses a comparison waits and is let in next.
 ///
 /// A single lock file cannot promise that. Taking one nobody holds is exclusive,
 /// but *reclaiming* one whose holder is gone is a read, a write and a check with
@@ -1707,11 +1711,15 @@ fn ahead_of(dir: &Path, ours: &Path) -> Result<Option<PathBuf>> {
     Ok((lowest != ours).then(|| dir.join(lowest)))
 }
 
-/// One entry's name: the moment it was made, the process that made it, and which
-/// of that process's attempts it is.
+/// One entry's name: the moment its maker read its own clock, the process that
+/// made it, and which of that process's attempts it is.
 ///
-/// Sortable as text, so the order entries were made in is the order they read in
-/// — which is the whole of how the gate decides who is inside it.
+/// The three together are unique and compare as text, which is the whole of what
+/// the gate asks of them: a **total order with no ties**, so exactly one entry is
+/// the lowest. The first field makes that order roughly the order entries appeared
+/// in, which is worth having and is not what anything rests on — two processes
+/// read their own clocks, so a tie there is broken by the other two fields rather
+/// than by which read happened first.
 fn entry_named(at: u64, pid: u32, attempt: u64) -> String {
     format!("{at:013}-{pid:010}-{attempt:06}")
 }
