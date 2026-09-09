@@ -179,20 +179,26 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
-    /// A live edit was accepted and applied to the desired graph.
+    /// A live edit was accepted, and committing it is what made the change it
+    /// records.
     ///
     /// Emitted only where at least one operation the command compiled to
-    /// **changed** something a reader folds — `Operation::commits_a_change`
-    /// decides that, exhaustively over the operations — so this kind means the
-    /// graph moved and nothing else. The kinds of the
-    /// operations it committed ride on the record as `operation_kinds`, so a
-    /// reader keys on what happened without parsing the command that produced it.
+    /// **changed** something a reader folding this record moves —
+    /// `Operation::commits_a_change` decides that, exhaustively over the
+    /// operations. That is the desired graph *and* the node record derived beside
+    /// it, because those are one durable document to such a reader: an
+    /// attestation, a park and a settlement from evidence move a node's recorded
+    /// state without moving the graph, and are read back off this record by name.
+    /// "Something changed" is what a reader has always taken this kind to mean,
+    /// and it is exactly what it still means. The kinds of the operations it
+    /// committed ride on the record as `operation_kinds`, so a reader keys on
+    /// what happened without parsing the command that produced it.
     EditCommitted,
-    /// A command was accepted and committed no graph operation.
+    /// A command was accepted and committed nothing a reader folds.
     ///
     /// The other half of the split above: a `finding` and a `complete` are
-    /// accepted, are answered `applied`, and change no graph — each says its
-    /// piece under its own record, a planner surface and a
+    /// accepted, are answered `applied`, and change nothing — each is a
+    /// **report**, whose own record is a planner surface and a
     /// `completion-requested` respectively — so journalling them as committed
     /// edits made one kind carry two meanings.
     CommandAccepted,

@@ -1035,8 +1035,16 @@ pub(crate) enum CommandVerdict {
     Applied,
     /// It was validated and nothing was wrong with it. Something else in the
     /// envelope refused, and an envelope applies all of its commands or none, so
-    /// nothing of this one was applied — resending it on its own is what gets it
-    /// in.
+    /// **nothing of this one was committed** — no graph moved and no record was
+    /// written for it. Resending it on its own is what gets it in.
+    ///
+    /// Not the same as "nothing of it happened", for exactly one command: a
+    /// `note` the delivery phase had already offered before a later delivery
+    /// refused was read by the conversation it reached. A conversation has no
+    /// undo, so the word here is about what the run committed — which is nothing
+    /// — and a manager resending the envelope may find that note delivered twice.
+    /// Validation itself offers nothing to any conversation, so this can only
+    /// ever be a note in an envelope every command of which validated.
     Validated,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,

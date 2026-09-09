@@ -4057,9 +4057,10 @@ rather than drifting.
 ## 65. One journal kind means both "a command was accepted" and "the graph changed" — OPEN
 
 **Proposal (for the planner who owns the contract): add one kind to this
-library's closed set, `command-accepted`, for an accepted command that commits no
-graph operation; hold `edit-committed` to meaning that the graph changed; and add
-one field, `operation_kinds`, to both, carrying the kinds of the operations the
+library's closed set, `command-accepted`, for an accepted command that commits
+nothing a reader folds; hold `edit-committed` to meaning that committing the
+command is what made the change it records; and add one field,
+`operation_kinds`, to both, carrying the kinds of the operations the
 record committed.**
 
 The contract's merged-stream paragraph lists `edit-committed` and says of it only

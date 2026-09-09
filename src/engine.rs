@@ -2178,11 +2178,16 @@ fn commit_command(
 
 /// Which kind one accepted command is journalled under.
 ///
-/// `edit-committed` means the graph changed, and only that: a command every one
-/// of whose operations is a **report** — a `finding` that went to the planner's
-/// surface queue, a `complete` journalled as its own `completion-requested` —
-/// changed nothing a reader folds, and calling it a committed edit made one kind
-/// carry two meanings. A correct monitor raised that as a defect twice.
+/// `edit-committed` means committing this command is what made the change it
+/// records, and only that. A command every one of whose operations is a
+/// **report** — a `finding` that went to the planner's surface queue, a
+/// `complete` journalled as its own `completion-requested` — changed nothing a
+/// reader folds, and calling it a committed edit made one kind carry two
+/// meanings. A correct monitor raised that as a defect twice.
+///
+/// The question is [`edits::Operation::commits_a_change`]'s, and it is
+/// deliberately wider than the desired graph: an operation that moves only the
+/// node record beside it is one a reader of this record moves too.
 ///
 /// Nothing is lost by the split, in either direction: what a reader reads off
 /// this record is the operation list, and both kinds carry the same one.
