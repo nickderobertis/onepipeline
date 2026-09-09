@@ -112,20 +112,23 @@ pub enum Reached {
 }
 
 impl Reached {
-    /// Whether a conversation actually read the note.
+    /// Whether a conversation took the note — not necessarily that a party has
+    /// read it yet.
     ///
-    /// The four dispositions a conversation answers with all mean a party of it
-    /// took the note — [`Queued`](Self::Queued) included, because the turn that
-    /// opens next is that same conversation's and the acceptance is already
-    /// made. [`Carried`](Self::Carried) is the one that means nobody read it:
-    /// the note is owed to a dispatch that has not started.
+    /// The four dispositions a conversation answers with all mean it took the
+    /// note, and [`Queued`](Self::Queued) is the one where nobody has read it:
+    /// no turn was live, so the turn that opens next carries it. That is still a
+    /// taking, because the acceptance is that same conversation's and is already
+    /// made. [`Carried`](Self::Carried) is the one where no conversation took
+    /// it at all: the note is owed to a dispatch that has not started.
     ///
     /// The question an envelope's atomicity turns on, which is why it is named
     /// here rather than pattern-matched at the one place that asks it: a
     /// conversation has no undo, so a note this answers `true` for is the one
-    /// effect of an envelope that a later refusal cannot take back.
+    /// effect of an envelope that a later refusal cannot take back — whether the
+    /// party has read it yet or is about to.
     #[must_use]
-    pub fn a_conversation_read_it(&self) -> bool {
+    pub fn a_conversation_took_it(&self) -> bool {
         !matches!(self, Self::Carried)
     }
 

@@ -2156,16 +2156,16 @@ impl Unapplied for Staged {
 }
 
 impl Unapplied for Delivery {
-    /// A note a conversation **read** is the one command a refusal cannot take
+    /// A note a conversation **took** is the one command a refusal cannot take
     /// back, and it is the only thing this phase can leave behind: a command it
     /// never reached did nothing, a compiled command commits only in the journal
-    /// phase, and a note nothing took was carried rather than read.
+    /// phase, and a note no conversation took was carried instead.
     fn unapplied_as(&self) -> crate::channel::CommandVerdict {
         if self.committed().iter().any(|operation| {
             matches!(
                 operation,
                 edits::Operation::NoteDelivered { reached, .. }
-                    if reached.a_conversation_read_it()
+                    if reached.a_conversation_took_it()
             )
         }) {
             crate::channel::CommandVerdict::Delivered
