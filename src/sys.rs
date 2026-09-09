@@ -2044,58 +2044,69 @@ mod tests {
     /// rather than asking once — and gives up rather than waiting for ever, so a
     /// tree that never grew is a named failure instead of a suite that hangs.
     ///
-    /// A listing this host would not give is retried and then **reported**,
-    /// rather than read as "no such child yet": those are opposite facts, and
-    /// folding them together is what let a `Get-CimInstance` that failed for its
-    /// own reasons come back as a tree that never started.
+    /// **The wait happens inside one `powershell`, and that is the whole point of
+    /// this shape.** A Rust loop starting a fresh `powershell` every 100ms is a
+    /// load the fixture puts on the host it is measuring, and on a two-core
+    /// runner it starved the very tree it was waiting for. One process per level
+    /// leaves the patience below bounding the tree appearing rather than the
+    /// queue draining.
+    ///
+    /// A listing this host would not give is still **reported** rather than read
+    /// as "no such child yet": those are opposite facts. The shell separates them
+    /// with its own exit code — [`LISTING_REFUSED`] and [`NEVER_APPEARED`] — and
+    /// `ErrorActionPreference = 'Stop'` is what puts the non-terminating half of
+    /// `Get-CimInstance`'s failures into the `catch` rather than into an empty
+    /// result.
     #[cfg(windows)]
     fn awaited_child_of(parent: u32, image: &str) -> std::result::Result<u32, String> {
-        let deadline = std::time::Instant::now() + LEVEL_PATIENCE;
-        let mut unanswered: Option<String> = None;
-        loop {
-            match child_of(parent, image) {
-                Ok(Some(child)) => return Ok(child),
-                Ok(None) => {}
-                Err(why) => unanswered = Some(why),
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(unanswered.map_or_else(
-                    || {
-                        format!(
-                            "this host listed no {image} under {parent} within {}s, so that \
-                             level of the tree never started",
-                            LEVEL_PATIENCE.as_secs()
-                        )
-                    },
-                    |why| format!("this host would not list the processes under {parent}: {why}"),
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-
-    /// The pid of `parent`'s child running `image`, `Ok(None)` while it has
-    /// none, and `Err` when this host would not say.
-    #[cfg(windows)]
-    fn child_of(parent: u32, image: &str) -> std::result::Result<Option<u32>, String> {
+        let waiting_listing = format!(
+            r#"
+$ErrorActionPreference = 'Stop'
+$deadline = (Get-Date).AddSeconds({patience})
+while ($true) {{
+  try {{
+    $listed = @(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent} AND Name="{image}"')
+  }} catch {{
+    [Console]::Error.Write($_.Exception.Message)
+    exit {refused}
+  }}
+  if ($listed.Count -gt 0) {{
+    $listed | ForEach-Object {{ $_.ProcessId }}
+    exit 0
+  }}
+  if ((Get-Date) -ge $deadline) {{ exit {never} }}
+  Start-Sleep -Milliseconds 100
+}}
+"#,
+            patience = LEVEL_PATIENCE.as_secs(),
+            refused = LISTING_REFUSED,
+            never = NEVER_APPEARED,
+        );
         let listed = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent} AND \
-                     Name=\"{image}\"').ProcessId"
-                ),
-            ])
+            .args(["-NoProfile", "-Command", &waiting_listing])
             .output()
             .map_err(|error| format!("`powershell` could not be run: {error}"))?;
         let complained = String::from_utf8_lossy(&listed.stderr).trim().to_owned();
-        // Either half is this host declining to answer. `Get-CimInstance` reports
-        // most of its failures without failing the shell, so the status alone
-        // would read a refused listing as an empty one.
-        if !listed.status.success() || !complained.is_empty() {
-            return Err(format!("exited {} saying {complained:?}", listed.status));
+
+        // Anything on stderr is this host declining to answer, whatever the
+        // status says — the reason the old shape checked both, kept because a
+        // shell that complained and still exited 0 has not answered the question
+        // that was asked.
+        if listed.status.code() == Some(NEVER_APPEARED) && complained.is_empty() {
+            return Err(format!(
+                "this host listed no {image} under {parent} within {}s, so that level of the \
+                 tree never started",
+                LEVEL_PATIENCE.as_secs()
+            ));
         }
+        if listed.status.code() != Some(0) || !complained.is_empty() {
+            return Err(format!(
+                "this host would not list the processes under {parent}: exited {} saying \
+                 {complained:?}",
+                listed.status
+            ));
+        }
+
         // Read strictly, for the reason [`parse_table`] is: the command asked for
         // one column of pids, so a non-blank line that is not one means the answer
         // is not the one that was asked for — and reading that as "no such child"
@@ -2111,8 +2122,23 @@ mod tests {
                     .map_err(|_| format!("listed {line:?} where a pid was due"))?,
             );
         }
-        Ok(listed_pids.first().copied())
+        listed_pids.first().copied().ok_or_else(|| {
+            format!("this host reported a {image} under {parent} and then listed none of them")
+        })
     }
+
+    /// The exit status the listing above takes when this host refused to answer.
+    ///
+    /// Both are outside the range `powershell` itself uses for its own failures,
+    /// so a shell that died on its own is read as a refusal rather than as
+    /// either of these.
+    #[cfg(windows)]
+    const LISTING_REFUSED: i32 = 3;
+
+    /// And the one it takes when the host answered, every time, that the level
+    /// below has not started.
+    #[cfg(windows)]
+    const NEVER_APPEARED: i32 = 4;
 
     /// Whether every pid in `tree` is gone inside `patience`.
     #[cfg(windows)]

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "version": "1.2.3",
+  "outcome": "shipped-verified",
+  "run_url": "https://github.com/nickderobertis/onepipeline/actions/runs/1",
+  "targets": [
+    {
+      "id": "crate:onepipeline",
+      "outcome": "shipped-verified",
+      "published": "success",
+      "verified": "success"
+    },
+    {
+      "id": "pypi:onepipeline-cli",
+      "outcome": "shipped-verified",
+      "published": "success",
+      "verified": "success"
+    },
+    {
+      "id": "npm:onepipeline-cli",
+      "outcome": "shipped-verified",
+      "published": "success",
+      "verified": "success"
+    }
+  ]
+}

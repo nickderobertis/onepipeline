@@ -23,6 +23,8 @@ name: Release
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
 #                     CARGO_REGISTRY_TOKEN is set.
+#   * verify-crate  — an artifact a release published and nothing installed is one
+#                     nobody is watching; this is that promise for the crate.
 #   * build-wheels  — wrap the prebuilt binary in per-platform PyPI wheels with
 #                     maturin (the ruff/uv pattern). Runs unconditionally, so a
 #                     packaging break reddens the release even while publishing
@@ -37,7 +39,19 @@ name: Release
 #   * publish-npm   — publish the platform packages, then the launcher that
 #                     depends on them, with the NPM_TOKEN secret, gated on the
 #                     NPM_PUBLISH repo variable.
-#   * verify-npm    — the same, on the same matrix, for `npm install -g`.
+#   * verify-npm    — the same promise for npm, one leg per platform package the
+#                     launcher pins: a platform nothing installs is one nothing
+#                     watches, which is how one of them stayed broken.
+#   * outcome       — the one artifact a consumer outside this repository can ask
+#                     what a release did, rather than reconstructing it from
+#                     thirty job squares.
+#
+# **Verification stays in this workflow rather than a separate one**, so this
+# workflow's conclusion is a claim about what a user can install rather than
+# about whether the publish steps exited 0. A release has already shipped
+# artifacts that could not be installed; the second claim would have been green
+# for all of them. `outcome` below makes the distinction readable without
+# opening a job log.
 #
 # Every verify job runs the version at publish time only, and by exact version.
 # `published-smoke.yml` runs the identical script against whatever the registries
@@ -108,6 +122,14 @@ jobs:
 
   # Re-gate the release on the same checks CI enforces, so a release can never
   # publish an artifact that would not pass the gate.
+  #
+  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the
+  # tree this gates is not one this repository has necessarily gated. This workflow
+  # fires on a *published Release*, and creating a Release by hand from any tag is the
+  # documented manual fallback (see the header above) — that tag can name a commit CI
+  # never ran on, or one whose gate ran against different pinned engines. The rule's
+  # premise, that an identical tree was already gated on the way in, is what does not
+  # hold here; this is the only run that can refuse to publish an artifact.
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -123,6 +145,7 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - run: just bootstrap
       - run: just check
+  # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
 
   # Which version of each sibling engine this release links, in the notes rather
   # than only in the CycloneDX SBOM inside a published wheel — where nobody who
@@ -232,6 +255,44 @@ jobs:
             exit 0
           fi
           cargo publish --locked
+
+  # Post-publish gate for the crate, the same promise verify-pypi and verify-npm
+  # make for the wheel and the launcher. crates.io had none, which is the hole
+  # aarch64 Linux sat in on npm: an artifact every release publishes and no
+  # release installs. One leg, because crates.io serves one artifact — the
+  # source — rather than one per platform, and building it is what a Rust user's
+  # `cargo install` does on every platform anyway.
+  verify-crate:
+    needs: [guard, publish-crate]
+    if: ${{ needs.guard.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the release tag is a version
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
+            exit 1
+          fi
+      # The install is the propagation probe, same as the other two verify jobs:
+      # the sparse index a user resolves from converges after the publish call
+      # returns, and only the install asks the thing a user asks.
+      - name: Install the published crate
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          bash scripts/retry-install.sh \
+            --label "crates.io onepipeline $ver on $RUNNER_OS/$RUNNER_ARCH" \
+            --action "check https://crates.io/crates/onepipeline — publish-crate may not have published this version" \
+            -- cargo install onepipeline --version "$ver" --locked --force
+      - name: Smoke-test what crates.io served
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          bash scripts/smoke-published.sh \
+            --expect-version "$ver" \
+            --label "crates.io onepipeline $ver on $RUNNER_OS/$RUNNER_ARCH"
 
   # PyPI wheels: maturin's `bin` bindings wrap the prebuilt binary in
   # per-platform wheels (the ruff/uv pattern), so `pip install onepipeline-cli`
@@ -488,7 +549,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        # One leg per platform package the launcher's manifest declares.
+        # `npm/test/platform-matrix.test.mjs` reconciles these `package:` names
+        # against that manifest, so a declared platform with no leg fails without
+        # needing a runner for it.
+        include:
+          - os: ubuntu-latest
+            package: onepipeline-cli-linux-x64
+          - os: ubuntu-24.04-arm
+            package: onepipeline-cli-linux-arm64
+          - os: macos-latest
+            package: onepipeline-cli-darwin-arm64
+          - os: macos-15-intel
+            package: onepipeline-cli-darwin-x64
+          - os: windows-latest
+            package: onepipeline-cli-win32-x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -514,9 +589,99 @@ jobs:
             --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH" \
             --action "check https://www.npmjs.com/package/onepipeline-cli — the platform package for this runner may not have published" \
             -- npm install -g --prefer-online "onepipeline-cli@${ver}"
+      # A leg that installed the launcher and never resolved its own platform
+      # package would still pass the smoke below on a machine that happened to
+      # have an older copy on PATH. This is the leg saying which package it
+      # proved, so `package:` above is an assertion rather than a label.
+      - name: Check npm resolved this leg's own platform package
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          root="$(npm root -g)"
+          node -e '
+            const { existsSync } = require("node:fs");
+            const { join } = require("node:path");
+            const root = process.argv[1];
+            const want = process.env.PACKAGE;
+            const where = [
+              join(root, want),
+              join(root, "onepipeline-cli", "node_modules", want),
+            ];
+            if (!where.some((dir) => existsSync(join(dir, "package.json")))) {
+              console.error(
+                `::error::npm installed onepipeline-cli without ${want}. An install ` +
+                  "silently skips an optional dependency it cannot resolve, so this is " +
+                  "the registry not yet serving that package at this version.",
+              );
+              process.exit(1);
+            }
+            console.log(`${want} resolved under ${root}`);
+          ' "$root"
       - name: Smoke-test what npm served
         run: |
           ver="${GITHUB_REF_NAME#v}"
           bash scripts/smoke-published.sh \
             --expect-version "$ver" \
             --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH"
+
+  # What this release did, as an artifact rather than as a conclusion somebody
+  # reconstructs from thirty job squares. README.md's "Release outcome" is where
+  # it is documented and where a consumer is told how to fetch it.
+  #
+  # `if: always()`, and `needs` every publish and verify job: a record that only
+  # exists when everything worked answers the one question nobody needs to ask.
+  outcome:
+    name: record the release outcome
+    needs: [publish-crate, verify-crate, publish-pypi, verify-pypi, publish-npm, verify-npm]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check the release tag is a version
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
+            exit 1
+          fi
+      # The identifiers are release-targets.toml's own, so the record names
+      # artifacts by the same names the release-target contract and
+      # `scripts/release-probe.sh` use. `npm/test/release-outcome.test.mjs` reads
+      # the `--target` names back out of this job and fails when they are not
+      # exactly what that file declares — and the goldens with them, so a target
+      # added to the declaration cannot be left out of the record. Every one of
+      # them names a verification job, which is the property `verify-crate` above
+      # was added to hold.
+      #
+      # Job results reach the script through `env:` rather than being
+      # interpolated into the command line, the same rule every other input in
+      # this repository follows; the script refuses any value that is not one of the
+      # results GitHub reports, rather than reading an unknown one as "not success".
+      - name: Compose the outcome record
+        env:
+          CRATE_PUBLISHED: ${{ needs.publish-crate.result }}
+          CRATE_VERIFIED: ${{ needs.verify-crate.result }}
+          PYPI_PUBLISHED: ${{ needs.publish-pypi.result }}
+          PYPI_VERIFIED: ${{ needs.verify-pypi.result }}
+          NPM_PUBLISHED: ${{ needs.publish-npm.result }}
+          NPM_VERIFIED: ${{ needs.verify-npm.result }}
+        run: |
+          node scripts/release-outcome.mjs \
+            --out "$RUNNER_TEMP/release-outcome.json" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --target crate:onepipeline --published "$CRATE_PUBLISHED" --verified "$CRATE_VERIFIED" \
+            --target pypi:onepipeline-cli --published "$PYPI_PUBLISHED" --verified "$PYPI_VERIFIED" \
+            --target npm:onepipeline-cli --published "$NPM_PUBLISHED" --verified "$NPM_VERIFIED"
+      # `--clobber` so a re-run replaces the record rather than failing on the
+      # asset it wrote last time: a re-run is how a release moves out of
+      # `shipped-unverified`, and the record has to move with it.
+      - name: Attach it to the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-outcome.json" --clobber

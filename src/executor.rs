@@ -617,6 +617,39 @@ mod tests {
         assert_eq!(request.graph.0, "./graphs/node-scope.yaml");
     }
 
+    /// Serialises the tests below that set `RUNS_DIR_ENV`, which belongs to the
+    /// whole process rather than to the test that set it.
+    ///
+    /// nextest gives each test its own process; plain `cargo test` runs a
+    /// module's tests as *threads of one process*, where both tests below would
+    /// otherwise read whichever value the other set last. The lock costs nothing
+    /// under nextest and makes both runners say the same thing.
+    static RUNS_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Held for the length of a test that sets `RUNS_DIR_ENV`. A poisoned lock
+    /// is recovered rather than propagated: the test that panicked holding it
+    /// has already failed, and refusing to run the next one would report a
+    /// second failure belonging to nobody.
+    fn runs_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+        RUNS_DIR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A temporary root nobody else has, keyed on the *test* rather than on the
+    /// process it runs in. Two tests running as threads share a pid; the counter
+    /// is what they do not share.
+    fn scratch_root(what: &str) -> PathBuf {
+        static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-{what}-{}-{}",
+            crate::sys::pid(),
+            NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
     /// The drafting dispatch takes the graph the launch named as it was written.
     ///
     /// Neither half of the node-scope composition is a statement about it: the
@@ -626,8 +659,8 @@ mod tests {
     /// dispatch that reaches it.
     #[test]
     fn the_drafting_dispatch_composes_nothing_onto_the_graph_the_launch_named() {
-        let root = std::env::temp_dir().join(format!("onepipeline-drafting-{}", crate::sys::pid()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _runs_dir = runs_dir_lock();
+        let root = scratch_root("drafting");
         let paths = crate::ledger::RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
         let record = r#"{"run_id":"demo","plan":"p.json","node_graph":"./node.yaml",
@@ -675,8 +708,8 @@ mod tests {
     /// scratch directory at all.
     #[test]
     fn every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one() {
-        let root = std::env::temp_dir().join(format!("onepipeline-scratch-{}", crate::sys::pid()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _runs_dir = runs_dir_lock();
+        let root = scratch_root("scratch");
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
         let labels = Labels {
             run_id: Some("demo".into()),
