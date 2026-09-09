@@ -1581,8 +1581,25 @@ impl Handover {
                     // it — it is that holder's own file and names it, so two
                     // waiters clearing it both simply find it gone.
                     if pid_of_entry(&ahead).is_some_and(|pid| !sys::process_may_be_live(pid)) {
-                        let _ = fs::remove_file(&ahead);
-                        continue;
+                        match fs::remove_file(&ahead) {
+                            // Cleared, or cleared by another waiter a moment ago:
+                            // either way it is out of the order.
+                            Ok(()) => continue,
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                            // Anything else is this host refusing to clear it, and
+                            // no number of further looks changes that: the entry
+                            // stays ahead of this one for ever, so the answer is
+                            // the one every other way of not getting in gives.
+                            Err(e) => {
+                                return Err(not_taken(
+                                    &paths.run,
+                                    &format!(
+                                        "the entry ahead of this one is a holder that is \
+                                         gone, and it could not be cleared: {e}"
+                                    ),
+                                ))
+                            }
+                        }
                     }
                     if std::time::Instant::now() >= deadline {
                         return Err(not_taken(
@@ -1618,8 +1635,16 @@ impl Handover {
             .create_new(true)
             .open(&entry)
             .map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+        // The place in the order is the name; the body is for an operator reading
+        // an entry left behind. A body that cannot be written is still a gate this
+        // process did not take — and the entry it already made is taken back with
+        // it, because an entry naming a *live* pid is one no waiter may clear.
         use std::io::Write;
-        let _ = file.write_all(sys::hostname().as_bytes());
+        if let Err(e) = file.write_all(sys::hostname().as_bytes()) {
+            drop(file);
+            let _ = fs::remove_file(&entry);
+            return Err(not_taken(&paths.run, &e.to_string()));
+        }
         Ok(Self { entry })
     }
 }
