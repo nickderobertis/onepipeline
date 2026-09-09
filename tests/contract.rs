@@ -2839,8 +2839,6 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_REFUSED),
         "entry 67 names a status this build does not exit at for a refused edit"
     );
-    // The whole of the proposal: an accepted envelope answers as accepted,
-    // whichever writer applies it, and only a refusal answers otherwise.
     assert_eq!(
         block["reply_queued_exit"], block["reply_applied_exit"],
         "entry 67 has a queued envelope answering with a status of its own again"
@@ -2850,7 +2848,6 @@ fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
         json!(EXIT_QUEUED),
         "entry 67 has a queued reply answering with the unfinished-run status again"
     );
-    // And the half a status cannot carry, which the words do.
     let driver =
         std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
     assert!(
@@ -4719,9 +4716,6 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         )) && readme.contains(&format!("and `{EXIT_REFUSED}` when it was refused")),
         "the README's reply exit-code mapping no longer matches the crate's constants"
     );
-    // And it no longer gives a queued reply a status of its own: an envelope that
-    // was accepted and a reply that was refused must not be answered with two
-    // codes a caller has to tell apart from a rejection. Divergence 67.
     assert!(
         !readme.contains(&format!("`{EXIT_QUEUED}` when it is queued")),
         "the README still maps a queued reply to a non-zero status"

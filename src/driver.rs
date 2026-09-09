@@ -2210,16 +2210,9 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         Submitted::AppliedByRun { reply } => {
             (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
-        // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares
-        // are told apart on **stdout**, in the receipt divergence 64 states: `"state"` and
-        // `"commands"` spell `applied` or `queued`, and the README says so and says a
-        // caller reading only the status is reading whether the envelope was accepted.
-        // Sharing the status is the point rather than an oversight — this verb's non-zero
-        // statuses are refusals to correct, its own documentation and the engine's comment
-        // both say so, and answering an accepted envelope with one told every status-reading
-        // wrapper to correct an edit that was already durable. Divergence 67 is the
-        // proposal, and `channel::a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway`
-        // reads both halves of what a caller gets here.
+        // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares are
+        // told apart on stdout, by the receipt's `state`; the status answers whether the
+        // envelope was accepted, which sharing it is the whole point of. Divergence 67.
         Submitted::Queued { reply } => {
             // Accepted, so it answers as accepted: a non-zero status from this
             // verb is a rejection to correct, which a queued envelope is not.
@@ -2840,10 +2833,20 @@ fn reconciled_here(
                 }
                 std::thread::sleep(ATTACH_POLL);
             }
-            // Anything else holding it is something *driving* the run, which is
-            // the honest queued answer: there is a reconciler and it has not got
-            // to this envelope.
-            Err(_) => return Ok(None),
+            // Something is driving the run, which is the honest queued answer:
+            // there is a reconciler and it has not got to this envelope.
+            Err(Error::Locked { .. }) => return Ok(None),
+            // And a lock this build could not read or write at all leaves the
+            // same answer — the edits are queued either way — but not silently:
+            // nothing established whether anything is driving this run.
+            Err(unreadable) => {
+                eprintln!(
+                    "onepipeline: could not ask whether anything is driving run '{}', so the \
+                     edits below are reported as this build last knew them: {unreadable}",
+                    paths.run
+                );
+                return Ok(None);
+            }
         }
     }
 }
