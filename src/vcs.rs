@@ -1533,6 +1533,21 @@ pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::SessionOpened)
 }
 
+/// Whether an envelope is one of a session's two **boundaries** — its opening or
+/// its closing — rather than a step inside it.
+///
+/// Asked through that library's own enum for the reason [`is_session_opened`]
+/// gives. The two are named together because they are one fact to the only
+/// caller that has the question: a node's activity line names the publication
+/// step it has reached, and a session opening or closing is the bracket around
+/// the work rather than a step of it. A dispatch whose session has opened and
+/// whose worker has not yet named a tool has *started* and done nothing, which is
+/// what its line has always said and is not a readout worth inventing a "now" for.
+pub fn is_session_boundary(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::SessionOpened)
+        || *kind == kind_of(onevcs::EventKind::SessionClosed)
+}
+
 /// Whether an envelope is a publication reaching its base, in `onevcs`'s own
 /// vocabulary.
 ///

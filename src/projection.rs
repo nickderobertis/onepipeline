@@ -1377,10 +1377,26 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
 
 /// Fold one relayed envelope into the node's live activity.
 ///
-/// Every envelope [`evidences_progress`] admits counts, and only a
-/// `turn-activity` names a tool, because that is the only kind carrying one. A
-/// heartbeat is recorded as the separate fact it is: the node still reads as
-/// one something is driving, without its arrival reading as work.
+/// Every envelope [`evidences_progress`] admits counts. Two kinds of envelope
+/// say what the node is **doing**: an `oneagentgraph` `turn-activity`, which
+/// names the tool a turn reached for, and any of `onevcs`'s own, which are the
+/// steps of a publication. A heartbeat is recorded as the separate fact it is:
+/// the node still reads as one something is driving, without its arrival reading
+/// as work.
+///
+/// The second of those is why this is not only about turns. A publication is the
+/// driver's own subprocess and emits no `turn-activity`, so a node eleven
+/// minutes into a push reported the last worker command from *before* it
+/// settled — `now Bash git status --porcelain (67 event(s), 3m43s ago)`, which
+/// is the exact shape a supervisor is taught to read as a stalled dispatch, and
+/// a monitor read it as one. The sibling's events were in the run's journal the
+/// whole time, labelled with the node; nothing had to start emitting anything.
+/// Publication is the longest and most failure-prone stretch of a lifecycle
+/// node's life, because the whole gate runs inside that push.
+///
+/// The last envelope to name something wins, which is what makes the two
+/// compose: a session opens, the worker's turns run and name their tools, the
+/// publication steps follow, and the line names whichever came last.
 fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
@@ -1395,6 +1411,22 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         Some(progress) => Some(progress.and(at)),
         None => Progress::first(at),
     };
+    if event.source == Source::Vcs {
+        // The sibling's own word for the step, unrewritten — how a kind is
+        // spelled is that library's to decide, and a table of this crate's own
+        // words for them would keep naming a step after it was renamed. Said as
+        // whose step it is, so `push` on this line is not read as a tool a turn
+        // reached for.
+        //
+        // The session's own opening and closing are the bracket rather than a
+        // step inside it — see [`crate::vcs::is_session_boundary`] — so a
+        // dispatch whose session has opened and whose worker has not yet named a
+        // tool still reports its count rather than a "now" nothing did.
+        if !crate::vcs::is_session_boundary(&event.kind) {
+            activity.doing = Some(format!("publication {}", event.kind.0));
+        }
+        return;
+    }
     if event.kind.0 != TURN_ACTIVITY {
         return;
     }

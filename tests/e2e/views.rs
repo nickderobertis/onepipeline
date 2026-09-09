@@ -3230,3 +3230,77 @@ fn a_rejection_over_an_open_change_request_is_named_as_a_rejection() {
         rendered.out_lacks("adopt it or stop it");
     }
 }
+
+/// A node inside its publication says what the *publication* is doing.
+///
+/// A publication is the driver's own subprocess and emits no `turn-activity`, so
+/// the activity line kept naming the last tool the worker reached for **before**
+/// it settled — for the whole length of the publication. One run read `now Bash
+/// git status --porcelain (67 event(s), 3m43s ago)` eleven minutes after
+/// `merge-queued`, with a real push running as a child of the driver: the exact
+/// shape a supervisor is taught to read as a stalled dispatch, and that run's
+/// monitor read it as one. The version-control library's own events were in the
+/// run's journal the whole time, labelled with the node.
+///
+/// The push is held here for the same reason the telemetry journey holds it: it
+/// is the only way to observe the window from outside while the node is still in
+/// it. Nothing new is emitted — the assertion is that the step named on the line
+/// is one the run's own journal already carries.
+#[test]
+fn a_node_in_publication_names_the_step_it_reached_rather_than_a_tool_from_before_it() {
+    let world = World::new("views-publishing");
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("local-direct", &held.argv());
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "publishing",
+        &plan_of("publishing", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+
+    // The worker's turn has named a tool, so the line has the wrong thing to say
+    // if the publication's own steps do not reach it.
+    world.until("the worker's turn to name a tool", |world| {
+        !world.events_of("publishing", "turn-activity").is_empty()
+    });
+    world.until("the publication to reach its merge path", |world| {
+        !world.events_of("publishing", "merge-queued").is_empty()
+    });
+
+    let status = world.run(&["status", "publishing"]);
+    status.exited(0).out_has("service: running");
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.contains("service"))
+        .unwrap_or_else(|| panic!("the node has a line: {}", status.stdout));
+    assert!(
+        !line.contains("echo the turn ran"),
+        "a node inside its publication reported the tool its worker used before it: {line}"
+    );
+    let named = line
+        .split("now publication ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or_else(|| panic!("the line names no publication step: {line}"))
+        .trim_end_matches(&['(', ')'][..])
+        .to_string();
+    // And the step it names is one the run's journal already carried, from the
+    // version-control library and stamped with this node.
+    assert!(
+        world.journal("publishing").iter().any(|event| {
+            event["source"] == "vcs"
+                && event["labels"]["node"] == "service"
+                && event["kind"] == named.as_str()
+        }),
+        "the line names '{named}', which is not a version-control step this run \
+         recorded for the node: {:?}",
+        world.kinds("publishing")
+    );
+
+    held.release();
+    world.until("the run to settle", |world| {
+        world.run_file("publishing", "result.json").is_file()
+    });
+}
