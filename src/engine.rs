@@ -2988,7 +2988,8 @@ fn interrupt_turns(
     if addresses.is_empty() {
         return format!(
             "nothing of this dispatch has named a turn to interrupt, so there was nothing to \
-             ask; it is killed in {}s if it has not exited by then",
+             ask; the only bound on what it may still run is the deadline — it is killed in {}s \
+             if it has not exited by then",
             grace.as_secs()
         );
     }
@@ -3012,8 +3013,10 @@ fn interrupt_turns(
         ));
     }
     format!(
-        "asked {} turn(s) to stop, commit, and end without starting new work — {}; the \
-         dispatch is killed in {}s if it has not exited by then",
+        "interrupted the {} running turn(s) this dispatch had named, each asked to stop, commit, \
+         and end — {}. That is not a budget of turns it may still run: nothing bounds how many \
+         it starts, and the only bound there is is the deadline — the dispatch is killed in {}s \
+         if it has not exited by then",
         addresses.len(),
         answers.join("; "),
         grace.as_secs()
