@@ -2091,6 +2091,20 @@ fn validate_envelope(
 /// refusal `docs/contract.md` describes nowhere and of handing a node its own
 /// notes out of the order the envelope wrote them. A reported residue was judged
 /// the smaller cost; whoever revisits it is revisiting a decision.
+// llmlint: ignore-block[changed_behavior_has_e2e] the window documented above is the
+// one behaviour here no journey can reach, and the doc says why: it needs one node
+// with a live conversation that accepts a note and, in the same run and the same
+// envelope, a second node whose own conversation refuses one — and this repository's
+// harness double holds every turn of a run on one shared gate, so a run cannot hold
+// one of each at once. Both sides of the window are driven end to end by
+// `a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offered`, for
+// the refusals decided with nothing offered to anybody, and by
+// `a_note_arriving_after_the_dispatch_has_completed_is_refused_and_recorded`, for a
+// conversation refusing one — both in `tests/note/main.rs`. The word the residue is
+// reported under is held by this module's
+// `a_refused_envelope_answers_a_delivered_note_differently_from_an_untouched_command`,
+// and `crate::channel::CommandVerdict::Delivered` carries this same directive for this
+// same reason.
 fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Error>> {
     let mut delivered: Vec<std::result::Result<Delivery, Error>> = Vec::with_capacity(staged.len());
     for step in staged {
@@ -2104,7 +2118,7 @@ fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Er
         delivered.push(commits_of(step).map(Delivery::Committed));
     }
     delivered
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// What the delivery phase did with one validated command.
 ///
