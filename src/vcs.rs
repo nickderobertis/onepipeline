@@ -42,9 +42,17 @@ use crate::error::{Error, Result};
 use crate::event::Envelope;
 use crate::filter::EventFilter;
 
+/// The sibling this module speaks for, as [`Error::Sibling`] names a tool.
+///
+/// A constant because [`session_open_conflicted`] reads it back: what that asks
+/// is whether *this* function composed the refusal in hand, and comparing
+/// against a literal typed out a second time would answer yes for a refusal
+/// spelled the same way by anything else.
+const ONEVCS: &str = "onevcs";
+
 fn sibling(message: impl Into<String>) -> Error {
     Error::Sibling {
-        tool: "onevcs",
+        tool: ONEVCS,
         message: message.into(),
     }
 }
@@ -64,13 +72,19 @@ fn providers() -> Providers<'static> {
 }
 
 /// How a refusal this module composed says a session open met a **base
-/// conflict**.
+/// conflict**, written at the **head** of the message.
 ///
 /// Written and read here, so it is this module's own convention rather than a
 /// reading of somebody else's sentence: the classification is made off `onevcs`'s
-/// typed [`SyncConflict`](onevcs::Error::SyncConflict), and this phrase carries
-/// it across the executor seam — whose refusal is [`Error::Sibling`], a shape
-/// `docs/contract.md` fixes.
+/// typed [`SyncConflict`](onevcs::Error::SyncConflict) and this marker carries it
+/// the one hop to the retry loop.
+///
+/// A marker at all because the hop is the **executor seam**, whose refusal
+/// `docs/contract.md` fixes as [`Error::Sibling`] — a tool and a message, with
+/// no room for a class of its own, and [`crate::error::Error`]'s variants are
+/// that document's too. What is in this crate's gift is where the marker is
+/// composed, where it is read, and what it is read *off*: one function each, and
+/// the error value the seam returned rather than any prose downstream of it.
 const SESSION_OPEN_CONFLICT: &str = "the base conflicts with this branch";
 
 /// Open a session over a per-run clone and worktree.
@@ -99,11 +113,19 @@ fn session_refusal(error: onevcs::Error) -> Error {
 /// Whether a dispatch was refused because the session it needed met a base
 /// conflict when it opened.
 ///
-/// Asked of the refusal's own text because that is the whole of what crosses the
-/// executor seam, and of text [`session_refusal`] composed rather than of the
-/// sibling's own — see [`SESSION_OPEN_CONFLICT`].
-pub(crate) fn session_open_conflicted(detail: &str) -> bool {
-    detail.contains(SESSION_OPEN_CONFLICT)
+/// Asked of the **error the executor seam returned**, and never of a settlement's
+/// detail: a detail is prose, an agent writes prose, and a decision that stops
+/// retrying and blocks a subtree must not be reachable from anything a dispatch
+/// can say. Three things have to hold at once, and only [`session_refusal`] makes
+/// all three — the refusal is [`Error::Sibling`], it names [`ONEVCS`], and its
+/// message *begins* with [`SESSION_OPEN_CONFLICT`] rather than merely containing
+/// it somewhere.
+pub(crate) fn session_open_conflicted(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Sibling { tool, message }
+            if *tool == ONEVCS && message.starts_with(SESSION_OPEN_CONFLICT)
+    )
 }
 
 /// Verify a session's work and publish it under its policy.
@@ -2042,6 +2064,53 @@ mod tests {
         };
         let event = published_event(&empty, &crate::event::Labels::default());
         assert_eq!(event.payload["landing"], serde_json::Value::Null);
+    }
+
+    /// What reads as a session-open conflict, and what deliberately does not.
+    ///
+    /// The decision this drives stops a node retrying and blocks the subtree
+    /// under it until a person answers, so the only thing that may reach it is
+    /// the refusal [`session_refusal`] composed at the executor seam.
+    /// `tests/e2e/lifecycle.rs` drives the real conflict end to end and reads the
+    /// decision it raises; what is held here is everything that *resembles* one
+    /// and is not — which no journey can drive, because a dispatch has no way to
+    /// make its own prose arrive as the seam's own refusal.
+    #[test]
+    fn only_the_refusal_this_module_composed_reads_as_a_session_open_conflict() {
+        let refused = session_refusal(onevcs::Error::SyncConflict {
+            reason: "both sides changed README.md".into(),
+        });
+        assert!(
+            session_open_conflicted(&refused),
+            "the refusal this module composes for the conflict was not read as one: {refused}"
+        );
+
+        // Every other refusal of the same call keeps its retries.
+        let invalid = session_refusal(onevcs::Error::Invalid {
+            reason: "no such base".into(),
+        });
+        assert!(
+            !session_open_conflicted(&invalid),
+            "a refusal no part of this is was read as the conflict: {invalid}"
+        );
+
+        // A dispatch quoting the marker in its own account of itself is not the
+        // seam saying it, wherever in the sentence the words land.
+        assert!(!session_open_conflicted(&Error::Sibling {
+            tool: ONEVCS,
+            message: format!("the agent reported that {SESSION_OPEN_CONFLICT}"),
+        }));
+
+        // Nor is a refusal spelled this way by anything that is not `onevcs`.
+        assert!(!session_open_conflicted(&Error::Sibling {
+            tool: "oneagentgraph",
+            message: format!("{SESSION_OPEN_CONFLICT}: sync conflict"),
+        }));
+
+        // Nor a failure of this crate's own that is not a sibling's at all.
+        assert!(!session_open_conflicted(&Error::Invalid(format!(
+            "{SESSION_OPEN_CONFLICT}: sync conflict"
+        ))));
     }
 
     /// The three answers [`session_tip`] gives, against three real streams.

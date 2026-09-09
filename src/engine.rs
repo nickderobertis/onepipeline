@@ -2523,23 +2523,32 @@ pub(crate) fn attempt(
     };
 
     for attempt in 1..=attempts.get() {
+        // Whether the seam refused this dispatch over a base conflict, asked of
+        // the refusal while it is still the typed value the seam returned. A
+        // settlement's detail is prose and a dispatch writes prose, so reading
+        // it there would put this decision within reach of anything a dispatch
+        // says about itself.
+        let mut conflicted = false;
         let drained = match executor.dispatch(request()) {
             Ok(mut handle) => drain(handle.as_mut(), tx, id, cancel),
-            Err(error) => Drained {
-                settlement: Settlement {
-                    detail: Some(error.to_string()),
-                    // Named an infrastructure failure rather than a task the
-                    // agent failed, because none of it is the agent's: the
-                    // dispatch layer refused before any work began. It is
-                    // still retried below, and this is the case retrying is
-                    // most likely to recover — an executor that was
-                    // momentarily unable to start anything.
-                    ..failed(id, INFRASTRUCTURE_FAILURE)
-                },
-                reached: Reached::NotStarted,
-                session: None,
-                branch: None,
-            },
+            Err(error) => {
+                conflicted = crate::vcs::session_open_conflicted(&error);
+                Drained {
+                    settlement: Settlement {
+                        detail: Some(error.to_string()),
+                        // Named an infrastructure failure rather than a task the
+                        // agent failed, because none of it is the agent's: the
+                        // dispatch layer refused before any work began. It is
+                        // still retried below, and this is the case retrying is
+                        // most likely to recover — an executor that was
+                        // momentarily unable to start anything.
+                        ..failed(id, INFRASTRUCTURE_FAILURE)
+                    },
+                    reached: Reached::NotStarted,
+                    session: None,
+                    branch: None,
+                }
+            }
         };
         if drained.settlement.status != NodeStatus::Failed
             || drained.reached == Reached::Speech
@@ -2551,7 +2560,7 @@ pub(crate) fn attempt(
         // answer: the branch and its base disagree about a file, and no dispatch
         // of this node's gets far enough to touch either. It goes to the
         // supervisor rather than spending the budget reproducing itself.
-        if conflicted_at_session_open(&drained.settlement) {
+        if conflicted {
             if let Some(whose) = crate::graph::NodeRef::of(node) {
                 let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
                     node: whose,
@@ -2588,20 +2597,6 @@ pub(crate) fn attempt(
         })));
     }
     last
-}
-
-/// Whether the sibling refused this dispatch because the session it needed met a
-/// base conflict when it opened.
-///
-/// Both halves, because either alone is the wrong question: the refusal has to
-/// have come *before any work began*, which [`INFRASTRUCTURE_FAILURE`] is the
-/// word for, and it has to have been the conflict.
-fn conflicted_at_session_open(settlement: &Settlement) -> bool {
-    settlement.outcome.as_deref() == Some(INFRASTRUCTURE_FAILURE)
-        && settlement
-            .detail
-            .as_deref()
-            .is_some_and(crate::vcs::session_open_conflicted)
 }
 
 /// A node whose session would not open because its branch and its base conflict.
