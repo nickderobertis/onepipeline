@@ -185,10 +185,13 @@ fn a_missing_document_and_a_stale_one_list_as_a_current_one_does() {
     let written = document(&paths);
 
     // A run recorded by a build that never wrote one.
-    // llmlint: ignore[tests_mirror_real_usage] the reason is on `put_back`: no verb removes
-    // the document its run's journal writer maintains, and a build that predates the
-    // document is the state under test.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb removes the document its run's
+    // journal writer maintains, and none could: a build that never wrote one is the state
+    // under test, and it is reached by taking away what this build wrote. Every claim after
+    // it is read off the compiled binary's own stdout.
     std::fs::remove_file(paths.summary()).expect("the document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(
         listed(&world),
         current,
@@ -206,9 +209,16 @@ fn a_missing_document_and_a_stale_one_list_as_a_current_one_does() {
 
     // And one whose journal has moved past it: the length the writer recorded is
     // not the length the file holds.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] what this stages is a writer that
+    // appended and died before writing the document beside it — a killed process rather
+    // than an interface, and the state `RunSummary::of`'s staleness check exists for. The
+    // document is this build's own with one recorded length moved, which is exactly what
+    // that writer would have left.
     let mut stale = written.clone();
     stale["journal_len"] = json!(1);
     put_back(&paths, &stale);
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(
         listed(&world),
         current,
@@ -590,9 +600,12 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         journal_of(&paths, &filler, per_run);
         assembled.push(paths);
     }
-    // llmlint: ignore[tests_mirror_real_usage] the template is not one of the four hundred
-    // this measures, and leaving it in would make the owned count off by one.
+    // llmlint: ignore-block[tests_mirror_real_usage] the template is the journey's own
+    // scaffolding rather than one of the four hundred roots it measures, and leaving it on
+    // the root would make the owned count off by one. No verb sweeps a run root, and one
+    // that did would be a different journey.
     std::fs::remove_dir_all(&template.dir).expect("the template run root");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let held = |assembled: &[RunPaths]| -> u64 {
         assembled

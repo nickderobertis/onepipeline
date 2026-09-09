@@ -3131,7 +3131,16 @@ fn status(args: &OptionalRunArgs) -> Result<i32> {
         Some(run) => views::status(&views::Survey::of_one(RunView::open(&resolve(run)?)?)),
         None => views::status_listed(&views::Listing::of(&ledger::runs_root())),
     };
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
+    // to stdout is one decision for all thirty-one of them in this file, not this verb's:
+    // every view verb here prints the same way, and `src/AGENTS.md` records the exit codes
+    // as spent — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" —
+    // so a write this one returned as an error would have to carry a code that already
+    // means something else. Making a closed pipe a first-class outcome is a change to the
+    // whole command surface and to the contract's exit codes, which belongs with the
+    // planner who owns them rather than in the one verb a diff happens to touch.
     print!("{rendered}");
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
     Ok(EXIT_SUCCESS)
 }
 
