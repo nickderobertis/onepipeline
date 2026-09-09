@@ -2740,6 +2740,19 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                         lock = back;
                         engine::reconcile_queued(paths)?;
                     }
+                    // The commands were applied; what could not be done is hand
+                    // the run on safely, so the claim is left standing for the
+                    // next writer to reclaim rather than released into the
+                    // window an edit accepted behind it would fall into.
+                    engine::LettingGo::NotHandedOver(held, why) => {
+                        eprintln!(
+                            "onepipeline: run '{}' is being left claimed rather than \
+                             released: {why}",
+                            paths.run
+                        );
+                        held.abandon();
+                        break;
+                    }
                 }
             }
             deliver_verdict_half(paths, &channel, envelope)?;
@@ -2889,13 +2902,15 @@ fn outcome_after_the_wait(
 /// already decided — so it says what it is leaving behind and lets the run go
 /// rather than holding a run it cannot write, which is the one state nothing
 /// recovers from.
-// llmlint: ignore-block[changed_behavior_has_e2e] the arm that reports is reached only by a
-// reconcile that fails on the run's own store while this process holds it, which no
-// journey can put a run into: there is no input to either CLI that makes one file
-// unwritable to one process. What it guards — a queue that moved under a takeover on its
-// way out — is the same call
+// llmlint: ignore-block[changed_behavior_has_e2e] one arm here is covered and one is not.
+// The handover it cannot take is driven by
+// `tests::a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing`; what is left
+// is a reconcile that fails on the run's own store while this process holds it, which no
+// journey can put a run into — there is no input to either CLI that makes one file
+// unwritable to one process. What both guard, a queue that moved under a takeover on its
+// way out, is the call
 // `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
-// drives, with two replies contending for one run.
+// drives with two replies contending for one run.
 fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
     let mut lock = lock;
     loop {
@@ -2912,6 +2927,14 @@ fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
                     lock.release();
                     return;
                 }
+            }
+            engine::LettingGo::NotHandedOver(held, why) => {
+                eprintln!(
+                    "onepipeline: run '{}' is being left claimed rather than released: {why}",
+                    paths.run
+                );
+                held.abandon();
+                return;
             }
         }
     }
@@ -3412,6 +3435,47 @@ mod tests {
                 ..Node::default()
             }],
         }
+    }
+
+    /// A takeover that cannot hand the run on **leaves the claim standing**.
+    ///
+    /// Releasing it is the one thing that would let an edit be accepted by a run
+    /// whose owner has gone, and this process cannot establish that nothing is
+    /// about to accept one — so the claim stays, naming a process that is ending,
+    /// and the next writer reclaims it exactly as it reclaims a run whose driver
+    /// died. The gate is refused here the way a shared runs root refuses one: a
+    /// record naming a host this one cannot reason about.
+    #[test]
+    fn a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-letgo-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("channel")).expect("a run directory");
+        let paths = RunPaths {
+            run: "letgo".to_owned(),
+            dir: dir.clone(),
+        };
+        let held = ledger::OwnershipLock::acquire(&paths, ledger::REPLY_VERB)
+            .expect("this process took the run over");
+        std::fs::write(
+            paths.channel("handover.lock"),
+            json!({
+                "pid": 1,
+                "host": "somewhere-else",
+                "acquired_at": "2026-09-09T00:00:00.000Z",
+                "verb": "handover",
+            })
+            .to_string(),
+        )
+        .expect("the gate record is written");
+
+        let_go(&paths, held);
+
+        assert!(
+            paths.lock().is_file(),
+            "the run was released by a writer that could not hand it over, which is the \
+             window an edit accepted behind it falls into"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The role prose [`run_description`] must never carry again.

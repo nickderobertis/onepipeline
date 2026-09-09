@@ -1475,10 +1475,6 @@ fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
 #[derive(Debug)]
 pub(crate) struct Handover {
     path: PathBuf,
-    /// Whether this process is the one inside the gate. `false` is the one case
-    /// [`Handover::hold`] gives up on it, and is what stops a drop removing a
-    /// file this process does not hold.
-    held: bool,
 }
 
 /// The verb a handover writes into its own record, for an operator reading one
@@ -1492,64 +1488,66 @@ const HANDING_OVER: &str = "handover";
 /// from a driver driving it, and the two answer differently.
 pub(crate) const REPLY_VERB: &str = "reply";
 
-/// How long a party waits for the other's section before going on without the
-/// gate.
+/// How long a party waits for a **live holder on this host** before refusing.
 ///
-/// Both sections are a couple of file operations, and a holder this host can
-/// prove is gone is reclaimed on the spot — so reaching this bound means a
-/// holder that is neither working nor provably gone, which is a record from
-/// another host or one this build cannot read. Going on then is the lesser of
-/// the two failures: the alternative is a driver that cannot let go of a run and
-/// a supervisor whose edit is never accepted.
+/// A bound on patience and never a licence: what waits it out is a peer inside a
+/// section of two file operations, so reaching it means something is wrong with
+/// that peer rather than that the wait is over. Time establishes nothing about
+/// whether a holder is still inside — a live process can be stopped for as long
+/// as anyone likes — so the answer here is that the gate was **not taken**, and
+/// every caller's job is to do nothing that needed it.
 const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Handover {
-    /// Hold the gate for this run, waiting out whoever is inside it.
-    // llmlint: ignore-block[changed_behavior_has_e2e] the arm that gives up on the gate
-    // needs a holder that has been inside a two-file-operation section for thirty seconds
-    // and is neither working nor provably gone — a lock record from another host, or one
-    // this build cannot read. No journey can put a run into that: a suite cannot write a
-    // foreign host's name into a live run's lock and then be the process that waits on it.
-    // What the gate itself does is driven from both sides by
-    // `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`.
-    pub(crate) fn hold(paths: &RunPaths) -> Self {
+    /// Hold the gate for this run, or report that this process is not inside it.
+    ///
+    /// Waits out a holder this host can see is a live process of its own, since
+    /// that is a peer in a section that ends in microseconds, and reclaims one it
+    /// can prove is gone. Anything else — a record naming another host, a gate
+    /// this host will not create at all — is refused **at once**: no amount of
+    /// waiting turns those into a gate this process holds, and the whole point of
+    /// the wait is that it ends in one of the two honest answers.
+    pub(crate) fn hold(paths: &RunPaths) -> Result<Self> {
+        Self::hold_within(paths, HANDOVER_PATIENCE)
+    }
+
+    /// The same, with the patience stated — which is how a test drives a
+    /// contention that outlasts it without waiting out the shipped bound.
+    pub(crate) fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
         let path = paths.channel("handover.lock");
-        let deadline = std::time::Instant::now() + HANDOVER_PATIENCE;
+        let deadline = std::time::Instant::now() + patience;
         loop {
-            match take_exclusively(&path, &paths.run, HANDING_OVER) {
-                Ok(()) => return Self { path, held: true },
-                Err(_) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(held) => {
-                    // Going on **without** the gate rather than taking it away
-                    // from whoever has it: a holder this host cannot account for
-                    // may yet be alive and inside its section, and removing its
-                    // file would put two parties in there — which is the very
-                    // thing this gate exists to prevent — while going on without
-                    // it costs at worst the ordering it was buying.
-                    eprintln!(
-                        "onepipeline: the handover gate of run '{}' has been held for {}s by \
-                         something this host cannot account for ({held}), so this process is \
-                         going on without it: an edit accepted while the run is being let go \
-                         of may go unclaimed until something drives the run again",
-                        paths.run,
-                        HANDOVER_PATIENCE.as_secs()
-                    );
-                    return Self { path, held: false };
-                }
+            let refused = match take_exclusively(&path, &paths.run, HANDING_OVER) {
+                Ok(()) => return Ok(Self { path }),
+                Err(refused) => refused,
+            };
+            // A holder that is a live process of this host is a peer, and a peer
+            // is worth waiting for. A record from another host is not this host's
+            // to reason about, and an error creating the file is not a wait's to
+            // fix, so neither is waited on at all.
+            let a_peer_on_this_host = matches!(
+                &refused,
+                Error::Locked { host, .. } if *host == sys::hostname()
+            );
+            if !a_peer_on_this_host || std::time::Instant::now() >= deadline {
+                return Err(Error::Refused(format!(
+                    "the handover gate of run '{}' could not be taken, so nothing was \
+                     accepted onto its command queue and nothing was released: {refused}. \
+                     This process is not inside the gate, and going on without it is what \
+                     would let an edit be accepted by a run whose owner has already left",
+                    paths.run
+                )));
             }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 impl Drop for Handover {
+    /// A `Handover` exists only where this process took the gate, so a drop
+    /// always has one to give back.
     fn drop(&mut self) {
-        if self.held {
-            let _ = fs::remove_file(&self.path);
-            self.held = false;
-        }
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -1582,6 +1580,18 @@ impl OwnershipLock {
     /// Release the lock now rather than at the end of the scope.
     pub fn release(mut self) {
         self.remove();
+    }
+
+    /// Stop holding the lock **without** releasing the run.
+    ///
+    /// What a writer does when it cannot hand the run over safely: releasing it
+    /// there is the one thing that would let an edit be accepted by a run whose
+    /// owner has gone, and this leaves the claim standing instead. The record
+    /// then names a process that is about to end, which the next writer reclaims
+    /// on the spot — so the run is recovered by the same path that recovers one
+    /// whose driver died, rather than by nothing.
+    pub(crate) fn abandon(mut self) {
+        self.held = false;
     }
 
     fn remove(&mut self) {

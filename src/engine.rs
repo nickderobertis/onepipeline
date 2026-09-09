@@ -728,6 +728,20 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
         match let_go_of(paths, lock) {
             LettingGo::Released => break,
             LettingGo::QueueMoved(back) => lock = back,
+            // Nothing was looked at and nothing released, so this driver does not
+            // release the run either: it leaves the claim standing over a process
+            // that is ending, which the next writer reclaims, rather than opening
+            // the window an accepted edit falls into.
+            LettingGo::NotHandedOver(held, why) => {
+                eprintln!(
+                    "onepipeline: run '{}' is being left claimed rather than released: {why}. \
+                     Its next writer reclaims it — `onepipeline adopt {}` — and any edit on \
+                     its queue is applied then",
+                    paths.run, paths.run
+                );
+                held.abandon();
+                break;
+            }
         }
     }
     Ok(outcome)
@@ -739,6 +753,13 @@ pub(crate) enum LettingGo {
     Released,
     /// The queue moved instead, so the run is **still held** — here it is back.
     QueueMoved(OwnershipLock),
+    /// The handover could not be taken, so **nothing was looked at and nothing
+    /// released**: the run is still held, and here it is back with the reason.
+    ///
+    /// The alternative is the race this gate exists to close, so there is no
+    /// answer here that releases the run: what a caller does with it is report it
+    /// and leave the claim standing, which the next writer reclaims.
+    NotHandedOver(OwnershipLock, Error),
 }
 
 /// Let go of a run under the handover gate, or hand the lock back because the
@@ -761,7 +782,10 @@ pub(crate) enum LettingGo {
 /// conversation. A queue that moved sends the caller back to apply it with the
 /// gate already dropped.
 pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
-    let handover = ledger::Handover::hold(paths);
+    let handover = match ledger::Handover::hold(paths) {
+        Ok(handover) => handover,
+        Err(why) => return LettingGo::NotHandedOver(lock, why),
+    };
     let letting = letting_go_under_the_handover(paths, lock);
     drop(handover);
     letting
@@ -805,7 +829,10 @@ pub(crate) fn accept(
     author: crate::channel::Author,
     commands: &[Command],
 ) -> Result<Accepted> {
-    let handover = ledger::Handover::hold(paths);
+    // A gate this process could not take refuses the submission rather than
+    // making it: nothing reaches the queue, so nothing is reported accepted that
+    // no writer is going to see.
+    let handover = ledger::Handover::hold(paths)?;
     let accepted = accepting_under_the_handover(paths, channel, author, commands);
     drop(handover);
     accepted
@@ -5013,7 +5040,7 @@ mod tests {
         // envelope: it may not let go of a run with an accepted edit on its queue.
         let paths = handover_scratch("submitter-first");
         let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
-        let gate = ledger::Handover::hold(&paths);
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
         let letting_go = std::thread::scope(|scope| {
             let leaving = scope.spawn(|| let_go_of(&paths, held));
             std::thread::sleep(LONG_ENOUGH_TO_HAVE_RUN);
@@ -5041,7 +5068,7 @@ mod tests {
         // queueing behind an owner that has gone.
         let paths = handover_scratch("owner-first");
         let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
-        let gate = ledger::Handover::hold(&paths);
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
         let accepted = std::thread::scope(|scope| {
             let submitting = scope.spawn(|| {
                 accept(
@@ -5076,6 +5103,112 @@ mod tests {
             ChannelState::new(&paths).claimable_commands().is_empty(),
             "an envelope reached the queue of a run nothing was driving"
         );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A gate record naming another host: a holder this host cannot reason about
+    /// and will not wait on, which is what a shared runs root produces.
+    fn held_by_another_host(paths: &RunPaths) {
+        std::fs::write(
+            paths.channel("handover.lock"),
+            serde_json::json!({
+                "pid": 1,
+                "host": "somewhere-else",
+                "acquired_at": "2026-09-09T00:00:00.000Z",
+                "verb": "handover",
+            })
+            .to_string(),
+        )
+        .expect("the gate record is written");
+    }
+
+    /// **A gate this process could not take stops both sections.**
+    ///
+    /// Failing open would put the two back where they were: an edit accepted onto
+    /// the queue of a run whose owner is releasing it, or an owner letting go
+    /// while an acceptance is in flight. So neither party does its section, and
+    /// each says what it did not do — the submitter that its commands were **not**
+    /// accepted, the owner that the run is left claimed rather than released.
+    #[test]
+    fn a_gate_this_process_cannot_take_stops_the_submission_and_the_release() {
+        let paths = handover_scratch("gate-refused");
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        held_by_another_host(&paths);
+
+        let refused = match accept(
+            &paths,
+            &ChannelState::new(&paths),
+            crate::channel::Author::Planner,
+            &[Command::Cancel {
+                id: "node".to_owned(),
+                reason: None,
+            }],
+        ) {
+            Ok(_) => panic!("commands were accepted without the gate that orders accepting"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.to_string().contains("nothing was accepted"),
+            "the refusal does not say the edit was not accepted: {refused}"
+        );
+        assert!(
+            ChannelState::new(&paths).claimable_commands().is_empty(),
+            "an edit was accepted onto the queue without the gate that orders it"
+        );
+
+        // And the other half: the run is handed back, not released.
+        let letting_go = let_go_of(&paths, held);
+        let LettingGo::NotHandedOver(still_held, why) = letting_go else {
+            panic!("the run was let go of without the gate that orders letting go");
+        };
+        assert!(
+            why.to_string().contains("nothing was released"),
+            "the answer does not say the run was not released: {why}"
+        );
+        assert!(
+            paths.lock().is_file(),
+            "the run's claim was dropped by a writer that could not hand it over"
+        );
+        still_held.abandon();
+        assert!(
+            paths.lock().is_file(),
+            "abandoning the claim removed it, so nothing is left for the next writer to \
+             reclaim"
+        );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// **Contention that outlasts the patience is a refusal, not a free pass.**
+    ///
+    /// A holder inside a section of two file operations is worth waiting for, and
+    /// this bounds that wait — but reaching the bound establishes nothing about
+    /// whether the holder is still inside, because a live process can be stopped
+    /// for as long as anything likes. So the wait ends in the same answer an
+    /// unreachable gate gives: this process is not inside it.
+    #[test]
+    fn contention_outlasting_the_patience_refuses_rather_than_going_on_without_the_gate() {
+        let paths = handover_scratch("gate-contended");
+        // A live holder of this host — this thread — which is exactly the holder
+        // the wait exists for, and exactly the one time may not be read as gone.
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
+
+        let waited = std::time::Instant::now();
+        let refused = ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("a gate somebody else is inside is not taken");
+        assert!(
+            waited.elapsed() >= Duration::from_millis(50),
+            "the patience was not spent before the answer: {:?}",
+            waited.elapsed()
+        );
+        assert!(
+            refused.to_string().contains("could not be taken"),
+            "the refusal does not say the gate was not taken: {refused}"
+        );
+        // The gate is still the holder's, and a refused attempt took nothing away
+        // from it.
+        drop(gate);
+        ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect("the gate is free once its holder lets go");
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
