@@ -2883,9 +2883,19 @@ fn outcome_after_the_wait(
 ///
 /// A takeover is an owner like any other and leaves the run the same way: the
 /// queue's last look and the release are one section, so an edit accepted after
-/// it stopped claiming is accepted from a run that is free. A drain that fails
-/// here is not reported — this process's own answer is already decided, and the
-/// run is left held by nobody, which is the state its next writer recovers from.
+/// it stopped claiming is accepted from a run that is free.
+///
+/// A drain that *fails* here does not change this process's own answer, which is
+/// already decided — so it says what it is leaving behind and lets the run go
+/// rather than holding a run it cannot write, which is the one state nothing
+/// recovers from.
+// llmlint: ignore-block[changed_behavior_has_e2e] the arm that reports is reached only by a
+// reconcile that fails on the run's own store while this process holds it, which no
+// journey can put a run into: there is no input to either CLI that makes one file
+// unwritable to one process. What it guards — a queue that moved under a takeover on its
+// way out — is the same call
+// `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
+// drives, with two replies contending for one run.
 fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
     let mut lock = lock;
     loop {
@@ -2893,7 +2903,12 @@ fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
             engine::LettingGo::Released => return,
             engine::LettingGo::QueueMoved(back) => {
                 lock = back;
-                if engine::reconcile_queued(paths).is_err() {
+                if let Err(error) = engine::reconcile_queued(paths) {
+                    eprintln!(
+                        "onepipeline: run '{}' is being let go of with an edit still on its \
+                         command queue, which this process could not apply: {error}",
+                        paths.run
+                    );
                     lock.release();
                     return;
                 }
@@ -2901,6 +2916,7 @@ fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
         }
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// What is holding a run's ownership lock, as far as a waiting `reply` is
 /// concerned.

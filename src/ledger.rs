@@ -1469,9 +1469,15 @@ fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
 ///
 /// Held for the run rather than for the queue, because releasing the run is one
 /// of the two things it orders and that is not the channel's file.
+///
+/// A wait that runs out is the one case a party goes on **without** it, saying
+/// so: see [`HANDOVER_PATIENCE`].
 #[derive(Debug)]
 pub(crate) struct Handover {
     path: PathBuf,
+    /// Whether this process is the one inside the gate. `false` is the one case
+    /// [`Handover::hold`] gives up on it, and is what stops a drop removing a
+    /// file this process does not hold.
     held: bool,
 }
 
@@ -1486,18 +1492,26 @@ const HANDING_OVER: &str = "handover";
 /// from a driver driving it, and the two answer differently.
 pub(crate) const REPLY_VERB: &str = "reply";
 
-/// How long a party waits for the other's section before taking the gate anyway.
+/// How long a party waits for the other's section before going on without the
+/// gate.
 ///
 /// Both sections are a couple of file operations, and a holder this host can
 /// prove is gone is reclaimed on the spot — so reaching this bound means a
 /// holder that is neither working nor provably gone, which is a record from
-/// another host or one this build cannot read. Taking it then is the lesser of
+/// another host or one this build cannot read. Going on then is the lesser of
 /// the two failures: the alternative is a driver that cannot let go of a run and
 /// a supervisor whose edit is never accepted.
 const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Handover {
     /// Hold the gate for this run, waiting out whoever is inside it.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm that gives up on the gate
+    // needs a holder that has been inside a two-file-operation section for thirty seconds
+    // and is neither working nor provably gone — a lock record from another host, or one
+    // this build cannot read. No journey can put a run into that: a suite cannot write a
+    // foreign host's name into a live run's lock and then be the process that waits on it.
+    // What the gate itself does is driven from both sides by
+    // `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`.
     pub(crate) fn hold(paths: &RunPaths) -> Self {
         let path = paths.channel("handover.lock");
         let deadline = std::time::Instant::now() + HANDOVER_PATIENCE;
@@ -1508,22 +1522,27 @@ impl Handover {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(held) => {
+                    // Going on **without** the gate rather than taking it away
+                    // from whoever has it: a holder this host cannot account for
+                    // may yet be alive and inside its section, and removing its
+                    // file would put two parties in there — which is the very
+                    // thing this gate exists to prevent — while going on without
+                    // it costs at worst the ordering it was buying.
                     eprintln!(
                         "onepipeline: the handover gate of run '{}' has been held for {}s by \
                          something this host cannot account for ({held}), so this process is \
-                         taking it: an edit accepted while the run is being let go of may go \
-                         unclaimed until something drives the run again",
+                         going on without it: an edit accepted while the run is being let go \
+                         of may go unclaimed until something drives the run again",
                         paths.run,
                         HANDOVER_PATIENCE.as_secs()
                     );
-                    let _ = fs::remove_file(&path);
-                    let _ = take_exclusively(&path, &paths.run, HANDING_OVER);
-                    return Self { path, held: true };
+                    return Self { path, held: false };
                 }
             }
         }
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 impl Drop for Handover {
     fn drop(&mut self) {

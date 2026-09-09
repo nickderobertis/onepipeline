@@ -773,7 +773,7 @@ pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
 /// both sides: a test holding the handover is the other party, and reaches this
 /// the way that party's own process would.
 fn letting_go_under_the_handover(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
-    if ChannelState::new(paths).unclaimed_commands().is_empty() {
+    if ChannelState::new(paths).claimable_commands().is_empty() {
         lock.release();
         return LettingGo::Released;
     }
@@ -5073,7 +5073,7 @@ mod tests {
             "the submitter queued its commands behind an owner that had already gone"
         );
         assert!(
-            ChannelState::new(&paths).unclaimed_commands().is_empty(),
+            ChannelState::new(&paths).claimable_commands().is_empty(),
             "an envelope reached the queue of a run nothing was driving"
         );
         std::fs::remove_dir_all(&paths.dir).ok();
