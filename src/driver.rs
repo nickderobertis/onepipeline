@@ -2631,8 +2631,13 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     // and with nothing driving the run this process becomes the single writer
     // and applies the edit itself. Execution is continuous, so there is no
     // boundary at which an edit has nothing to apply to.
-    match ledger::OwnershipLock::acquire(paths, TAKING_THE_RUN_OVER) {
-        Ok(lock) => {
+    //
+    // The ask and the submission are **one section**, under the handover gate an
+    // owner letting go of the run takes across its own last look at the queue —
+    // so the answer this fork is taken on is still true when the commands land.
+    // See [`engine::accept`].
+    match engine::accept(paths, &channel, envelope.author, &envelope.commands)? {
+        engine::Accepted::NothingIsDriving(lock) => {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
             let mut compiled: Vec<edits::Operation> = Vec::new();
@@ -2723,14 +2728,26 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                     }
                 }
             }
-            lock.release();
+            // This process was the run's writer, so it lets go of it the way a
+            // driver does: under the handover, and not while the queue holds
+            // something another supervisor's edit put there while this one was
+            // being applied.
+            let mut lock = lock;
+            loop {
+                match engine::let_go_of(paths, lock) {
+                    engine::LettingGo::Released => break,
+                    engine::LettingGo::QueueMoved(back) => {
+                        lock = back;
+                        engine::reconcile_queued(paths)?;
+                    }
+                }
+            }
             deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::AppliedHere {
                 operations: compiled,
             })
         }
-        Err(Error::Locked { .. }) => {
-            let id = channel.submit(envelope.author, &envelope.commands)?;
+        engine::Accepted::Queued(id) => {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             let mut answered = None;
             while Instant::now() < deadline {
@@ -2770,7 +2787,6 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::Queued { reply: id })
         }
-        Err(other) => Err(other),
     }
 }
 
@@ -2809,16 +2825,16 @@ fn outcome_after_the_wait(
 ) -> Result<Option<crate::channel::CommandOutcome>> {
     let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
     loop {
-        match ledger::OwnershipLock::acquire(paths, TAKING_THE_RUN_OVER) {
+        match ledger::OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
             Ok(lock) => {
                 // Taking a lock is not instant, and whoever had it may have
                 // answered this envelope while it was being taken.
                 if let Some(outcome) = channel.outcome_of(id) {
-                    lock.release();
+                    let_go(paths, lock);
                     return Ok(Some(outcome));
                 }
                 let reconciled = engine::reconcile_queued(paths);
-                lock.release();
+                let_go(paths, lock);
                 reconciled?;
                 // Whatever the queue answered about *this* envelope, which is
                 // `None` where the reconciler's cursor had already passed it.
@@ -2862,9 +2878,29 @@ fn outcome_after_the_wait(
 
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// The verb a `reply` writes into the run's ownership lock while it applies what
-/// the run's driver did not.
-const TAKING_THE_RUN_OVER: &str = "reply";
+/// Let go of a run this process took over, draining anything that reached the
+/// queue while it was writing.
+///
+/// A takeover is an owner like any other and leaves the run the same way: the
+/// queue's last look and the release are one section, so an edit accepted after
+/// it stopped claiming is accepted from a run that is free. A drain that fails
+/// here is not reported — this process's own answer is already decided, and the
+/// run is left held by nobody, which is the state its next writer recovers from.
+fn let_go(paths: &RunPaths, lock: ledger::OwnershipLock) {
+    let mut lock = lock;
+    loop {
+        match engine::let_go_of(paths, lock) {
+            engine::LettingGo::Released => return,
+            engine::LettingGo::QueueMoved(back) => {
+                lock = back;
+                if engine::reconcile_queued(paths).is_err() {
+                    lock.release();
+                    return;
+                }
+            }
+        }
+    }
+}
 
 /// What is holding a run's ownership lock, as far as a waiting `reply` is
 /// concerned.
@@ -2884,7 +2920,7 @@ enum Holder {
 impl Holder {
     fn of(verb: &str) -> Self {
         match verb {
-            TAKING_THE_RUN_OVER => Self::AnotherTakeover,
+            ledger::REPLY_VERB => Self::AnotherTakeover,
             _ => Self::SomethingDriving,
         }
     }

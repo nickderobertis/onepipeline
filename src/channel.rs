@@ -1395,6 +1395,22 @@ impl ChannelState {
         Ok(id)
     }
 
+    /// The command envelopes no reconciler has claimed yet, **without** claiming
+    /// them.
+    ///
+    /// What a writer about to let go of the run asks: whether there is anything
+    /// left for it to do. Claiming to find out would take envelopes off the queue
+    /// this process is not going to apply.
+    pub(crate) fn unclaimed_commands(&self) -> Vec<QueuedCommands> {
+        let claimed_through: u64 =
+            crate::ledger::read_json_opt(&self.paths.channel("commands-cursor.json")).unwrap_or(0);
+        crate::ledger::read_lines(&self.paths.channel("commands.jsonl"))
+            .iter()
+            .filter_map(|line| serde_json::from_str::<QueuedCommands>(line).ok())
+            .filter(|queued| queued.id >= claimed_through)
+            .collect()
+    }
+
     /// Claim the command envelopes the reconciler has not drained yet.
     pub fn claim_commands(&self) -> crate::Result<Vec<QueuedCommands>> {
         let cursor_path = self.paths.channel("commands-cursor.json");

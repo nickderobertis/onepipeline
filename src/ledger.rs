@@ -1376,6 +1376,164 @@ pub struct LockRecord {
     pub started: String,
 }
 
+/// Create `path` as this process's exclusive claim, or report who holds it.
+///
+/// The one place a lock file is taken in this crate, so the two locks over a run
+/// — [`OwnershipLock`] over the run itself and [`Handover`] over letting go of it
+/// — are taken the same way and reclaimed on the same terms.
+fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| Error::Ledger {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
+    let record = LockRecord {
+        pid: sys::pid(),
+        host: sys::hostname(),
+        acquired_at: sys::now_rfc3339(),
+        verb: verb.to_string(),
+        started: sys::process_start_token(sys::pid())
+            .map(|token| token.recorded().to_string())
+            .unwrap_or_default(),
+    };
+    let body = serde_json::to_string(&record)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let held_by: Option<LockRecord> = read_json_opt(path);
+            match held_by {
+                // A holder on this host that this host can prove is gone
+                // leaves a lock nothing will release. Reclaim it.
+                Some(held)
+                    if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
+                {
+                    write_atomic(path, body.as_bytes())?;
+                    Ok(())
+                }
+                Some(held) => Err(Error::Locked {
+                    run: run.to_string(),
+                    pid: held.pid,
+                    host: held.host,
+                    verb: held.verb,
+                }),
+                // An unreadable lock is still a claim. Refusing is the safe
+                // reading: the alternative is a second writer on a run
+                // whose first writer cannot be identified.
+                None => Err(Error::Locked {
+                    run: run.to_string(),
+                    pid: 0,
+                    host: sys::hostname(),
+                    verb: "an unreadable lock".to_string(),
+                }),
+            }
+        }
+        Err(e) => Err(Error::Ledger {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+/// The gate that makes **accepting a command** and **letting the run go** two
+/// things that cannot interleave.
+///
+/// A departing owner reads the command queue and, finding it empty, releases the
+/// run. A submitter asks whether anything is driving the run and, finding one,
+/// queues its commands behind it. Between either pair the scheduler may stop a
+/// process for as long as it likes, so without a gate the two interleave into
+/// the one outcome neither party would accept: an envelope accepted onto the
+/// queue of a run whose owner has just decided there was nothing on it, and left.
+/// **No absence of I/O closes that** — the window is a preemption, not a
+/// duration.
+///
+/// Both parties hold this across their pair, so one of the two orders happens and
+/// each is answerable: the submitter first, and the departing owner's own read
+/// finds the envelope; the owner first, and the submitter's ask finds the run
+/// free and takes it. What it does not do — deliberately — is guard *applying*
+/// an edit: the sections it serializes are a file read and a file remove, so a
+/// holder of this is never inside a subprocess, a conversation or a graph fold.
+///
+/// Held for the run rather than for the queue, because releasing the run is one
+/// of the two things it orders and that is not the channel's file.
+#[derive(Debug)]
+pub(crate) struct Handover {
+    path: PathBuf,
+    held: bool,
+}
+
+/// The verb a handover writes into its own record, for an operator reading one
+/// that outlived its holder.
+const HANDING_OVER: &str = "handover";
+
+/// The verb a `reply` writes into a run's ownership lock while it applies what
+/// the run's driver did not.
+///
+/// Read as well as written: it is how one reply taking a run over tells itself
+/// from a driver driving it, and the two answer differently.
+pub(crate) const REPLY_VERB: &str = "reply";
+
+/// How long a party waits for the other's section before taking the gate anyway.
+///
+/// Both sections are a couple of file operations, and a holder this host can
+/// prove is gone is reclaimed on the spot — so reaching this bound means a
+/// holder that is neither working nor provably gone, which is a record from
+/// another host or one this build cannot read. Taking it then is the lesser of
+/// the two failures: the alternative is a driver that cannot let go of a run and
+/// a supervisor whose edit is never accepted.
+const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl Handover {
+    /// Hold the gate for this run, waiting out whoever is inside it.
+    pub(crate) fn hold(paths: &RunPaths) -> Self {
+        let path = paths.channel("handover.lock");
+        let deadline = std::time::Instant::now() + HANDOVER_PATIENCE;
+        loop {
+            match take_exclusively(&path, &paths.run, HANDING_OVER) {
+                Ok(()) => return Self { path, held: true },
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(held) => {
+                    eprintln!(
+                        "onepipeline: the handover gate of run '{}' has been held for {}s by \
+                         something this host cannot account for ({held}), so this process is \
+                         taking it: an edit accepted while the run is being let go of may go \
+                         unclaimed until something drives the run again",
+                        paths.run,
+                        HANDOVER_PATIENCE.as_secs()
+                    );
+                    let _ = fs::remove_file(&path);
+                    let _ = take_exclusively(&path, &paths.run, HANDING_OVER);
+                    return Self { path, held: true };
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Handover {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = fs::remove_file(&self.path);
+            self.held = false;
+        }
+    }
+}
+
 /// The run's ownership lock, released when this value is dropped.
 ///
 /// The process driving a run is the only writer of its graph and its journal's
@@ -1398,67 +1556,8 @@ impl OwnershipLock {
     /// the state `adopt` exists to recover from.
     pub fn acquire(paths: &RunPaths, verb: &str) -> Result<Self> {
         let path = paths.lock();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::Ledger {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
-        let record = LockRecord {
-            pid: sys::pid(),
-            host: sys::hostname(),
-            acquired_at: sys::now_rfc3339(),
-            verb: verb.to_string(),
-            started: sys::process_start_token(sys::pid())
-                .map(|token| token.recorded().to_string())
-                .unwrap_or_default(),
-        };
-        let body = serde_json::to_string(&record)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
-                    path: path.clone(),
-                    source: e,
-                })?;
-                Ok(Self { path, held: true })
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let held_by: Option<LockRecord> = read_json_opt(&path);
-                match held_by {
-                    // A holder on this host that this host can prove is gone
-                    // leaves a lock nothing will release. Reclaim it.
-                    Some(held)
-                        if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
-                    {
-                        write_atomic(&path, body.as_bytes())?;
-                        Ok(Self { path, held: true })
-                    }
-                    Some(held) => Err(Error::Locked {
-                        run: paths.run.clone(),
-                        pid: held.pid,
-                        host: held.host,
-                        verb: held.verb,
-                    }),
-                    // An unreadable lock is still a claim. Refusing is the safe
-                    // reading: the alternative is a second writer on a run
-                    // whose first writer cannot be identified.
-                    None => Err(Error::Locked {
-                        run: paths.run.clone(),
-                        pid: 0,
-                        host: sys::hostname(),
-                        verb: "an unreadable lock".to_string(),
-                    }),
-                }
-            }
-            Err(e) => Err(Error::Ledger { path, source: e }),
-        }
+        take_exclusively(&path, &paths.run, verb)?;
+        Ok(Self { path, held: true })
     }
 
     /// Release the lock now rather than at the end of the scope.
