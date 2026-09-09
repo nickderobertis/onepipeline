@@ -347,6 +347,33 @@ fn the_local_executors_capacity_reports_the_three_numbers_the_contract_names() {
     );
 }
 
+/// Serialises every test below that sets one of the process-global variables the
+/// `oneagentgraph` seam reads — `ONEPIPELINE_ONEAGENTGRAPH_BIN`, which names the
+/// executable, and `ONEAGENTGRAPH_STATE_DIR`, which names where its runs are
+/// recorded.
+///
+/// nextest — the runner this repository uses — gives each test its own process,
+/// so under it neither variable reaches anything else. Plain `cargo test` runs a
+/// binary's tests as *threads of one process*, and under that runner one test's
+/// value decides another's assertion:
+/// `dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot`
+/// points the seam at an executable that does not exist, and
+/// `a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch`
+/// then launches *that* instead of the real sibling and is refused for the wrong
+/// reason. Observed, one run in three. The lock costs nothing under nextest and
+/// makes both runners say the same thing.
+static SEAM_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Held for the length of a test that sets one of those variables. A poisoned
+/// lock is recovered rather than propagated: the test that panicked holding it
+/// has already failed, and refusing to run the next one would report a second
+/// failure belonging to nobody.
+fn seam_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    SEAM_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() {
     // The seam is a subprocess boundary: this crate composes `oneagentgraph`
@@ -356,8 +383,10 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
     //
     // The seam is *named* rather than left to `PATH`: `oneagentgraph` is a
     // published CLI, so a host that has it installed would otherwise make this
-    // assertion depend on whose machine it ran on. nextest runs each test in its
-    // own process, so the variable this sets reaches nothing else.
+    // assertion depend on whose machine it ran on. The variable is this whole
+    // process's, so it is set under [`seam_env_lock`] and removed again — a
+    // sibling test launches the real executable through it.
+    let _seam = seam_env_lock();
     std::env::set_var(
         "ONEPIPELINE_ONEAGENTGRAPH_BIN",
         "oneagentgraph-that-is-not-installed",
@@ -379,6 +408,9 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
         message.contains("oneagentgraph"),
         "the seam is unnamed: {message}"
     );
+    // Put back what this test pointed at an executable that is not there, so it
+    // decides nothing but its own assertion.
+    std::env::remove_var("ONEPIPELINE_ONEAGENTGRAPH_BIN");
 }
 
 /// The `filters:` block in the contract is a block this crate's own types read.
@@ -1038,8 +1070,11 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
 /// transmitted; a dispatch that dropped it would launch the graph happily.
 #[test]
 fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
-    let root = std::env::temp_dir().join(format!("onepipeline-seam-{}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("a scratch root");
+    // Both of these are the whole process's: the root is keyed on this test
+    // rather than on the process it runs in, and the variable naming it is set
+    // under the lock a sibling test setting the seam's own variables also holds.
+    let _seam = seam_env_lock();
+    let root = scratch("seam");
     std::env::set_var("ONEAGENTGRAPH_STATE_DIR", root.join("state"));
     let graph = root.join("single-sided.yaml");
     std::fs::write(
@@ -1078,6 +1113,7 @@ fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
         !other.to_string().contains("max_turns"),
         "a control nobody declared was sent anyway: {other}"
     );
+    std::env::remove_var("ONEAGENTGRAPH_STATE_DIR");
     std::fs::remove_dir_all(&root).ok();
 }
 

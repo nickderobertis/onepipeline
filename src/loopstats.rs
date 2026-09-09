@@ -71,23 +71,41 @@ pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The same reads again, attributed to the **thread** that performed them,
+    /// and only in a test build.
+    ///
+    /// [`STORE_BYTES`] is per process by design, which makes it the wrong thing
+    /// for a check to measure a *delta* across: under a runner that runs tests
+    /// as threads of one process, every other thread's ledger read lands in it
+    /// too and a bounded read reads as an unbounded one.
+    ///
+    /// Not a second account — it is the same call site below, counted twice — and
+    /// every line of it is `cfg(test)`, so a release compiles the atomic alone.
+    static THREAD_STORE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    #[cfg(test)]
+    THREAD_STORE_BYTES.with(|counted| counted.set(counted.get() + bytes));
 }
 
 pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }
 
-/// What that counter stands at, for the checks that hold a bounded read bounded.
+/// What this thread's account stands at, for the checks that hold a bounded read
+/// bounded.
 ///
-/// The loop's own report reads it through [`flush`] instead. This is the same
-/// account under a second name rather than a second account: `ledger::bytes_read`
-/// is what the summary's checks measure with, and the whole point of pointing it
-/// here is that they measure the number the host is actually told.
+/// The loop's own report reads the process-wide counter through [`flush`]
+/// instead. Both are the same reads counted at the same call site, so a check
+/// measuring across this one is still measuring the number the host is told —
+/// only without the reads no test of it performed.
 #[cfg(test)]
 pub(crate) fn store_bytes() -> u64 {
-    STORE_BYTES.load(Ordering::Relaxed)
+    THREAD_STORE_BYTES.with(std::cell::Cell::get)
 }
 
 /// Whether this process was launched to report what its loop did.
@@ -125,8 +143,32 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
 mod tests {
     use super::*;
 
+    /// Serialises the two tests below, which both set and clear [`STATS_ENV`] —
+    /// the one process-wide variable that decides what the other asserts.
+    ///
+    /// nextest, the runner this repository uses, gives each test its own process,
+    /// so there the variable reaches nothing else. Plain `cargo test` runs a
+    /// module's tests as *threads of one process*, and under that runner these two
+    /// decide each other both ways round: `nothing_is_written_when_nobody_asked_for_it`
+    /// asserts the variable is unset while its sibling holds it at `1`, and the
+    /// sibling's `flush` writes nothing at all when this one has just cleared it.
+    /// The lock costs nothing under nextest and makes both runners say the same
+    /// thing.
+    static STATS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Held for the length of a test that touches [`STATS_ENV`]. A poisoned lock
+    /// is recovered rather than propagated: the test that panicked holding it has
+    /// already failed, and refusing to run the next one would report a second
+    /// failure belonging to nobody.
+    fn stats_lock() -> std::sync::MutexGuard<'static, ()> {
+        STATS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn nothing_is_written_when_nobody_asked_for_it() {
+        let _stats = stats_lock();
         // Asserted through the one function that decides it, because the counters
         // themselves are process-wide and a test running beside this one moves them.
         std::env::remove_var(STATS_ENV);
@@ -143,8 +185,15 @@ mod tests {
 
     #[test]
     fn every_count_a_journey_reads_is_written_under_its_own_name() {
-        let root =
-            std::env::temp_dir().join(format!("onepipeline-loopstats-{}", std::process::id()));
+        let _stats = stats_lock();
+        // Keyed on the *call* rather than on the process: two tests running as
+        // threads share a pid, and the counter is what they do not share.
+        static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-loopstats-{}-{}",
+            std::process::id(),
+            NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let paths = crate::ledger::RunPaths::under(&root, "measured");
         paths.create().expect("the run directory");
