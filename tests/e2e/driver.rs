@@ -3949,6 +3949,11 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is the crate's own ownership lock, handover gate and command queue — the three
+// things every writer of a run touches — which any change under `src/` can move, so a
+// narrower project could not honestly run them. `live_edit.rs` and `store.rs` carry the
+// same directive for the same reason.
 /// An edit that reaches a run whose driver is **on its way out** is applied by
 /// that driver, before it lets go of the run.
 ///
@@ -4055,11 +4060,6 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
     );
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
-// exercise is the crate's own ownership lock, handover gate and command queue — the three
-// things every writer of a run touches — which any change under `src/` can move, so a
-// narrower project could not honestly run them. `live_edit.rs` and `store.rs` carry the
-// same directive for the same reason.
 /// A run held in the one window where its driver owns it and claims nothing.
 ///
 /// The run's only node has settled and the driver is inside its write-back

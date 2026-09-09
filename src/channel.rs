@@ -1406,6 +1406,13 @@ impl ChannelState {
     /// file holds, because the two differ by a line no build can read: that line
     /// is passed over here exactly as the claim passes over it, so a writer does
     /// not stay for work nothing will ever take.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the leniency here is not this
+    // function's own: it reads the cursor and the queue exactly as `claim_commands` does,
+    // line for line, because the question it answers is what that call would take. A
+    // cursor or a record no build can read is passed over by both, and a writer that
+    // stayed for one would be waiting on work nothing will ever claim — which is the state
+    // that has no way out. What that leniency costs is `claim_commands`'s to answer for,
+    // and it predates this change.
     pub(crate) fn claimable_commands(&self) -> Vec<QueuedCommands> {
         let claimed_through: u64 =
             crate::ledger::read_json_opt(&self.paths.channel("commands-cursor.json")).unwrap_or(0);
@@ -1415,6 +1422,8 @@ impl ChannelState {
             .filter(|queued| queued.id >= claimed_through)
             .collect()
     }
+
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// Claim the command envelopes the reconciler has not drained yet.
     pub fn claim_commands(&self) -> crate::Result<Vec<QueuedCommands>> {

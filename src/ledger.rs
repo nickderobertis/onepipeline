@@ -1572,7 +1572,7 @@ impl Handover {
         let held = Self::take_a_place(paths, &dir)?;
         let deadline = std::time::Instant::now() + patience;
         loop {
-            match ahead_of(&dir, &held.entry) {
+            match ahead_of(&dir, &held.entry).map_err(|e| not_taken(&paths.run, &e.to_string()))? {
                 // Nothing is ahead: this entry is the lowest, so this process is
                 // the one inside the gate.
                 None => return Ok(held),
@@ -1624,11 +1624,10 @@ impl Handover {
         // Unique per attempt and not only per process, so two attempts of one
         // process contend the way two processes do rather than colliding.
         static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let entry = dir.join(format!(
-            "{:013}-{:010}-{:06}",
+        let entry = dir.join(entry_named(
             sys::now_millis(),
-            u64::from(sys::pid()),
-            ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1_000_000
+            sys::pid(),
+            ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1_000_000,
         ));
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -1664,27 +1663,52 @@ fn not_taken(run: &str, because: &str) -> Error {
 
 /// The entry ahead of `ours`, or `None` where `ours` is the lowest.
 ///
-/// Unreadable directory entries are passed over rather than waited on: an entry
-/// this build cannot place in the order is one it cannot say is ahead.
-fn ahead_of(dir: &Path, ours: &Path) -> Option<PathBuf> {
-    let ours = ours.file_name()?;
+/// **Every uncertainty here counts as an entry ahead**, because the only thing
+/// this answers is whether this process may go in: a directory it cannot read, an
+/// entry it cannot read, and a name it cannot place in the order are each a claim
+/// it cannot rule out — and a later build's naming would be exactly that. So
+/// unreadable is `Err`, which the caller reports as a gate it did not take, and a
+/// name from outside this build's own shape sorts ahead of everything and is
+/// waited on until its holder can be shown to be gone, which nothing about it
+/// can — so it ends in a refusal rather than in a second party inside the gate.
+fn ahead_of(dir: &Path, ours: &Path) -> Result<Option<PathBuf>> {
+    let ours = ours.file_name().unwrap_or_default().to_os_string();
+    let listing = fs::read_dir(dir).map_err(|e| Error::Ledger {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
     let mut lowest: Option<std::ffi::OsString> = None;
-    for entry in fs::read_dir(dir).ok()? {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        if pid_of_entry(Path::new(&name)).is_none() {
-            continue;
-        }
+    for entry in listing {
+        let name = entry
+            .map_err(|e| Error::Ledger {
+                path: dir.to_path_buf(),
+                source: e,
+            })?
+            .file_name();
         if lowest.as_ref().is_none_or(|low| name < *low) {
             lowest = Some(name);
         }
     }
-    let lowest = lowest?;
-    (lowest != ours).then(|| dir.join(lowest))
+    let lowest = lowest.ok_or_else(|| {
+        Error::Invalid(format!(
+            "{}: this process's own entry is not in the gate it wrote it to",
+            dir.display()
+        ))
+    })?;
+    Ok((lowest != ours).then(|| dir.join(lowest)))
+}
+
+/// One entry's name: the moment it was made, the process that made it, and which
+/// of that process's attempts it is.
+///
+/// Sortable as text, so the order entries were made in is the order they read in
+/// — which is the whole of how the gate decides who is inside it.
+fn entry_named(at: u64, pid: u32, attempt: u64) -> String {
+    format!("{at:013}-{pid:010}-{attempt:06}")
 }
 
 /// The pid an entry's name carries, or `None` for a name this build did not
-/// write.
+/// write — which is a holder it cannot show is gone, and so one it waits on.
 fn pid_of_entry(entry: &Path) -> Option<u32> {
     entry.file_name()?.to_str()?.split('-').nth(1)?.parse().ok()
 }
@@ -1972,6 +1996,42 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{entry_named, pid_of_entry};
+
+    /// The gate's entry name is written by one function and read by another, so
+    /// the two are held to each other here rather than by a reader noticing.
+    ///
+    /// Both halves matter: the pid comes back out — it is how a waiter tells a
+    /// holder that is gone from one that is working — and the order the names
+    /// sort in is the order the entries were made in, which is the whole of how
+    /// the gate decides who is inside it.
+    #[test]
+    fn a_gate_entrys_name_carries_its_pid_and_sorts_by_when_it_was_made() {
+        let earlier = entry_named(1_757_000_000_000, 4242, 0);
+        assert_eq!(pid_of_entry(std::path::Path::new(&earlier)), Some(4242));
+
+        for later in [
+            entry_named(1_757_000_000_001, 1, 0),
+            entry_named(1_757_000_000_000, 4243, 0),
+            entry_named(1_757_000_000_000, 4242, 1),
+        ] {
+            assert!(
+                earlier < later,
+                "{earlier} does not sort before {later}, so the gate's order is not the \
+                 order its entries were made in"
+            );
+            assert!(pid_of_entry(std::path::Path::new(&later)).is_some());
+        }
+
+        // And a name this build did not write carries no pid, which is what makes
+        // a waiter treat it as a holder it cannot show is gone.
+        assert_eq!(
+            pid_of_entry(std::path::Path::new("handover.lock")),
+            None,
+            "a name from outside this build's shape was read as one of its own"
+        );
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
