@@ -378,7 +378,7 @@ impl RunSummary {
         if let Some(stored) = ledger::read_json_opt::<Self>(&paths.summary()) {
             if (stored.journal_len, stored.journal_mtime_ms) == stamp && stored.run_id == paths.run
             {
-                return Ok(stored);
+                return Ok(stored.with_the_report_the_run_left(paths));
             }
         }
         // Stamped with what the store held **before** the fold, for the reason
@@ -387,6 +387,51 @@ impl RunSummary {
         let folded = Self::folded(paths, stamp)?;
         let _ = ledger::write_json(&paths.summary(), &folded);
         Ok(folded)
+    }
+
+    /// Take the landings the run's **own settled report** re-read, where they say
+    /// more than its journal did.
+    ///
+    /// The reader's half of a document that is complete about the journal and one
+    /// step behind the report beside it. A driver re-reads every unlanded change
+    /// as it closes out — `engine`'s `landings_after_asking_again` — and writes
+    /// what it found to `result.json`, **after** the last record it appends: so
+    /// the writer maintaining this document has already written its last version
+    /// by the time that report exists. A fold takes the report
+    /// ([`views::landings_the_run_re_read`](crate::views::landings_the_run_re_read)),
+    /// so a served row that did not would be the two accounts of one run this
+    /// document exists to keep as one — and it is the account that costs, because
+    /// the listing would then go and ask a repository about a change the run had
+    /// already watched land.
+    ///
+    /// **Only ever `unlanded` → `landed`, and only where there is an `unlanded`
+    /// to move.** A base does not stop carrying what it carries, so the later
+    /// answer in that direction alone cannot un-land anything; and a run with
+    /// nothing unlanded has the same row either way, which keeps this read off the
+    /// listing path for every run with nothing to gain from it.
+    fn with_the_report_the_run_left(mut self, paths: &RunPaths) -> Self {
+        let unlanded = graph::Landing::Unlanded.as_str();
+        if !self.landings.values().any(|node| node.landing == unlanded) {
+            return self;
+        }
+        // Read leniently: a report this build cannot parse — one a newer build
+        // wrote, at a version this one refuses — leaves the row exactly as the
+        // journal left it, which is the answer it always had.
+        let Some(result) = ledger::read_json_opt::<crate::engine::RunResult>(&paths.result())
+        else {
+            return self;
+        };
+        for node in result.nodes {
+            if node.landing != Some(graph::Landing::Landed) {
+                continue;
+            }
+            if let Some(held) = self.landings.get_mut(&node.id) {
+                if held.landing == unlanded {
+                    held.landing = graph::Landing::Landed.as_str().to_string();
+                }
+            }
+        }
+        self
     }
 
     /// The same summary, always by folding the whole store.

@@ -53,6 +53,7 @@ mod journal;
 // changes it exists to catch.
 mod landing;
 mod lifecycle;
+mod listing;
 mod live_edit;
 mod loopcost;
 mod node_validator;

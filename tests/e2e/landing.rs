@@ -26,11 +26,18 @@
 //! separate invocation of the binary, so the wall clock is the whole cost a
 //! supervisor pays at a terminal rather than the render alone:
 //!
-//! | render | landing reads | repository asks | lines printed | wall clock |
-//! | --- | --- | --- | --- | --- |
-//! | `results` | 5 | 5, all of `service` | 8 | 839 ms |
-//! | `goals` (the run summary) | 4 | 4, all of `service` | 4 | 540 ms |
-//! | `status` | 4 | 4, all of `service` | 4 | 618 ms |
+//! | invocation | render | landing reads | repository asks | lines printed | wall clock |
+//! | --- | --- | --- | --- | --- | --- |
+//! | `results <RUN>` | `results` | 5 | 5, all of `service` | 8 | 944 ms |
+//! | `goals <RUN>` | the run summary | 4 | 4, all of `service` | 4 | 895 ms |
+//! | `status <RUN>` | `status` | 4 | 4, all of `service` | 4 | 1109 ms |
+//! | `runs` | the run summary | 4 | 4, all of `service` | 1 | 546 ms |
+//! | `status` | `status` | 4 | 4, all of `service` | 1 | 578 ms |
+//!
+//! The last two are the **bounded listing**, which reaches the same decision from
+//! each run's summary document rather than from a fold of its store: the read is
+//! the same read, because what the document carries is the landing's *inputs* and
+//! never its answer.
 //!
 //! The asks are one per read and not one per render — `vcs::landing_now` says
 //! why.
@@ -703,19 +710,27 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
     // One invocation before anything is timed, so what is measured is a render
     // rather than the first exec of a debug binary nobody has paged in.
     world.run(&["runs"]).exited(0);
-    for (view, argv, expected) in [
+    for (named, view, argv, expected) in [
         // `results` prints a line for every node; the counting views report on
         // the five whose publication answered a landing at all.
-        ("results", vec!["results", run.as_str()], 5),
-        ("summary", vec!["goals", run.as_str()], 4),
-        ("status", vec!["status", run.as_str()], 4),
+        ("results", "results", vec!["results", run.as_str()], 5),
+        ("goals", "summary", vec!["goals", run.as_str()], 4),
+        ("status-one-run", "status", vec!["status", run.as_str()], 4),
+        // The same bound over the **bounded listing**, which reaches the same
+        // decision from a run's summary document rather than from a fold of its
+        // store. That the read still happens is the point: the document carries
+        // the landing's *inputs*, so a change merged since the node settled is
+        // found here exactly as the folding views find it — and the one node
+        // whose settlement already recorded a landing is still never asked.
+        ("runs", "summary", vec!["runs"], 4),
+        ("status-listed", "status", vec!["status"], 4),
     ] {
         // Each repetition records into a file of its own, so the acts asserted
         // on below are one render's rather than three renders' appended.
         let mut took = std::time::Duration::ZERO;
         let mut measured = None;
         for repetition in 0..REPETITIONS {
-            let path = world.root.join(format!("{view}-{repetition}.reads"));
+            let path = world.root.join(format!("{named}-{repetition}.reads"));
             let began = std::time::Instant::now();
             let rendered = world.run_recording_renders(&path, &argv);
             took += began.elapsed();
@@ -727,7 +742,7 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         let rendered: Vec<&Value> = acts.iter().filter(|act| act["view"] == view).collect();
         assert!(
             !rendered.is_empty(),
-            "{view} recorded no render at all:\n{}",
+            "{named} recorded no render at all:\n{}",
             measured.stdout
         );
 
@@ -743,17 +758,17 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         assert_eq!(
             once.len(),
             asked.len(),
-            "{view} asked the landing read twice for one node: {asked:?}"
+            "{named} asked the landing read twice for one node: {asked:?}"
         );
         assert_eq!(
             asked.len(),
             expected,
-            "{view} performed {} landing read(s), not {expected}: {asked:?}",
+            "{named} performed {} landing read(s), not {expected}: {asked:?}",
             asked.len()
         );
         assert!(
             !asked.contains(&RECORDED_LANDED.to_owned()),
-            "{view} read a landing the run had already recorded: {asked:?}"
+            "{named} read a landing the run had already recorded: {asked:?}"
         );
 
         let reported: Vec<String> = rendered
@@ -764,12 +779,12 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         for node in &asked {
             assert!(
                 reported.contains(node),
-                "{view} read a landing for {node}, whose line it does not print: {reported:?}"
+                "{named} read a landing for {node}, whose line it does not print: {reported:?}"
             );
         }
         assert!(
             asked.len() <= reported.len(),
-            "{view} performed more reads than it has nodes to report on: {asked:?} over \
+            "{named} performed more reads than it has nodes to report on: {asked:?} over \
              {reported:?}"
         );
 
@@ -800,13 +815,13 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         assert_eq!(
             opened_once.len(),
             opened.len(),
-            "{view} asked about one repository twice over for a node it had already decided: \
+            "{named} asked about one repository twice over for a node it had already decided: \
              {opened:?}"
         );
         for (repo, node) in &opened {
             assert!(
                 reported.contains(node),
-                "{view} asked about {repo} for {node}, whose line it does not print: {reported:?}"
+                "{named} asked about {repo} for {node}, whose line it does not print: {reported:?}"
             );
         }
         // One ask per read and no other: one without a read would be this crate
@@ -814,7 +829,7 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         assert_eq!(
             opened.len(),
             asked.len(),
-            "{view} asked about {} repositor(ies) for {} landing read(s): {opened:?}",
+            "{named} asked about {} repositor(ies) for {} landing read(s): {opened:?}",
             opened.len(),
             asked.len()
         );
@@ -828,13 +843,13 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         for act in &per_node {
             assert!(
                 act["act"] == "landing-read" || act["act"] == "repository-asked",
-                "{view} did per-node work no landing read accounts for: {act}"
+                "{named} did per-node work no landing read accounts for: {act}"
             );
         }
         assert_eq!(
             per_node.len(),
             asked.len() + opened.len(),
-            "{view} performed per-node work beside its landing reads: {per_node:?}"
+            "{named} performed per-node work beside its landing reads: {per_node:?}"
         );
 
         // What each repository cost this render, which is the figure the bound
@@ -844,7 +859,7 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
             *per_repository.entry(repo.as_str()).or_default() += 1;
         }
         measured_cost.push_str(&format!(
-            "  {view:<8} {} landing read(s), {} repository ask(s) {:?}, {} line(s) \
+            "  {named:<14} {} landing read(s), {} repository ask(s) {:?}, {} line(s) \
              printed, {:?} per render\n",
             asked.len(),
             opened.len(),
