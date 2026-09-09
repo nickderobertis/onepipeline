@@ -176,10 +176,19 @@ const FNV_PRIME: u128 = (1 << 88) | 0x13b;
 /// could not be carried would re-hash the whole prefix per applied command, which is
 /// the cost this document removes.
 ///
-/// An **integrity check and not a security boundary** — what it catches is a covered
-/// record truncated or rewritten by a heal, a copy, or an editor. A cryptographic
-/// digest would need a dependency `AGENTS.md` guards, and the fallback either way is
-/// a full fold.
+/// An **integrity check and not a security boundary**, and what it detects is exactly
+/// the accidents: a covered record truncated, half-written, or rewritten by a heal, a
+/// copy, or an editor, where a rewrite landing on the same 128-bit value is not a
+/// failure mode anyone here meets.
+///
+/// What it does **not** detect is a rewrite crafted to match, and no digest would.
+/// This document is unauthenticated and sits in the run root beside the journal it
+/// summarises, so anything able to rewrite covered bytes is equally able to rewrite
+/// the seal over them; a cryptographic digest would move the cost of colliding by
+/// accident and nothing else, for a dependency `AGENTS.md` guards. That is the right
+/// boundary because the journal is the authoritative record and this is a discardable
+/// cache of a prefix of it: the fallback either way is the whole-store fold every
+/// reader did before this document existed.
 fn digested(from: u128, bytes: &[u8]) -> u128 {
     bytes.iter().fold(from, |digest, byte| {
         (digest ^ u128::from(*byte)).wrapping_mul(FNV_PRIME)
@@ -263,8 +272,8 @@ impl Coverage {
     /// itself. [`digest`](Self::digest) does not go in, which is what stops it
     /// sealing over itself.
     ///
-    /// What that leaves is a document this build wrote, over a journal prefix that
-    /// has not moved. It is still not a proof that the state is the *fold* of those
+    /// What that leaves is a document no part of which has moved since a writer
+    /// sealed it, over a journal prefix that has not moved either. It is still not a proof that the state is the *fold* of those
     /// bytes — only folding them proves that, which is the cost this document
     /// removes — but there is no longer any part of the document a reader takes on
     /// trust separately from the rest.
