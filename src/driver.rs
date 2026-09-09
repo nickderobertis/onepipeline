@@ -2175,9 +2175,10 @@ enum Submitted {
         /// the record to find out what it just did.
         operations: Vec<edits::Operation>,
     },
-    /// Every command applied **by the run's own reconciler**, which is the
-    /// writer while a driver holds the run. What they became is in its record
-    /// rather than here.
+    /// Every command applied **by the run's own reconciler**, over the durable
+    /// queue: the driver holding the run, or this process once that driver had
+    /// gone and this one took the run over. What they became is in the run's
+    /// record rather than here.
     AppliedByRun {
         /// The reply's id in the channel.
         reply: u64,
@@ -2728,32 +2729,87 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
         Err(Error::Locked { .. }) => {
             let id = channel.submit(envelope.author, &envelope.commands)?;
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            let mut answered = None;
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    deliver_verdict_half(paths, &channel, envelope)?;
-                    if outcome.applied {
-                        return Ok(Submitted::AppliedByRun { reply: id });
-                    }
-                    return Err(Error::Refused(
-                        outcome
-                            .reason
-                            .unwrap_or_else(|| "the reconciler rejected the edit".into()),
-                    ));
+                    answered = Some(outcome);
+                    break;
                 }
                 std::thread::sleep(ATTACH_POLL);
             }
+            // The wait ran out with nothing answering, so the question this fork
+            // was taken on is asked again: is anything still driving this run?
+            // It is a different question now than it was — a driver that held the
+            // run when these commands were accepted can have died holding it
+            // since — and the answer is taken the only way it cannot be raced.
+            let answered = match answered {
+                Some(outcome) => Some(outcome),
+                None => reconciled_here(paths, &channel, id)?,
+            };
+            if let Some(outcome) = answered {
+                deliver_verdict_half(paths, &channel, envelope)?;
+                if outcome.applied {
+                    return Ok(Submitted::AppliedByRun { reply: id });
+                }
+                return Err(Error::Refused(
+                    outcome
+                        .reason
+                        .unwrap_or_else(|| "the reconciler rejected the edit".into()),
+                ));
+            }
 
-            // Accepted and durable, but not reconciled within the timeout: they
-            // remain queued, and this is not an instruction to resend. The
-            // verdict half does not wait on that — it answers a question rather
-            // than the graph, and the reader waiting for it is not the reader
-            // waiting for the edits — so it is delivered here as it is on every
-            // other path, and only the edits are reported still queued.
+            // Accepted and durable, but not reconciled: they remain queued, and
+            // this is not an instruction to resend. The verdict half does not
+            // wait on that — it answers a question rather than the graph, and the
+            // reader waiting for it is not the reader waiting for the edits — so
+            // it is delivered here as it is on every other path, and only the
+            // edits are reported still queued.
             deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::Queued { reply: id })
         }
         Err(other) => Err(other),
     }
+}
+
+/// Reconcile the run's command queue **here**, when the wait for a reconciler ran
+/// out and nothing is driving the run any more.
+///
+/// The holder of the run's ownership lock is the only party that can apply a
+/// queued edit. A driver that dies holding the run releases nothing, so the
+/// commands it never claimed wait for whatever takes the run next — which used
+/// to mean an `adopt` somebody had to think to type, on exactly the runs a
+/// `retry` or a `requeue` was aimed at. This process accepted the edit, so this
+/// process is what takes the run over when the lock's holder has gone.
+///
+/// **It never resubmits and never applies anything twice.** The envelope is
+/// already on the durable queue and stays the one copy of itself: what runs here
+/// is the reconciler, over that queue, behind that queue's own cursor. So an
+/// envelope some other writer already claimed is not claimed again — and this
+/// answers `None` for it, which reports it still queued rather than applying a
+/// second copy of commands that may already be half applied.
+///
+/// `None` is also what a run something is still driving answers, because the
+/// lock is what says so and it is not taken here.
+fn reconciled_here(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    id: u64,
+) -> Result<Option<crate::channel::CommandOutcome>> {
+    let Ok(lock) = ledger::OwnershipLock::acquire(paths, "reply") else {
+        return Ok(None);
+    };
+    // Taking a lock is not instant, and the driver that had it may have answered
+    // this envelope on its own way out while it was being taken.
+    if let Some(outcome) = channel.outcome_of(id) {
+        lock.release();
+        return Ok(Some(outcome));
+    }
+    let reconciled = engine::reconcile_queued(paths);
+    lock.release();
+    reconciled?;
+    // Whatever the queue answered about *this* envelope, which is `None` where
+    // the reconciler's cursor had already passed it.
+    Ok(channel.outcome_of(id))
 }
 
 /// Compile one command in the process that is applying it, delivering what only a

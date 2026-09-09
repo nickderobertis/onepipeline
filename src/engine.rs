@@ -685,10 +685,58 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     let mut state = Projected::open(paths);
     report_unreadable_records(paths, &state);
 
-    let outcome = converge(paths, &mut journal, &mut state, &launch)?;
+    let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
+    // The **last** claim on the command queue, after everything this driver owed
+    // the run is written and with nothing left to do but let go of it.
+    //
+    // The loop takes one of its own on its way out, but the run is not released
+    // there: `record_result` still has to run, and that asks `onevcs` about every
+    // change this run left unlanded — so the gap between the loop's claim and
+    // the lock going is a subprocess boundary wide, and an edit accepted in it
+    // was accepted by a run whose driver reconciles nothing more. Here there is
+    // no I/O between the claim and the release for one to arrive in.
+    //
+    // Claimed until the queue is empty, and the result written again whenever a
+    // claim moved the graph: an edit applied after the record was written is an
+    // edit the record does not carry, and this is the run's last word on what
+    // became of it. It cannot spin, because the queue's cursor only advances.
+    let channel = ChannelState::new(paths);
+    while reconcile_edits(
+        paths,
+        &mut journal,
+        &mut state,
+        &channel,
+        &launch,
+        &mut BTreeMap::new(),
+    )? {
+        outcome = graph::state_of(&state.statuses());
+        record_result(paths, &state, outcome)?;
+    }
     lock.release();
     Ok(outcome)
+}
+
+/// Reconcile whatever a run's command queue is holding, as the run's writer.
+///
+/// What `reply` runs when the wait for a reconciler ran out and the driver it
+/// queued its envelope behind has gone: the same three phases the loop runs, the
+/// same durable queue, behind the same cursor — so an envelope some other writer
+/// already claimed is not claimed again here and nothing is applied twice. The
+/// caller holds the run's ownership lock, which is what makes this process the
+/// writer; nothing is in flight, because nothing is driving the run.
+pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<bool> {
+    let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    let mut journal = Journal::open(paths);
+    let mut state = Projected::open(paths);
+    reconcile_edits(
+        paths,
+        &mut journal,
+        &mut state,
+        &ChannelState::new(paths),
+        &launch,
+        &mut BTreeMap::new(),
+    )
 }
 
 /// The reconcile loop: converge the actual frontier toward the desired graph.

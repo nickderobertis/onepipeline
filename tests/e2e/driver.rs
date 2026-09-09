@@ -4054,3 +4054,128 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
         "a second driver took the run over, so the first one's claim proves nothing"
     );
 }
+
+/// An edit accepted by a run whose driver then **dies holding it** is applied by
+/// the process that accepted it, rather than left on the queue.
+///
+/// The lock-holder is the only party that can apply a queued edit, and a driver
+/// that dies releases nothing — so the commands it never claimed used to wait for
+/// an `adopt` somebody had to think to type. The `reply` that accepted them is
+/// the process that is still there, so when its wait runs out it asks again
+/// whether anything is driving the run, takes the run over when nothing is, and
+/// reconciles the queue it already put its envelope on.
+///
+/// The window is real and is entered the way a real one is: the run's write-back
+/// close-out, during which the driver holds the run and claims nothing, held open
+/// by a capture path the store cannot write. The envelope is proven onto the
+/// queue before the driver is ended, so what follows is not a race — nothing
+/// claimed it, and nothing but this reply is left to.
+///
+/// `#[cfg(unix)]` because it ends a process by pid and because the capture
+/// fixture depends on POSIX `File::create` refusing a path a directory occupies,
+/// which `store.rs`'s own capture-outage journey says the same of.
+#[cfg(unix)]
+#[test]
+fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it() {
+    use std::io::Write;
+
+    let world = World::new("driver-queue-recovery");
+    world.script("work.wait", "hold");
+    let (run, driver) =
+        start_detached_announcing(&world, "queue-recovery", vec![agent("work", &[])]);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a write-back capture path that cannot
+    // be written is a state a host produces on its own — a full disk, a permission change —
+    // and `store.rs`'s `an_unwritable_writeback_capture_is_reported_retried_and_recovered`
+    // states the same fixture the same way. It is here because the driver has to hold the
+    // run without claiming its queue for long enough for a planner to type a reply into
+    // that window, and how long a store takes to refuse is not an input the CLI exposes.
+    let capture = world.run_file(&run, "writeback-task-list.stdout");
+    world.until("the first projection to leave its capture behind", |_| {
+        capture.is_file()
+    });
+    std::fs::remove_file(&capture).expect("the completed capture is removed");
+    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.release("work.go");
+    world.until("the only node to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+
+    // The edit is typed into that window, and waits there for a reconciler.
+    let mut replying = world
+        .cmd(&["reply", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "3")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the reply starts");
+    let mut stdin = replying.stdin.take().expect("stdin is piped");
+    write!(
+        stdin,
+        "{}",
+        json!({"version": 2, "commands": [
+            {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                   "task": "## What\nthe work the edit asked for"}}
+        ]})
+    )
+    .expect("the envelope is written");
+    drop(stdin);
+    world.until("the envelope to reach the run's command queue", |world| {
+        world
+            .run_file(&run, "channel/commands.jsonl")
+            .is_file()
+            .then(|| std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl")))
+            .and_then(Result::ok)
+            .is_some_and(|queued| queued.contains("\"extra\""))
+    });
+
+    // And the driver dies holding the run, the way a host ends a process it has
+    // run out of memory for: the lock it never released still names it, and the
+    // envelope on the queue is one it never claimed.
+    end_process(driver);
+
+    let answered = replying.wait_with_output().expect("the reply answers");
+    let said = String::from_utf8_lossy(&answered.stdout);
+    assert!(
+        answered.status.success(),
+        "the reply did not answer as accepted: {said}{}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    assert!(
+        said.contains("\"applied\""),
+        "the accepted edit was left on the dead driver's queue: {said}"
+    );
+
+    // The run's own record of it: one envelope on the queue, answered once and
+    // applied once. Nothing was sent again, and nothing was applied twice.
+    let queue = std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl"))
+        .expect("the command queue");
+    let queued: Vec<&str> = queue
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "the envelope was submitted again: {queued:?}"
+    );
+    let answers = world.command_outcomes(&run);
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers[0]["applied"], json!(true), "{answers:?}");
+    let committed = world.events_of(&run, "edit-committed");
+    assert_eq!(
+        committed.len(),
+        1,
+        "the edit was applied more than once: {committed:?}"
+    );
+    assert!(
+        world.events_of(&run, "driver-adopted").is_empty(),
+        "something adopted the run, so this journey proves nothing about the reply"
+    );
+}
