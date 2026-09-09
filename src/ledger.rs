@@ -1376,11 +1376,17 @@ pub struct LockRecord {
     pub started: String,
 }
 
-/// Create `path` as this process's exclusive claim, or report who holds it.
+/// Take `path` as this process's claim, or report who holds it.
 ///
 /// The one place a lock file is taken in this crate, so the two locks over a run
 /// — [`OwnershipLock`] over the run itself and [`Handover`] over letting go of it
 /// — are taken the same way and reclaimed on the same terms.
+///
+/// Exclusive on both paths, and by two different mechanisms: creating the file is
+/// exclusive because the filesystem makes it so, and *reclaiming* a dead holder's
+/// is exclusive because the record is read back afterwards — two contenders that
+/// both saw the same dead holder both write, and only the one the record names
+/// comes away with it.
 fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
@@ -1421,8 +1427,27 @@ fn take_exclusively(path: &Path, run: &str, verb: &str) -> Result<()> {
                 Some(held)
                     if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
                 {
+                    // Two contenders can read the same dead holder, and both
+                    // would write over it — so the write is not what decides
+                    // this. The record is **read back**, and only the process the
+                    // record then names has it; the other reads the winner's and
+                    // is refused, exactly as it would have been by a live holder.
                     write_atomic(path, body.as_bytes())?;
-                    Ok(())
+                    match read_json_opt::<LockRecord>(path) {
+                        Some(now) if now.pid == record.pid && now.host == record.host => Ok(()),
+                        Some(won_by) => Err(Error::Locked {
+                            run: run.to_string(),
+                            pid: won_by.pid,
+                            host: won_by.host,
+                            verb: won_by.verb,
+                        }),
+                        None => Err(Error::Locked {
+                            run: run.to_string(),
+                            pid: 0,
+                            host: sys::hostname(),
+                            verb: "an unreadable lock".to_string(),
+                        }),
+                    }
                 }
                 Some(held) => Err(Error::Locked {
                     run: run.to_string(),
@@ -1487,6 +1512,9 @@ const HANDING_OVER: &str = "handover";
 /// Read as well as written: it is how one reply taking a run over tells itself
 /// from a driver driving it, and the two answer differently.
 pub(crate) const REPLY_VERB: &str = "reply";
+
+/// The verb a driver writes into a run's ownership lock while it drives it.
+pub(crate) const DRIVE_VERB: &str = "drive";
 
 /// How long a party waits for a **live holder on this host** before refusing.
 ///

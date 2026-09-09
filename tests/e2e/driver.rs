@@ -4055,6 +4055,11 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is the crate's own ownership lock, handover gate and command queue — the three
+// things every writer of a run touches — which any change under `src/` can move, so a
+// narrower project could not honestly run them. `live_edit.rs` and `store.rs` carry the
+// same directive for the same reason.
 /// A run held in the one window where its driver owns it and claims nothing.
 ///
 /// The run's only node has settled and the driver is inside its write-back
@@ -4140,6 +4145,90 @@ fn adding_a_node() -> serde_json::Value {
         {"op": "add", "node": {"id": "extra", "persona": "engineer",
                                "task": "## What\nthe work the edit asked for"}}
     ]})
+}
+
+/// A gate record naming a host this one cannot reason about, which is what a runs
+/// root shared between hosts produces.
+#[cfg(unix)]
+fn a_gate_this_host_cannot_take(world: &World, run: &str) {
+    std::fs::write(
+        world.run_file(run, "channel/handover.lock"),
+        json!({
+            "pid": 1,
+            "host": "somewhere-else",
+            "acquired_at": "2026-09-09T00:00:00.000Z",
+            "verb": "handover",
+        })
+        .to_string(),
+    )
+    .expect("the gate record is written");
+}
+
+/// An edit that cannot be **gated** is refused rather than accepted.
+///
+/// Accepting a command and letting go of a run are one order or the other, and
+/// the gate is what makes them so. A `reply` that cannot take it cannot know
+/// which side of a departing owner its envelope would land on — so it does not
+/// queue one, and says the edit was not accepted rather than reporting a
+/// durability it cannot promise.
+#[cfg(unix)]
+#[test]
+fn an_edit_that_cannot_be_gated_is_refused_and_nothing_reaches_the_queue() {
+    let world = World::new("driver-gate-refused");
+    world.script("work.wait", "hold");
+    let (run, _) = start_detached_announcing(&world, "gate-refused", vec![agent("work", &[])]);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    a_gate_this_host_cannot_take(&world, &run);
+
+    let refused = world.run_with_stdin(&["reply", &run], &adding_a_node().to_string());
+    refused
+        .exited(REFUSED)
+        .err_has("nothing was accepted onto its command queue");
+    assert!(
+        !world.run_file(&run, "channel/commands.jsonl").is_file(),
+        "an edit reached the queue without the gate that orders accepting one"
+    );
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty(),
+        "an edit was applied by a process that could not be told what was driving the run"
+    );
+
+    world.release("work.go");
+}
+
+/// A driver that cannot be **gated** on its way out leaves the run claimed.
+///
+/// Releasing it there is the one move that would let an edit be accepted by a run
+/// whose owner has gone — the submitter would ask, be told the run is driven, and
+/// queue behind a driver that is already leaving. So the claim stays, over a
+/// process that is ending, and the next writer reclaims it exactly as it reclaims
+/// a run whose driver died.
+#[cfg(unix)]
+#[test]
+fn a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed() {
+    let world = World::new("driver-gate-refused-exit");
+    let (run, driver) = a_driver_that_owns_a_run_and_claims_nothing(&world, "gate-exit");
+    a_gate_this_host_cannot_take(&world, &run);
+
+    world.until("the driver to end", |_| !still_listed(driver));
+    assert!(
+        world.run_file(&run, "owner.lock").is_file(),
+        "the run was released by a driver that could not hand it over"
+    );
+    world.until_run_file_holds(&run, "driver.log", "left claimed rather than released");
+
+    // And what that leaves is a state a writer recovers from rather than a wedge.
+    // The claim names a process that is gone, so once the gate is takeable again
+    // the next writer reclaims the run and applies what it is given — the same
+    // path that recovers a run whose driver died.
+    std::fs::remove_file(world.run_file(&run, "channel/handover.lock"))
+        .expect("the gate this host could not take is gone");
+    world
+        .run_with_stdin(&["reply", &run], &adding_a_node().to_string())
+        .exited(0)
+        .out_has("\"applied\"");
 }
 
 /// An edit accepted by a run whose driver then **dies holding it** is applied by
@@ -4252,3 +4341,4 @@ fn a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over(
     assert_eq!(answers[0]["applied"], json!(true), "{answers:?}");
     assert_eq!(answers[1]["applied"], json!(false), "{answers:?}");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

@@ -652,7 +652,7 @@ impl Dispatch {
 /// reader afterwards would call the run undriven while the driver that won was
 /// still working on it.
 pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
-    OwnershipLock::acquire(paths, "drive")
+    OwnershipLock::acquire(paths, ledger::DRIVE_VERB)
 }
 
 /// Drive one run's graph to settlement, in this process, under a lock the
@@ -5120,6 +5120,38 @@ mod tests {
             .to_string(),
         )
         .expect("the gate record is written");
+    }
+
+    /// A gate whose holder this host can prove is gone is reclaimed — **once**.
+    ///
+    /// A driver that dies inside the section leaves a file nothing will remove,
+    /// and a gate nobody can ever take would stop every submission and every
+    /// release on the run. So a dead holder's is reclaimed; what keeps that from
+    /// being a second way in is that the record is read back, so of two
+    /// contenders that both saw the same dead holder only one comes away with it.
+    #[test]
+    fn a_gate_whose_holder_is_gone_is_reclaimed_by_one_taker() {
+        let paths = handover_scratch("gate-stale");
+        std::fs::write(
+            paths.channel("handover.lock"),
+            serde_json::json!({
+                "pid": 0,
+                "host": sys::hostname(),
+                "acquired_at": "2026-09-09T00:00:00.000Z",
+                "verb": "handover",
+            })
+            .to_string(),
+        )
+        .expect("the gate record is written");
+
+        let reclaimed = ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect("a gate whose holder is gone is reclaimed");
+        // And it is a gate like any other once taken: the next taker waits on
+        // this process, rather than reclaiming it a second time.
+        ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("the reclaimed gate is held, so a second taker is refused");
+        drop(reclaimed);
+        std::fs::remove_dir_all(&paths.dir).ok();
     }
 
     /// **A gate this process could not take stops both sections.**
