@@ -182,9 +182,9 @@ pub enum PipelineKind {
     /// A live edit was accepted and applied to the desired graph.
     ///
     /// Emitted only where at least one operation the command compiled to
-    /// **changed** something a reader folds — see
-    /// [`Operation::commits_a_change`](crate::edits::Operation::commits_a_change)
-    /// — so this kind means the graph moved and nothing else. The kinds of the
+    /// **changed** something a reader folds — `Operation::commits_a_change`
+    /// decides that, exhaustively over the operations — so this kind means the
+    /// graph moved and nothing else. The kinds of the
     /// operations it committed ride on the record as `operation_kinds`, so a
     /// reader keys on what happened without parsing the command that produced it.
     EditCommitted,
