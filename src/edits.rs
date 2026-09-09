@@ -264,6 +264,68 @@ pub enum Operation {
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
+impl Operation {
+    /// The wire tag this operation is recorded under.
+    ///
+    /// Read back out of the operation's own serialization rather than restated
+    /// as a table of literals beside it: the enum is `#[serde(tag = "kind")]`, so
+    /// the tag a record carries and the tag this answers are one derivation and
+    /// cannot drift apart when a variant is renamed. The fallback is unreachable
+    /// for a fieldless-tagged enum and carries the variant's own name rather than
+    /// panicking, because losing a journal record is a worse answer than an
+    /// unfamiliar tag in one.
+    #[must_use]
+    pub fn kind(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.get("kind").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| format!("{self:?}"))
+    }
+
+    /// Whether committing this operation is what *makes* the change it records.
+    ///
+    /// The question `edit-committed` exists to answer, and the one that decides
+    /// which kind a compiled command is journalled under. "The graph" here is the
+    /// desired graph **and the record derived beside it** — what a reader folding
+    /// this operation list actually moves — because those are one durable
+    /// document to every reader: an attestation, a park, a supersession and a
+    /// settlement-from-evidence each move a node's recorded state and are read
+    /// back off this record by name, so a build that stopped writing them here
+    /// would silently lose them.
+    ///
+    /// Exactly two operations answer `false`, and both are **reports**: the
+    /// record of them is not what makes them true. A `finding-raised` went to the
+    /// planner's surface queue, and a `completion-request` is journalled as its
+    /// own `completion-requested` — the fold of an `edit-committed` skips it for
+    /// that very reason, so that one request is not counted twice. Neither is
+    /// read off an operation list by anything, here or downstream, which is why
+    /// moving them off this kind takes nothing away from a reader that predates
+    /// the move.
+    ///
+    /// Exhaustive on purpose: a variant added later has to decide this rather
+    /// than inherit an answer.
+    #[must_use]
+    pub fn changes_the_graph(&self) -> bool {
+        match self {
+            Self::FindingRaised { .. } | Self::CompletionRequested { .. } => false,
+            Self::NodeAdded { .. }
+            | Self::EdgeAdded { .. }
+            | Self::EdgeRemoved { .. }
+            | Self::NodeDropped { .. }
+            | Self::Reparent { .. }
+            | Self::RetryRequested { .. }
+            | Self::NodeParked { .. }
+            | Self::NodeRequeued { .. }
+            | Self::HumanAttested { .. }
+            | Self::SettledFromEvidence { .. }
+            | Self::LandingFromEvidence { .. }
+            | Self::TaskAmended { .. }
+            | Self::ContextAdded { .. }
+            | Self::NoteDelivered { .. } => true,
+        }
+    }
+}
+
 /// How a planner note actually reached its node.
 ///
 /// The fact `edit-committed` records, and what tells replay whether the note is

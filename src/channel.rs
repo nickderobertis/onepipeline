@@ -974,11 +974,47 @@ fn mark(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
 }
 
 /// The reconciler's answer to one submitted envelope.
+///
+/// An envelope is all-or-nothing, so [`applied`](Self::applied) is still the
+/// whole envelope's answer and every reader that predates
+/// [`results`](Self::results) keeps reading exactly what it read. What that
+/// boolean could never say is *which* command decided it, which is what left a
+/// manager believing a node's bar had changed when the command that would have
+/// changed it was never compiled.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommandOutcome {
     /// The envelope this answers.
     pub id: u64,
     /// Whether every command in it was applied.
+    pub applied: bool,
+    /// Why not, when it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// One entry per command the envelope carried, in the order it carried them.
+    ///
+    /// Omitted when empty, so a record this build writes for an envelope with no
+    /// commands is byte-for-byte the record an older build wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<CommandResult>,
+}
+
+/// What became of **one** command of an envelope.
+///
+/// The envelope is atomic, so a refusal anywhere in it leaves every entry here
+/// `applied: false` — but not for the same reason, and the difference is the
+/// whole point: one entry names the refusal, and the rest name the command whose
+/// refusal took them down with it. A manager reading them knows which command to
+/// send again and which to fix.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CommandResult {
+    /// Where in the envelope's `commands` this one sat, from zero.
+    pub index: usize,
+    /// The command's op, as the envelope spelled it.
+    ///
+    /// Carried so an entry names the command it belongs to rather than leaving a
+    /// reader to count positions in the envelope it sent.
+    pub op: String,
+    /// Whether this command was applied.
     pub applied: bool,
     /// Why not, when it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

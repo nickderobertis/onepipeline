@@ -1776,6 +1776,27 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// is durable, so an envelope reaching this loop may have been written by a
 /// build or a caller that did not check, and the reconciler is the last place a
 /// refusal still means something.
+///
+/// # An envelope is all of its commands or none of them
+///
+/// [`edits::compile`] promises that a refused edit cannot half-apply, and that
+/// promise is real and narrower than it reads: it is about **one** command's
+/// multi-edge mutation, validated against a cloned graph and thrown away whole
+/// when any edge of it refuses. Nothing above it provided the same for an
+/// envelope, so a loop that journalled each command as it compiled left the
+/// commands before a refusal committed and abandoned every one after it — and
+/// answered for all of it with a single boolean naming only the command that
+/// failed. One envelope carrying a `note` and the `amend` that made the same
+/// correction durable delivered neither and reported only the note, which is a
+/// manager believing a node's bar had changed when it had not.
+///
+/// So the pass is in two halves. Everything that can refuse happens in the
+/// first: every command is compiled, in order, against a **staged** copy of the
+/// run's state that carries what the commands before it did, so a command that
+/// depends on its predecessor is judged against the graph its predecessor
+/// produced exactly as it was before. Nothing is journalled there. Only when the
+/// whole envelope has compiled does the second half write it — and a refusal
+/// anywhere leaves the journal, and therefore the graph, exactly as it was.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -1787,58 +1808,195 @@ fn reconcile_edits(
     let mut changed = false;
     for envelope in channel.claim_commands()? {
         let author = envelope.author;
-        let mut applied = true;
-        let mut reason = None;
-        for command in &envelope.commands {
-            let compiled = crate::channel::allows(author, command).and_then(|()| {
-                compile_and_deliver(paths, state, author, command, launch, in_flight)
-            });
-            match compiled {
-                Ok(operations) => {
-                    // Dropping or retrying a running node raises its
-                    // cooperative cancellation signal: the dispatch stops and,
-                    // for a lifecycle node, preserves what it committed.
-                    for target in cancelled_by(command) {
-                        if let Some(dispatch) = in_flight.get(&target) {
-                            dispatch.cancel.cancel();
-                        }
-                    }
-                    journal.emit(
-                        journal::PipelineKind::EditCommitted,
-                        journal::labels(&paths.run, None),
-                        journal::payload(&[
-                            ("author", json!(author)),
-                            ("command", json!(command)),
-                            ("operations", json!(operations)),
-                        ]),
+        match compile_envelope(paths, state, author, &envelope.commands, launch, in_flight) {
+            Ok(compiled) => {
+                for (command, operations) in envelope.commands.iter().zip(&compiled) {
+                    commit_command(
+                        paths, journal, state, author, command, operations, in_flight,
                     )?;
-                    record_operation_facts(paths, journal, author, &operations)?;
-                    // An edit the monitor made is the planner's to review: it
-                    // was applied on the monitor's own judgement, so the planner
-                    // learns of it without being asked to approve it first.
-                    if author == crate::channel::Author::Monitor {
-                        if let Some(surface) = monitor_edit(command) {
-                            raise(paths, journal, surface)?;
-                        }
-                    }
-                    state.refresh(paths);
                     changed = true;
                 }
-                Err(error) => {
-                    applied = false;
-                    reason = Some(error.to_string());
-                    record_rejection(paths, journal, author, command, &error)?;
-                    break;
-                }
+                channel.answer_commands(&CommandOutcome {
+                    id: envelope.id,
+                    applied: true,
+                    reason: None,
+                    results: envelope
+                        .commands
+                        .iter()
+                        .enumerate()
+                        .map(|(index, command)| crate::channel::CommandResult {
+                            index,
+                            op: crate::channel::op_of(command).to_string(),
+                            applied: true,
+                            reason: None,
+                        })
+                        .collect(),
+                })?;
+            }
+            Err(refusal) => {
+                // The refusal is the only thing this envelope leaves in the
+                // record, and it names one command: the others were not refused,
+                // they were never applied, and journalling a rejection for each
+                // would put edits nobody made in front of a reader.
+                record_rejection(
+                    paths,
+                    journal,
+                    author,
+                    &envelope.commands[refusal.index],
+                    &refusal.error,
+                )?;
+                channel.answer_commands(&CommandOutcome {
+                    id: envelope.id,
+                    applied: false,
+                    reason: Some(refusal.error.to_string()),
+                    results: refusal.results(&envelope.commands),
+                })?;
             }
         }
-        channel.answer_commands(&CommandOutcome {
-            id: envelope.id,
-            applied,
-            reason,
-        })?;
     }
     Ok(changed)
+}
+
+/// The one command of an envelope that refused, and what it said.
+struct Refused {
+    /// Where in the envelope it sat.
+    index: usize,
+    /// Why.
+    error: Error,
+}
+
+impl Refused {
+    /// What each command of the refused envelope is told.
+    ///
+    /// The refused one carries its own reason. Every other carries the reason it
+    /// was not applied, which is a different fact and the one a manager acts on:
+    /// nothing is wrong with those commands, and re-sending them alone is what
+    /// gets them in. Naming the command that took them down means a manager does
+    /// not have to guess which of them to fix.
+    fn results(&self, commands: &[Command]) -> Vec<crate::channel::CommandResult> {
+        let refused = crate::channel::op_of(&commands[self.index]);
+        commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| crate::channel::CommandResult {
+                index,
+                op: crate::channel::op_of(command).to_string(),
+                applied: false,
+                reason: Some(if index == self.index {
+                    self.error.to_string()
+                } else {
+                    format!(
+                        "not applied: command {} of this envelope ('{refused}') was refused, and \
+                         an envelope applies all of its commands or none — resend this one \
+                         on its own once that is answered",
+                        self.index
+                    )
+                }),
+            })
+            .collect()
+    }
+}
+
+/// Compile every command of one envelope, or name the first that refused.
+///
+/// The staged state is a copy the journal never sees: each command's compiled
+/// operations are folded onto it through [`projection::fold_operations`], which
+/// is the same derivation the journal's own reader applies to the record this
+/// pass is about to write. So `add extra` followed by `reparent extra` is judged
+/// exactly as it was when the loop journalled between them, and the whole
+/// envelope still refuses as one.
+fn compile_envelope(
+    paths: &RunPaths,
+    state: &Projected,
+    author: crate::channel::Author,
+    commands: &[Command],
+    launch: &LaunchRecord,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> std::result::Result<Vec<Vec<edits::Operation>>, Refused> {
+    let mut staged: RunState = (**state).clone();
+    let mut compiled = Vec::with_capacity(commands.len());
+    for (index, command) in commands.iter().enumerate() {
+        let operations = crate::channel::allows(author, command)
+            .and_then(|()| compile_and_deliver(paths, &staged, author, command, launch, in_flight))
+            .map_err(|error| Refused { index, error })?;
+        crate::projection::fold_operations(&mut staged, &operations, Some(sys::now_millis()));
+        compiled.push(operations);
+    }
+    Ok(compiled)
+}
+
+/// Write one compiled command into the run's record, and act on it.
+///
+/// Called only once the whole envelope has compiled, so everything here either
+/// succeeds or is a failure of the run's own journal — which ends the pass
+/// rather than half-applying an envelope.
+fn commit_command(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    author: crate::channel::Author,
+    command: &Command,
+    operations: &[edits::Operation],
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Result<()> {
+    // Dropping or retrying a running node raises its cooperative cancellation
+    // signal: the dispatch stops and, for a lifecycle node, preserves what it
+    // committed.
+    for target in cancelled_by(command) {
+        if let Some(dispatch) = in_flight.get(&target) {
+            dispatch.cancel.cancel();
+        }
+    }
+    journal.emit(
+        journalled_as(operations),
+        journal::labels(&paths.run, None),
+        journal::payload(&[
+            ("author", json!(author)),
+            ("command", json!(command)),
+            ("operations", json!(operations)),
+            ("operation_kinds", json!(operation_kinds(operations))),
+        ]),
+    )?;
+    record_operation_facts(paths, journal, author, operations)?;
+    // An edit the monitor made is the planner's to review: it was applied on the
+    // monitor's own judgement, so the planner learns of it without being asked to
+    // approve it first.
+    if author == crate::channel::Author::Monitor {
+        if let Some(surface) = monitor_edit(command) {
+            raise(paths, journal, surface)?;
+        }
+    }
+    state.refresh(paths);
+    Ok(())
+}
+
+/// Which kind one accepted command is journalled under.
+///
+/// `edit-committed` means the graph changed, and only that: a command every one
+/// of whose operations is a **report** — a `finding` that went to the planner's
+/// surface queue, a `complete` journalled as its own `completion-requested` —
+/// changed nothing a reader folds, and calling it a committed edit made one kind
+/// carry two meanings. A correct monitor raised that as a defect twice.
+///
+/// Nothing is lost by the split, in either direction: what a reader reads off
+/// this record is the operation list, and both kinds carry the same one.
+pub(crate) fn journalled_as(operations: &[edits::Operation]) -> journal::PipelineKind {
+    if operations.iter().any(edits::Operation::changes_the_graph) {
+        journal::PipelineKind::EditCommitted
+    } else {
+        journal::PipelineKind::CommandAccepted
+    }
+}
+
+/// The kinds of the operations one record committed, in the order it committed
+/// them.
+///
+/// So a reader keys on *what happened* without deserializing the command that
+/// produced it, or the operation list, or knowing which ops each op-word can
+/// compile to. Written on both kinds, because a reader that has to know which
+/// kind carries the field is back to keying on the kind.
+pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
+    operations.iter().map(edits::Operation::kind).collect()
 }
 
 /// Validate one command, hand a note to the node's conversation where its
@@ -5302,6 +5460,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The json block one divergence entry carries, which is the source a
+    /// consumer in another repository reads these names out of.
+    fn divergence_block(number: &str) -> Value {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with(number))
+            .unwrap_or_else(|| panic!("the record still carries entry {number}"));
+        entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"))
+    }
+
+    /// Which kind an accepted command is journalled under, and the field that
+    /// says what it committed, are the ones the divergence record proposes.
+    ///
+    /// `Operation::changes_the_graph` is what decides the kind, and it is private
+    /// vocabulary — so `tests/contract.rs`, which drives the public surface,
+    /// cannot reach it, and entry 65 is the only place the split is written down.
+    /// Both directions: an operation that stops being a report without a line
+    /// there fails here, and so does a name the entry carries that no operation
+    /// answers to.
+    #[test]
+    fn the_kind_an_accepted_command_is_journalled_under_is_the_one_entry_65_names() {
+        let block = divergence_block("65.");
+
+        // The two operations the entry calls reports are exactly the two this
+        // build journals apart from a committed edit.
+        let every = [
+            edits::Operation::FindingRaised {
+                node: None,
+                message: "the branch has no commits yet".into(),
+                blocking: false,
+            },
+            edits::Operation::CompletionRequested {
+                reason: "publication verified".into(),
+            },
+            edits::Operation::HumanAttested {
+                node: "sign-off".into(),
+            },
+            edits::Operation::TaskAmended {
+                node: "later".into(),
+                text: "the corrected criterion".into(),
+            },
+        ];
+        let reports: Vec<String> = every
+            .iter()
+            .filter(|operation| !operation.changes_the_graph())
+            .map(edits::Operation::kind)
+            .collect();
+        assert_eq!(
+            reports,
+            serde_json::from_value::<Vec<String>>(block["reporting_operations"].clone())
+                .expect("entry 65 names the operations it calls reports")
+        );
+
+        // And the kind each lands under, decided by the same function the
+        // reconciler and `reply` both journal through.
+        assert_eq!(
+            journalled_as(&every[..2]).as_str(),
+            serde_json::from_value::<Vec<String>>(block["event_kinds"].clone())
+                .expect("entry 65 names the kind it adds")[0]
+        );
+        assert_eq!(
+            journalled_as(&every[2..]),
+            journal::PipelineKind::EditCommitted
+        );
+        assert_eq!(
+            serde_json::from_value::<Vec<String>>(block["carried_on"].clone())
+                .expect("entry 65 names which records carry the field"),
+            vec![
+                journal::PipelineKind::EditCommitted.as_str().to_string(),
+                journal::PipelineKind::CommandAccepted.as_str().to_string(),
+            ]
+        );
+
+        // The field is written under the name the entry states, and carries every
+        // operation's kind in the order it was committed.
+        let field = block["operation_kinds_field"]
+            .as_str()
+            .expect("entry 65 names the field");
+        let payload = journal::payload(&[(field, json!(operation_kinds(&every)))]);
+        assert_eq!(
+            payload[field],
+            json!([
+                "finding-raised",
+                "completion-requested",
+                "human-attested",
+                "task-amended"
+            ])
+        );
+    }
+
     /// The four reasons and their fields are the ones the divergence record
     /// proposes, and a consumer in another repository reads.
     ///
@@ -5312,20 +5569,7 @@ mod tests {
     /// enum no longer carries.
     #[test]
     fn the_hold_reasons_are_the_ones_the_divergence_record_names() {
-        let record = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
-        )
-        .expect("the divergence record ships");
-        let entry = record
-            .split("\n## ")
-            .find(|entry| entry.starts_with("55."))
-            .expect("the record still carries entry 55");
-        let block: Value = entry
-            .split("```json")
-            .nth(1)
-            .and_then(|rest| rest.split("```").next())
-            .and_then(|block| serde_json::from_str(block).ok())
-            .expect("entry 55 carries the json block this test drives");
+        let block = divergence_block("55.");
 
         // One of each, so every variant's own payload is read rather than a list
         // of names kept beside them.

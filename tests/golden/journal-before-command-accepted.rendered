@@ -1,0 +1,9 @@
+before  SETTLED  3/3 done
+  after: amended — ## What the corrected criterion
+  providers: fake-provider: 1 identity bound, 0% utilized
+
+before  complete
+  slow                     done
+  after                    done
+      amendment: ## What the corrected criterion
+  extra                    done

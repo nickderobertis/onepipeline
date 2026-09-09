@@ -180,7 +180,22 @@ pub enum PipelineKind {
     /// A node reached a terminal status.
     NodeSettled,
     /// A live edit was accepted and applied to the desired graph.
+    ///
+    /// Emitted only where at least one operation the command compiled to
+    /// **changed** something a reader folds — see
+    /// [`Operation::changes_the_graph`](crate::edits::Operation::changes_the_graph)
+    /// — so this kind means the graph moved and nothing else. The kinds of the
+    /// operations it committed ride on the record as `operation_kinds`, so a
+    /// reader keys on what happened without parsing the command that produced it.
     EditCommitted,
+    /// A command was accepted and committed no graph operation.
+    ///
+    /// The other half of the split above: a `finding` and a `complete` are
+    /// accepted, are answered `applied`, and change no graph — each says its
+    /// piece under its own record, a planner surface and a
+    /// `completion-requested` respectively — so journalling them as committed
+    /// edits made one kind carry two meanings.
+    CommandAccepted,
     /// A live edit was refused, with the reason its submitter was told.
     EditRejected,
     /// A surface was *sent*. Delivery is a separate fact.
@@ -258,6 +273,7 @@ impl PipelineKind {
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
             Self::EditCommitted => "edit-committed",
+            Self::CommandAccepted => "command-accepted",
             Self::EditRejected => "edit-rejected",
             Self::PlannerSurfaceQueued => "planner-surface-queued",
             Self::PlannerSurfaced => "planner-surfaced",
@@ -313,6 +329,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
     PipelineKind::EditCommitted,
+    PipelineKind::CommandAccepted,
     PipelineKind::EditRejected,
     PipelineKind::PlannerSurfaceQueued,
     PipelineKind::PlannerSurfaced,

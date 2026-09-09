@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–64 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–65 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 64 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 65 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -3375,11 +3375,14 @@ more:
 
 It writes one line per meaningful event and one heartbeat line per interval of
 silence. **Meaningful** is a closed set of this crate's own kinds —
-`edit-committed`, `edit-rejected`, `node-settled`, `planner-surface-queued`,
-`decision-pending`, `decision-cleared`, `completion-requested`, `run-stopped` —
-which is every class a supervisor acts on and not the siblings' token-by-token
-detail, which is what `monitor --all` is for. A graph edit is emitted whichever
-author issued it, so the monitor's edits reach the same line a planner's do.
+`edit-committed`, `command-accepted`, `edit-rejected`, `node-settled`,
+`planner-surface-queued`, `decision-pending`, `decision-cleared`,
+`completion-requested`, `run-stopped` — which is every class a supervisor acts on
+and not the siblings' token-by-token detail, which is what `monitor --all` is
+for. A graph edit is emitted whichever author issued it, so the monitor's edits
+reach the same line a planner's do, and an accepted command that changed no graph
+— entry 65's `command-accepted` — reaches it beside the one that did, because
+what a supervisor acts on is the command having been accepted.
 
 **A record has to be this crate's by source as well as by kind.** A kind is a
 wire string that no library owns, and this stream is three libraries merged, so a
@@ -4050,3 +4053,72 @@ reads **this entry** — every key, the words each may answer, and which half ea
 one's presence depends on — and drives an envelope of each shape through the
 verb, so a key, a word, or a presence rule that moves on either side fails there
 rather than drifting.
+
+## 65. One journal kind means both "a command was accepted" and "the graph changed" — OPEN
+
+**Proposal (for the planner who owns the contract): add one kind to this
+library's closed set, `command-accepted`, for an accepted command that commits no
+graph operation; hold `edit-committed` to meaning that the graph changed; and add
+one field, `operation_kinds`, to both, carrying the kinds of the operations the
+record committed.**
+
+The contract's merged-stream paragraph lists `edit-committed` and says of it only
+that it "carries the `author` that submitted the edit". The code emitted it for
+**every** successfully compiled command, including a `finding` — which compiles
+to a `finding-raised` operation that mutates no graph and whose actual record is
+the planner surface it raised — and a `complete`, whose record is its own
+`completion-requested`. So one kind carried two meanings, "a command was
+accepted" and "the graph changed", and every reader wants the second. During one
+supervision window a monitor raised that as a defect twice, and both were correct
+observations of a misleading name.
+
+**What decides which kind.** [`edits::Operation::changes_the_graph`](../src/edits.rs)
+— exhaustive over the operation enum, so a variant added later has to answer it.
+"The graph" there is the desired graph **and the record derived beside it**,
+because those are one durable document to every reader: an attestation, a park, a
+supersession, a note still owed to a next dispatch and a settlement from evidence
+each move a node's recorded state and are read back off this record by name. The
+two operations that answer `false` are the two that are **reports** — the record
+of them is not what makes them true — and neither is read off an operation list
+by anything, here or downstream. That is what makes the split cost a preceding
+reader nothing: a `finding` it used to fold changed nothing when it folded it.
+
+**`operation_kinds` rather than a second parse.** A reader wanting to know what
+an edit did had to deserialize the command, know which operations each op-word
+can compile to, and reproduce that mapping. The field is the list the record
+already carries, spelled as the operations' own serde tags and in the order they
+were committed, so a reader keys on what happened without parsing what asked for
+it. Written on **both** kinds, because a reader that has to know which kind
+carries the field is back to keying on the kind.
+
+**Both directions of compatibility are the point, and both are held.** This
+crate's own readers of the graph-change record — the fold that derives a run's
+state, and the views that render it — read a journal written before this change
+exactly as they did, because `edit-committed` still means everything it meant to
+them. And a reader written against only the kinds a journal from before this
+change carries still reports what it reported when it meets a journal this build
+writes: the records it no longer sees were inert to it.
+
+It arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40, 47, 53 and 55's additions
+did. A consumer in another repository reads these names, so the block below is
+the source: `tests/contract.rs` parses it out of this file, every event kind named
+here must be one `PipelineKind` carries and the contract's own list does not, and
+the field must be one both records carry.
+
+```json
+{
+  "event_kinds": ["command-accepted"],
+  "operation_kinds_field": "operation_kinds",
+  "carried_on": ["edit-committed", "command-accepted"],
+  "reporting_operations": ["finding-raised", "completion-requested"]
+}
+```
+
+Driven end to end by `tests/e2e/live_edit.rs`'s
+`a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does` — a real
+`finding`, and a real `add` naming a dependency, which commits two operations of
+two kinds — and
+held in both compatibility directions by `tests/journal_compatibility.rs` against
+`tests/golden/journal-before-command-accepted.jsonl`, the immutable record of what
+a preceding reader knows.

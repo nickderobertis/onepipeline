@@ -909,7 +909,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 pin_preserved_branch(state, node, status);
             }
         }
-        Some(journal::PipelineKind::EditCommitted) => {
+        // Both kinds fold the same way, and deliberately: which of them a
+        // command is journalled under is decided by the **emitter**, from
+        // whether any operation it compiled changes anything a reader folds, and
+        // a reader that folds both is right whatever a newer build decides to
+        // put where. Today a `command-accepted` carries only operations this
+        // fold ignores, so folding it costs nothing and cannot be wrong.
+        Some(journal::PipelineKind::EditCommitted | journal::PipelineKind::CommandAccepted) => {
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
@@ -919,107 +925,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.strict = false;
                 return;
             };
-            for operation in &operations {
-                edits::apply(&mut state.graph, operation);
-                match operation {
-                    Operation::HumanAttested { node } => {
-                        state.attestations.insert(node.clone());
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(NodeStatus::Done));
-                    }
-                    // A completion request is recorded as its own event by
-                    // whichever side took it, so folding it here too would
-                    // count one request twice.
-                    Operation::CompletionRequested { .. } => {}
-                    Operation::RetryRequested {
-                        node, replacement, ..
-                    } => {
-                        // What the supersession did to the node it replaced. The
-                        // node itself leaves the graph with the same edit, so
-                        // this is what the run's record says became of it.
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
-                        // And which node carries its work now, which is the half
-                        // no status word can say: `cancelled` is also what a
-                        // `drop` leaves, and the two take opposite actions.
-                        state.superseded.insert(node.clone(), replacement.clone());
-                    }
-                    Operation::NodeParked { node, by, reason } => {
-                        // Who decided, and why. The park is what a later
-                        // `requeue` is judged against, so this is folded rather
-                        // than left in the record for a reader to go and find.
-                        state
-                            .parks
-                            .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
-                        // What the node was *before* the park decides which park
-                        // this is: a cancel of a running node asks a dispatch to
-                        // stop and leaves it running, and one of a node that
-                        // never started stops nothing. Both become `parked`, and
-                        // the difference rides the same single write.
-                        let was = state.recorded.get(node).map(|recorded| recorded.status());
-                        let parked = match (was, millis_of(&event.ts)) {
-                            (Some(NodeStatus::Running), Some(since)) => {
-                                Recorded::Cancelling { since }
-                            }
-                            _ => Recorded::At(NodeStatus::Parked),
-                        };
-                        state.recorded.insert(node.clone(), parked);
-                    }
-                    Operation::NodeRequeued { node, .. } => {
-                        state.recorded.remove(node);
-                        // The park is over, so nothing is held by whoever made
-                        // it: a later park of the same node is judged on its own
-                        // author rather than on this one's.
-                        state.parks.remove(node);
-                    }
-                    // The record moving without the graph moving, which is the
-                    // whole of what a settlement from evidence does. Its own
-                    // `node-settled` says the same thing to a reader that does
-                    // not fold operations; folding it here is what makes replay
-                    // of the edit alone reconstruct what the reconciler did.
-                    Operation::SettledFromEvidence {
-                        node,
-                        outcome,
-                        evidence: _,
-                    } => {
-                        state
-                            .recorded
-                            .insert(node.clone(), Recorded::At(edits::settled_status(*outcome)));
-                        state
-                            .outcomes
-                            .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
-                    }
-                    // Only a note that is still owed to a dispatch. One the
-                    // running turn already took has been read, and holding it
-                    // for the next dispatch would re-state a correction the
-                    // worker has acted on.
-                    Operation::ContextAdded {
-                        node,
-                        note,
-                        delivery: edits::Delivery::Deferred,
-                    } => {
-                        state.pending_context.insert(node.clone(), note.clone());
-                    }
-                    Operation::ContextAdded { .. } => {}
-                    // The same fact under the op that replaced `context`: a note
-                    // no turn took is owed to the node's next dispatch, and the
-                    // four dispositions beside it are notes a live conversation
-                    // read, which owe nothing forward.
-                    Operation::NoteDelivered {
-                        node,
-                        text,
-                        reached: crate::note::Reached::Carried,
-                        ..
-                    } => {
-                        state
-                            .pending_context
-                            .insert(node.clone(), text.as_str().to_string());
-                    }
-                    _ => {}
-                }
-            }
+            fold_operations(state, &operations, millis_of(&event.ts));
         }
         // A note delivered onto the node's *next* dispatch is owed to it, exactly
         // as a deferred planner note is, and this record is the only thing that
@@ -1354,6 +1260,119 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
         completed_steps: completed,
     });
     node.branch = Some(branch);
+}
+
+/// Fold one committed command's operations into the run's state.
+///
+/// The single derivation of what an accepted command *did*, so the reconciler's
+/// own view of the envelope it is halfway through compiling and a reader
+/// replaying that envelope out of the journal cannot come to differ: the loop
+/// stages each command against this before it compiles the next one, and the
+/// fold above replays the record it eventually wrote through the same code.
+///
+/// `at` is when the record was stamped, which only the park needs — a cancel of
+/// a *running* node leaves a dispatch out there, and how long it has been
+/// converging is measured from here.
+pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at: Option<u64>) {
+    for operation in operations {
+        edits::apply(&mut state.graph, operation);
+        match operation {
+            Operation::HumanAttested { node } => {
+                state.attestations.insert(node.clone());
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Done));
+            }
+            // A completion request is recorded as its own event by
+            // whichever side took it, so folding it here too would
+            // count one request twice.
+            Operation::CompletionRequested { .. } => {}
+            Operation::RetryRequested {
+                node, replacement, ..
+            } => {
+                // What the supersession did to the node it replaced. The
+                // node itself leaves the graph with the same edit, so
+                // this is what the run's record says became of it.
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
+                // And which node carries its work now, which is the half
+                // no status word can say: `cancelled` is also what a
+                // `drop` leaves, and the two take opposite actions.
+                state.superseded.insert(node.clone(), replacement.clone());
+            }
+            Operation::NodeParked { node, by, reason } => {
+                // Who decided, and why. The park is what a later
+                // `requeue` is judged against, so this is folded rather
+                // than left in the record for a reader to go and find.
+                state
+                    .parks
+                    .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
+                // What the node was *before* the park decides which park
+                // this is: a cancel of a running node asks a dispatch to
+                // stop and leaves it running, and one of a node that
+                // never started stops nothing. Both become `parked`, and
+                // the difference rides the same single write.
+                let was = state.recorded.get(node).map(|recorded| recorded.status());
+                let parked = match (was, at) {
+                    (Some(NodeStatus::Running), Some(since)) => Recorded::Cancelling { since },
+                    _ => Recorded::At(NodeStatus::Parked),
+                };
+                state.recorded.insert(node.clone(), parked);
+            }
+            Operation::NodeRequeued { node, .. } => {
+                state.recorded.remove(node);
+                // The park is over, so nothing is held by whoever made
+                // it: a later park of the same node is judged on its own
+                // author rather than on this one's.
+                state.parks.remove(node);
+            }
+            // The record moving without the graph moving, which is the
+            // whole of what a settlement from evidence does. Its own
+            // `node-settled` says the same thing to a reader that does
+            // not fold operations; folding it here is what makes replay
+            // of the edit alone reconstruct what the reconciler did.
+            Operation::SettledFromEvidence {
+                node,
+                outcome,
+                evidence: _,
+            } => {
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(edits::settled_status(*outcome)));
+                state
+                    .outcomes
+                    .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
+            }
+            // Only a note that is still owed to a dispatch. One the
+            // running turn already took has been read, and holding it
+            // for the next dispatch would re-state a correction the
+            // worker has acted on.
+            Operation::ContextAdded {
+                node,
+                note,
+                delivery: edits::Delivery::Deferred,
+            } => {
+                state.pending_context.insert(node.clone(), note.clone());
+            }
+            Operation::ContextAdded { .. } => {}
+            // The same fact under the op that replaced `context`: a note
+            // no turn took is owed to the node's next dispatch, and the
+            // four dispositions beside it are notes a live conversation
+            // read, which owe nothing forward.
+            Operation::NoteDelivered {
+                node,
+                text,
+                reached: crate::note::Reached::Carried,
+                ..
+            } => {
+                state
+                    .pending_context
+                    .insert(node.clone(), text.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Fold one relayed envelope into the node's live activity.

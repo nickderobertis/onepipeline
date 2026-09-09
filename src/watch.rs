@@ -36,8 +36,12 @@ const POLL: Duration = Duration::from_secs(1);
 /// The siblings' token-by-token detail is what `monitor --all` is for. Divergence
 /// entry 58 argues the selection; what matters here is that it is closed, and
 /// that an edit is in it whichever author issued it and whether or not it landed.
-const MEANINGFUL: [PipelineKind; 8] = [
+const MEANINGFUL: [PipelineKind; 9] = [
     PipelineKind::EditCommitted,
+    // Beside it rather than instead of it: which of the two kinds an accepted
+    // command is journalled under says whether the graph moved, and a supervisor
+    // watching a run acts on the command having been accepted either way.
+    PipelineKind::CommandAccepted,
     PipelineKind::EditRejected,
     PipelineKind::NodeSettled,
     PipelineKind::PlannerSurfaceQueued,

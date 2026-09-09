@@ -328,7 +328,7 @@ Anything nothing in the stack measures is reported absent, never as a zero.
 `onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
 it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
 It blocks, writing one line per event a supervisor acts on — a graph edit whichever
-author issued it (`edit-committed`, `edit-rejected`), a node settling at any outcome
+author issued it (`edit-committed`, `command-accepted`, `edit-rejected`), a node settling at any outcome
 (`node-settled`), a surface being raised (`planner-surface-queued`), a decision
 beginning or clearing to hold a subtree (`decision-pending`, `decision-cleared`), a
 completion being asked for (`completion-requested`), and the run being stopped

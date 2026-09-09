@@ -2476,3 +2476,279 @@ fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
         .exited(0)
         .out_has("\"applied\"");
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The text an amendment carries in the atomicity journeys below, distinctive
+/// enough that a view either shows it or does not.
+const CORRECTION: &str = "## What\nthe corrected criterion this envelope carried";
+
+/// A run with a turn open on one node and a second node that never dispatches,
+/// which is the only shape that reaches a refusal **only the reconciler** can
+/// raise: `reply` validates every command against the projected graph before it
+/// queues anything, so a refusal `edits::compile` can make never gets as far as
+/// the loop. A `live` note that will persist to no dispatch is refused where the
+/// note is *delivered*, which is inside the loop and after the commands before it
+/// have already compiled.
+fn undeliverable_note_run(world: &World, name: &str) -> String {
+    world.script("slow.turn-open", "");
+    live(
+        world,
+        name,
+        vec![agent("slow", &[]), agent("later", &["slow"])],
+        &["slow"],
+    )
+}
+
+/// The `live` note that node cannot take, and the amendment that rode with it.
+///
+/// The pairing the documentation effectively prescribes — a correction said into
+/// the running turn and the same correction made durable — and the one that
+/// exposed the defect: the note could not be delivered, the loop stopped there,
+/// and the amend was never compiled at all while the refusal named only the note.
+fn correction_and_note() -> Value {
+    json!([
+        {"op": "amend", "id": "later", "text": CORRECTION},
+        {"op": "note", "id": "later", "addressee": "worker",
+         "text": "start from the fixture", "deliver": "live", "persist": false},
+    ])
+}
+
+/// An envelope applies all of its commands or none of them.
+///
+/// `edits::compile` promises that a refused edit cannot half-apply, and that
+/// promise is about **one** command's multi-edge mutation. Nothing provided it
+/// for the envelope, so the commands before a refusal were committed and every
+/// one after it was abandoned — which left a manager reading `applied: false`
+/// about a note while an amendment they never saw ruled on had gone into the
+/// graph, or not gone in, with no way to tell from the answer.
+#[test]
+fn an_envelope_whose_second_command_refuses_leaves_no_record_of_any_of_it() {
+    let world = World::new("edit-atomic-refusal");
+    let run = undeliverable_note_run(&world, "atomicrefusal");
+
+    world
+        .run_with_stdin(&["reply", &run], &envelope(correction_and_note()))
+        .exited(REFUSED)
+        .err_has("composes it into no dispatch");
+
+    // Every record of this run attributable to the envelope: one rejection, of
+    // the one command that refused, and nothing that says any command of it was
+    // committed. Read out of the run's own journal, which is what a manager has.
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty()
+            && world.events_of(&run, "command-accepted").is_empty(),
+        "a command of a refused envelope reached the record: {:?}",
+        world.kinds(&run)
+    );
+    let rejected = world.events_of(&run, "edit-rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["payload"]["command"]["op"], "note");
+
+    // And the graph is exactly as it was: the amendment the first command
+    // carried is in neither view, because it was never applied.
+    for verb in ["status", "results"] {
+        world
+            .run(&[verb, &run])
+            .exited(0)
+            .out_lacks("the corrected criterion this envelope carried");
+    }
+
+    // Re-sent on its own, the identical amendment commits immediately — which is
+    // what makes the refusal above a report about the envelope rather than about
+    // this command.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "later", "text": CORRECTION}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("the corrected criterion this envelope carried");
+
+    world.release("slow.go");
+}
+
+/// The other half of the same property: an envelope that compiles whole applies
+/// **every** command of it, with each one's mutation and its own record present.
+#[test]
+fn an_envelope_whose_commands_all_succeed_applies_and_records_every_one() {
+    let world = World::new("edit-atomic-applied");
+    let run = live(&world, "atomicapplied", vec![agent("slow", &[])], &["slow"]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nextra", "max_turns": 2}},
+                {"op": "reparent", "id": "extra", "deps": ["slow"]},
+                {"op": "amend", "id": "extra", "text": CORRECTION},
+                {"op": "note", "id": "extra", "addressee": "worker",
+                 "text": "the fixture moved", "deliver": "next"},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    // One record per command, in the order the envelope carried them.
+    assert_eq!(
+        committed(&world, &run),
+        vec!["add", "reparent", "amend", "note"]
+    );
+    // And each command's own mutation, read off the operations the records
+    // carry: the node, the edge, the amendment, and the note owed forward.
+    let kinds: Vec<String> = operations(&world, &run)
+        .iter()
+        .filter_map(|operation| operation["kind"].as_str().map(str::to_string))
+        .collect();
+    for expected in ["node-added", "edge-added", "task-amended", "note-delivered"] {
+        assert!(
+            kinds.contains(&expected.to_string()),
+            "no {expected} operation was recorded: {kinds:?}"
+        );
+    }
+    // The graph a fresh reader folds carries every one of them.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("extra")
+        .out_has("the corrected criterion this envelope carried");
+
+    world.release("slow.go");
+}
+
+/// The answer an envelope gets reports **each command's** own result.
+///
+/// One boolean and one reason could only ever name the command that refused, so
+/// the commands that were never applied — which is what a manager has to resend —
+/// were invisible in it. Both facts are still there: the envelope's own
+/// `applied`, unchanged for every reader that predates this, and one entry per
+/// command beside it.
+#[test]
+fn an_envelope_answers_each_of_its_commands_with_that_commands_own_result() {
+    let world = World::new("edit-atomic-outcomes");
+    let run = undeliverable_note_run(&world, "atomicoutcomes");
+
+    world
+        .run_with_stdin(&["reply", &run], &envelope(correction_and_note()))
+        .exited(REFUSED);
+
+    let outcomes = world.command_outcomes(&run);
+    let answered = outcomes.last().expect("the envelope was answered");
+    assert_eq!(answered["applied"], false, "{answered}");
+
+    let results = answered["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the answer reports each command: {answered}"));
+    assert_eq!(results.len(), 2, "{answered}");
+
+    // Each entry names the command it belongs to, by position and by op, and the
+    // two do not say the same thing: the note carries the refusal it earned, and
+    // the amendment carries the different fact that it was never applied — and
+    // names the command that took it down, so a manager knows which to fix and
+    // which to resend.
+    assert_eq!(results[0]["index"], 0);
+    assert_eq!(results[0]["op"], "amend");
+    assert_eq!(results[0]["applied"], false);
+    let amend_said = results[0]["reason"].as_str().expect("a reason");
+    assert!(
+        amend_said.contains("command 1 of this envelope ('note') was refused")
+            && amend_said.contains("resend this one on its own"),
+        "the amendment's entry does not say why it was not applied: {amend_said}"
+    );
+
+    assert_eq!(results[1]["index"], 1);
+    assert_eq!(results[1]["op"], "note");
+    assert_eq!(results[1]["applied"], false);
+    assert!(
+        results[1]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("composes it into no dispatch"),
+        "the note's entry does not carry its own refusal: {answered}"
+    );
+
+    world.release("slow.go");
+}
+
+/// `edit-committed` means the graph changed, and a command that changed no graph
+/// says so under its own kind — with the operation kinds on the record either
+/// way, so a reader never has to parse the command that produced them.
+#[test]
+fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
+    let world = World::new("edit-accepted-kinds");
+    let run = live(
+        &world,
+        "acceptedkinds",
+        vec![agent("slow", &[]), agent("after", &["slow"])],
+        &["slow"],
+    );
+
+    // A `finding` mutates no graph: it compiles to one operation whose whole
+    // record is the planner surface it raised.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "author": "monitor", "commands": [
+                {"op": "finding", "id": "slow", "message": "the branch has no commits yet"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+
+    let accepted = world.events_of(&run, "command-accepted");
+    assert_eq!(accepted.len(), 1, "{:?}", world.kinds(&run));
+    assert_eq!(accepted[0]["payload"]["command"]["op"], "finding");
+    assert_eq!(
+        accepted[0]["payload"]["operation_kinds"],
+        json!(["finding-raised"]),
+        "the accepted command does not name what it committed: {}",
+        accepted[0]
+    );
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty(),
+        "a command that changed no graph was journalled as a committed edit: {:?}",
+        world.kinds(&run)
+    );
+
+    // An `add` naming a dependency commits several operations of several
+    // distinguishable kinds, and every one of them is on the record.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nextra", "deps": ["slow"]}}
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let committed_edit = world.events_of(&run, "edit-committed");
+    assert_eq!(committed_edit.len(), 1, "{:?}", world.kinds(&run));
+    let named: Vec<String> = committed_edit[0]["payload"]["operation_kinds"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the record names what it committed: {}", committed_edit[0]))
+        .iter()
+        .filter_map(|kind| kind.as_str().map(str::to_string))
+        .collect();
+    // Read off the operations the same record carries, so this asserts that
+    // **none** is omitted rather than that some named set is present.
+    let carried: Vec<String> = committed_edit[0]["payload"]["operations"]
+        .as_array()
+        .expect("the record carries its operations")
+        .iter()
+        .filter_map(|operation| operation["kind"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(named, carried, "{}", committed_edit[0]);
+    assert!(
+        carried.len() > 1
+            && carried.contains(&"node-added".to_string())
+            && carried.contains(&"edge-added".to_string()),
+        "the command did not commit several distinguishable operation kinds: {carried:?}"
+    );
+
+    world.release("slow.go");
+}

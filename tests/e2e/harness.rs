@@ -2448,6 +2448,17 @@ impl World {
             .collect()
     }
 
+    /// The reconciler's answer to each envelope submitted to one run's command
+    /// queue, in the order it answered them.
+    ///
+    /// Read off the channel's own durable record rather than off the `reply`
+    /// receipt: the receipt is one process's summary of one submission, and this
+    /// is what the run itself wrote down about the envelope — which is what a
+    /// manager reading a run afterwards has.
+    pub fn command_outcomes(&self, run: &str) -> Vec<Value> {
+        read_jsonl(&self.run_file(run, "channel/command-outcomes.jsonl"))
+    }
+
     /// A file inside a run's directory.
     pub fn run_file(&self, run: &str, relative: &str) -> PathBuf {
         self.runs.join(run).join(relative)

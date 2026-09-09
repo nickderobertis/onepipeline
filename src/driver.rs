@@ -2617,6 +2617,16 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // This pass's own copy, walked forward as each command commits, for
             // the reason the checking pass above holds one.
             let mut frontier = frontier.clone();
+            // Compiled whole before any of it is journalled, exactly as the
+            // reconcile loop's own pass is and for the same reason: the checking
+            // pass above turns away every refusal `edits::compile` can raise, but
+            // a note's *delivery* can still refuse here — and a loop that
+            // journalled as it went would leave the commands before that one
+            // committed and abandon the rest. Which writer judged an envelope is
+            // an accident of whether anything was driving the run, so an envelope
+            // is all of its commands or none of them on both.
+            let mut pending: Vec<Vec<edits::Operation>> =
+                Vec::with_capacity(envelope.commands.len());
             for command in &envelope.commands {
                 // Nothing is driving this run, so nothing of it is in flight —
                 // the note is still asked of the member the node's last dispatch
@@ -2637,17 +2647,24 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                     }
                 };
                 edits::advance(&mut frontier, &operations);
+                pending.push(operations);
+            }
+            for (command, operations) in envelope.commands.iter().zip(&pending) {
                 compiled.extend(operations.iter().cloned());
                 journal.emit(
-                    journal::PipelineKind::EditCommitted,
+                    engine::journalled_as(operations),
                     journal::labels(&paths.run, None),
                     journal::payload(&[
                         ("author", json!(envelope.author)),
                         ("command", json!(command)),
                         ("operations", json!(operations)),
+                        (
+                            "operation_kinds",
+                            json!(engine::operation_kinds(operations)),
+                        ),
                     ]),
                 )?;
-                engine::record_operation_facts(paths, &mut journal, envelope.author, &operations)?;
+                engine::record_operation_facts(paths, &mut journal, envelope.author, operations)?;
                 // The planner is told what the monitor did here as well as in
                 // the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the

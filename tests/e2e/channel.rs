@@ -4060,8 +4060,10 @@ fn a_monitor_cannot_declare_the_run_complete_by_attaching_a_command_to_the_verdi
             .to_string(),
         )
         .exited(0);
-    world.until("the planner's edit to reach the graph", |world| {
-        !world.events_of(&run, "edit-committed").is_empty()
+    // A `finding` changes no graph, so it is journalled under the kind that says
+    // so — the record is still the run's account of an accepted command.
+    world.until("the planner's command to reach the record", |world| {
+        !world.events_of(&run, "command-accepted").is_empty()
     });
     world.release("build.go");
 }
@@ -4357,10 +4359,13 @@ fn a_verdict_beside_commands_applied_with_nothing_driving_is_journalled_and_name
         requested[0]["payload"]["reason"],
         "the approval is all that is left"
     );
-    // And the command half reached the graph in the same process.
+    // And the command half was applied in the same process. A `complete` changes
+    // no graph — its record is the `completion-requested` above — so it is
+    // journalled under the kind that says an accepted command committed no graph
+    // operation, which is still this process saying it applied it.
     assert!(
         !world
-            .events_of("undrivenverdict", "edit-committed")
+            .events_of("undrivenverdict", "command-accepted")
             .is_empty(),
         "the commands were not applied: {:?}",
         world.kinds("undrivenverdict")
