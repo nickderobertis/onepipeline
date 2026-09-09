@@ -504,6 +504,9 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
+    /// A node's session would not open because its branch and its base conflict,
+    /// which is the one refusal at that boundary no further attempt converges on.
+    SessionConflicted(Box<SessionConflict>),
     /// A configured drafting dispatch produced no change request body.
     BodyNotDrafted(Box<UndraftedBody>),
     /// One acceptance criterion was compared against the branch its node is
@@ -758,6 +761,10 @@ fn converge(
     // edge is paid at most once per change to the folded state rather than once
     // per caller that wants it.
     let mut derived: Option<BTreeMap<String, NodeStatus>> = None;
+    // What lifts the hold on a node whose work reached the origin: the question
+    // its publication could not get an answer to, asked again.
+    let mut unread = crate::vcs::UnreadMergePaths::default();
+    let mut read_unread: Option<Instant> = None;
     // When each piece of paced work was last done. `None` is due now, which is
     // what makes the first pass do all of it.
     let mut read_upstreams: Option<Instant> = None;
@@ -785,6 +792,12 @@ fn converge(
         // reports `true` only for work it *consumed*, which bounds this at one
         // extra pass per change and leaves a converged run running none.
         let mut moved = false;
+        // Put back before anything derives from the state: the fold a settlement
+        // triggers re-reads the journal, and this is not in it.
+        if unread.apply(state) {
+            derived = None;
+            unpublished = true;
+        }
         if reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)? {
             derived = None;
             unpublished = true;
@@ -864,6 +877,19 @@ fn converge(
             moved = true;
         }
 
+        // A verdict the publication could not read may have become readable.
+        let statuses = statuses_of(&mut derived, state);
+        let mut watching_merge_paths = unread.watching(state, &statuses);
+        if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {
+            read_unread = Some(Instant::now());
+            if unread.read_again(state, &watching_merge_paths) {
+                derived = None;
+                unpublished = true;
+                moved = true;
+            }
+            watching_merge_paths = unread.watching(state, &statuses_of(&mut derived, state));
+        }
+
         // Start what became actionable *before* asking whether the run is over.
         // A ready human action derives as `waiting`, which is a settled status —
         // so a check that ran first would call the graph terminal and leave that
@@ -908,9 +934,11 @@ fn converge(
             report_unprojected(paths, journal, writeback)?;
         }
 
-        if in_flight.is_empty() {
+        if in_flight.is_empty() && watching_merge_paths.is_empty() {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
+            // A merge path still being asked about is the exception the second
+            // clause above carries, because `blocked` is a *settled* status.
             if graph::is_terminal(&statuses) {
                 break;
             }
@@ -941,6 +969,11 @@ fn converge(
                 Duration::MAX
             },
             next_quiet(&in_flight, stall_after),
+            if watching_merge_paths.is_empty() {
+                Duration::MAX
+            } else {
+                until_due(read_unread, unread.every())
+            },
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -1040,6 +1073,11 @@ fn converge(
                 // because a planner reading its own updates is who decides what to
                 // do next, and what to do next is not the same for the two.
                 Message::Cancelling(step) => raise(paths, journal, cancelling_surface(&step))?,
+                // A decision rather than a report, so it is raised blocking and
+                // the subtree below the node waits on the person answering it.
+                Message::SessionConflicted(conflict) => {
+                    raise(paths, journal, session_conflict_surface(&conflict))?
+                }
                 // Emitted rather than relayed: it is this crate's own kind, so it
                 // belongs in this crate's own stream, numbered by the writer that
                 // owns it.
@@ -2428,7 +2466,7 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, &node.id, cancel, tx, &request).settlement
+    attempt(executor, node, cancel, tx, &request).settlement
 }
 
 /// How far one attempt got.
@@ -2472,43 +2510,69 @@ pub(crate) struct Drained {
 /// carries no work to lose.
 pub(crate) fn attempt(
     executor: &dyn Executor,
-    node: &str,
+    node: &Node,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
 ) -> Drained {
+    // The node itself and not its id alone, because the one message this raises
+    // crosses a thread boundary and carries the identity rather than borrowing
+    // it — see [`CriterionChecked::node`]. Everything else here reads the id.
+    let id = node.id.as_str();
     let attempts = boundary_attempts();
     let mut backoff = Duration::from_secs(boundary_backoff_seconds());
     let mut last = Drained {
-        settlement: failed(node, INFRASTRUCTURE_FAILURE),
+        settlement: failed(id, INFRASTRUCTURE_FAILURE),
         reached: Reached::NotStarted,
         session: None,
         branch: None,
     };
 
     for attempt in 1..=attempts.get() {
+        // Whether the seam refused this dispatch over a base conflict, asked of
+        // the refusal while it is still the typed value the seam returned. A
+        // settlement's detail is prose and a dispatch writes prose, so reading
+        // it there would put this decision within reach of anything a dispatch
+        // says about itself.
+        let mut conflicted = false;
         let drained = match executor.dispatch(request()) {
-            Ok(mut handle) => drain(handle.as_mut(), tx, node, cancel),
-            Err(error) => Drained {
-                settlement: Settlement {
-                    detail: Some(error.to_string()),
-                    // Named an infrastructure failure rather than a task the
-                    // agent failed, because none of it is the agent's: the
-                    // dispatch layer refused before any work began. It is
-                    // still retried below, and this is the case retrying is
-                    // most likely to recover — an executor that was
-                    // momentarily unable to start anything.
-                    ..failed(node, INFRASTRUCTURE_FAILURE)
-                },
-                reached: Reached::NotStarted,
-                session: None,
-                branch: None,
-            },
+            Ok(mut handle) => drain(handle.as_mut(), tx, id, cancel),
+            Err(error) => {
+                conflicted = crate::vcs::session_open_conflicted(&error);
+                Drained {
+                    settlement: Settlement {
+                        detail: Some(error.to_string()),
+                        // Named an infrastructure failure rather than a task the
+                        // agent failed, because none of it is the agent's: the
+                        // dispatch layer refused before any work began. It is
+                        // still retried below, and this is the case retrying is
+                        // most likely to recover — an executor that was
+                        // momentarily unable to start anything.
+                        ..failed(id, INFRASTRUCTURE_FAILURE)
+                    },
+                    reached: Reached::NotStarted,
+                    session: None,
+                    branch: None,
+                }
+            }
         };
         if drained.settlement.status != NodeStatus::Failed
             || drained.reached == Reached::Speech
             || cancel.is_cancelled()
         {
+            return drained;
+        }
+        // The one refusal at this boundary another attempt provably cannot
+        // answer: the branch and its base disagree about a file, and no dispatch
+        // of this node's gets far enough to touch either. It goes to the
+        // supervisor rather than spending the budget reproducing itself.
+        if conflicted {
+            if let Some(whose) = crate::graph::NodeRef::of(node) {
+                let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
+                    node: whose,
+                    because: drained.settlement.detail.clone().unwrap_or_default(),
+                })));
+            }
             return drained;
         }
         last = drained;
@@ -2521,7 +2585,7 @@ pub(crate) fn attempt(
             if last.reached != Reached::NotStarted {
                 last.settlement = Settlement {
                     detail: last.settlement.detail.clone(),
-                    ..failed(node, NO_AGENT_PROGRESS)
+                    ..failed(id, NO_AGENT_PROGRESS)
                 };
             }
             break;
@@ -2532,13 +2596,63 @@ pub(crate) fn attempt(
         // the node was actually asked again rather than the moment the last
         // attempt gave up.
         let _ = tx.send(Message::Redispatched(Box::new(Redispatch {
-            node: node.to_string(),
+            node: id.to_string(),
             attempt: NonZeroU32::MIN.saturating_add(attempt),
             attempts,
             reason: last.settlement.detail.clone().unwrap_or_default(),
         })));
     }
     last
+}
+
+/// A node whose session would not open because its branch and its base conflict.
+///
+/// Handed to the single writer rather than surfaced where it is found, for
+/// [`UndraftedBody`]'s reason: the loop owns this crate's own stream and the
+/// planner's queue, and a dispatch thread reporting into either beside it is a
+/// second writer.
+pub(crate) struct SessionConflict {
+    /// The node whose session was refused.
+    ///
+    /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, for
+    /// [`CriterionChecked::node`]'s reason: this crosses a thread boundary, so
+    /// what reaches the single writer arrives already being the identity of a
+    /// node the graph carries.
+    pub node: crate::graph::NodeRef,
+    /// `onevcs`'s own account of the conflict, which names the files, the copy
+    /// of the branch to resolve it on, and the command that lands it as it
+    /// stands.
+    pub because: String,
+}
+
+/// The decision a session-open conflict puts to the supervisor.
+///
+/// **Blocking**, because it is a decision rather than a report: nothing in this
+/// run converges on it, and the subtree below the node cannot start until
+/// somebody merges two branches by hand.
+fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: format!(
+            "node '{node}' cannot open a session: its branch and the base it would be \
+             published into conflict, and no further attempt converges on that — opening \
+             the session again reproduces this exact refusal, because neither side of it \
+             changes on its own.\n\
+             onevcs: {because}\n\
+             Resolve the merge on the branch as onevcs describes above, then answer this \
+             with a `retry` of '{node}': the replacement continues that same branch, so it \
+             starts from the resolution rather than from the conflict.",
+            node = conflict.node.as_str(),
+            because = bounded(&crate::views::one_line(&conflict.because)),
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: true,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(conflict.node.as_str().to_owned()),
+    }
 }
 
 /// Relay a dispatch's events into the merged stream and settle on its outcome.

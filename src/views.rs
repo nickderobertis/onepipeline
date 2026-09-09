@@ -2582,7 +2582,12 @@ pub fn results(view: &RunView) -> String {
         if status == NodeStatus::Skipped {
             out.push_str(&format!(
                 "      never attempted; skipped by: {}\n",
-                skipped_by_phrase(&graph::skipped_by(&view.state.graph, &statuses, &node.id))
+                skipped_by_phrase(&graph::skipped_by(
+                    &view.state.graph,
+                    &statuses,
+                    &view.state.settled(),
+                    &node.id
+                ))
             ));
         }
         if status == NodeStatus::Waiting {

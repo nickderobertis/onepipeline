@@ -43,9 +43,17 @@ use crate::error::{Error, Result};
 use crate::event::Envelope;
 use crate::filter::EventFilter;
 
+/// The sibling this module speaks for, as [`Error::Sibling`] names a tool.
+///
+/// A constant because [`session_open_conflicted`] reads it back: what that asks
+/// is whether *this* function composed the refusal in hand, and comparing
+/// against a literal typed out a second time would answer yes for a refusal
+/// spelled the same way by anything else.
+const ONEVCS: &str = "onevcs";
+
 fn sibling(message: impl Into<String>) -> Error {
     Error::Sibling {
-        tool: "onevcs",
+        tool: ONEVCS,
         message: message.into(),
     }
 }
@@ -64,12 +72,61 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// How a refusal this module composed says a session open met a **base
+/// conflict**, written at the **head** of the message.
+///
+/// Written and read here, so it is this module's own convention rather than a
+/// reading of somebody else's sentence: the classification is made off `onevcs`'s
+/// typed [`SyncConflict`](onevcs::Error::SyncConflict) and this marker carries it
+/// the one hop to the retry loop.
+///
+/// A marker at all because the hop is the **executor seam**, whose refusal
+/// `docs/contract.md` fixes as [`Error::Sibling`] — a tool and a message, with
+/// no room for a class of its own, and [`crate::error::Error`]'s variants are
+/// that document's too. What is in this crate's gift is where the marker is
+/// composed, where it is read, and what it is read *off*: one function each, and
+/// the error value the seam returned rather than any prose downstream of it.
+const SESSION_OPEN_CONFLICT: &str = "the base conflicts with this branch";
+
 /// Open a session over a per-run clone and worktree.
 pub fn session_open(request: &SessionRequest) -> Result<Session> {
     providers()
         .vcs
         .open_session(request.clone())
-        .map_err(refusal)
+        .map_err(session_refusal)
+}
+
+/// A session open `onevcs` refused, as this crate's own error — with the one
+/// refusal no further attempt converges on **named**.
+///
+/// A sync conflict is two conditions sharing one word. During a publication the
+/// base moved under work already going and the bounded resolve-and-requeue lost
+/// the race, which another attempt can win — [`Preserving::SyncConflict`]. At
+/// *session open* it is a merge nobody has performed, and opening the session
+/// again reproduces the identical refusal.
+fn session_refusal(error: onevcs::Error) -> Error {
+    match &error {
+        onevcs::Error::SyncConflict { .. } => sibling(format!("{SESSION_OPEN_CONFLICT}: {error}")),
+        _ => refusal(error),
+    }
+}
+
+/// Whether a dispatch was refused because the session it needed met a base
+/// conflict when it opened.
+///
+/// Asked of the **error the executor seam returned**, and never of a settlement's
+/// detail: a detail is prose, an agent writes prose, and a decision that stops
+/// retrying and blocks a subtree must not be reachable from anything a dispatch
+/// can say. Three things have to hold at once, and only [`session_refusal`] makes
+/// all three — the refusal is [`Error::Sibling`], it names [`ONEVCS`], and its
+/// message *begins* with [`SESSION_OPEN_CONFLICT`] rather than merely containing
+/// it somewhere.
+pub(crate) fn session_open_conflicted(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Sibling { tool, message }
+            if *tool == ONEVCS && message.starts_with(SESSION_OPEN_CONFLICT)
+    )
 }
 
 /// Verify a session's work and publish it under its policy.
@@ -452,6 +509,160 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
     )
 }
 
+/// The nodes whose publication left its work on the origin with the merge path
+/// unread, and how many times this run has asked again about each.
+///
+/// `crate::graph` holds their dependents rather than skipping them, and a hold
+/// nothing lifts stops a run just as surely — so this is what lifts it. Bounded
+/// by [`HOLD_ASKS`], and asked only about a node actually holding something.
+#[derive(Debug, Default)]
+pub(crate) struct UnreadMergePaths {
+    /// Keyed by the type that *is* a node identity rather than by the string one
+    /// spells: every key here came from a node in this run's graph, and
+    /// [`crate::graph::NodeRef`] is what carries that past the boundary.
+    asking: BTreeMap<crate::graph::NodeRef, Asking>,
+}
+
+/// How many times one node's unread merge path is asked about again.
+///
+/// Deliberately not [`crate::engine::merge_path_reads`]: that one is a
+/// publication holding a session open, so it is small, while nothing is occupied
+/// by waiting here. Twelve at the default interval is a minute of holding, which
+/// is a host outage's timescale — and a merge a *person* performs is not
+/// something a run waits for at all.
+const HOLD_ASKS: std::num::NonZeroU32 = match std::num::NonZeroU32::new(12) {
+    Some(asks) => asks,
+    None => unreachable!(),
+};
+
+/// How one node's asking has gone.
+///
+/// The count rides both cases, so a landing this run never asked for cannot be
+/// recorded.
+#[derive(Debug, Clone, Copy)]
+enum Asking {
+    /// Asked this many times, and no landing shown yet.
+    Unanswered(std::num::NonZeroU32),
+    /// `onevcs` showed the change reaching its base, on the last of this many
+    /// asks.
+    Landed(std::num::NonZeroU32),
+}
+
+impl Asking {
+    fn asks(self) -> std::num::NonZeroU32 {
+        match self {
+            Self::Unanswered(asks) | Self::Landed(asks) => asks,
+        }
+    }
+}
+
+impl UnreadMergePaths {
+    /// How long to leave between asks: the publication's own first backoff,
+    /// because it is the same question about the same host and how patient a run
+    /// is with a merge path should not need saying twice.
+    pub(crate) fn every(&self) -> Duration {
+        crate::engine::merge_path_backoff()
+    }
+
+    /// The nodes still worth asking about: settled with their work on the origin,
+    /// holding at least one dependent, and neither answered nor asked out.
+    pub(crate) fn watching(
+        &self,
+        state: &crate::projection::RunState,
+        statuses: &BTreeMap<String, crate::graph::NodeStatus>,
+    ) -> Vec<crate::graph::NodeRef> {
+        let budget = HOLD_ASKS.get();
+        state
+            .graph
+            .iter()
+            // A node identity leaving the graph's own scope is carried as one
+            // rather than as a field anybody could put anything in.
+            .filter_map(crate::graph::NodeRef::of)
+            .filter(|node| {
+                statuses.get(node.as_str()) == Some(&crate::graph::NodeStatus::Failed)
+                    && state.outcomes.get(node.as_str()).map(String::as_str)
+                        == Some(Failure::UNREAD)
+                    && match self.asking.get(node) {
+                        None => true,
+                        Some(Asking::Unanswered(asks)) => asks.get() < budget,
+                        Some(Asking::Landed(_)) => false,
+                    }
+            })
+            .filter(|node| {
+                state
+                    .graph
+                    .dependents_of(node.as_str())
+                    .iter()
+                    .any(|dependent| {
+                        statuses.get(dependent) == Some(&crate::graph::NodeStatus::Blocked)
+                    })
+            })
+            .collect()
+    }
+
+    /// Put every landing this run has been shown back onto the state it belongs
+    /// to.
+    ///
+    /// Every pass rather than once where it was read, because the loop re-folds
+    /// the whole state from the journal each time a node settles and this is not
+    /// in the journal. Reports whether the state had lost one.
+    pub(crate) fn apply(&self, state: &mut crate::projection::RunState) -> bool {
+        let mut restored = false;
+        for (node, _) in self
+            .asking
+            .iter()
+            .filter(|(_, asking)| matches!(asking, Asking::Landed(_)))
+        {
+            let already = state
+                .landings
+                .insert(node.as_str().to_owned(), crate::graph::Landing::Landed);
+            restored |= already != Some(crate::graph::Landing::Landed);
+        }
+        restored
+    }
+
+    /// Ask `onevcs` again about each of them, and record every landing it can
+    /// show.
+    ///
+    /// The answer goes onto the run's own state rather than into its journal, for
+    /// the reason `crate::engine`'s cross-DAG resolution does the same: it is a
+    /// read of something this run does not write, so a fresh driver re-derives it
+    /// rather than inheriting a claim it cannot check. Reports whether anything
+    /// became decidable.
+    pub(crate) fn read_again(
+        &mut self,
+        state: &mut crate::projection::RunState,
+        watching: &[crate::graph::NodeRef],
+    ) -> bool {
+        let mut lifted = false;
+        for node in watching {
+            let id = node.as_str();
+            // Every ask is counted, whatever it answers: the budget is on the
+            // asking rather than on the answers, so a host that never comes back
+            // is bounded by the same number a host that does is.
+            let asks = self
+                .asking
+                .get(node)
+                .map_or(std::num::NonZeroU32::MIN, |asking| {
+                    asking.asks().saturating_add(1)
+                });
+            self.asking.insert(node.clone(), Asking::Unanswered(asks));
+            let Some(branch) = state.branches.get(id).cloned() else {
+                continue;
+            };
+            // The node's own repository, so a branch name two identities both
+            // hold is asked about the one this run's work is in.
+            let repo = state.graph.get(id).and_then(|node| node.repo.clone());
+            if proved_landed(&branch, repo.as_deref()) {
+                self.asking.insert(node.clone(), Asking::Landed(asks));
+                lifted = true;
+            }
+        }
+        let _ = self.apply(state);
+        lifted
+    }
+}
+
 /// Where a human reads the change a publication produced, when there is one.
 ///
 /// A change request that is open, or that the host is holding, names its URL. A
@@ -527,20 +738,105 @@ pub fn session_close(token: &SessionToken) -> Result<Session> {
 /// `None` when nothing recorded one, when the record names no usable commit, and
 /// equally when the stream cannot be read — the caller settles exactly as it
 /// would have, because an unreadable record is not evidence of a branch nobody
-/// committed to. The value is checked where it enters, by [`usable`], for the
-/// reason [`landing_commit_of`] is: a commit is rendered into a settlement, a
-/// view, and an event payload, and one carrying a control character forges a row
-/// wherever it lands.
+/// committed to. A caller that has to tell those apart asks [`session_tip`],
+/// which is what this reads and collapses.
 pub fn branch_head_in(token: &SessionToken) -> Option<String> {
+    match session_tip(token) {
+        SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+        SessionTip::Unmoved | SessionTip::Unknown => None,
+    }
+}
+
+/// A commit value this crate will carry.
+///
+/// A newtype and never a bare `String`, because [`usable`] is what stands
+/// between a recorded sha and a settlement, a view, and an event payload — and a
+/// variant holding a `String` puts that value back where anything could
+/// construct one that never passed it. [`Commit::of`] is the only constructor
+/// and it *is* that check, so a `Commit` in hand is a commit this crate renders
+/// rather than one it is about to have to re-examine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit(String);
+
+impl Commit {
+    /// The commit `sha` names, or `None` where this crate will not carry it.
+    pub(crate) fn of(sha: &str) -> Option<Self> {
+        usable(sha).map(Self)
+    }
+
+    /// The commit as a settlement, a view, and an event payload spell it.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where a session left the branch that outlives it, as far as its own stream
+/// says.
+///
+/// Three cases and not an `Option`, because the absence [`branch_head_in`]
+/// answers with is two facts that a caller comparing one attempt with the next
+/// must not read as one: a session that committed nothing left the branch
+/// exactly where it stood, and a stream nothing could read says nothing about
+/// where the branch stands at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTip {
+    /// `commit-preserved` named this commit, so the branch stands at it.
+    At(Commit),
+    /// The stream was read and carries no commit this session made. `onevcs`
+    /// commits a session's worktree only where it holds something to commit, so
+    /// the session added nothing and the branch stands where it stood.
+    Unmoved,
+    /// Nothing is known: the stream could not be read, or the commit it named is
+    /// not one this crate will carry. **Never** read as
+    /// [`Unmoved`](Self::Unmoved) — an unreadable record is not evidence of a
+    /// branch nobody committed to.
+    Unknown,
+}
+
+/// Read that off the session's stream.
+///
+/// The stream is opened **and read** here rather than through [`events`], which
+/// answers a read it could not perform with the empty batch a readable and empty
+/// stream also gives: telling those two apart is the whole of what this adds.
+/// Both refusals count — a stream that would not open, and a batch
+/// [`EventStream::read`] turned down over one line it could not parse.
+///
+/// The commit is checked where it enters, by [`Commit::of`], for the reason
+/// [`landing_commit_of`] is: a commit is rendered into a settlement, a view, and
+/// an event payload, and one carrying a control character forges a row wherever
+/// it lands. One that fails that check is [`Unknown`](SessionTip::Unknown) and
+/// not [`Unmoved`](SessionTip::Unmoved) — a session that recorded a commit did
+/// commit, whatever this crate can do with the value.
+pub fn session_tip(token: &SessionToken) -> SessionTip {
+    let Some(mut stream) = opened(token, None) else {
+        return SessionTip::Unknown;
+    };
+    let batch = match stream.read() {
+        Ok(batch) => batch,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: cannot read session {}'s events: {error}",
+                token.0
+            );
+            return SessionTip::Unknown;
+        }
+    };
     let preserved = kind_of(onevcs::EventKind::CommitPreserved);
     // The last one wins: a session that committed twice was left at the second.
-    events(token, None)
-        .iter()
+    let Some(envelope) = batch
+        .into_iter()
         .rev()
+        .map(relayed)
         .find(|envelope| envelope.kind == preserved)
-        .and_then(|envelope| envelope.payload.get("sha"))
+    else {
+        return SessionTip::Unmoved;
+    };
+    envelope
+        .payload
+        .get("sha")
         .and_then(|sha| sha.as_str())
-        .and_then(usable)
+        .and_then(Commit::of)
+        .map_or(SessionTip::Unknown, SessionTip::At)
 }
 
 /// The change request one session's work reached, when it reached one.
@@ -1810,6 +2106,165 @@ mod tests {
         };
         let event = published_event(&empty, &crate::event::Labels::default());
         assert_eq!(event.payload["landing"], serde_json::Value::Null);
+    }
+
+    /// What reads as a session-open conflict, and what deliberately does not.
+    ///
+    /// The decision this drives stops a node retrying and blocks the subtree
+    /// under it until a person answers, so the only thing that may reach it is
+    /// the refusal [`session_refusal`] composed at the executor seam.
+    /// `tests/e2e/lifecycle.rs` drives the real conflict end to end and reads the
+    /// decision it raises; what is held here is everything that *resembles* one
+    /// and is not — which no journey can drive, because a dispatch has no way to
+    /// make its own prose arrive as the seam's own refusal.
+    #[test]
+    fn only_the_refusal_this_module_composed_reads_as_a_session_open_conflict() {
+        let refused = session_refusal(onevcs::Error::SyncConflict {
+            reason: "both sides changed README.md".into(),
+        });
+        assert!(
+            session_open_conflicted(&refused),
+            "the refusal this module composes for the conflict was not read as one: {refused}"
+        );
+
+        // Every other refusal of the same call keeps its retries.
+        let invalid = session_refusal(onevcs::Error::Invalid {
+            reason: "no such base".into(),
+        });
+        assert!(
+            !session_open_conflicted(&invalid),
+            "a refusal no part of this is was read as the conflict: {invalid}"
+        );
+
+        // A dispatch quoting the marker in its own account of itself is not the
+        // seam saying it, wherever in the sentence the words land.
+        assert!(!session_open_conflicted(&Error::Sibling {
+            tool: ONEVCS,
+            message: format!("the agent reported that {SESSION_OPEN_CONFLICT}"),
+        }));
+
+        // Nor is a refusal spelled this way by anything that is not `onevcs`.
+        assert!(!session_open_conflicted(&Error::Sibling {
+            tool: "oneagentgraph",
+            message: format!("{SESSION_OPEN_CONFLICT}: sync conflict"),
+        }));
+
+        // Nor a failure of this crate's own that is not a sibling's at all.
+        assert!(!session_open_conflicted(&Error::Invalid(format!(
+            "{SESSION_OPEN_CONFLICT}: sync conflict"
+        ))));
+    }
+
+    /// The three answers [`session_tip`] gives, against three real streams.
+    ///
+    /// The distinction is the whole of why the type has three cases: a session
+    /// that committed nothing left its branch where it stood, and a stream
+    /// nothing could read says nothing about where the branch stands — so
+    /// `crate::lifecycle` hands an attempt back for the first and spends it for
+    /// the second. Driven through the sibling's own reader over files on disk,
+    /// because "the reader refuses this batch" is a fact about that reader.
+    ///
+    /// It takes [`scratch_home_held`] for the reason the journey below states:
+    /// `ONEVCS_HOME` is process-global and this crate's unit tests share one
+    /// process.
+    #[test]
+    fn a_session_tip_tells_a_branch_that_did_not_move_from_one_nothing_could_read() {
+        let _home = super::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-tip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let record = |token: &str, seq: u64, kind: &str, payload: serde_json::Value| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": payload,
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let write = |token: &str, body: String| {
+            std::fs::write(root.join("streams").join(format!("{token}.ndjson")), body)
+                .expect("the stream is written");
+        };
+        let opened = |token: &str| record(token, 1, "session-opened", serde_json::json!({}));
+        let committed = |token: &str, sha: &str| {
+            record(
+                token,
+                2,
+                "commit-preserved",
+                serde_json::json!({"branch": "b", "sha": sha}),
+            )
+        };
+
+        // A session that committed: the branch stands at what it recorded.
+        let at = "s-tip-committed";
+        write(at, format!("{}\n{}\n", opened(at), committed(at, "c0ffee")));
+        assert_eq!(
+            session_tip(&SessionToken(at.into())),
+            SessionTip::At(Commit::of("c0ffee").expect("a commit this crate carries"))
+        );
+
+        // A session that committed nothing: `onevcs` commits a worktree only
+        // where it holds something to commit, so the branch stands where it
+        // stood — which is evidence, and not the absence of it.
+        let unmoved = "s-tip-nothing";
+        write(unmoved, format!("{}\n", opened(unmoved)));
+        assert_eq!(
+            session_tip(&SessionToken(unmoved.into())),
+            SessionTip::Unmoved
+        );
+
+        // A stream cut mid-record: the sibling's typed reader refuses the whole
+        // batch, so the commit that *is* in it is one this crate never saw.
+        let torn = "s-tip-torn";
+        let whole = committed(torn, "decaf");
+        write(torn, format!("{}\n{}", opened(torn), &whole[..20]));
+        assert_eq!(
+            session_tip(&SessionToken(torn.into())),
+            SessionTip::Unknown,
+            "a batch the reader refused was read as a session that committed nothing"
+        );
+
+        // A stream nothing wrote at all: refused by name, and equally unknown.
+        assert_eq!(
+            session_tip(&SessionToken("s-tip-neverwritten".into())),
+            SessionTip::Unknown
+        );
+
+        // And a recorded commit this crate will not carry. The session did
+        // commit, whatever the value is, so this is not the branch standing
+        // still either.
+        let forged = "s-tip-forged";
+        write(
+            forged,
+            format!(
+                "{}\n{}\n",
+                opened(forged),
+                committed(forged, "c0ffee\u{7}bad")
+            ),
+        );
+        assert_eq!(
+            session_tip(&SessionToken(forged.into())),
+            SessionTip::Unknown,
+            "a commit that would forge a row was read as a session that committed nothing"
+        );
+
+        // The `Option` the older reader answers with is this, collapsed.
+        assert_eq!(
+            branch_head_in(&SessionToken(at.into())),
+            Some("c0ffee".to_string())
+        );
+        assert_eq!(branch_head_in(&SessionToken(unmoved.into())), None);
+        assert_eq!(branch_head_in(&SessionToken(torn.into())), None);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// What this crate reads from a session stream that is not whole.

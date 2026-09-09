@@ -95,12 +95,26 @@ pub fn execute(
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
+    // The commit the branch stood at when the previous attempt published it.
+    let mut published: Option<String> = None;
     loop {
         let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
             Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
+        if let Some(same) = republished(published.as_deref(), &preserved.tip) {
+            return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
+        }
+        published = match &preserved.tip {
+            crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+            // The branch stands where the attempt before it left it, which is
+            // what the next attempt is compared against.
+            crate::vcs::SessionTip::Unmoved => published,
+            // Nothing is known about where it stands, so there is nothing for
+            // the next attempt to be compared against.
+            crate::vcs::SessionTip::Unknown => None,
+        };
         // Two reasons to stop, and one settlement for both: the budget is spent,
         // or the run is being stopped. A cancelled run must not be given another
         // dispatch — the teardown is on its way to reap it, and the node would
@@ -262,7 +276,7 @@ fn attempt_once(
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
-        let drained = engine::attempt(executor, &node.id, cancel, tx, &build);
+        let drained = engine::attempt(executor, node, cancel, tx, &build);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -730,6 +744,18 @@ struct Preserved {
     /// a spent budget writes says it exactly as one that settled straight away
     /// does.
     undrafted: Option<String>,
+    /// Where the session left this branch, which is the tip that was published.
+    ///
+    /// Read off `onevcs`'s own record of the session — the library that made the
+    /// commit is the one that knows what it is at — so comparing two attempts is
+    /// comparing two of its answers rather than a second account of a branch
+    /// grown here. Three cases rather than an absent commit, because
+    /// [`SessionTip::Unmoved`] is evidence the branch did not move and
+    /// [`SessionTip::Unknown`] is the absence of evidence either way.
+    ///
+    /// [`SessionTip::Unmoved`]: crate::vcs::SessionTip::Unmoved
+    /// [`SessionTip::Unknown`]: crate::vcs::SessionTip::Unknown
+    tip: crate::vcs::SessionTip,
 }
 
 /// Settle or continue one failed publication.
@@ -790,6 +816,7 @@ fn failed_publication(
                 reason: engine::bounded(&crate::views::one_line(reason)),
                 evidence: crate::vcs::evidence_in(token),
                 undrafted,
+                tip: crate::vcs::session_tip(token),
             }))
         }
         _ => settled(),
@@ -804,6 +831,79 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
     match undrafted {
         Some(why) => format!("{detail}. {why}"),
         None => detail.to_owned(),
+    }
+}
+
+/// The commit an attempt republished, where the attempt before it published one
+/// and this one left the branch at the same place.
+///
+/// Named for the **tip** and not for the tree, because that is what is compared:
+/// two commits carrying identical trees are two commits, and this answers `None`
+/// for them, which is the safe direction. `None` too where nothing is known — a
+/// record that could not be read is not evidence that a branch did not move, and
+/// the attempt is spent exactly as it was before any of this existed.
+fn republished(published: Option<&str>, tip: &crate::vcs::SessionTip) -> Option<String> {
+    let published = published?;
+    match tip {
+        // The same commit, named twice.
+        crate::vcs::SessionTip::At(commit) => {
+            (commit.as_str() == published).then(|| published.to_owned())
+        }
+        // A session that committed nothing left the branch at what the attempt
+        // before it published.
+        crate::vcs::SessionTip::Unmoved => Some(published.to_owned()),
+        crate::vcs::SessionTip::Unknown => None,
+    }
+}
+
+/// The settlement of a node whose attempt republished the commit its previous
+/// attempt published — the branch did not move, so its tree did not either.
+///
+/// **The residual and not the failure's own word.** Each of the four preserving
+/// words says something about the branch, and the branch is not what refused
+/// this; [`Failure::Terminal`] is the ending whose meaning covers it. The attempt
+/// is handed back rather than spent, and the settlement says how much is left.
+///
+/// [`Failure::Terminal`]: crate::vcs::Failure::Terminal
+fn republished_the_same_commit(
+    node: &str,
+    preserved: &Preserved,
+    endings: &[crate::vcs::Preserving],
+    head: &str,
+    attempt: std::num::NonZeroU32,
+) -> Settlement {
+    let attempts = engine::publication_attempts();
+    // The attempt this settles on is given back, so what it cost the budget is
+    // every attempt *before* it.
+    let unspent = attempts
+        .get()
+        .saturating_sub(attempt.get().saturating_sub(1));
+    let roll_up = format!(
+        "{count} publication attempt{plural} on {branch} published the same commit, {head}, \
+         and ended {endings}: the refusal is not about the branch, so no further attempt on \
+         it could answer differently. {unspent} of {attempts} publication attempts are \
+         unspent",
+        count = endings.len(),
+        plural = if endings.len() == 1 { "" } else { "s" },
+        branch = preserved.branch,
+        endings = endings
+            .iter()
+            .map(|ending| ending.outcome())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    Settlement {
+        branch: Some(preserved.branch.clone()),
+        head: Some(head.to_owned()),
+        detail: Some(compose(
+            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            preserved.undrafted.as_deref(),
+        )),
+        ..Settlement::plain(
+            node,
+            NodeStatus::Failed,
+            Some(crate::vcs::Failure::RESIDUAL),
+        )
     }
 }
 
@@ -1393,6 +1493,46 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What an attempt left the branch at decides whether it republished, and the
+    /// three answers are three different things.
+    ///
+    /// The two an e2e drives — a session that committed nothing over a tree its
+    /// worker did not change, and one that committed something new — are in
+    /// `tests/e2e/lifecycle.rs`. The third is not reachable through the binary:
+    /// the hook that makes a session's stream unreadable runs on every
+    /// publishing push, so a run cannot be driven to a *later* attempt that
+    /// cannot say where the branch is while an earlier one could. It is the one
+    /// answer that must not be read as either of the others, so it is stated
+    /// here.
+    #[test]
+    fn a_tip_nothing_could_read_is_not_evidence_that_the_branch_did_not_move() {
+        let commit = |sha: &str| crate::vcs::Commit::of(sha).expect("a commit this crate carries");
+        let published = Some("c0ffee");
+        assert_eq!(
+            republished(published, &crate::vcs::SessionTip::At(commit("c0ffee"))),
+            Some("c0ffee".to_string()),
+            "the same commit, published twice, was read as two"
+        );
+        assert_eq!(
+            republished(published, &crate::vcs::SessionTip::At(commit("decaf"))),
+            None,
+            "a branch that moved was read as one that stood still"
+        );
+        assert_eq!(
+            republished(published, &crate::vcs::SessionTip::Unmoved),
+            Some("c0ffee".to_string()),
+            "a session that committed nothing moved the branch it did not touch"
+        );
+        assert_eq!(
+            republished(published, &crate::vcs::SessionTip::Unknown),
+            None,
+            "a record nothing could read was taken as proof the branch stood still"
+        );
+        // And nothing to compare against is nothing to conclude, whatever this
+        // attempt says: the first attempt of every node arrives here.
+        assert_eq!(republished(None, &crate::vcs::SessionTip::Unmoved), None);
+    }
 
     /// The endings this module emits and the endings the contract names are one
     /// set.

@@ -37,7 +37,10 @@ pub const STEP_SEPARATOR: char = '/';
 /// be carried rather than borrowed: a message from a dispatch thread, which is
 /// exactly where an unvalidated string would arrive at the single writer with
 /// nothing left to check it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Ordered, so a map this crate keys by node identity can be keyed by the type
+/// that *is* one rather than by the string it spells.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NodeRef(String);
 
 impl NodeRef {
@@ -54,6 +57,19 @@ impl NodeRef {
 
     /// The identity as a graph, a journal label, and a surface spell it.
     pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Borrowed as the id it spells, so a map keyed by this type is *looked up* with
+/// the id a graph node or a dependency edge already holds.
+///
+/// Without it a lookup would have to spell a `&str` back into a `NodeRef`, and
+/// the only honest way to do that is a constructor taking a bare string — which
+/// is the thing this type exists to keep out. Borrowing keeps construction on
+/// [`NodeRef::of`] alone while leaving reads cheap.
+impl std::borrow::Borrow<str> for NodeRef {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -910,15 +926,86 @@ fn find_cycle(nodes: &[Node]) -> Option<String> {
     None
 }
 
+/// What a node's settlement said, as far as scheduling has to know it.
+///
+/// [`NodeStatus`] alone is what the derivation used to read, and it is a
+/// projection that discards where the work got to — which is right for eight of
+/// the nine settlements and wrong for one: read as a bare `failed`,
+/// [`ReachedTheOrigin`](Self::ReachedTheOrigin) skipped every dependent of a
+/// change that had in fact merged.
+///
+/// Cases and not fields, because these facts are correlated and fields beside
+/// each other would make a `ready` node whose failed publication landed a value
+/// somebody could construct.
+// llmlint: ignore-block[invalid_states_unrepresentable] `At` takes every `NodeStatus`
+// because every one of them is an inhabitant here: this is what scheduling knows about a
+// node, not what a journal recorded for one. `crate::crossdag` answers an upstream
+// reference with `Done` **or `Blocked`** — a derived status, by construction, since the
+// consumer's run never settles the other run's node — and `Settled::at` is the constructor
+// that carries it in. Narrowing the payload would make that legitimate value
+// unrepresentable rather than an illegitimate one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// Where the node got to, and nothing else this decision turns on.
+    At(NodeStatus),
+    /// It settled `failed` because its publishing push **reached the origin** and
+    /// the merge path behind it could not be read —
+    /// [`Failure::UNREAD`](crate::vcs::Failure::UNREAD) — and the verdict on it is
+    /// still outstanding.
+    ///
+    /// Not the branch being turned down: the work is on the origin and only the
+    /// verdict about it is outstanding.
+    ReachedTheOrigin,
+    /// The same settlement, after `onevcs` has been asked again and has **shown
+    /// the change reaching its base**.
+    ///
+    /// Its own case rather than a qualifier on the one above, because the two
+    /// differ in the one thing every reader of this acts on: a dependent waits on
+    /// the first and starts on the second.
+    ReachedItsBase,
+}
+
+impl Settled {
+    /// One settlement, reading the word it settled under **once**, here, so no
+    /// caller carries that word any further than the boundary it arrives at.
+    pub fn of(status: NodeStatus, outcome: Option<&str>, landing: Option<Landing>) -> Self {
+        if status == NodeStatus::Failed && outcome == Some(crate::vcs::Failure::UNREAD) {
+            return if landing == Some(Landing::Landed) {
+                Self::ReachedItsBase
+            } else {
+                Self::ReachedTheOrigin
+            };
+        }
+        Self::At(status)
+    }
+
+    /// A settlement known only by its status, which is every node whose word
+    /// nothing here has — a cross-DAG upstream, and every caller that asks about
+    /// a status alone.
+    pub fn at(status: NodeStatus) -> Self {
+        Self::At(status)
+    }
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+
+    /// Where the node got to.
+    pub fn status(self) -> NodeStatus {
+        match self {
+            Self::At(status) => status,
+            // The one status these two can be, which is what makes them cases.
+            Self::ReachedTheOrigin | Self::ReachedItsBase => NodeStatus::Failed,
+        }
+    }
+}
+
 /// Derive every node's status from the graph and what has already settled.
 ///
-/// `recorded` holds only the statuses the journal wrote. Everything else —
-/// `ready`, `pending`, and the two derived gates `blocked` and `skipped` — is
-/// computed here against the current graph, so an edit that changes eligibility
-/// takes effect on the same pass.
+/// `settled` holds only what the journal wrote. Everything else — `ready`,
+/// `pending`, and the two derived gates `blocked` and `skipped` — is computed
+/// here against the current graph, so an edit that changes eligibility takes
+/// effect on the same pass.
 pub fn derive(
     graph: &Graph,
-    recorded: &BTreeMap<String, NodeStatus>,
+    settled: &BTreeMap<NodeRef, Settled>,
     resolved_cross_dag: &dyn Fn(&str) -> Option<NodeStatus>,
 ) -> BTreeMap<String, NodeStatus> {
     let mut statuses: BTreeMap<String, NodeStatus> = BTreeMap::new();
@@ -934,11 +1021,11 @@ pub fn derive(
             statuses.insert(node.id.clone(), NodeStatus::Parked);
             continue;
         }
-        if let Some(recorded) = recorded.get(&node.id) {
+        if let Some(recorded) = settled.get(node.id.as_str()) {
             // A recorded settlement stands, except for the two derived gates:
             // they are re-derived against the graph as it is now.
-            if !matches!(recorded, NodeStatus::Blocked | NodeStatus::Skipped) {
-                statuses.insert(node.id.clone(), *recorded);
+            if !matches!(recorded.status(), NodeStatus::Blocked | NodeStatus::Skipped) {
+                statuses.insert(node.id.clone(), recorded.status());
             }
         }
     }
@@ -951,7 +1038,8 @@ pub fn derive(
             if statuses.contains_key(&node.id) {
                 continue;
             }
-            let Some(status) = eligibility(graph, node, &statuses, resolved_cross_dag) else {
+            let Some(status) = eligibility(graph, node, &statuses, settled, resolved_cross_dag)
+            else {
                 continue;
             };
             statuses.insert(node.id.clone(), status);
@@ -975,6 +1063,7 @@ fn eligibility(
     graph: &Graph,
     node: &Node,
     statuses: &BTreeMap<String, NodeStatus>,
+    settled: &BTreeMap<NodeRef, Settled>,
     resolved_cross_dag: &dyn Fn(&str) -> Option<NodeStatus>,
 ) -> Option<NodeStatus> {
     let mut all_done = true;
@@ -982,11 +1071,15 @@ fn eligibility(
     let mut gated = false;
 
     for dep in &node.deps {
-        let status = if is_cross_dag(dep) {
+        let reached = if is_cross_dag(dep) {
             // An unknown or unfinished upstream leaves the consumer blocked
             // rather than failing it: the upstream may still arrive.
             match resolved_cross_dag(dep) {
-                Some(status) => status,
+                // The status alone, because the status is the whole of what a
+                // cross-DAG edge is answered with: `docs/contract.md` fixes
+                // `done` as the only settlement one accepts, so no word beside
+                // it changes anything here.
+                Some(status) => Settled::at(status),
                 None => {
                     all_done = false;
                     gated = true;
@@ -995,7 +1088,17 @@ fn eligibility(
             }
         } else if graph.contains(dep) {
             match statuses.get(dep) {
-                Some(status) => *status,
+                // The status as this pass derived it is authoritative — `blocked`
+                // and `skipped` are re-derived every pass — so the settlement's
+                // own case stands only where that derivation still agrees.
+                Some(status) => match settled.get(dep.as_str()) {
+                    Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
+                        if *status == NodeStatus::Failed =>
+                    {
+                        *reached
+                    }
+                    _ => Settled::At(*status),
+                },
                 None => {
                     all_done = false;
                     continue;
@@ -1006,9 +1109,20 @@ fn eligibility(
             continue;
         };
 
-        match status {
+        if reached_its_base(&reached) {
+            // Its work is on the base, which is the whole of what a dependent
+            // waits on a dependency for. The node itself still reads `failed` —
+            // its publication really did end without a verdict — and that is a
+            // fact about the node rather than about what may run next.
+            continue;
+        }
+        match reached.status() {
             NodeStatus::Done => {}
-            _ if skips_dependents(status) => {
+            _ if holds_dependents(&reached) => {
+                gated = true;
+                all_done = false;
+            }
+            _ if skips_dependents(&reached) => {
                 failed = true;
                 all_done = false;
             }
@@ -1048,8 +1162,33 @@ fn eligibility(
 /// One predicate for both halves of a skip — [`eligibility`] derives it,
 /// [`skipped_by`] names what answered it — so a run cannot report a skip whose
 /// cause it disagrees with.
-fn skips_dependents(status: NodeStatus) -> bool {
-    matches!(status, NodeStatus::Failed | NodeStatus::Skipped)
+///
+/// A publication that left its work **on the origin** is deliberately not one,
+/// whichever way its verdict has since gone.
+fn skips_dependents(settled: &Settled) -> bool {
+    matches!(
+        settled,
+        Settled::At(NodeStatus::Failed | NodeStatus::Skipped)
+    )
+}
+
+/// Whether a dependency's publication reached the origin and the verdict on it is
+/// still outstanding, so its dependents **wait** rather than being skipped.
+///
+/// The dependent is waiting on a merge already in flight, which is a hold and not
+/// a skip: a skip is permanent and this is not, because the same run goes on
+/// asking whether the verdict has become decidable.
+fn holds_dependents(settled: &Settled) -> bool {
+    matches!(settled, Settled::ReachedTheOrigin)
+}
+
+/// Whether that verdict has since been decided, and decided in the work's favour.
+///
+/// The only thing that lifts the hold. For everything a dependent does next this
+/// is what `done` means — the work it consumes is on the branch it will be cut
+/// from — so it starts, while the node keeps the word its publication earned.
+fn reached_its_base(settled: &Settled) -> bool {
+    matches!(settled, Settled::ReachedItsBase)
 }
 
 /// The dependencies whose own failure or skip is why `id` derived
@@ -1063,6 +1202,7 @@ fn skips_dependents(status: NodeStatus) -> bool {
 pub fn skipped_by(
     graph: &Graph,
     statuses: &BTreeMap<String, NodeStatus>,
+    settled: &BTreeMap<NodeRef, Settled>,
     id: &str,
 ) -> Vec<(String, NodeStatus)> {
     if statuses.get(id) != Some(&NodeStatus::Skipped) {
@@ -1075,7 +1215,15 @@ pub fn skipped_by(
         .iter()
         .filter_map(|dep| {
             let status = *statuses.get(dep)?;
-            skips_dependents(status).then(|| (dep.clone(), status))
+            let reached = match settled.get(dep.as_str()) {
+                Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
+                    if status == NodeStatus::Failed =>
+                {
+                    *reached
+                }
+                _ => Settled::At(status),
+            };
+            skips_dependents(&reached).then(|| (dep.clone(), status))
         })
         .collect()
 }
@@ -1353,6 +1501,15 @@ mod tests {
 
     fn no_cross_dag(_: &str) -> Option<NodeStatus> {
         None
+    }
+
+    /// The identity `graph` carries for `id`, which is what a settlement map is
+    /// keyed by.
+    ///
+    /// Through [`NodeRef::of`] and never around it, so these tests key the map
+    /// the way a run does — off a node the graph holds.
+    fn whose(graph: &Graph, id: &str) -> NodeRef {
+        NodeRef::of(graph.get(id).expect("the graph carries the node")).expect("a node identity")
     }
 
     #[test]
@@ -1727,7 +1884,7 @@ mod tests {
             agent("c", &["a", "b"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), NodeStatus::Done);
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Done));
 
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["a"], NodeStatus::Done);
@@ -1743,7 +1900,7 @@ mod tests {
             agent("ship", &["approve"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), NodeStatus::Done);
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["approve"], NodeStatus::Waiting);
         assert_eq!(statuses["ship"], NodeStatus::Blocked);
@@ -1756,7 +1913,7 @@ mod tests {
             agent("ship", &["approve", "build"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), NodeStatus::Failed);
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Failed));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["approve"], NodeStatus::Waiting);
         assert_eq!(statuses["ship"], NodeStatus::Skipped);
@@ -1784,8 +1941,8 @@ mod tests {
             agent("ship", &["approve"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("ship".to_string(), NodeStatus::Blocked);
-        recorded.insert("approve".to_string(), NodeStatus::Done);
+        recorded.insert(whose(&graph, "ship"), Settled::at(NodeStatus::Blocked));
+        recorded.insert(whose(&graph, "approve"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["ship"], NodeStatus::Ready);
     }
@@ -1805,6 +1962,58 @@ mod tests {
         assert_eq!(statuses["consume"], NodeStatus::Skipped);
     }
 
+    /// The one settlement whose dependents wait rather than being skipped, and
+    /// what lifts the wait.
+    ///
+    /// Held here as well as end to end because it is a *derivation* rule and this
+    /// is where derivation is decided: the same graph, the same status, and only
+    /// the word and the landing beside it different, which is the whole of what
+    /// the decision was missing.
+    #[test]
+    fn a_publication_whose_work_reached_the_origin_holds_its_dependents_rather_than_skipping_them()
+    {
+        let graph = Graph::from_plan(&plan_of(vec![
+            agent("publish", &[]),
+            agent("announce", &["publish"]),
+        ]));
+        let unread = |landing| {
+            BTreeMap::from([(
+                whose(&graph, "publish"),
+                Settled::of(
+                    NodeStatus::Failed,
+                    Some(crate::vcs::Failure::UNREAD),
+                    landing,
+                ),
+            )])
+        };
+
+        // The verdict is outstanding: the work is on the origin, so the
+        // dependent waits on it.
+        let held = derive(&graph, &unread(None), &no_cross_dag);
+        assert_eq!(held["publish"], NodeStatus::Failed);
+        assert_eq!(held["announce"], NodeStatus::Blocked);
+        assert!(skipped_by(&graph, &held, &unread(None), "announce").is_empty());
+
+        // The verdict arrived, and it says the change reached its base. The node
+        // keeps the word its own publication earned; the dependent starts.
+        let lifted = derive(&graph, &unread(Some(Landing::Landed)), &no_cross_dag);
+        assert_eq!(lifted["publish"], NodeStatus::Failed);
+        assert_eq!(lifted["announce"], NodeStatus::Ready);
+
+        // And nothing about skipping in general moved: the same status under any
+        // other word skips its dependents exactly as it always did.
+        let task_failed = BTreeMap::from([(
+            whose(&graph, "publish"),
+            Settled::of(NodeStatus::Failed, Some(crate::engine::TASK_FAILED), None),
+        )]);
+        let skipped = derive(&graph, &task_failed, &no_cross_dag);
+        assert_eq!(skipped["announce"], NodeStatus::Skipped);
+        assert_eq!(
+            skipped_by(&graph, &skipped, &task_failed, "announce"),
+            vec![("publish".to_string(), NodeStatus::Failed)]
+        );
+    }
+
     /// A derived skip and its named cause are one answer, so they are held to
     /// the same map here: whatever `derive` settled on, `skipped_by` names the
     /// dependencies that made it say so.
@@ -1817,21 +2026,21 @@ mod tests {
             agent("announce", &["ship"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), NodeStatus::Failed);
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Failed));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
 
         assert_eq!(statuses["ship"], NodeStatus::Skipped);
         assert_eq!(statuses["announce"], NodeStatus::Skipped);
         assert_eq!(
-            skipped_by(&graph, &statuses, "ship"),
+            skipped_by(&graph, &statuses, &recorded, "ship"),
             vec![("build".to_string(), NodeStatus::Failed)]
         );
         assert_eq!(
-            skipped_by(&graph, &statuses, "announce"),
+            skipped_by(&graph, &statuses, &recorded, "announce"),
             vec![("ship".to_string(), NodeStatus::Skipped)]
         );
-        assert!(skipped_by(&graph, &statuses, "lint").is_empty());
-        assert!(skipped_by(&graph, &statuses, "nowhere").is_empty());
+        assert!(skipped_by(&graph, &statuses, &recorded, "lint").is_empty());
+        assert!(skipped_by(&graph, &statuses, &recorded, "nowhere").is_empty());
 
         // A park outranks the derived gates, so this node is not skipped — and
         // is handed no reason for a skip it is not being held by.
@@ -1840,7 +2049,7 @@ mod tests {
         let graph = Graph::from_plan(&plan_of(vec![agent("build", &[]), parked]));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["sweep"], NodeStatus::Parked);
-        assert!(skipped_by(&graph, &statuses, "sweep").is_empty());
+        assert!(skipped_by(&graph, &statuses, &recorded, "sweep").is_empty());
     }
 
     #[test]
@@ -1855,7 +2064,7 @@ mod tests {
     fn a_complete_graph_is_complete_and_exits_zero() {
         let graph = Graph::from_plan(&plan_of(vec![agent("a", &[])]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), NodeStatus::Done);
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(state_of(&statuses), GraphState::Complete);
         assert_eq!(GraphState::Complete.exit_code(), 0);
@@ -1867,7 +2076,7 @@ mod tests {
     fn a_graph_still_running_has_not_settled() {
         let graph = Graph::from_plan(&plan_of(vec![agent("a", &[])]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), NodeStatus::Running);
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Running));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert!(!is_terminal(&statuses));
         assert_eq!(state_of(&statuses), GraphState::Waiting);

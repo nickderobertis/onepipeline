@@ -625,12 +625,12 @@ impl RunState {
     /// [`statuses_with`](Self::statuses_with), which is what a caller resolving
     /// its references some other way asks.
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
-        let recorded = self.statuses_recorded();
-        if let Some(derived) = derived_already(&self.graph, &recorded, &self.cross_dag) {
+        let settled = self.settled();
+        if let Some(derived) = derived_already(&self.graph, &settled, &self.cross_dag) {
             return derived;
         }
         let derived = self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied());
-        remember_derived(&self.graph, &recorded, &self.cross_dag, &derived);
+        remember_derived(&self.graph, &settled, &self.cross_dag, &derived);
         derived
     }
 
@@ -640,7 +640,35 @@ impl RunState {
         upstream: &dyn Fn(&str) -> Option<NodeStatus>,
     ) -> BTreeMap<String, NodeStatus> {
         crate::loopstats::statuses_derived();
-        crate::graph::derive(&self.graph, &self.statuses_recorded(), upstream)
+        crate::graph::derive(&self.graph, &self.settled(), upstream)
+    }
+
+    /// What each node's settlement said, as the derivation reads it.
+    ///
+    /// The status is a projection, and this is what it is a projection *of*; see
+    /// [`crate::graph::Settled`], which is where the settlement's own word is
+    /// read and where it stops being one.
+    ///
+    /// Walked over the **graph** rather than over what the journal recorded, so
+    /// every key is the identity of a node this graph carries: the derivation
+    /// reads it by node, and a settlement recorded for an id the graph no longer
+    /// has is one nothing here could ask about anyway.
+    pub(crate) fn settled(&self) -> SettledFacts {
+        self.graph
+            .iter()
+            .filter_map(|node| {
+                let id = node.id.as_str();
+                let recorded = self.recorded.get(id)?;
+                Some((
+                    crate::graph::NodeRef::of(node)?,
+                    crate::graph::Settled::of(
+                        recorded.status(),
+                        self.outcomes.get(id).map(String::as_str),
+                        self.landings.get(id).copied(),
+                    ),
+                ))
+            })
+            .collect()
     }
 }
 
@@ -669,10 +697,23 @@ const DERIVATIONS_HELD: usize = 4;
 
 type Statuses = BTreeMap<String, NodeStatus>;
 
+/// What each node settled as, keyed the way the derivation reads it.
+///
+/// The whole of it and not the statuses alone, because the derivation reads the
+/// whole of it: a landing this run has since proved changes what the graph
+/// derives without changing any status, and a key that dropped it would hand back
+/// the answer taken before the proof.
+///
+/// Keyed by [`crate::graph::NodeRef`] and not by `String`, because every key here
+/// *is* the identity of a node the graph carries — [`RunState::settled`] takes
+/// them off the graph — and the type that says so is the one that can only be
+/// built from a node.
+type SettledFacts = BTreeMap<crate::graph::NodeRef, crate::graph::Settled>;
+
 /// One remembered derivation: the three inputs, and what they derived to.
 struct Derivation {
     graph: Graph,
-    recorded: Statuses,
+    settled: SettledFacts,
     cross_dag: Statuses,
     derived: Statuses,
 }
@@ -683,23 +724,32 @@ fn derivations() -> std::sync::MutexGuard<'static, Vec<Derivation>> {
     DERIVED.lock().unwrap_or_else(|held| held.into_inner())
 }
 
-fn derived_already(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses) -> Option<Statuses> {
+fn derived_already(
+    graph: &Graph,
+    settled: &SettledFacts,
+    cross_dag: &Statuses,
+) -> Option<Statuses> {
     derivations()
         .iter()
         .find(|held| {
-            held.graph == *graph && held.recorded == *recorded && held.cross_dag == *cross_dag
+            held.graph == *graph && held.settled == *settled && held.cross_dag == *cross_dag
         })
         .map(|held| held.derived.clone())
 }
 
-fn remember_derived(graph: &Graph, recorded: &Statuses, cross_dag: &Statuses, derived: &Statuses) {
+fn remember_derived(
+    graph: &Graph,
+    settled: &SettledFacts,
+    cross_dag: &Statuses,
+    derived: &Statuses,
+) {
     let mut held = derivations();
     if held.len() >= DERIVATIONS_HELD {
         held.remove(0);
     }
     held.push(Derivation {
         graph: graph.clone(),
-        recorded: recorded.clone(),
+        settled: settled.clone(),
         cross_dag: cross_dag.clone(),
         derived: derived.clone(),
     });
