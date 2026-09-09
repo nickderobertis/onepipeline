@@ -3948,3 +3948,107 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         "the abandoned dispatch's work never reached the base"
     );
 }
+
+/// An edit that reaches a run whose driver is **on its way out** is applied by
+/// that driver, before it lets go of the run.
+///
+/// The holder of the ownership lock is the only party that can apply a queued
+/// edit, so the moment it stops claiming the queue is the moment an accepted
+/// edit stops being applied by anybody — and a `reply` that lands in that window
+/// is told its commands are durable and waiting for a reconciler that is walking
+/// out of the door. The window selects for the edits worth applying: `retry` a
+/// failed node, `requeue` a parked one, settle a wrong record are all reached for
+/// on a run that is **not progressing**, which is exactly the run whose driver
+/// has nothing left to dispatch.
+///
+/// The window is entered here the way a real one is — the run's write-back
+/// close-out, a bounded wait this driver owes the store before it settles — and
+/// it is held open by a capture path the store cannot write, which is the same
+/// fixture `store.rs` uses for a projection that fails and retries. The reply is
+/// typed after the run's only node has settled, so the loop has already run its
+/// last pass: what applies it is the claim the driver takes on its way out, and
+/// what proves the driver rather than the reply applied it is the run's own
+/// answer on the command queue, which only the lock-holder writes.
+#[test]
+fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go() {
+    let world = World::new("driver-drain-on-exit");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "drain-on-exit",
+        &plan_of("drain-on-exit", vec![agent("work", &[])]),
+    );
+    let run = "drain-on-exit";
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+
+    // Every write-back from here on fails and is retried, which is what keeps the
+    // close-out at the far end of the run open for its whole bounded window
+    // rather than for as long as one store command takes.
+    let capture = world.run_file(run, "writeback-task-list.stdout");
+    world.until("the first projection to leave its capture behind", |_| {
+        capture.is_file()
+    });
+    std::fs::remove_file(&capture).expect("the completed capture is removed");
+    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+
+    // The run's only node settles, so the loop has nothing left to do and starts
+    // closing the run out.
+    world.release("work.go");
+    world.until("the only node to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // And the edit arrives there: after the last pass, while the driver still
+    // holds the run.
+    let submitted = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [
+            {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                   "task": "## What\nthe work the edit asked for"}}
+        ]})
+        .to_string(),
+    );
+    submitted.exited(0).out_has("\"applied\"");
+
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    // The run's own answer on the command queue: the envelope reached the durable
+    // queue — so it was not applied in the replying process, which never submits
+    // one — and a reconciler answered it applied. Only the driver holding the run
+    // writes that.
+    let answered = world.command_outcomes(run);
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["applied"], json!(true), "{answered:?}");
+
+    // And the run's own record of what became of the edit, written by that driver
+    // before it released the run: the node the edit added is in the result, and
+    // this driver dispatched it rather than leaving it for whoever adopted the
+    // run next.
+    let result: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(world.run_file(run, "result.json")).expect("a result"),
+    )
+    .expect("the result is JSON");
+    let added = result["nodes"]
+        .as_array()
+        .expect("the result lists its nodes")
+        .iter()
+        .find(|node| node["id"] == "extra")
+        .unwrap_or_else(|| panic!("the result does not carry the node the edit added: {result}"));
+    assert_eq!(added["status"], "done", "{result}");
+    assert!(
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "extra"),
+        "the node the edit added was never dispatched by the driver that applied it"
+    );
+    // No second driver: nothing adopted this run to finish what the first left.
+    assert!(
+        world.events_of(run, "driver-adopted").is_empty(),
+        "a second driver took the run over, so the first one's claim proves nothing"
+    );
+}

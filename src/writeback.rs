@@ -334,6 +334,21 @@ impl Writeback {
             pending = next;
         }
     }
+
+    /// The run is being driven again after a close-out, so the retry schedule the
+    /// close-out suspends goes back on.
+    ///
+    /// A driver that finds a queued edit on its way out applies it and goes on
+    /// driving the run, which puts it back in the phase where a failed projection
+    /// waits out its growing interval rather than being retried inside a bounded
+    /// window that has ended.
+    pub fn driving_again(&self) {
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.phase = RunPhase::Running;
+            ready.notify_all();
+        }
+    }
 }
 
 impl Drop for Writeback {
