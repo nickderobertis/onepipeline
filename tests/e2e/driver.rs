@@ -4124,7 +4124,6 @@ fn queued_behind_the_driver(
     replying
 }
 
-/// Every envelope on a run's durable command queue.
 #[cfg(unix)]
 fn queue_of(world: &World, run: &str) -> Vec<String> {
     std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
@@ -4135,7 +4134,6 @@ fn queue_of(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-/// The node one of the edits below asks for.
 #[cfg(unix)]
 fn adding_a_node() -> serde_json::Value {
     json!({"version": 2, "commands": [

@@ -2747,7 +2747,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             // since — and the answer is taken the only way it cannot be raced.
             let answered = match answered {
                 Some(outcome) => Some(outcome),
-                None => reconciled_here(paths, &channel, id)?,
+                None => outcome_after_the_wait(paths, &channel, id)?,
             };
             if let Some(outcome) = answered {
                 deliver_verdict_half(paths, &channel, envelope)?;
@@ -2774,8 +2774,8 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     }
 }
 
-/// Reconcile the run's command queue **here**, when the wait for a reconciler ran
-/// out and nothing is driving the run any more.
+/// This envelope's answer once the wait for a reconciler has run out — taking the
+/// run over and reconciling its queue where nothing is driving it any more.
 ///
 /// The holder of the run's ownership lock is the only party that can apply a
 /// queued edit. A driver that dies holding the run releases nothing, so the
@@ -2802,7 +2802,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 // run's own store. Neither is a state a journey can put a run into — there is no input to
 // either CLI that refuses one file to one process — and both leave the same answer the
 // wait already had, which is that the edits are queued.
-fn reconciled_here(
+fn outcome_after_the_wait(
     paths: &RunPaths,
     channel: &ChannelState,
     id: u64,
@@ -2835,7 +2835,7 @@ fn reconciled_here(
             // releases hands the lock over, and one that dies leaves a lock this
             // process reclaims.
             Err(Error::Locked { verb, .. })
-                if verb == TAKING_THE_RUN_OVER && Instant::now() < deadline =>
+                if Holder::of(&verb) == Holder::AnotherTakeover && Instant::now() < deadline =>
             {
                 if let Some(outcome) = channel.outcome_of(id) {
                     return Ok(Some(outcome));
@@ -2860,13 +2860,35 @@ fn reconciled_here(
     }
 }
 
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
 /// The verb a `reply` writes into the run's ownership lock while it applies what
 /// the run's driver did not.
-///
-/// Read as well as written: it is how one reply taking a run over tells itself
-/// from a driver driving it, and the two answer differently.
 const TAKING_THE_RUN_OVER: &str = "reply";
-// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// What is holding a run's ownership lock, as far as a waiting `reply` is
+/// concerned.
+///
+/// The lock record's `verb` is a wire string every acquirer writes, so it is read
+/// into this at the one place a decision turns on it: waiting on a holder is only
+/// ever right for one of the two, and a spelling nothing writes must not fall into
+/// that arm by being unequal to a literal.
+#[derive(Debug, PartialEq, Eq)]
+enum Holder {
+    /// Another `reply` applying what a driver that has gone did not.
+    AnotherTakeover,
+    /// Anything driving the run, which is what every other verb is.
+    SomethingDriving,
+}
+
+impl Holder {
+    fn of(verb: &str) -> Self {
+        match verb {
+            TAKING_THE_RUN_OVER => Self::AnotherTakeover,
+            _ => Self::SomethingDriving,
+        }
+    }
+}
 
 /// Compile one command in the process that is applying it, delivering what only a
 /// delivery can answer.

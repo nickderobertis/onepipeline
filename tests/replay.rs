@@ -282,7 +282,6 @@ fn a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads() 
     let mut five = four.clone();
     five["queued_at"] = json!(SURFACE_QUEUED_AT);
 
-    // The two things the fold derives from this record.
     let folded = |root: &Path| -> (u64, Option<u64>) {
         let survey = Survey::of(root);
         assert!(

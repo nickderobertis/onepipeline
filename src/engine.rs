@@ -1233,9 +1233,7 @@ fn converge(
 /// What a close-out's last claim on the command queue found, and so what the
 /// loop does next.
 enum LastClaim {
-    /// Nothing was waiting: this driver is done and the run settles.
     FoundNothing,
-    /// Commands were claimed and applied, so the run has moved on.
     MovedTheRun,
 }
 
