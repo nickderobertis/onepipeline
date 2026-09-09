@@ -630,18 +630,25 @@ impl RunState {
     /// The status is a projection, and this is what it is a projection *of*; see
     /// [`crate::graph::Settled`], which is where the settlement's own word is
     /// read and where it stops being one.
-    pub(crate) fn settled(&self) -> BTreeMap<String, crate::graph::Settled> {
-        self.recorded
+    ///
+    /// Walked over the **graph** rather than over what the journal recorded, so
+    /// every key is the identity of a node this graph carries: the derivation
+    /// reads it by node, and a settlement recorded for an id the graph no longer
+    /// has is one nothing here could ask about anyway.
+    pub(crate) fn settled(&self) -> SettledFacts {
+        self.graph
             .iter()
-            .map(|(id, recorded)| {
-                (
-                    id.clone(),
+            .filter_map(|node| {
+                let id = node.id.as_str();
+                let recorded = self.recorded.get(id)?;
+                Some((
+                    crate::graph::NodeRef::of(node)?,
                     crate::graph::Settled::of(
                         recorded.status(),
                         self.outcomes.get(id).map(String::as_str),
                         self.landings.get(id).copied(),
                     ),
-                )
+                ))
             })
             .collect()
     }
@@ -678,7 +685,12 @@ type Statuses = BTreeMap<String, NodeStatus>;
 /// whole of it: a landing this run has since proved changes what the graph
 /// derives without changing any status, and a key that dropped it would hand back
 /// the answer taken before the proof.
-type SettledFacts = BTreeMap<String, crate::graph::Settled>;
+///
+/// Keyed by [`crate::graph::NodeRef`] and not by `String`, because every key here
+/// *is* the identity of a node the graph carries — [`RunState::settled`] takes
+/// them off the graph — and the type that says so is the one that can only be
+/// built from a node.
+type SettledFacts = BTreeMap<crate::graph::NodeRef, crate::graph::Settled>;
 
 /// One remembered derivation: the three inputs, and what they derived to.
 struct Derivation {

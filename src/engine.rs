@@ -2460,7 +2460,7 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, &node.id, cancel, tx, &request).settlement
+    attempt(executor, node, cancel, tx, &request).settlement
 }
 
 /// How far one attempt got.
@@ -2504,15 +2504,19 @@ pub(crate) struct Drained {
 /// carries no work to lose.
 pub(crate) fn attempt(
     executor: &dyn Executor,
-    node: &str,
+    node: &Node,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
 ) -> Drained {
+    // The node itself and not its id alone, because the one message this raises
+    // crosses a thread boundary and carries the identity rather than borrowing
+    // it — see [`CriterionChecked::node`]. Everything else here reads the id.
+    let id = node.id.as_str();
     let attempts = boundary_attempts();
     let mut backoff = Duration::from_secs(boundary_backoff_seconds());
     let mut last = Drained {
-        settlement: failed(node, INFRASTRUCTURE_FAILURE),
+        settlement: failed(id, INFRASTRUCTURE_FAILURE),
         reached: Reached::NotStarted,
         session: None,
         branch: None,
@@ -2520,7 +2524,7 @@ pub(crate) fn attempt(
 
     for attempt in 1..=attempts.get() {
         let drained = match executor.dispatch(request()) {
-            Ok(mut handle) => drain(handle.as_mut(), tx, node, cancel),
+            Ok(mut handle) => drain(handle.as_mut(), tx, id, cancel),
             Err(error) => Drained {
                 settlement: Settlement {
                     detail: Some(error.to_string()),
@@ -2530,7 +2534,7 @@ pub(crate) fn attempt(
                     // still retried below, and this is the case retrying is
                     // most likely to recover — an executor that was
                     // momentarily unable to start anything.
-                    ..failed(node, INFRASTRUCTURE_FAILURE)
+                    ..failed(id, INFRASTRUCTURE_FAILURE)
                 },
                 reached: Reached::NotStarted,
                 session: None,
@@ -2548,10 +2552,12 @@ pub(crate) fn attempt(
         // of this node's gets far enough to touch either. It goes to the
         // supervisor rather than spending the budget reproducing itself.
         if conflicted_at_session_open(&drained.settlement) {
-            let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
-                node: node.to_string(),
-                because: drained.settlement.detail.clone().unwrap_or_default(),
-            })));
+            if let Some(whose) = crate::graph::NodeRef::of(node) {
+                let _ = tx.send(Message::SessionConflicted(Box::new(SessionConflict {
+                    node: whose,
+                    because: drained.settlement.detail.clone().unwrap_or_default(),
+                })));
+            }
             return drained;
         }
         last = drained;
@@ -2564,7 +2570,7 @@ pub(crate) fn attempt(
             if last.reached != Reached::NotStarted {
                 last.settlement = Settlement {
                     detail: last.settlement.detail.clone(),
-                    ..failed(node, NO_AGENT_PROGRESS)
+                    ..failed(id, NO_AGENT_PROGRESS)
                 };
             }
             break;
@@ -2575,7 +2581,7 @@ pub(crate) fn attempt(
         // the node was actually asked again rather than the moment the last
         // attempt gave up.
         let _ = tx.send(Message::Redispatched(Box::new(Redispatch {
-            node: node.to_string(),
+            node: id.to_string(),
             attempt: NonZeroU32::MIN.saturating_add(attempt),
             attempts,
             reason: last.settlement.detail.clone().unwrap_or_default(),
@@ -2606,7 +2612,12 @@ fn conflicted_at_session_open(settlement: &Settlement) -> bool {
 /// second writer.
 pub(crate) struct SessionConflict {
     /// The node whose session was refused.
-    pub node: String,
+    ///
+    /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, for
+    /// [`CriterionChecked::node`]'s reason: this crosses a thread boundary, so
+    /// what reaches the single writer arrives already being the identity of a
+    /// node the graph carries.
+    pub node: crate::graph::NodeRef,
     /// `onevcs`'s own account of the conflict, which names the files, the copy
     /// of the branch to resolve it on, and the command that lands it as it
     /// stands.
@@ -2631,7 +2642,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
              Resolve the merge on the branch as onevcs describes above, then answer this \
              with a `retry` of '{node}': the replacement continues that same branch, so it \
              starts from the resolution rather than from the conflict.",
-            node = conflict.node,
+            node = conflict.node.as_str(),
             because = bounded(&crate::views::one_line(&conflict.because)),
         ),
         source: crate::channel::source::RECONCILER.into(),
@@ -2639,7 +2650,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
         queued_at: sys::now_millis(),
         abandoned: false,
         asker: None,
-        workstream: Some(conflict.node.clone()),
+        workstream: Some(conflict.node.as_str().to_owned()),
     }
 }
 

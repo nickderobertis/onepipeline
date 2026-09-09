@@ -107,7 +107,7 @@ pub fn execute(
             return republished_the_same_commit(&node.id, &preserved, &endings, &same, attempt);
         }
         published = match &preserved.tip {
-            crate::vcs::SessionTip::At(commit) => Some(commit.clone()),
+            crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
             // The branch stands where the attempt before it left it, which is
             // what the next attempt is compared against.
             crate::vcs::SessionTip::Unmoved => published,
@@ -276,7 +276,7 @@ fn attempt_once(
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
-        let drained = engine::attempt(executor, &node.id, cancel, tx, &build);
+        let drained = engine::attempt(executor, node, cancel, tx, &build);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -846,7 +846,9 @@ fn republished(published: Option<&str>, tip: &crate::vcs::SessionTip) -> Option<
     let published = published?;
     match tip {
         // The same commit, named twice.
-        crate::vcs::SessionTip::At(commit) => (commit == published).then(|| published.to_owned()),
+        crate::vcs::SessionTip::At(commit) => {
+            (commit.as_str() == published).then(|| published.to_owned())
+        }
         // A session that committed nothing left the branch at what the attempt
         // before it published.
         crate::vcs::SessionTip::Unmoved => Some(published.to_owned()),
@@ -1505,14 +1507,15 @@ mod tests {
     /// here.
     #[test]
     fn a_tip_nothing_could_read_is_not_evidence_that_the_branch_did_not_move() {
+        let commit = |sha: &str| crate::vcs::Commit::of(sha).expect("a commit this crate carries");
         let published = Some("c0ffee");
         assert_eq!(
-            republished(published, &crate::vcs::SessionTip::At("c0ffee".into())),
+            republished(published, &crate::vcs::SessionTip::At(commit("c0ffee"))),
             Some("c0ffee".to_string()),
             "the same commit, published twice, was read as two"
         );
         assert_eq!(
-            republished(published, &crate::vcs::SessionTip::At("decaf".into())),
+            republished(published, &crate::vcs::SessionTip::At(commit("decaf"))),
             None,
             "a branch that moved was read as one that stood still"
         );

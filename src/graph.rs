@@ -37,6 +37,7 @@ pub const STEP_SEPARATOR: char = '/';
 /// be carried rather than borrowed: a message from a dispatch thread, which is
 /// exactly where an unvalidated string would arrive at the single writer with
 /// nothing left to check it.
+///
 /// Ordered, so a map this crate keys by node identity can be keyed by the type
 /// that *is* one rather than by the string it spells.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,6 +57,19 @@ impl NodeRef {
 
     /// The identity as a graph, a journal label, and a surface spell it.
     pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Borrowed as the id it spells, so a map keyed by this type is *looked up* with
+/// the id a graph node or a dependency edge already holds.
+///
+/// Without it a lookup would have to spell a `&str` back into a `NodeRef`, and
+/// the only honest way to do that is a constructor taking a bare string — which
+/// is the thing this type exists to keep out. Borrowing keeps construction on
+/// [`NodeRef::of`] alone while leaving reads cheap.
+impl std::borrow::Borrow<str> for NodeRef {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -939,7 +953,7 @@ impl Settled {
 /// effect on the same pass.
 pub fn derive(
     graph: &Graph,
-    settled: &BTreeMap<String, Settled>,
+    settled: &BTreeMap<NodeRef, Settled>,
     resolved_cross_dag: &dyn Fn(&str) -> Option<NodeStatus>,
 ) -> BTreeMap<String, NodeStatus> {
     let mut statuses: BTreeMap<String, NodeStatus> = BTreeMap::new();
@@ -955,7 +969,7 @@ pub fn derive(
             statuses.insert(node.id.clone(), NodeStatus::Parked);
             continue;
         }
-        if let Some(recorded) = settled.get(&node.id) {
+        if let Some(recorded) = settled.get(node.id.as_str()) {
             // A recorded settlement stands, except for the two derived gates:
             // they are re-derived against the graph as it is now.
             if !matches!(recorded.status(), NodeStatus::Blocked | NodeStatus::Skipped) {
@@ -997,7 +1011,7 @@ fn eligibility(
     graph: &Graph,
     node: &Node,
     statuses: &BTreeMap<String, NodeStatus>,
-    settled: &BTreeMap<String, Settled>,
+    settled: &BTreeMap<NodeRef, Settled>,
     resolved_cross_dag: &dyn Fn(&str) -> Option<NodeStatus>,
 ) -> Option<NodeStatus> {
     let mut all_done = true;
@@ -1025,7 +1039,7 @@ fn eligibility(
                 // The status as this pass derived it is authoritative — `blocked`
                 // and `skipped` are re-derived every pass — so the settlement's
                 // own case stands only where that derivation still agrees.
-                Some(status) => match settled.get(dep) {
+                Some(status) => match settled.get(dep.as_str()) {
                     Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
                         if *status == NodeStatus::Failed =>
                     {
@@ -1136,7 +1150,7 @@ fn reached_its_base(settled: &Settled) -> bool {
 pub fn skipped_by(
     graph: &Graph,
     statuses: &BTreeMap<String, NodeStatus>,
-    settled: &BTreeMap<String, Settled>,
+    settled: &BTreeMap<NodeRef, Settled>,
     id: &str,
 ) -> Vec<(String, NodeStatus)> {
     if statuses.get(id) != Some(&NodeStatus::Skipped) {
@@ -1149,7 +1163,7 @@ pub fn skipped_by(
         .iter()
         .filter_map(|dep| {
             let status = *statuses.get(dep)?;
-            let reached = match settled.get(dep) {
+            let reached = match settled.get(dep.as_str()) {
                 Some(reached @ (Settled::ReachedTheOrigin | Settled::ReachedItsBase))
                     if status == NodeStatus::Failed =>
                 {
@@ -1435,6 +1449,15 @@ mod tests {
 
     fn no_cross_dag(_: &str) -> Option<NodeStatus> {
         None
+    }
+
+    /// The identity `graph` carries for `id`, which is what a settlement map is
+    /// keyed by.
+    ///
+    /// Through [`NodeRef::of`] and never around it, so these tests key the map
+    /// the way a run does — off a node the graph holds.
+    fn whose(graph: &Graph, id: &str) -> NodeRef {
+        NodeRef::of(graph.get(id).expect("the graph carries the node")).expect("a node identity")
     }
 
     #[test]
@@ -1809,7 +1832,7 @@ mod tests {
             agent("c", &["a", "b"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), Settled::at(NodeStatus::Done));
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Done));
 
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["a"], NodeStatus::Done);
@@ -1825,7 +1848,7 @@ mod tests {
             agent("ship", &["approve"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), Settled::at(NodeStatus::Done));
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["approve"], NodeStatus::Waiting);
         assert_eq!(statuses["ship"], NodeStatus::Blocked);
@@ -1838,7 +1861,7 @@ mod tests {
             agent("ship", &["approve", "build"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), Settled::at(NodeStatus::Failed));
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Failed));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["approve"], NodeStatus::Waiting);
         assert_eq!(statuses["ship"], NodeStatus::Skipped);
@@ -1866,8 +1889,8 @@ mod tests {
             agent("ship", &["approve"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("ship".to_string(), Settled::at(NodeStatus::Blocked));
-        recorded.insert("approve".to_string(), Settled::at(NodeStatus::Done));
+        recorded.insert(whose(&graph, "ship"), Settled::at(NodeStatus::Blocked));
+        recorded.insert(whose(&graph, "approve"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(statuses["ship"], NodeStatus::Ready);
     }
@@ -1903,7 +1926,7 @@ mod tests {
         ]));
         let unread = |landing| {
             BTreeMap::from([(
-                "publish".to_string(),
+                whose(&graph, "publish"),
                 Settled::of(
                     NodeStatus::Failed,
                     Some(crate::vcs::Failure::UNREAD),
@@ -1928,7 +1951,7 @@ mod tests {
         // And nothing about skipping in general moved: the same status under any
         // other word skips its dependents exactly as it always did.
         let task_failed = BTreeMap::from([(
-            "publish".to_string(),
+            whose(&graph, "publish"),
             Settled::of(NodeStatus::Failed, Some(crate::engine::TASK_FAILED), None),
         )]);
         let skipped = derive(&graph, &task_failed, &no_cross_dag);
@@ -1951,7 +1974,7 @@ mod tests {
             agent("announce", &["ship"]),
         ]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("build".to_string(), Settled::at(NodeStatus::Failed));
+        recorded.insert(whose(&graph, "build"), Settled::at(NodeStatus::Failed));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
 
         assert_eq!(statuses["ship"], NodeStatus::Skipped);
@@ -1989,7 +2012,7 @@ mod tests {
     fn a_complete_graph_is_complete_and_exits_zero() {
         let graph = Graph::from_plan(&plan_of(vec![agent("a", &[])]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), Settled::at(NodeStatus::Done));
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Done));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert_eq!(state_of(&statuses), GraphState::Complete);
         assert_eq!(GraphState::Complete.exit_code(), 0);
@@ -2001,7 +2024,7 @@ mod tests {
     fn a_graph_still_running_has_not_settled() {
         let graph = Graph::from_plan(&plan_of(vec![agent("a", &[])]));
         let mut recorded = BTreeMap::new();
-        recorded.insert("a".to_string(), Settled::at(NodeStatus::Running));
+        recorded.insert(whose(&graph, "a"), Settled::at(NodeStatus::Running));
         let statuses = derive(&graph, &recorded, &no_cross_dag);
         assert!(!is_terminal(&statuses));
         assert_eq!(state_of(&statuses), GraphState::Waiting);

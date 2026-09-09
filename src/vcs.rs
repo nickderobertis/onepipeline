@@ -719,8 +719,31 @@ pub fn session_close(token: &SessionToken) -> Result<Session> {
 /// which is what this reads and collapses.
 pub fn branch_head_in(token: &SessionToken) -> Option<String> {
     match session_tip(token) {
-        SessionTip::At(commit) => Some(commit),
+        SessionTip::At(commit) => Some(commit.as_str().to_owned()),
         SessionTip::Unmoved | SessionTip::Unknown => None,
+    }
+}
+
+/// A commit value this crate will carry.
+///
+/// A newtype and never a bare `String`, because [`usable`] is what stands
+/// between a recorded sha and a settlement, a view, and an event payload — and a
+/// variant holding a `String` puts that value back where anything could
+/// construct one that never passed it. [`Commit::of`] is the only constructor
+/// and it *is* that check, so a `Commit` in hand is a commit this crate renders
+/// rather than one it is about to have to re-examine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit(String);
+
+impl Commit {
+    /// The commit `sha` names, or `None` where this crate will not carry it.
+    pub(crate) fn of(sha: &str) -> Option<Self> {
+        usable(sha).map(Self)
+    }
+
+    /// The commit as a settlement, a view, and an event payload spell it.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -735,7 +758,7 @@ pub fn branch_head_in(token: &SessionToken) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionTip {
     /// `commit-preserved` named this commit, so the branch stands at it.
-    At(String),
+    At(Commit),
     /// The stream was read and carries no commit this session made. `onevcs`
     /// commits a session's worktree only where it holds something to commit, so
     /// the session added nothing and the branch stands where it stood.
@@ -755,7 +778,7 @@ pub enum SessionTip {
 /// Both refusals count — a stream that would not open, and a batch
 /// [`EventStream::read`] turned down over one line it could not parse.
 ///
-/// The commit is checked where it enters, by [`usable`], for the reason
+/// The commit is checked where it enters, by [`Commit::of`], for the reason
 /// [`landing_commit_of`] is: a commit is rendered into a settlement, a view, and
 /// an event payload, and one carrying a control character forges a row wherever
 /// it lands. One that fails that check is [`Unknown`](SessionTip::Unknown) and
@@ -789,7 +812,7 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
         .payload
         .get("sha")
         .and_then(|sha| sha.as_str())
-        .and_then(usable)
+        .and_then(Commit::of)
         .map_or(SessionTip::Unknown, SessionTip::At)
 }
 
@@ -2074,7 +2097,7 @@ mod tests {
         write(at, format!("{}\n{}\n", opened(at), committed(at, "c0ffee")));
         assert_eq!(
             session_tip(&SessionToken(at.into())),
-            SessionTip::At("c0ffee".into())
+            SessionTip::At(Commit::of("c0ffee").expect("a commit this crate carries"))
         );
 
         // A session that committed nothing: `onevcs` commits a worktree only
