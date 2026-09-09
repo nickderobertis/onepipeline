@@ -2793,6 +2793,15 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
 ///
 /// `None` is also what a run something is still driving answers, because the
 /// lock is what says so and it is not taken here.
+// llmlint: ignore-block[changed_behavior_has_e2e] the two answers this can give are
+// driven end to end — applied by
+// `driver::an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it`
+// and refused by `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`,
+// which is also where two replies contend for the run. What is left is failure *of the
+// takeover itself*: a lock this host will not create, and a reconcile that fails on the
+// run's own store. Neither is a state a journey can put a run into — there is no input to
+// either CLI that refuses one file to one process — and both leave the same answer the
+// wait already had, which is that the edits are queued.
 fn reconciled_here(
     paths: &RunPaths,
     channel: &ChannelState,
@@ -2857,6 +2866,7 @@ fn reconciled_here(
 /// Read as well as written: it is how one reply taking a run over tells itself
 /// from a driver driving it, and the two answer differently.
 const TAKING_THE_RUN_OVER: &str = "reply";
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Compile one command in the process that is applying it, delivering what only a
 /// delivery can answer.

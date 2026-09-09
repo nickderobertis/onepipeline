@@ -735,7 +735,10 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
 /// already claimed is not claimed again here and nothing is applied twice. The
 /// caller holds the run's ownership lock, which is what makes this process the
 /// writer; nothing is in flight, because nothing is driving the run.
-pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<bool> {
+/// Answers nothing: **what** the queue held is read off the queue's own answers,
+/// which is where the caller's envelope is named and where every other envelope
+/// it reconciled is named too.
+pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     let mut journal = Journal::open(paths);
     let mut state = Projected::open(paths);
@@ -746,7 +749,8 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<bool> {
         &ChannelState::new(paths),
         &launch,
         &mut BTreeMap::new(),
-    )
+    )?;
+    Ok(())
 }
 
 /// The reconcile loop: converge the actual frontier toward the desired graph.
