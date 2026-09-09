@@ -53,8 +53,32 @@ esac
 # Base 10 explicitly: the digits check above accepts `08`, and bash arithmetic
 # reads a leading zero as octal and refuses it — half-way through a wait, with a
 # message about base conversion rather than about the value somebody set.
-await_budget=$((10#$await_budget))
-await_interval=$((10#$await_interval))
+#
+# Those zeros come off here too, so the conversion can be compared against what
+# it was given. An all-zero string trims to nothing, which is 0.
+without_leading_zeros() {
+  local trimmed="${1#"${1%%[!0]*}"}"
+  printf '%s' "${trimmed:-0}"
+}
+
+budget_digits="$await_budget"
+interval_digits="$await_interval"
+await_budget=$((10#$budget_digits))
+await_interval=$((10#$interval_digits))
+
+# All digits is not yet a number of seconds: bash counts in `intmax_t` and
+# **wraps silently** rather than failing, so 2^63 comes back negative and 2^64
+# comes back 0. The negative one is why this is checked at all — `waited -ge
+# budget` below is true on the first miss, so an operator who asked for an
+# enormous wait would get none, and publish the unresolvable launcher this
+# script exists to hold back. Refused rather than clamped: a wait nobody asked
+# for is not a repair.
+[ "$await_budget" = "$(without_leading_zeros "$budget_digits")" ] || refuse \
+  "PUBLISH_NPM_AWAIT_BUDGET is '$budget_digits', which is more seconds than this shell can hold" \
+  "unset it to take the default, or set it to a whole number of seconds below $((1 << 62))"
+[ "$await_interval" = "$(without_leading_zeros "$interval_digits")" ] || refuse \
+  "PUBLISH_NPM_AWAIT_INTERVAL is '$interval_digits', which is more seconds than this shell can hold" \
+  "unset it to take the default, or set it to a whole number of seconds below $((1 << 62))"
 
 [ "$await_interval" -gt 0 ] || refuse \
   "PUBLISH_NPM_AWAIT_INTERVAL is 0, so a wait would spin without ever pausing" \

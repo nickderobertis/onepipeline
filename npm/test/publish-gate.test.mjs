@@ -520,6 +520,16 @@ describe("the npm publish order", () => {
       ["10", "not-a-number"],
       ["10", "-1"],
       ["10", "0"],
+      // All digits and still not a number of seconds: bash counts in `intmax_t`
+      // and wraps silently rather than failing, so 2^63 arrives as a *negative*
+      // budget and 2^64 as zero. The negative one is why this is here rather
+      // than in a unit test of the parser — `waited -ge budget` is true on the
+      // first miss, so an operator who asked for an enormous wait would get no
+      // wait at all, and publish exactly the unresolvable launcher this script
+      // exists to hold back.
+      ["9223372036854775808", "1"],
+      ["18446744073709551616", "1"],
+      ["10", "9223372036854775808"],
     ]) {
       const refused = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
         env: {
