@@ -779,8 +779,25 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
             vec![agent("build", &[]), lifecycle("publish", &[])],
         ),
     );
-    let filler = std::fs::read(bulk.journal()).expect("the template's own records");
-    assert!(!filler.is_empty(), "the template run recorded nothing");
+    // Each template's records, read **before** it leaves the root and carried
+    // with it. A clone's journal is grown out of its own template's records
+    // rather than out of one template's for every root, because a fixture whose
+    // store describes one graph and whose document describes another is two
+    // fixtures: the folding build reads the store and this one reads the
+    // document, and a figure comparing them would not be the same work done
+    // twice. Paired with the template it came from so the two cannot be handed
+    // out separately.
+    let records = |template: &RunPaths| {
+        let filler = std::fs::read(template.journal()).expect("the template's own records");
+        assert!(
+            !filler.is_empty(),
+            "the {} template recorded nothing",
+            template.run
+        );
+        filler
+    };
+    let bulk_template = (&bulk, records(&bulk));
+    let owned_template = (&owned, records(&owned));
     // The templates are the shape the rows will be, before a single one is
     // cloned: a fixture that never had the tally cannot clone one.
     for (template, tally) in [(&bulk, BULK_TALLY), (&owned, OWNED_TALLY)] {
@@ -795,19 +812,19 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
 
     let per_run = SCALED_JOURNAL_BYTES / SCALED_RUNS as u64;
     let stranger = "another-planner";
-    let mut assembled: Vec<RunPaths> = Vec::new();
+    let mut assembled: Vec<(RunPaths, &[u8])> = Vec::new();
     for nth in 0..SCALED_RUNS {
         // The rows this session owns are the ones carrying a landing, so the
         // invocation the cost was worst on is the one whose every row does the
         // per-row work.
-        let (template, owner) = if nth < SCALED_OWNED {
-            (&owned, world.session.as_str())
+        let ((template, filler), owner) = if nth < SCALED_OWNED {
+            (&owned_template, world.session.as_str())
         } else {
-            (&bulk, stranger)
+            (&bulk_template, stranger)
         };
         let paths = cloned_run(template, &world.runs, &format!("scaled-{nth:04}"), owner);
-        journal_of(&paths, &filler, per_run);
-        assembled.push(paths);
+        journal_of(&paths, filler, per_run);
+        assembled.push((paths, filler));
     }
     // llmlint: ignore-block[tests_mirror_real_usage] the templates are the journey's own
     // scaffolding rather than two of the four hundred roots it measures, and leaving them on
@@ -832,10 +849,10 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     std::fs::remove_dir_all(&repository.checkout).expect("the repository's checkout");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
-    let held = |assembled: &[RunPaths]| -> u64 {
+    let held = |assembled: &[(RunPaths, &[u8])]| -> u64 {
         assembled
             .iter()
-            .map(|paths| std::fs::metadata(paths.journal()).map_or(0, |about| about.len()))
+            .map(|(paths, _)| std::fs::metadata(paths.journal()).map_or(0, |about| about.len()))
             .sum()
     };
     let bytes = held(&assembled);
@@ -894,6 +911,33 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         );
     }
 
+    // And the store under each root describes the **same graph** its document
+    // does, asked of this build's own folding path.
+    //
+    // `status <RUN>` is a detail read: it folds the run's merged store and says
+    // what that fold makes of it, where `status` given no run reads the bounded
+    // document beside it. So one run rendered both ways is the two builds this
+    // journey's figures compare — the folding one and this one — put over the
+    // same root, and a line that matches is the statement that they are reading
+    // one graph. Without it the clock below is honest about its own build and
+    // says nothing about what it is being compared against: a clone carrying one
+    // template's document and another's records renders `1/2 done` here and
+    // `2/3 done` there, both green, neither the same work.
+    let listing = rendered(&world, &["status"]);
+    for nth in [0, SCALED_OWNED] {
+        let run = format!("scaled-{nth:04}");
+        let folded = rendered(&world, &["status", &run]);
+        let folded = folded.lines().next().expect("the run's own line");
+        let read = listing
+            .lines()
+            .find(|line| line.starts_with(&run))
+            .expect("the listing's line for the same run");
+        assert_eq!(
+            folded, read,
+            "{run} reads as one run to a fold of its store and as another to the document              beside it, so the two builds this journey times are not reading one graph"
+        );
+    }
+
     // Before the first measurement, so both are taken over a disk that has finished
     // with the fixture rather than one still writing it: what is being compared is
     // the render, and the ten gibibytes written below would otherwise be in the
@@ -915,14 +959,16 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
 
     // The same root, with the one input a fold is linear in multiplied by ten and
     // the run count held exactly where it was.
-    for paths in &assembled {
+    for (paths, filler) in &assembled {
         // Ten times **this journal's own** length rather than ten times the
         // even share, so the total that comes out is ten times the total that
-        // went in rather than ten times what was aimed at.
+        // went in rather than ten times what was aimed at. Grown out of the
+        // records this root's own documents describe, for the reason they were
+        // paired above.
         let held = std::fs::metadata(paths.journal())
             .expect("the journal")
             .len();
-        journal_of(paths, &filler, held * JOURNAL_MULTIPLE);
+        journal_of(paths, filler, held * JOURNAL_MULTIPLE);
     }
     // The documents the listing reads, back in the cache the first measurement
     // found them in. Writing ten gibibytes evicts six hundred kilobytes of small
@@ -930,7 +976,7 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // page cache rather than of the listing: what the ratio below is about is the
     // one input a fold is linear in, and the cache state either measurement
     // happens to start in is not it.
-    for paths in &assembled {
+    for (paths, _) in &assembled {
         for document in [paths.summary(), paths.launch()] {
             let _ = std::fs::read(document);
         }
