@@ -109,17 +109,30 @@ fn records_under(world: &World, run: &str) -> Vec<PathBuf> {
 /// clock. Its streams go nowhere: a supervisor's terminal is not what any claim
 /// here is about, and a pipe nobody reads is a watch that blocks on its own output.
 fn arm(world: &World, run: &str) -> std::process::Child {
-    let before = records_under(world, run).len();
     let watching = world
         .cmd(&["watch", run, "--timeout", "none"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("the watch starts");
+    // Waited on by **this watch's own name** rather than by a count, because a
+    // writer arming a watch also sweeps the records it has proved are not live: a
+    // count can come out where it started, and did.
+    let mine = format!("{}-", watching.id());
     world.until("the watch to record itself", |world| {
-        records_under(world, run).len() > before
+        records_under(world, run)
+            .iter()
+            .any(|path| named(path).starts_with(&mine))
     });
     watching
+}
+
+/// One record's file name.
+fn named(path: &std::path::Path) -> String {
+    path.file_name()
+        .expect("a watcher record has a name")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// One watcher record, read back as the writer wrote it.
@@ -266,10 +279,7 @@ fn a_run_a_live_watch_holds_is_not_reported_and_reads_unwatched_once_it_returns(
         "the record names a process other than the watch that wrote it: {held}"
     );
     assert!(
-        only.file_name()
-            .expect("the record has a name")
-            .to_string_lossy()
-            .starts_with(&format!("{}-", watching.id())),
+        named(only).starts_with(&format!("{}-", watching.id())),
         "the record is not named after the process holding it: {only:?}"
     );
     assert!(
@@ -477,7 +487,7 @@ fn concurrent_watches_are_recorded_apart_and_hold_the_run_watched_until_the_last
     let third = arm(&world, &run);
     let names: Vec<String> = records_under(&world, &run)
         .iter()
-        .map(|path| path.file_name().expect("a name").to_string_lossy().into())
+        .map(|path| named(path))
         .collect();
     assert_eq!(
         names.len(),
@@ -562,6 +572,32 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
         asked.stderr
     );
 
+    // A run whose store is not on disk at all is excluded on the same terms, and
+    // this is the one stamp that is not a length and a time: `(0, 0)` is what the
+    // writer records for a run whose journal it cannot stat — a real state, since a
+    // run root exists before its first record lands — so a document carrying it
+    // describes that run exactly rather than being behind it.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb takes a run's store away, and
+    // the state is left by a sweep or a restore that did not copy it. The document put back
+    // is this build's own with the stamp its own writer records for a journal it cannot
+    // stat, which is what that run would carry.
+    let paths = paths_of(&world, &complete);
+    let mut storeless = document(&paths);
+    storeless["journal_len"] = json!(0);
+    storeless["journal_mtime_ms"] = json!(0);
+    std::fs::write(paths.summary(), storeless.to_string()).expect("the document");
+    std::fs::remove_file(paths.journal()).expect("the run's merged store");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let asked = world.run(&["unwatched"]);
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a settled run whose store is gone was written about: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+
     // And the same run, with its document behind its journal.
     //
     // llmlint: ignore-block[tests_mirror_real_usage] what this stages is a writer that
@@ -587,7 +623,7 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
 /// is called, and what to do to the file to put it there.
 type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 
-/// The three states a run's summary document can be in that leave its settlement
+/// The four states a run's summary document can be in that leave its settlement
 /// undecidable, each with the way that state is reached.
 ///
 /// Function pointers rather than a table of data, because what distinguishes them
@@ -596,10 +632,10 @@ type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 ///
 /// llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts the document
 /// its run's journal writer maintains, and none could — each of the three is left by a
-/// build or a crash rather than by an interface. What is put back is this build's own
-/// document, edited only where the state under test is the edit, and every claim afterwards
-/// is read off the compiled binary's own streams.
-const UNDECIDABLE: [Undecidable; 3] = [
+/// build, a crash, or a copied run root rather than by an interface. What is put back is
+/// this build's own document, edited only where the state under test is the edit, and every
+/// claim afterwards is read off the compiled binary's own streams.
+const UNDECIDABLE: [Undecidable; 4] = [
     ("no document at all", |path, _written| {
         std::fs::remove_file(path).expect("the document");
     }),
@@ -614,15 +650,22 @@ const UNDECIDABLE: [Undecidable; 3] = [
             std::fs::write(path, older.to_string()).expect("the document");
         },
     ),
+    ("a document that is another run's", |path, written| {
+        let mut copied = written.clone();
+        copied["run_id"] = json!("some-other-run");
+        std::fs::write(path, copied.to_string()).expect("the document");
+    }),
 ];
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A run whose settlement cannot be decided at all is named on **standard error**
 /// with the reason, is absent from standard output, and changes no exit status.
 ///
-/// Three ways to reach it, because they are one fact to a reader and three
-/// different things on disk: no document, one that cannot be read, and one at a
-/// schema version this build refuses. Such a run is most often an old settled run
+/// Four ways to reach it, because they are one fact to a reader and four different
+/// things on disk: no document, one that cannot be read, one at a schema version
+/// this build refuses, and one that is *another run's* — which is what a copied run
+/// root leaves, and is no more a description of this run than a document nobody
+/// wrote. Such a run is most often an old settled run
 /// whose document is gone, and blocking on it would never clear by watching it —
 /// so it is said out loud and passed over.
 #[test]
@@ -952,6 +995,24 @@ const SINGLE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 /// in both figures, so this compares the verb with itself rather than with a clock.
 const GROWTH_BOUND: u32 = 2;
 
+/// The floor that ratio is taken against.
+///
+/// A ratio between two medians is a measurement of the **host** as much as of the
+/// verb when both are single-digit milliseconds, and both are: the whole invocation
+/// is a process start plus four hundred small reads. Measured here, the same code
+/// twice — 8.2 ms against 7.1 ms on a quiet host, and 11.7 ms against 31.8 ms with
+/// the crate's whole instrumented suite running beside it, which is how this suite
+/// runs in the gate. The second pair is not a scaling effect: ten gibibytes written
+/// a moment earlier evict the pages of the binary being started, and that cost is
+/// paid by the process rather than by anything it reads.
+///
+/// So the ratio is taken against this floor rather than against a figure smaller
+/// than the noise around it — and what it still catches is the only thing it is
+/// for. A build that read those journals would answer in **seconds** over ten
+/// gibibytes, which is two orders of magnitude past this floor and past the bound
+/// the unmultiplied root is held to anyway, which the grown root is held to as well.
+const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(60);
+
 /// How many invocations each median is taken over, after one warm-up.
 ///
 /// The warm-up is discarded because what it measures is mostly a debug binary
@@ -1228,10 +1289,19 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
 
     let after = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
-        after <= before * GROWTH_BOUND,
+        after <= before.max(GROWTH_FLOOR) * GROWTH_BOUND,
         "`onepipeline unwatched` took {after:?} over {grown} journal byte(s) against {before:?} \
          over {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
          verb that reads no journal is held to"
+    );
+    // And the grown root is held to the same absolute bound the unmultiplied one
+    // is, which is the statement that does not depend on a ratio at all: ten
+    // gibibytes of journal do not put this verb anywhere near what a hook can wait
+    // for.
+    assert!(
+        after < ASKING_BOUND,
+        "`onepipeline unwatched` took {after:?} over {grown} journal byte(s), past the \
+         {ASKING_BOUND:?} a check asked at the end of every turn is held to"
     );
     println!(
         "  unwatched     {before:?} over {SCALED_RUNS} roots holding {bytes} journal byte(s), \
@@ -1394,5 +1464,83 @@ fn unwatched_opens_no_run_store_that_is_there() {
         opened.contains(&journal),
         "`results` did not open the store it folds, so nothing above was observed: {opened:?}"
     );
+    world.release("build.go");
+}
+
+/// Arming a watch sweeps the records this host can **prove** are not live watches,
+/// and removes nothing else.
+///
+/// The bound on a directory that would otherwise grow for ever: a run watched a
+/// thousand times over a week would hold a thousand records, all but one of them
+/// about processes that are gone. What makes the sweep safe is what it refuses to
+/// touch — a record naming another host, whose pid means nothing here, and one this
+/// build could not read, about which it has proved nothing. Both are another party's
+/// evidence, and a writer that swept them to tidy its own directory would be
+/// deleting it.
+///
+/// **The sweep is not what makes a dead watcher read as gone**, and this journey is
+/// careful to say so: the run reads unwatched *before* anything is swept, on the
+/// strength of the reading alone.
+#[test]
+fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else() {
+    let world = World::new("unwatched-sweep");
+    world.script("build.wait", "hold");
+    let run = held(&world, "unwatchedsweep");
+
+    // A record this host can prove is not a live watch: a real watch's own, whose
+    // process has since been reaped.
+    let mut watching = arm(&world, &run);
+    let dead_pid = watching.id();
+    watching.kill().expect("the watch takes the signal");
+    watching.wait().expect("the watch ends");
+    let [dead] = &records_under(&world, &run)[..] else {
+        panic!("the killed watch did not leave exactly one record");
+    };
+    let dead = dead.clone();
+    let template = record(&dead);
+
+    // Beside it, the two records a sweep may not touch.
+    let mut elsewhere = template.clone();
+    elsewhere["host"] = json!("another-host");
+    let foreign = put(
+        &world,
+        &run,
+        "4243-0badc0ffee000002.json",
+        &elsewhere.to_string(),
+    );
+    let unreadable = put(&world, &run, "4244-0badc0ffee000003.json", "{\"schema_ver");
+
+    // The run reads unwatched now, before anything has swept anything: the reading
+    // is what decides it, and the sweep is only housekeeping.
+    world
+        .run(&["unwatched"])
+        .exited(RUNS_UNWATCHED)
+        .out_has(&run);
+    assert!(
+        dead.exists(),
+        "reading the run removed a record, and the reading side removes nothing"
+    );
+
+    // A fresh watch, which is the writer that sweeps.
+    let watching = arm(&world, &run);
+    assert!(
+        !dead.exists(),
+        "the record of the reaped watch (pid {dead_pid}) was not swept, so a long-watched \
+         run accumulates them without bound"
+    );
+    assert!(
+        foreign.exists(),
+        "the sweep removed a record naming another host, about which this host has proved \
+         nothing"
+    );
+    assert!(
+        unreadable.exists(),
+        "the sweep removed a record it could not read, which is another build's evidence"
+    );
+    // And the run is watched again, by the watch that did the sweeping.
+    world.run(&["unwatched"]).exited(SUCCESS);
+
+    world.run(&["stop", &run, "--force"]).exited(0);
+    watching.wait_with_output().expect("the watch returns");
     world.release("build.go");
 }
