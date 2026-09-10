@@ -146,44 +146,55 @@ fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::
     Ok(found)
 }
 
-/// Whether `text` has the shape RFC 3339 fixes for a date and time.
+/// Whether `text` is an RFC 3339 date and time.
 ///
 /// `YYYY-MM-DDThh:mm:ss`, then an optional fraction, then `Z` or an offset — the
 /// separator and the zone marker in either case, which the grammar allows and
 /// which this crate's own writer does not produce.
+///
+/// **The ranges as well as the shape**, down to the day being one its month has:
+/// `2026-99-99T99:99:99Z` has the shape and is not an instant, and a check that
+/// took it would be punctuation with a date's name on it. Leap seconds are the one
+/// place the grammar is wider than a clock — `23:59:60` is a second RFC 3339 admits
+/// — so `60` is allowed there and nowhere else.
+///
+/// Kept here rather than reached for from a dependency because it is the only place
+/// this crate parses an instant at all: every other timestamp it holds it *writes*.
 fn is_rfc3339(text: &str) -> bool {
-    let digits = |part: &str| part.len() == part.chars().filter(char::is_ascii_digit).count();
     let Some((date, rest)) = text.split_once(['T', 't']) else {
         return false;
     };
     let [year, month, day] = date.split('-').collect::<Vec<_>>()[..] else {
         return false;
     };
-    if !(year.len() == 4 && month.len() == 2 && day.len() == 2)
-        || !digits(year)
-        || !digits(month)
-        || !digits(day)
-    {
+    let (Some(year), Some(month), Some(day)) = (
+        number(year, 4, 0..=9_999),
+        number(month, 2, 1..=12),
+        number(day, 2, 1..=31),
+    ) else {
+        return false;
+    };
+    if day > days_in(month, year) {
         return false;
     }
     let (clock, zone) = match rest.find(['Z', 'z', '+']) {
         Some(at) => rest.split_at(at),
-        // A negative offset, whose sign is also the separator inside the time —
-        // which it cannot be, because the time holds none.
+        // A negative offset, whose sign is also the separator inside the date —
+        // which is behind us, so the last one in what is left is the zone's.
         None => match rest.rfind('-') {
             Some(at) => rest.split_at(at),
             None => return false,
         },
     };
     if !matches!(zone, "Z" | "z") {
-        let Some(offset) = zone
+        let Some((hours, minutes)) = zone
             .strip_prefix('+')
             .or_else(|| zone.strip_prefix('-'))
             .and_then(|offset| offset.split_once(':'))
         else {
             return false;
         };
-        if !(offset.0.len() == 2 && offset.1.len() == 2 && digits(offset.0) && digits(offset.1)) {
+        if number(hours, 2, 0..=23).is_none() || number(minutes, 2, 0..=59).is_none() {
             return false;
         }
     }
@@ -192,14 +203,38 @@ fn is_rfc3339(text: &str) -> bool {
     let [hour, minute, second] = clock.split(':').collect::<Vec<_>>()[..] else {
         return false;
     };
-    hour.len() == 2
-        && minute.len() == 2
-        && second.len() == 2
-        && digits(hour)
-        && digits(minute)
-        && digits(second)
+    number(hour, 2, 0..=23).is_some()
+        && number(minute, 2, 0..=59).is_some()
+        // 60 is the leap second, which is a second this grammar has.
+        && number(second, 2, 0..=60).is_some()
         && !fraction.is_empty()
-        && digits(fraction)
+        && fraction.chars().all(|c| c.is_ascii_digit())
+}
+
+/// One fixed-width decimal field of an instant, within the range the grammar gives
+/// it.
+///
+/// The width is checked as well as the value, because RFC 3339 fixes it: `9-1-1`
+/// is not a date, and a parse alone would take it.
+fn number(text: &str, width: usize, allowed: std::ops::RangeInclusive<u32>) -> Option<u32> {
+    if text.len() != width || !text.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|value| allowed.contains(value))
+}
+
+/// How many days that month of that year has.
+///
+/// The proleptic Gregorian rule, which is the calendar RFC 3339 dates are in.
+fn days_in(month: u32, year: u32) -> u32 {
+    match month {
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Whether one recorded watch is watching its run **now**, and where it is not,
@@ -538,6 +573,12 @@ mod tests {
             "2026-09-09T18:21:04+02:00",
             "2026-09-09T18:21:04-06:30",
             "2026-09-09T18:21:04.000000001-06:30",
+            // The three the ranges have to admit rather than round off: the leap
+            // second the grammar has, and a leap day in a year that has one — a
+            // century among them, which the Gregorian rule keeps.
+            "2026-12-31T23:59:60Z",
+            "2024-02-29T18:21:04Z",
+            "2000-02-29T18:21:04Z",
         ] {
             assert!(is_rfc3339(shape), "`{shape}` is an RFC 3339 instant");
         }
@@ -563,6 +604,19 @@ mod tests {
             "2026-09-09T18:21:04+2:00",
             "2026-09-09Txx:21:04Z",
             "../../etc/passwd",
+            // The shape, without being an instant: a month, a day, an hour, a
+            // minute, a second and an offset no clock has, and a day its own month
+            // does not.
+            "2026-99-09T18:21:04Z",
+            "2026-09-99T18:21:04Z",
+            "2026-09-09T99:21:04Z",
+            "2026-09-09T18:99:04Z",
+            "2026-09-09T18:21:61Z",
+            "2026-09-09T18:21:04+99:00",
+            "2026-09-09T18:21:04+02:99",
+            "2026-02-30T18:21:04Z",
+            "2025-02-29T18:21:04Z",
+            "2100-02-29T18:21:04Z",
         ] {
             assert!(!is_rfc3339(shape), "`{shape}` is not an RFC 3339 instant");
         }
