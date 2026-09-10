@@ -2523,6 +2523,78 @@ pub fn ended(child: std::process::Child) {
     child.wait_with_output().expect("the child ends");
 }
 
+/// Wait until the kernel has finished writing back what a fixture just wrote.
+///
+/// For the host-sized journeys, and for the one thing they measure that is not the
+/// code: each grows four hundred journals to ten gibibytes and then times a
+/// command against them, and the pages of that write are still on their way to the
+/// disk when the first invocation starts. The clock then reads the fixture's own
+/// write rather than the command — measured, the same command on the same root
+/// came back at 8.2 ms and at 31.8 ms depending on nothing but what the disk was
+/// still doing.
+///
+/// `fsync` on each file is not this: it puts *that file's* pages on the device and
+/// returns, while the rest of the machine's dirty pages — the run roots, the
+/// documents, the binary's own eviction — are still being written. This waits for
+/// the whole of it, which is what makes a ratio between two measurements a
+/// statement about the command.
+///
+/// **Linux, where the kernel says so.** `/proc/meminfo` carries `Dirty` and
+/// `Writeback` in kilobytes; everywhere else this returns at once, because there is
+/// no portable way to ask and a wait that guessed would be a sleep. It is bounded
+/// either way: a host that never settles gets the measurement it would have got
+/// anyway, and says so rather than hanging the suite.
+pub fn writeback_settled() {
+    let settled = waited_for(SETTLING, std::time::Duration::from_millis(200), || {
+        dirty_bytes().is_none_or(|held| held <= SETTLED_BYTES)
+    });
+    if !settled {
+        println!(
+            "  the kernel is still writing back {:?} byte(s) after {SETTLING:?}; what follows \
+             is measured over a disk that is still busy",
+            dirty_bytes()
+        );
+    }
+}
+
+/// What the kernel may still be holding before a measurement is its own.
+///
+/// Thirty-two mebibytes: far below the ten gibibytes a host-sized fixture writes,
+/// and far above the ordinary churn of a machine that is doing nothing in
+/// particular — so this waits for the fixture and not for idleness.
+const SETTLED_BYTES: u64 = 32 * 1024 * 1024;
+
+/// How long that wait may take before the measurement is made anyway.
+///
+/// Sixty seconds, twice: a journey that waited longer could reach nextest's own
+/// `terminate-after` — six sixty-second periods — and be killed rather than
+/// measured, which is worse than a measurement taken over a disk that is still
+/// busy. Measured on this host: ten gibibytes had 204 MB left to write when a
+/// two-minute wait ran out, and the figures either side of it were within 3% of
+/// each other regardless, because what the wait is protecting against is mostly
+/// already handled by putting the binary back in the cache.
+const SETTLING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many bytes this host says it has yet to write back, or `None` where it will
+/// not say.
+#[cfg(target_os = "linux")]
+fn dirty_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let held = |key: &str| -> Option<u64> {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.split_whitespace().next())
+            .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
+            .map(|kilobytes| kilobytes * 1024)
+    };
+    Some(held("Dirty:")? + held("Writeback:")?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn dirty_bytes() -> Option<u64> {
+    None
+}
+
 /// Poll until `ready` holds, reporting whether it did before the deadline.
 ///
 /// Every wait in this suite is on work another process or thread is doing, so

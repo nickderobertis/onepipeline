@@ -79,6 +79,34 @@ status-level = "slow"
 [profile.ci]
 status-level = "pass"
 
+# The two host-sized journeys take the **whole** group while they run.
+#
+# Each assembles four hundred run roots and grows their journals to ten gibibytes,
+# so its true cost is the disk rather than a process tree — and the cap above is
+# about process trees, which is why it does not already cover this. Four threads
+# meant a journey writing ten gibibytes ran beside three other tests and, once
+# there were two such journeys, beside the other one. Measured: `listing`'s own
+# growth ratio failed at 58.6 ms against 133.0 ms inside a full run and passes at
+# 96.3 against 114.7 with the two of them apart, and
+# `views::status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable`
+# — the one test in this suite that measures the *freshness* of a heartbeat —
+# failed twice in five full runs rendering a beat three seconds stale, which is
+# what a saturated disk does to the process writing that beat.
+#
+# Spelled as the threads a test **requires** rather than as a group of its own, so
+# these journeys stay inside the cap above rather than running beside it: a second
+# group would be a fifth process tree, which is the oversubscription that cap
+# exists to prevent. Asked of the runner rather than assumed: nextest names a key
+# it does not know — `ignoring unknown configuration key:
+# profile.default.overrides.0.threads-requiredd` — and says nothing about this one,
+# which is how a setting that silently did nothing would be caught.
+#
+# **Before the group assignment below**, because the first matching override wins
+# per setting and the one below matches every test in these binaries.
+[[profile.default.overrides]]
+filter = 'test(/a_host_sized/)'
+threads-required = 4
+
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.

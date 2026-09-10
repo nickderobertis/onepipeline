@@ -508,16 +508,32 @@ fn standing_of(record: &WatcherRecord, run: &str) -> WatchStanding {
     if sys::process_terminated_awaiting_parent(pid) {
         return WatchStanding::AwaitingItsParent;
     }
-    match sys::process_start_token(pid) {
-        Some(token) if token.matches(&record.started) => WatchStanding::Live,
-        // A token was read and the record carries one to compare it against, and
-        // they disagree: the pid has been handed on. That is a *reading*, which is
-        // what makes it the one answer here that admits removal.
-        Some(_) if !record.started.is_empty() => WatchStanding::NotThatProcess,
+    token_standing(sys::process_start_token(pid).as_ref(), &record.started)
+}
+
+/// The last of the six conditions, taken apart from the host that answers it: what
+/// a start token **read now** says about a token recorded earlier.
+///
+/// A function of the two readings and nothing else, because this is the point that
+/// decides whether a record may be deleted, and the difference it draws is between
+/// an answer and the absence of one. On the platform this crate's tier runs on, a
+/// live process's `/proc/<pid>/stat` is always readable, so `None` for a live pid
+/// cannot be staged by a journey here — and a regression folding it back into
+/// [`WatchStanding::NotThatProcess`] would erase a live watcher's record for ever.
+/// Separating it is what lets that case be driven directly; see this module's own
+/// tests.
+fn token_standing(read: Option<&sys::StartToken>, recorded: &str) -> WatchStanding {
+    match read {
+        // Two readings in hand and they agree: this is the process that wrote it.
+        Some(token) if token.matches(recorded) => WatchStanding::Live,
+        // Two readings in hand and they disagree: the pid has been handed on, so the
+        // process that wrote this record is gone. That is a *reading*, which is what
+        // makes it the one answer here that admits removal.
+        Some(_) if !recorded.is_empty() => WatchStanding::NotThatProcess,
         // Everything else is an absence of evidence rather than evidence of an
-        // absence — this host would not say what the process's start is, or the
-        // record was written where it would not say. The run reads unwatched, and
-        // the record stays.
+        // absence — this host would not say what the process's start is now, or the
+        // record was written where it would not say then. The run reads unwatched,
+        // and the record stays.
         _ => WatchStanding::Unproven,
     }
 }
@@ -622,6 +638,65 @@ fn nonce() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A start token this host **would not give** is not a mismatch, and the two
+    /// are decided apart at the point that decides removal.
+    ///
+    /// The case the correction was for, driven where it can be driven at all: on
+    /// Linux a live process's `/proc/<pid>/stat` is always readable, so no journey
+    /// in this repository can stage a live pid whose current token comes back
+    /// `None` — `tests/e2e/unwatched.rs` says so where it drives the half it can.
+    /// This is the other half, and it is the one a regression would land on: fold
+    /// `None` back into [`WatchStanding::NotThatProcess`] and the sweep erases the
+    /// record of a watcher that is alive and watching, with no later reading able
+    /// to bring it back.
+    ///
+    /// The token is **this process's own**, read from the host rather than
+    /// constructed, so what the comparison is given is the same kind of value the
+    /// verb gives it.
+    #[test]
+    fn a_token_this_host_would_not_give_is_not_a_mismatch() {
+        let mine = sys::process_start_token(sys::pid())
+            .expect("this host reports the start of the process asking");
+        let recorded = mine.recorded().to_string();
+
+        // Two readings that agree.
+        assert_eq!(
+            token_standing(Some(&mine), &recorded),
+            WatchStanding::Live,
+            "a token that matches the record is the process that wrote it"
+        );
+        // Two readings that disagree: a pid handed to another process.
+        let standing = token_standing(Some(&mine), "linux-proc-stat:1");
+        assert_eq!(standing, WatchStanding::NotThatProcess);
+        assert!(
+            standing.proved_gone(),
+            "a mismatch is what a sweep is for: the pid is held by something else"
+        );
+        // No reading at all, against a record that carries one.
+        let standing = token_standing(None, &recorded);
+        assert_eq!(
+            standing,
+            WatchStanding::Unproven,
+            "a token this host would not give was read as a mismatch, which is a live \
+             watcher's record erased on a reading nobody took"
+        );
+        assert!(
+            !standing.proved_gone(),
+            "a sweep would remove the record of a watcher this host merely could not \
+             judge, and nothing could ever put it back"
+        );
+        assert!(!standing.is_live(), "and it is still not a live watch");
+        // And a record that carries no token, whatever was read.
+        for read in [Some(&mine), None] {
+            let standing = token_standing(read, "");
+            assert_eq!(standing, WatchStanding::Unproven);
+            assert!(
+                !standing.proved_gone(),
+                "a record with nothing to judge was swept"
+            );
+        }
+    }
 
     /// The name this build gives a record is the one entry 66 states.
     ///

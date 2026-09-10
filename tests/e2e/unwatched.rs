@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World, NODE_SETTLED, RUNS_UNWATCHED};
+use crate::harness::{agent, plan_of, writeback_settled, World, NODE_SETTLED, RUNS_UNWATCHED};
 
 use onepipeline::views::{RunPaths, WATCHER_SCHEMA_VERSION};
 
@@ -1055,18 +1055,6 @@ const SINGLE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 /// in both figures, so this compares the verb with itself rather than with a clock.
 const GROWTH_BOUND: u32 = 2;
 
-/// The floor that ratio is taken against.
-///
-/// Both medians are single-digit milliseconds — a process start plus four hundred
-/// small reads — so the ratio between them measures the host as much as the verb.
-/// The same code, twice: 8.2 ms against 7.1 ms on a quiet host, and 11.7 ms against
-/// 31.8 ms with the crate's whole instrumented suite running beside it, which is how
-/// this suite runs in the gate. The second pair is not a scaling effect — ten
-/// gibibytes written a moment earlier evict the pages of the binary being started —
-/// and a build that actually read those journals would answer in **seconds**, which
-/// is two orders of magnitude past this floor.
-const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(60);
-
 /// How many invocations each median is taken over, after one warm-up.
 ///
 /// The warm-up is discarded because what it measures is mostly a debug binary
@@ -1304,6 +1292,12 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     // reader who cannot see what they are cannot weigh it.
     println!("  the rows this bound is measured over:\n{rows}");
 
+    // Before the first measurement, so both are taken over a disk that has finished
+    // with the fixture rather than one still writing it: what is being compared is
+    // the verb, and the ten gibibytes written below would otherwise be in the second
+    // figure and not the first.
+    writeback_settled();
+    binary_in_cache();
     let before = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
         before < ASKING_BOUND,
@@ -1328,6 +1322,9 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
             let _ = std::fs::read(document);
         }
     }
+    // And again, for the write that just happened — this is the one the ratio is
+    // about, and `fsync` per file only puts that file's pages on the device.
+    writeback_settled();
     let grown = held_bytes(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,
@@ -1341,9 +1338,10 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
         "the answer changed when the journals grew, so the run count or the fixture moved"
     );
 
+    binary_in_cache();
     let after = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
-        after <= before.max(GROWTH_FLOOR) * GROWTH_BOUND,
+        after <= before * GROWTH_BOUND,
         "`onepipeline unwatched` took {after:?} over {grown} journal byte(s) against {before:?} \
          over {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
          verb that reads no journal is held to"
@@ -1574,9 +1572,18 @@ fn arming_a_watch_sweeps_what_it_proved_is_gone_and_keeps_what_it_could_not_judg
     );
     let unreadable = put(&world, &run, "4244-0badc0ffee000003.json", "{\"schema_ver");
     // The one this journey exists for: a live pid, and no start token to judge it
-    // by — which is what a watch armed on a host that will not report one leaves,
-    // and what one failed reading of a live watcher's start looks like from here.
+    // by — which is what a watch armed on a host that will not report one leaves.
     // This process is the live pid, because a test process is emphatically alive.
+    //
+    // **The half this environment cannot stage** is the mirror of it: a live pid
+    // whose token this host will not give *now*, against a record that carries one.
+    // On Linux a live process's `/proc/<pid>/stat` is always readable, so there is
+    // no such pid to point a record at — and a reading that came back empty would
+    // mean the process is gone, which is a different standing decided two lines
+    // earlier. That half is driven directly, on the function that decides it, by
+    // `src/watchers.rs`'s `a_token_this_host_would_not_give_is_not_a_mismatch`;
+    // both halves are the same standing, so a regression folding either back into
+    // a proven mismatch fails one of the two.
     let mut unjudgeable = template.clone();
     unjudgeable["pid"] = json!(std::process::id());
     unjudgeable["started"] = json!("");
@@ -1760,4 +1767,18 @@ fn a_run_root_whose_name_is_not_a_run_id_is_passed_over() {
         asked.stderr
     );
     world.release("build.go");
+}
+
+/// Put the binary back in the page cache before a measurement.
+///
+/// The one thing these journeys measure that is not the command: the compiled test
+/// binary is a quarter of a gigabyte, this fixture writes ten gibibytes over it,
+/// and the machine's page cache is smaller than the two together — so the second
+/// measurement pays to page the binary back in on **every** `exec`, which is a cost
+/// of the fixture rather than of what is being timed. Read before both
+/// measurements, so what they differ by is not what the kernel happened to be
+/// holding when each began.
+fn binary_in_cache() {
+    let read = std::fs::read(crate::harness::binary()).expect("the binary under test");
+    assert!(!read.is_empty(), "the binary under test is empty");
 }

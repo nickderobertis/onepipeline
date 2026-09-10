@@ -44,7 +44,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, lifecycle, plan_of, World};
+use crate::harness::{agent, lifecycle, plan_of, writeback_settled, World};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION};
 
@@ -460,23 +460,6 @@ const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 /// a clock.
 const GROWTH_BOUND: u32 = 2;
 
-/// The floor that ratio is taken against.
-///
-/// Both medians are tens of milliseconds — process start, four hundred small
-/// documents, and three repository reads — so the ratio between them measures the
-/// host as much as the code. Measured on this host inside one run of the suite:
-/// `runs` took 58.6 ms over the unmultiplied root and 133.0 ms over the grown one,
-/// and the same journey a run earlier took 27 ms against 45 ms. The difference is
-/// not a scaling effect — ten gibibytes written a moment earlier evict the pages of
-/// the binary being started, and there are now two journeys in this binary that
-/// write ten gibibytes — so the ratio is taken against this floor rather than
-/// against a figure smaller than the noise around it.
-///
-/// What it still catches is what it is for: a fold of ten gibibytes takes **tens of
-/// seconds**, which is two orders of magnitude past this floor and past
-/// [`LISTING_BOUND`], which the grown root is held to as well.
-const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(300);
-
 /// How many renders each median is taken over, after one warm-up.
 ///
 /// The warm-up is discarded because what it measures is mostly a debug binary
@@ -781,6 +764,13 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         );
     }
 
+    // Before the first measurement, so both are taken over a disk that has finished
+    // with the fixture rather than one still writing it: what is being compared is
+    // the render, and the ten gibibytes written below would otherwise be in the
+    // second figure and not the first.
+    writeback_settled();
+    binary_in_cache();
+
     let mut before = Vec::new();
     for argv in LISTINGS {
         let took = median(&world, argv);
@@ -815,6 +805,9 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
             let _ = std::fs::read(document);
         }
     }
+    // And again, for the write that just happened — this is the one the ratio is
+    // about, and `fsync` per file only puts that file's pages on the device.
+    writeback_settled();
     let grown = held(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,
@@ -827,10 +820,11 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
         "the run count did not stay where it was"
     );
 
+    binary_in_cache();
     for (argv, was) in LISTINGS.iter().zip(before) {
         let took = median(&world, argv);
         assert!(
-            took <= was.max(GROWTH_FLOOR) * GROWTH_BOUND,
+            took <= was * GROWTH_BOUND,
             "`onepipeline {}` took {took:?} over {grown} journal byte(s) against {was:?} over \
              {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
              bounded read is held to",
@@ -1064,4 +1058,18 @@ fn no_listing_command_opens_a_run_store_that_is_there() {
         opened.contains(&journal),
         "`results` did not open the store it folds, so nothing above was observed: {opened:?}"
     );
+}
+
+/// Put the binary back in the page cache before a measurement.
+///
+/// The one thing these journeys measure that is not the command: the compiled test
+/// binary is a quarter of a gigabyte, this fixture writes ten gibibytes over it,
+/// and the machine's page cache is smaller than the two together — so the second
+/// measurement pays to page the binary back in on **every** `exec`, which is a cost
+/// of the fixture rather than of what is being timed. Read before both
+/// measurements, so what they differ by is not what the kernel happened to be
+/// holding when each began.
+fn binary_in_cache() {
+    let read = std::fs::read(crate::harness::binary()).expect("the binary under test");
+    assert!(!read.is_empty(), "the binary under test is empty");
 }
