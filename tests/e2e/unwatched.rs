@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, World, RUNS_UNWATCHED};
+use crate::harness::{agent, plan_of, World, NODE_SETTLED, RUNS_UNWATCHED};
 
 use onepipeline::views::{RunPaths, WATCHER_SCHEMA_VERSION};
 
@@ -109,8 +109,14 @@ fn records_under(world: &World, run: &str) -> Vec<PathBuf> {
 /// clock. Its streams go nowhere: a supervisor's terminal is not what any claim
 /// here is about, and a pipe nobody reads is a watch that blocks on its own output.
 fn arm(world: &World, run: &str) -> std::process::Child {
+    arm_until(world, run, "surface")
+}
+
+/// The same, told what to return on — for the one journey that needs a watch to
+/// **end** without the run it was watching ending with it.
+fn arm_until(world: &World, run: &str, until: &str) -> std::process::Child {
     let watching = world
-        .cmd(&["watch", run, "--timeout", "none"])
+        .cmd(&["watch", run, "--timeout", "none", "--until", until])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -244,15 +250,32 @@ fn an_unsettled_run_nothing_is_watching_is_named_with_its_standing_word() {
     world.release("build.go");
 }
 
-/// A run a live process is watching is not reported, and the record that says so
-/// is gone once the watch returns.
+/// A run a live process is watching is not reported, and reads unwatched the
+/// moment that watch returns.
+///
+/// The same question twice with nothing changed but the process, which is the whole
+/// of what the record is for. The watch is ended by a **condition it was told to
+/// return on** rather than by stopping the run, because a stopped run is excluded
+/// from this verb whatever is watching it — so the second answer would prove
+/// nothing about watching at all.
 #[test]
 fn a_run_a_live_watch_holds_is_not_reported_and_reads_unwatched_once_it_returns() {
     let world = World::new("unwatched-live");
+    // Two dispatches held open, so releasing the first ends the watch while the run
+    // it was watching is still going.
     world.script("build.wait", "hold");
-    let run = held(&world, "unwatchedlive");
+    world.script("docs.wait", "hold");
+    let run = "unwatchedlive";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("docs", &["build"])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
 
-    let watching = arm(&world, &run);
+    let watching = arm_until(&world, run, "node=build");
     let asked = world.run(&["unwatched"]);
     asked.exited(SUCCESS);
     assert!(
@@ -263,7 +286,7 @@ fn a_run_a_live_watch_holds_is_not_reported_and_reads_unwatched_once_it_returns(
     );
 
     // The record is this build's own, and it says what it is supposed to say.
-    let [only] = &records_under(&world, &run)[..] else {
+    let [only] = &records_under(&world, run)[..] else {
         panic!("one live watch left something other than one record");
     };
     let held = record(only);
@@ -287,21 +310,25 @@ fn a_run_a_live_watch_holds_is_not_reported_and_reads_unwatched_once_it_returns(
         "the record does not say when the watch began: {held}"
     );
 
-    // And once the watch has returned, the run reads unwatched again — the same
-    // question, a different answer, with nothing having changed but the process.
-    let watched = &run;
-    world.run(&["stop", watched, "--force"]).exited(0);
-    let ended = watching.wait_with_output().expect("the watch returns");
-    assert!(
-        !ended.status.success(),
-        "a watch on a stopped run returned as though the run had settled"
-    );
-    assert!(
-        records_under(&world, &run).is_empty(),
-        "a watch that returned left its record behind: {:?}",
-        records_under(&world, &run)
-    );
+    // The condition the watch was told to return on, and nothing else about the
+    // run: its second node is still held open, so the run goes on.
     world.release("build.go");
+    let ended = watching.wait_with_output().expect("the watch returns");
+    assert_eq!(
+        ended.status.code(),
+        Some(NODE_SETTLED),
+        "the watch did not return on the node it was told to return on: {}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    assert!(
+        records_under(&world, run).is_empty(),
+        "a watch that returned left its record behind: {:?}",
+        records_under(&world, run)
+    );
+
+    let asked = world.run(&["unwatched"]);
+    asked.exited(RUNS_UNWATCHED).out_has(run);
+    world.release("docs.go");
 }
 
 /// A watch killed and **left unreaped by its parent** is not a live watch on the
@@ -821,6 +848,24 @@ fn the_option_decides_which_session_is_asked_about_and_the_environment_decides_w
     asked.exited(RUNS_UNWATCHED).out_has(&theirs);
     assert!(!asked.stdout.contains(&mine), "{}", asked.stdout);
 
+    // An option carrying nothing is a refusal rather than a fall-through: the
+    // environment here names a session that owns a reportable run, and answering
+    // out of it would be reporting on whichever session the hook happens to run
+    // under — the one mistake the option exists to make impossible.
+    let blank = world.run(&["unwatched", "--session", ""]);
+    assert!(
+        blank.code != SUCCESS && blank.code != RUNS_UNWATCHED,
+        "`--session \"\"` was answered out of the environment: {} {}",
+        blank.code,
+        blank.stdout
+    );
+    blank.err_has("no session");
+    assert!(
+        blank.stdout.is_empty(),
+        "a refusal wrote to standard output: {}",
+        blank.stdout
+    );
+
     // The option, against an environment naming the other session — both ways
     // round, so what decides is the option rather than the pair happening to
     // agree.
@@ -1003,20 +1048,14 @@ const GROWTH_BOUND: u32 = 2;
 
 /// The floor that ratio is taken against.
 ///
-/// A ratio between two medians is a measurement of the **host** as much as of the
-/// verb when both are single-digit milliseconds, and both are: the whole invocation
-/// is a process start plus four hundred small reads. Measured here, the same code
-/// twice — 8.2 ms against 7.1 ms on a quiet host, and 11.7 ms against 31.8 ms with
-/// the crate's whole instrumented suite running beside it, which is how this suite
-/// runs in the gate. The second pair is not a scaling effect: ten gibibytes written
-/// a moment earlier evict the pages of the binary being started, and that cost is
-/// paid by the process rather than by anything it reads.
-///
-/// So the ratio is taken against this floor rather than against a figure smaller
-/// than the noise around it — and what it still catches is the only thing it is
-/// for. A build that read those journals would answer in **seconds** over ten
-/// gibibytes, which is two orders of magnitude past this floor and past the bound
-/// the unmultiplied root is held to anyway, which the grown root is held to as well.
+/// Both medians are single-digit milliseconds — a process start plus four hundred
+/// small reads — so the ratio between them measures the host as much as the verb.
+/// The same code, twice: 8.2 ms against 7.1 ms on a quiet host, and 11.7 ms against
+/// 31.8 ms with the crate's whole instrumented suite running beside it, which is how
+/// this suite runs in the gate. The second pair is not a scaling effect — ten
+/// gibibytes written a moment earlier evict the pages of the binary being started —
+/// and a build that actually read those journals would answer in **seconds**, which
+/// is two orders of magnitude past this floor.
 const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// How many invocations each median is taken over, after one warm-up.

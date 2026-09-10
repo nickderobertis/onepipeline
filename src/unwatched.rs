@@ -293,11 +293,19 @@ fn decide(paths: &RunPaths) -> Decided {
 
 /// Whether a document accounts for the journal beside it as it stands now.
 fn stamped(paths: &RunPaths, summary: &RunSummary) -> bool {
-    let Ok(about) = std::fs::metadata(paths.journal()) else {
+    let about = match std::fs::metadata(paths.journal()) {
+        Ok(about) => about,
         // A journal that is not there stamps as `(0, 0)`, which is what the writer
         // records for a run whose first record has not landed — so a document
         // carrying it describes that run exactly.
-        return (summary.journal_len, summary.journal_mtime_ms) == (0, 0);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (summary.journal_len, summary.journal_mtime_ms) == (0, 0)
+        }
+        // Anything else is this host declining to say what the journal is, which is
+        // **not** the same fact and must not be read as it: a stamp that cannot be
+        // compared has not matched, so the run is not excluded and is reported if
+        // nothing is watching it. That is where every unknown on this path resolves.
+        Err(_) => return false,
     };
     let modified = about
         .modified()

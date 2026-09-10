@@ -129,13 +129,6 @@ pub struct WatcherRecord {
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Read an RFC 3339 date and time, refusing anything that is not one.
-///
-/// The **shape** rather than a calendar: what this is for is telling an instant
-/// from something that is not one, and a date this host would not have produced is
-/// still an instant a person can read. Kept here rather than reached for from a
-/// dependency because it is the only place this crate parses one at all — every
-/// other timestamp it holds it *writes* — and a date-time library would be a
-/// dependency taken for six characters of punctuation.
 fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::Error> {
     let found = String::deserialize(reader)?;
     if !is_rfc3339(&found) {
