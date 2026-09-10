@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1](https://github.com/nickderobertis/onepipeline/compare/v0.26.0...v0.26.1) - 2026-09-10
+
+### Fixed
+
+- *(driver)* guarantee a handed-off edit is applied, and date the surface it hands out ([#223](https://github.com/nickderobertis/onepipeline/pull/223))
+
 ## [0.26.0](https://github.com/nickderobertis/onepipeline/compare/v0.25.0...v0.26.0) - 2026-09-09
 
 ### Fixed
