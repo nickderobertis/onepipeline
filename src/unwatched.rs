@@ -1,24 +1,16 @@
 //! `onepipeline unwatched` — which of this session's runs has nothing watching
 //! it.
 //!
-//! Written for a **hook** rather than for a person. What it makes possible is
-//! asking "is anything looking at the work I dispatched?" with a script instead of
-//! with prose in a manager's instructions, at the end of every turn, where a
-//! harness can refuse to let the turn end. Entry 66 of
-//! `docs/contract-divergences.md` is the proposal it waits on and the whole
-//! statement of the contract; neither is restated here.
+//! What the verb promises, and why it exists at all, is entry 66 of
+//! `docs/contract-divergences.md`: the proposal it waits on. It is not restated
+//! here, on the terms [`crate::watch`] keeps beside its own entry.
 //!
-//! Everything on this path **reads**, exactly as [`crate::views`] does — and it
-//! reads no run's merged event store at any point, including for a run whose
-//! summary document is absent or stale. That is not an optimisation but the
-//! difference between a verb that can run at the end of every turn and one that
-//! cannot: the host this was written for holds around 490 run roots and 11 GB of
-//! journals, and folding them took 74 seconds.
-//!
-//! Two costs, and they are deliberately different. **Discovery** is proportional
-//! to the number of run roots, because ownership lives in each run's own launch
-//! record and reading those is the only way to find the owned ones — nothing else
-//! about a root is opened to decide it. Everything after discovery is
+//! The one thing worth saying beside the code is the cost, because it is a
+//! property of *this* module rather than of the contract: everything here
+//! **reads**, and it reads no run's merged event store at any point — including
+//! for a run whose summary document is absent or stale, which is where a reader
+//! is tempted to fold. Discovery is proportional to the number of run roots,
+//! because ownership lives in each run's own launch record; everything after it is
 //! proportional to the runs the asked-about session owns.
 
 use std::path::Path;

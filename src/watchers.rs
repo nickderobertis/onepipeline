@@ -1,47 +1,28 @@
 //! The **watcher record**: the evidence that a run is being watched.
 //!
-//! One document per live watch, under the watched run's own root, because
-//! [`crate::watch`] takes no lock a writer needs and any number of watches may
-//! sit on one run at once. Its whole purpose is to be read back by somebody
-//! *else* — the question "is anything watching this run?" is asked by a process
-//! that is not watching it — so the record carries what a second party needs to
-//! decide that from the host as it stands: which process, on which machine, and
-//! the start token that says the pid is still that process.
+//! What the record is and what it promises is entry 66 of
+//! `docs/contract-divergences.md`, and is not restated here. What is worth saying
+//! beside the code is the two rules a maintainer has to keep apart, because
+//! nothing in the types enforces them:
 //!
-//! # The asymmetry is inverted here, deliberately
-//!
+//! **What is reported inverts this crate's usual asymmetry.**
 //! [`sys::process_may_be_live`] resolves every unknown toward "still working",
 //! because for a *driver* the worse error is reporting live work as dead. For a
-//! *watch* the worse error is the other one: a run reported watched while nothing
-//! is watching it is precisely the silence this record exists to end, and it
-//! costs hours — where the opposite error costs one re-armed watch. So every
-//! unknown here resolves toward **not watched**: a record this build cannot read
-//! is not a live watch, a host that will not report a start token leaves a record
-//! that is never a live watch, and a pid this host will not describe is not a
-//! watcher.
+//! *watch* it is the other one, so every unknown here resolves toward **not
+//! watched** — a record that cannot be read, a host that will not report a start
+//! token, a pid it will not describe.
 //!
-//! # No heartbeat, no expiry, no cleanup step
+//! **What is removed does not.** Deletion is the one act here that cannot be taken
+//! back, so it needs evidence the process is *gone* rather than the absence of
+//! evidence that it is there: a token that was read and disagrees is a removal, and
+//! one this host would not give is not. `WatchStanding::proved_gone` is where the
+//! two bars are kept apart, and folding them cost a live watcher its record.
 //!
-//! Nothing stands between a watcher dying and its run reading unwatched. The
-//! deaths that matter have no clean exit — killed, crashed, out of memory,
-//! terminal closed — so liveness is decided by reading the host at the moment of
-//! the question and never by an interval or a sweep. Removing the record on a
-//! clean exit is permitted ([`Armed`]) and is never relied upon; a writer arming
-//! a watch also removes the records it has itself **proved** the process of is
-//! gone, so a long-watched run does not accumulate them without bound, and it
-//! removes nothing else. The reading side removes nothing at all, exactly as
+//! Nothing else stands between a watcher dying and its run reading unwatched —
+//! no heartbeat, no expiry, no cleanup step — because the deaths that matter have
+//! no clean exit. Removing the record on a clean exit is permitted ([`Armed`]) and
+//! is never relied upon; the reading side removes nothing at all, exactly as
 //! everything in [`crate::views`] reads.
-//!
-//! # Reporting and removing are two different bars
-//!
-//! The inversion above governs what is *reported*, and it stops there. Removal is
-//! the one act on this path that cannot be taken back, so it takes the opposite
-//! rule: evidence that the process is **gone**, never merely the absence of
-//! evidence that it is there. A start token this host would not give reports the
-//! run unwatched — which costs one re-armed watch — and leaves the record where it
-//! is, because deleting it would destroy the only thing that could ever have said
-//! the watcher was alive. [`WatchStanding::proved_gone`] is where the two bars are
-//! kept apart.
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -106,14 +87,14 @@ pub struct WatcherRecord {
     pub run_id: String,
     /// The watching process.
     pub pid: NonZeroU32,
-    /// The host that pid is meaningful on, as [`sys::hostname`] reads it.
+    /// The host that pid is meaningful on, as `sys::hostname` reads it.
     ///
     /// A pid means nothing across machines, so a record naming another host is
     /// never a live watch here — which is the inverted asymmetry the module
     /// documentation states, and the opposite of what a *driver*'s liveness
     /// reading does with the same fact.
     pub host: String,
-    /// That process's start token, as [`sys::process_start_token`] reads it, and
+    /// That process's start token, as `sys::process_start_token` reads it, and
     /// **empty** where this host would not say.
     ///
     /// The half of the proof a pid cannot give: a pid is reused, so a record
@@ -269,7 +250,12 @@ fn days_in(month: u32, year: u32) -> u32 {
 /// that a **writer** reads. Everything but [`Live`](Self::Live) reports the run
 /// unwatched, which is where every unknown here resolves; but only some of them
 /// are evidence that the recorded process is *gone*, and deleting a record is the
-/// one act that cannot be taken back. See [`proved_gone`](Self::proved_gone).
+/// one act that cannot be taken back, and only some of these are evidence of one.
+/// `proved_gone` — private, because what a *writer* may remove is not a promise
+/// this crate makes to a reader — is where that is decided, and it is named in
+/// plain code rather than linked for the reason `src/cli.rs` states: rustdoc
+/// refuses a public item's link to a private one under this repository's denied
+/// warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WatchStanding {
@@ -286,7 +272,7 @@ pub enum WatchStanding {
     ///
     /// Not folded into [`ProcessGone`](Self::ProcessGone), because it is the one
     /// death that answers every other reading as life — see
-    /// [`sys::process_terminated_awaiting_parent`] — and it is the state a watch
+    /// `sys::process_terminated_awaiting_parent` — and it is the state a watch
     /// killed by a parent that goes on running sits in.
     AwaitingItsParent,
     /// A start token read now **is not** the one recorded: the pid has been handed
@@ -559,7 +545,7 @@ impl Armed {
     /// nothing — so a failure here neither refuses the verb nor writes to a
     /// stream a supervisor is reading events on. The sweep is what keeps a run
     /// that has been watched a thousand times from holding a thousand records,
-    /// and it removes only what [`WatchStanding::proved_gone`] admits.
+    /// and it removes only what `WatchStanding::proved_gone` admits.
     pub(crate) fn arm(paths: &RunPaths) -> Self {
         Self::sweep(paths);
         let pid = sys::pid();
