@@ -464,7 +464,7 @@ fn a_reused_pid_another_host_an_empty_token_another_run_a_schema_and_a_stamp_are
         (
             "a record whose token is empty, which never matches",
             mine(&|held| held["started"] = json!("")),
-            "not the process that recorded it",
+            "nothing can say whether it is the process that recorded it",
         ),
         (
             "a record another host wrote, where its pid means nothing",
@@ -1521,22 +1521,32 @@ fn unwatched_opens_no_run_store_that_is_there() {
     world.release("build.go");
 }
 
-/// Arming a watch sweeps the records this host can **prove** are not live watches,
-/// and removes nothing else.
+/// Arming a watch sweeps the records this host has **proved the process of is
+/// gone**, and removes nothing else.
 ///
 /// The bound on a directory that would otherwise grow for ever: a run watched a
 /// thousand times over a week would hold a thousand records, all but one of them
 /// about processes that are gone. What makes the sweep safe is what it refuses to
-/// touch — a record naming another host, whose pid means nothing here, and one this
-/// build could not read, about which it has proved nothing. Both are another party's
-/// evidence, and a writer that swept them to tidy its own directory would be
-/// deleting it.
+/// touch, and the four kinds it refuses are each here — a record naming another
+/// host, whose pid means nothing here; one this build could not read at all; one
+/// whose pid **is** live; and the one this journey exists for, a record nothing can
+/// judge because it carries no start token.
+///
+/// **That last one is the distinction between reporting and removing**, and they
+/// are two different bars. The run is *reported* unwatched on it, because an
+/// absence of evidence resolves that way and being wrong costs one re-armed watch.
+/// The record is *not deleted* on it, because deletion cannot be taken back and
+/// would destroy the only thing that could ever have said the watcher was alive: a
+/// single failed reading of a live watch's start would erase its record for ever,
+/// its supervisor would read the run unwatched and arm a second watch, and a hook
+/// refusing to end a turn on that reading would refuse over a run that was never
+/// unwatched at all.
 ///
 /// **The sweep is not what makes a dead watcher read as gone**, and this journey is
 /// careful to say so: the run reads unwatched *before* anything is swept, on the
 /// strength of the reading alone.
 #[test]
-fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else() {
+fn arming_a_watch_sweeps_what_it_proved_is_gone_and_keeps_what_it_could_not_judge() {
     let world = World::new("unwatched-sweep");
     world.script("build.wait", "hold");
     let run = held(&world, "unwatchedsweep");
@@ -1553,7 +1563,7 @@ fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else
     let dead = dead.clone();
     let template = record(&dead);
 
-    // Beside it, the two records a sweep may not touch.
+    // Beside it, the records a sweep may not touch.
     let mut elsewhere = template.clone();
     elsewhere["host"] = json!("another-host");
     let foreign = put(
@@ -1563,6 +1573,30 @@ fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else
         &elsewhere.to_string(),
     );
     let unreadable = put(&world, &run, "4244-0badc0ffee000003.json", "{\"schema_ver");
+    // The one this journey exists for: a live pid, and no start token to judge it
+    // by — which is what a watch armed on a host that will not report one leaves,
+    // and what one failed reading of a live watcher's start looks like from here.
+    // This process is the live pid, because a test process is emphatically alive.
+    let mut unjudgeable = template.clone();
+    unjudgeable["pid"] = json!(std::process::id());
+    unjudgeable["started"] = json!("");
+    let unproven = put(
+        &world,
+        &run,
+        &format!("{}-0badc0ffee000004.json", std::process::id()),
+        &unjudgeable.to_string(),
+    );
+    // A proven mismatch beside it, so the two readings are told apart by what they
+    // are rather than by which file they are in: the same live pid, with a token
+    // that was read and disagrees.
+    let mut handed_on = unjudgeable.clone();
+    handed_on["started"] = json!("linux-proc-stat:1");
+    let mismatched = put(
+        &world,
+        &run,
+        &format!("{}-0badc0ffee000005.json", std::process::id()),
+        &handed_on.to_string(),
+    );
 
     // The run reads unwatched now, before anything has swept anything: the reading
     // is what decides it, and the sweep is only housekeeping.
@@ -1591,8 +1625,22 @@ fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else
         unreadable.exists(),
         "the sweep removed a record it could not read, which is another build's evidence"
     );
-    // And the run is watched again, by the watch that did the sweeping.
+    assert!(
+        unproven.exists(),
+        "the sweep removed a record nothing could judge — a live pid with no start token \
+         to compare — which is a live watcher's record erased for ever on the strength of a \
+         reading nobody took"
+    );
+    assert!(
+        !mismatched.exists(),
+        "the sweep kept a record whose token was read and disagreed, so removal is not \
+         deciding on the evidence it has: the pid has been handed to another process and \
+         the one that wrote this record is gone"
+    );
+    // And the run is watched again, by the watch that did the sweeping — over a
+    // directory that still holds the record nothing could judge.
     world.run(&["unwatched"]).exited(SUCCESS);
+    assert!(unproven.exists(), "the second reading removed it instead");
 
     world.run(&["stop", &run, "--force"]).exited(0);
     watching.wait_with_output().expect("the watch returns");

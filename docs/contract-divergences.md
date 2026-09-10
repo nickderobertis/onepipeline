@@ -4312,10 +4312,30 @@ parent that then goes on running is a zombie until that parent reaps it or dies.
 its run reading unwatched.** Removing the record on a clean exit is permitted and
 is never relied upon, because the deaths that matter here have no clean exit —
 killed, crashed, out of memory, terminal closed. A writer arming a watch also
-removes the records it has itself **proved** are not live, so a long-watched run
-does not accumulate them without bound, and it removes nothing else: not a record
-naming another host, not one naming another run, and not one it could not read.
-The reading side removes nothing at all, exactly as everything in `views` reads.
+removes the records it has itself **proved the process of is gone**, so a
+long-watched run does not accumulate them without bound, and it removes nothing
+else. The reading side removes nothing at all, exactly as everything in `views`
+reads.
+
+**Reporting and removing are two different bars, and that is the load-bearing half
+of the sweep.** What is *reported* takes the inversion above: every unknown
+resolves toward unwatched, because being wrong there costs one re-armed watch.
+Removal cannot take the same rule, because it is the one act on this path that
+cannot be taken back — it needs evidence the process is **gone**, never merely the
+absence of evidence that it is there. So a start token that was read and
+*disagrees* with the record is a removal (the pid has been handed on), while a
+token this host would not give, or a record that carries none, is not: such a
+watch is reported as unwatched and its record is left exactly where it is. Folding
+those two into one answer is this verb's own failure inverted — one failed reading
+of a live watcher's start would erase its record for ever, its supervisor would
+read the run unwatched and arm a second watch, and a hook refusing to end a turn on
+that reading would be refusing over a run that was never unwatched at all. It is
+the same asymmetry this repository already states twice: *not answered* is not *not
+released* for a release probe, and a landing decided by comparison may never answer
+`yes` because it is a comparison rather than a record. A record naming another host
+or another run is not removed either, on the older half of the same rule: it is not
+proved dead, merely not ours to judge — and one this build could not read at all is
+not judged and never reaches the question.
 
 **The asymmetry is inverted here, deliberately, and it is the load-bearing
 decision.** `sys::process_may_be_live` resolves every unknown toward "still
@@ -4415,7 +4435,8 @@ person.
     "its record names another host",
     "its process is gone",
     "its process ended and is waiting to be reaped",
-    "its pid is not the process that recorded it"
+    "its pid is not the process that recorded it",
+    "nothing can say whether it is the process that recorded it"
   ],
   "record_name": "<pid>-<nonce>.json",
   "record_directory": "watchers",

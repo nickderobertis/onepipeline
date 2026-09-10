@@ -374,7 +374,7 @@ pub(crate) mod tests {
     /// The match is what makes it exhaustive: a variant added to the enum and left
     /// out of this list fails to compile here rather than quietly leaving the
     /// entry naming five of six answers.
-    fn every_standing() -> [WatchStanding; 6] {
+    fn every_standing() -> [WatchStanding; 7] {
         let all = [
             WatchStanding::Live,
             WatchStanding::AnotherRun,
@@ -382,6 +382,7 @@ pub(crate) mod tests {
             WatchStanding::ProcessGone,
             WatchStanding::AwaitingItsParent,
             WatchStanding::NotThatProcess,
+            WatchStanding::Unproven,
         ];
         for standing in all {
             match standing {
@@ -390,7 +391,8 @@ pub(crate) mod tests {
                 | WatchStanding::AnotherHost
                 | WatchStanding::ProcessGone
                 | WatchStanding::AwaitingItsParent
-                | WatchStanding::NotThatProcess => {}
+                | WatchStanding::NotThatProcess
+                | WatchStanding::Unproven => {}
             }
         }
         all

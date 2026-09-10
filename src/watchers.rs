@@ -27,10 +27,21 @@
 //! terminal closed — so liveness is decided by reading the host at the moment of
 //! the question and never by an interval or a sweep. Removing the record on a
 //! clean exit is permitted ([`Armed`]) and is never relied upon; a writer arming
-//! a watch also removes the records it has itself **proved** are not live, so a
-//! long-watched run does not accumulate them without bound, and it removes
-//! nothing else. The reading side removes nothing at all, exactly as everything
-//! in [`crate::views`] reads.
+//! a watch also removes the records it has itself **proved** the process of is
+//! gone, so a long-watched run does not accumulate them without bound, and it
+//! removes nothing else. The reading side removes nothing at all, exactly as
+//! everything in [`crate::views`] reads.
+//!
+//! # Reporting and removing are two different bars
+//!
+//! The inversion above governs what is *reported*, and it stops there. Removal is
+//! the one act on this path that cannot be taken back, so it takes the opposite
+//! rule: evidence that the process is **gone**, never merely the absence of
+//! evidence that it is there. A start token this host would not give reports the
+//! run unwatched — which costs one re-armed watch — and leaves the record where it
+//! is, because deleting it would destroy the only thing that could ever have said
+//! the watcher was alive. [`WatchStanding::proved_gone`] is where the two bars are
+//! kept apart.
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -111,6 +122,11 @@ pub struct WatcherRecord {
     /// report a token leaves records that are never live watches — every run on
     /// such a host reads unwatched, which is the honest answer rather than a
     /// defect and resolves in the safe direction.
+    ///
+    /// It does **not** resolve that way for the sweep, and the two are decided
+    /// apart: a record carrying no token is one nothing can judge, so nothing
+    /// removes it while the pid it names is live. See
+    /// [`WatchStanding::Unproven`].
     pub started: String,
     /// When the watch began, as an RFC 3339 string.
     ///
@@ -242,11 +258,17 @@ fn days_in(month: u32, year: u32) -> u32 {
 /// Whether one recorded watch is watching its run **now**, and where it is not,
 /// why not.
 ///
-/// Six answers rather than a flag, because a reader that renders a run's watchers
-/// has to say which of them it is: a record naming another host, one whose
-/// process this host has proved is gone, and one whose pid has since been handed
-/// to something else are three different things to tell an operator, and only one
-/// of them means the watch was ever running here.
+/// Seven answers rather than a flag, because a reader that renders a run's
+/// watchers has to say which of them it is: a record naming another host, one
+/// whose process this host has proved is gone, and one whose pid has since been
+/// handed to something else are three different things to tell an operator, and
+/// only one of them means the watch was ever running here.
+///
+/// The last two are the sharpest distinction on the type, and the one thing on it
+/// that a **writer** reads. Everything but [`Live`](Self::Live) reports the run
+/// unwatched, which is where every unknown here resolves; but only some of them
+/// are evidence that the recorded process is *gone*, and deleting a record is the
+/// one act that cannot be taken back. See [`proved_gone`](Self::proved_gone).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WatchStanding {
@@ -266,11 +288,25 @@ pub enum WatchStanding {
     /// [`sys::process_terminated_awaiting_parent`] — and it is the state a watch
     /// killed by a parent that goes on running sits in.
     AwaitingItsParent,
-    /// A start token read now is not the one recorded: the pid has been handed to
-    /// another process, the record carries no token at all, or this host will not
-    /// say. All three are the same fact to a reader — nothing here proves this
-    /// process is the one that wrote the record.
+    /// A start token read now **is not** the one recorded: the pid has been handed
+    /// to another process, so the process that wrote this record is gone.
+    ///
+    /// A positive reading, and that is what separates it from
+    /// [`Unproven`](Self::Unproven): two tokens were in hand and they disagreed.
     NotThatProcess,
+    /// Nothing here can say whether the pid is the process that recorded it: this
+    /// host would not report a start token now, or the record carries none.
+    ///
+    /// **An absence of evidence, and never a death certificate.** Deliberately not
+    /// folded into [`NotThatProcess`](Self::NotThatProcess), which is what folding
+    /// them cost: one failed reading of a live watcher's start would have swept its
+    /// record away permanently, and no later successful reading could bring it
+    /// back — so a supervisor whose watch was working would read the run unwatched
+    /// and arm a second one, which is this verb's own failure mode inverted. The run
+    /// reads unwatched on this standing, because that fails in the safe direction;
+    /// the record stays, because deletion destroys the only thing that could ever
+    /// have said otherwise.
+    Unproven,
 }
 
 impl WatchStanding {
@@ -288,15 +324,27 @@ impl WatchStanding {
             Self::ProcessGone => "its process is gone",
             Self::AwaitingItsParent => "its process ended and is waiting to be reaped",
             Self::NotThatProcess => "its pid is not the process that recorded it",
+            Self::Unproven => "nothing can say whether it is the process that recorded it",
         }
     }
 
-    /// Whether this build **proved** the recorded process is not watching, on
-    /// this host and for this run.
+    /// Whether this build **proved** the recorded process is gone, on this host
+    /// and for this run.
     ///
-    /// What a writer may remove, and nothing else: a record naming another host
-    /// or another run is not proved dead but merely not ours to judge, and an
-    /// unreadable one is not judged at all.
+    /// What a writer may remove, and nothing else. The bar is deliberately higher
+    /// than the bar for reporting a run unwatched, and the two must not be read off
+    /// one another: *unwatched* is what an absence of evidence honestly answers,
+    /// because being wrong there costs one re-armed watch — while *removal* is the
+    /// one act that cannot be taken back, so it needs evidence the process is gone
+    /// rather than merely the absence of evidence that it is there. A reading this
+    /// host could not take is not a death certificate.
+    ///
+    /// So three standings qualify and four do not. A record naming another host or
+    /// another run is not proved dead but merely not ours to judge; a record this
+    /// build could not read at all is not judged, and never reaches this; and
+    /// [`Unproven`](Self::Unproven) is the case this distinction exists for — a
+    /// live watcher whose start this host would not report, whose record a sweep
+    /// would otherwise erase for ever.
     fn proved_gone(self) -> bool {
         matches!(
             self,
@@ -461,7 +509,15 @@ fn standing_of(record: &WatcherRecord, run: &str) -> WatchStanding {
     }
     match sys::process_start_token(pid) {
         Some(token) if token.matches(&record.started) => WatchStanding::Live,
-        _ => WatchStanding::NotThatProcess,
+        // A token was read and the record carries one to compare it against, and
+        // they disagree: the pid has been handed on. That is a *reading*, which is
+        // what makes it the one answer here that admits removal.
+        Some(_) if !record.started.is_empty() => WatchStanding::NotThatProcess,
+        // Everything else is an absence of evidence rather than evidence of an
+        // absence — this host would not say what the process's start is, or the
+        // record was written where it would not say. The run reads unwatched, and
+        // the record stays.
+        _ => WatchStanding::Unproven,
     }
 }
 
