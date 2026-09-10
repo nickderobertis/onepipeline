@@ -141,18 +141,11 @@ pub const EXIT_WATCH_ELAPSED: i32 = 5;
 /// on exactly the runs it was installed to find, and one that read the answer as a
 /// refusal would report every turn as broken.
 ///
-/// **The same number [`EXIT_NODE_SETTLED`] carries, on a different verb.** These
-/// codes are a per-verb protocol — `4`, `5` and `6` are `watch`'s five returns and
-/// no other verb spells any of them — so the pair is one number with two meanings
-/// on two commands rather than one meaning overloaded, and a caller of either verb
-/// branches unambiguously. Named separately so that neither verb's returns are read
-/// off the other's constant.
-///
-/// The sharing is deliberate and is the second instance of it, not the first:
-/// divergence entry 58 gave `watch` the `3` this crate already assigns to "nothing
-/// is driving the run" rather than a number of its own, on the same reading of what
-/// these codes are. Entry 66 states this one, and it is the contract owner's to
-/// rule on.
+/// **The same number [`EXIT_NODE_SETTLED`] carries, on a different verb**, because
+/// every code above [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol and a
+/// caller always knows which verb it ran. Divergence entry 66 is where that is
+/// argued and ruled on; it is named on both constants so a reader meets it at
+/// whichever one they open.
 // llmlint: ignore-block[cli_output_contract] the rule reads these as one global code space, in
 // which two outcomes sharing `6` are indistinguishable. They are not one space: every code
 // above `3` belongs to a single verb's protocol, `watch` alone spells `4`, `5` and `6`, and
@@ -171,16 +164,10 @@ pub const EXIT_RUNS_UNWATCHED: i32 = 6;
 /// wait running out — and the record beside it names *which* node, so neither
 /// answer is read out of prose.
 ///
-/// **This number is shared with [`EXIT_RUNS_UNWATCHED`], which is `unwatched`'s
-/// answer that at least one owned run has nothing watching it.** The reason is on
-/// both constants so that a reader meets it at whichever one they open, and it is
-/// stated where the contract lives — divergence entry 66 — rather than only in the
-/// suppression beside it. Every code above [`EXIT_NOTHING_DRIVING`] belongs to a
-/// single verb's protocol: an exit status is per invocation and a caller always
-/// knows which verb it ran, so this is one number carrying two meanings on two
-/// commands rather than one meaning overloaded, and no caller can meet both. The
-/// same reading is why `watch` *reuses* [`EXIT_NOTHING_DRIVING`] from the shared
-/// set instead of taking a number of its own, which entry 58 records.
+/// **Shared with [`EXIT_RUNS_UNWATCHED`]**, which is `unwatched`'s answer that an
+/// owned run has nothing watching it, on the reading above: a code above
+/// [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol. Divergence entries 58
+/// and 66 argue it.
 pub const EXIT_NODE_SETTLED: i32 = 6;
 
 #[cfg(test)]

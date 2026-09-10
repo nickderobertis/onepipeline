@@ -918,37 +918,39 @@ fn a_question_with_no_session_at_all_is_refused_rather_than_answered() {
     );
 }
 
-/// The other question it cannot ask: a runs root that exists and cannot be read as
-/// a whole.
+/// The other question it cannot ask: a runs root that is there and cannot be read
+/// as a whole.
 ///
 /// Answering it as "nothing is unwatched" is the silence the whole verb exists to
-/// end, so it is the same refusal the missing session gets rather than a `0`.
+/// end, so it is the same refusal the missing session gets rather than a `0` — and
+/// the refusal names the root, because an operator pointed at the wrong path has
+/// nothing else to go on.
 ///
-/// **Unix, and a host condition rather than a skipped assertion.** A directory this
-/// process may not list is staged with a mode, which Windows does not have and
-/// which the kernel ignores for a privileged process — so where the state cannot be
-/// reached, there is nothing to assert *about*, and asserting over a directory that
-/// is in fact readable would assert the opposite of this journey's claim. The
-/// refusal that is portable is the one above, and it runs everywhere.
-#[cfg(unix)]
+/// **Staged as a runs root that is a file**, which is a state every platform has
+/// and every process meets the same way: `read_dir` refuses it with something that
+/// is not "no such directory", which is the whole of what this path distinguishes.
+/// A directory whose mode forbids listing is the same refusal by a different
+/// errno, and staging *that* is what this journey used to do — but a mode is a
+/// thing Windows does not have and the kernel ignores for a privileged process, so
+/// the journey could return having asserted nothing, which is not a journey.
 #[test]
 fn a_runs_root_that_cannot_be_read_is_refused_rather_than_answered() {
     let world = World::new("unwatched-unreadableroot");
-    let unreadable = world.root.join("unreadable-runs");
-    std::fs::create_dir_all(&unreadable).expect("a runs root");
-    if !unreadable_to_us(&unreadable) {
-        println!(
-            "this process can list a directory it set to mode 000, so it is privileged and              the state under test does not exist for it"
-        );
-        return;
-    }
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a runs root out of a
+    // file, and none could: what this stands in for is an operator or a harness pointing
+    // `ONEPIPELINE_RUNS_DIR` at something that is not a directory of runs, and the binary
+    // meets it exactly as it meets a directory it may not list. Everything asserted after
+    // it is read off the compiled binary's own streams.
+    let unreadable = world.root.join("runs-that-are-a-file");
+    std::fs::write(&unreadable, "not a directory of runs").expect("something in the way");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
     let asked = world
         .cmd(&["unwatched"])
         .env("ONEPIPELINE_RUNS_DIR", &unreadable)
         .output()
         .expect("the binary runs");
     let code = asked.status.code();
-    let _ = std::fs::set_permissions(&unreadable, readable());
     assert!(
         code != Some(SUCCESS) && code != Some(RUNS_UNWATCHED),
         "a runs root this process cannot read was answered rather than refused: {asked:?}"
@@ -961,26 +963,6 @@ fn a_runs_root_that_cannot_be_read_is_refused_rather_than_answered() {
         String::from_utf8_lossy(&asked.stderr).contains(&unreadable.display().to_string()),
         "the refusal does not name the root it could not read: {asked:?}"
     );
-}
-
-/// Make a directory one this process cannot list, answering whether it worked.
-///
-/// The answer is what a privileged process gets: the mode is set and the kernel
-/// ignores it, so the state under test was not reached.
-#[cfg(unix)]
-fn unreadable_to_us(dir: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    if std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).is_err() {
-        return false;
-    }
-    // Root ignores the mode, so the state under test was not reached.
-    std::fs::read_dir(dir).is_err()
-}
-
-#[cfg(unix)]
-fn readable() -> std::fs::Permissions {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::Permissions::from_mode(0o755)
 }
 
 /// One run's summary document, as its own writer wrote it.
