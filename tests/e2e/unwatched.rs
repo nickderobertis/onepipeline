@@ -833,15 +833,12 @@ fn the_option_decides_which_session_is_asked_about_and_the_environment_decides_w
 /// A question this verb cannot ask at all is **refused**, with a status that is
 /// neither of its two answers.
 ///
-/// Both refusals, because a caller has to tell "no run is unwatched" from "this
-/// verb could not answer": the hook treats every status but `0` and the unwatched
-/// answer as silence, and an operator in a plain shell is told why on standard
-/// error.
+/// A caller has to tell "no run is unwatched" from "this verb could not answer":
+/// the hook treats every status but `0` and the unwatched answer as silence, and an
+/// operator in a plain shell is told why on standard error.
 #[test]
-fn a_question_this_verb_cannot_ask_is_refused_rather_than_answered() {
-    let world = World::new("unwatched-refusals");
-
-    // No session anywhere: no option, and nothing in the environment.
+fn a_question_with_no_session_at_all_is_refused_rather_than_answered() {
+    let world = World::new("unwatched-nosession");
     let asked = world
         .cmd(&["unwatched"])
         .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
@@ -860,17 +857,30 @@ fn a_question_this_verb_cannot_ask_is_refused_rather_than_answered() {
         String::from_utf8_lossy(&asked.stderr).contains("no session"),
         "the refusal does not say what is missing: {asked:?}"
     );
+}
 
-    // A runs root that exists and cannot be read as a whole.
+/// The other question it cannot ask: a runs root that exists and cannot be read as
+/// a whole.
+///
+/// Answering it as "nothing is unwatched" is the silence the whole verb exists to
+/// end, so it is the same refusal the missing session gets rather than a `0`.
+///
+/// **Unix, and a host condition rather than a skipped assertion.** A directory this
+/// process may not list is staged with a mode, which Windows does not have and
+/// which the kernel ignores for a privileged process — so where the state cannot be
+/// reached, there is nothing to assert *about*, and asserting over a directory that
+/// is in fact readable would assert the opposite of this journey's claim. The
+/// refusal that is portable is the one above, and it runs everywhere.
+#[cfg(unix)]
+#[test]
+fn a_runs_root_that_cannot_be_read_is_refused_rather_than_answered() {
+    let world = World::new("unwatched-unreadableroot");
     let unreadable = world.root.join("unreadable-runs");
     std::fs::create_dir_all(&unreadable).expect("a runs root");
     if !unreadable_to_us(&unreadable) {
-        // llmlint: ignore[no_skipped_tests] not a skip: the first refusal above is
-        // asserted on every platform, and this second one is about a *host* condition —
-        // a directory this process may not list. A root nobody can read cannot be staged
-        // where the test process is privileged or where the platform has no such mode, and
-        // asserting over a directory that is in fact readable would assert the opposite of
-        // the journey's claim.
+        println!(
+            "this process can list a directory it set to mode 000, so it is privileged and              the state under test does not exist for it"
+        );
         return;
     }
     let asked = world
@@ -895,6 +905,9 @@ fn a_question_this_verb_cannot_ask_is_refused_rather_than_answered() {
 }
 
 /// Make a directory one this process cannot list, answering whether it worked.
+///
+/// The answer is what a privileged process gets: the mode is set and the kernel
+/// ignores it, so the state under test was not reached.
 #[cfg(unix)]
 fn unreadable_to_us(dir: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -905,22 +918,10 @@ fn unreadable_to_us(dir: &std::path::Path) -> bool {
     std::fs::read_dir(dir).is_err()
 }
 
-#[cfg(not(unix))]
-fn unreadable_to_us(_dir: &std::path::Path) -> bool {
-    false
-}
-
 #[cfg(unix)]
 fn readable() -> std::fs::Permissions {
     use std::os::unix::fs::PermissionsExt;
     std::fs::Permissions::from_mode(0o755)
-}
-
-#[cfg(not(unix))]
-fn readable() -> std::fs::Permissions {
-    std::fs::metadata(".")
-        .expect("the working directory")
-        .permissions()
 }
 
 /// One run's summary document, as its own writer wrote it.
