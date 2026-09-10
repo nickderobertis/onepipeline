@@ -1622,3 +1622,46 @@ fn a_watch_that_cannot_write_its_record_runs_as_it_does_with_one() {
     asked.err_has(&blocked).err_has("watcher directory");
     world.release("build.go");
 }
+
+/// A run root whose name is **not a run id** is passed over, launch record and
+/// all.
+///
+/// The boundary every externally supplied run id in this crate crosses, at the one
+/// place this verb takes one from a stranger: what discovery joins onto the runs
+/// root is a directory name somebody else chose, and what a reported line does with
+/// it is name it back to a caller that will type it at another verb. A root this
+/// build cannot name is one it cannot report, whatever its launch record says.
+///
+/// **Unix**, because that is where the state exists: the separator a run id may not
+/// contain is a character Windows does not allow in a file name at all, so there is
+/// no such directory there to meet.
+#[cfg(unix)]
+#[test]
+fn a_run_root_whose_name_is_not_a_run_id_is_passed_over() {
+    let world = World::new("unwatched-badname");
+    world.script("build.wait", "hold");
+    let real = held(&world, "unwatchedrealname");
+
+    // A directory that claims to be a run, carrying a launch record naming this
+    // very session — so ownership is not what keeps it off the list.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a run root whose name is
+    // not a run id, because `start` mints its own from an alphabet that has none of these
+    // characters. What it stands in for is a directory somebody else put beside the runs,
+    // and what it carries is this build's own launch record, copied.
+    let odd = world.runs.join(r"od\dname");
+    std::fs::create_dir_all(&odd).expect("a run root");
+    std::fs::copy(paths_of(&world, &real).launch(), odd.join("launch.json"))
+        .expect("a copied launch record");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let asked = world.run(&["unwatched"]);
+    asked.exited(RUNS_UNWATCHED).out_has(&real);
+    assert!(
+        !asked.stdout.contains("od") && !asked.stderr.contains("od"),
+        "a root this build cannot name was written about: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+    world.release("build.go");
+}

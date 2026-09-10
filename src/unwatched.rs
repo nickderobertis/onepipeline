@@ -53,7 +53,7 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
             Decided::Undecidable(reason) => {
                 unresolved.push(format!("{}: {reason}\n", paths.run));
             }
-            Decided::Unsettled(summary) => {
+            Decided::NotProvenSettled(summary) => {
                 let watchers = Watchers::of(&paths);
                 if watchers.any_live() {
                     continue;
@@ -118,6 +118,13 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
 /// a session and did not, and answering it out of the environment would report on
 /// whichever session the hook happens to be running under — the one mistake the
 /// option exists to make impossible.
+// llmlint: ignore-block[invalid_states_unrepresentable] a launching session is a `String`
+// wherever it exists in this crate — `sys::launching_session` answers one, `LaunchRecord`
+// records one, and `ledger::owned_by` compares two — and `docs/contract.md` names no
+// `Session` type, so a newtype here would be converted straight back at the one place this
+// value is used. What can be made unrepresentable is what this function does: the absence
+// this verb refuses is a `Result` rather than a blank string handed on, so no caller can
+// ask about a session nobody named.
 fn session(args: &UnwatchedArgs) -> Result<String> {
     args.session
         .clone()
@@ -131,6 +138,7 @@ fn session(args: &UnwatchedArgs) -> Result<String> {
             ))
         })
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Walk the runs root, and answer with every run root under it whose launch record
 /// names `session`.
@@ -181,13 +189,20 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
         // Asked for as text rather than converted to it. A lossy conversion would
         // put a replacement character where a byte was and then read *that* path —
         // which is another directory, or none — where what a name that is not text
-        // means is that this build cannot name the run. It cannot be one this verb
-        // reports either: a run id is one path segment of `[A-Za-z0-9._-]`, so the
-        // line would name a run nobody could type. So it is passed over with the
-        // roots that belong to nobody, which is what it is.
+        // means is that this build cannot name the run. Neither it nor a name that
+        // is text and is not a run id can be one this verb reports: the line would
+        // name a run nobody could type at the verb it tells them to type it at. So
+        // both are passed over with the roots that belong to nobody.
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
+        // And it has to be a run id, which is the boundary every externally
+        // supplied one in this crate crosses: what is joined onto the runs root
+        // here is a *stranger's* directory name, and a reported line names it back
+        // to a caller that will type it at another verb.
+        if !ledger::is_valid_run_id(&name) {
+            continue;
+        }
         let paths = RunPaths::under(root, &name);
         // The launch record and nothing else. Read leniently, exactly as every
         // other reader of it: a record this build cannot parse names no session,
@@ -224,13 +239,16 @@ enum Decided {
     /// whose stamp matches its journal as it stands. Not reported, however long it
     /// has been unwatched.
     Settled,
-    /// It is still going, so far as its own document says.
+    /// Nothing **proved** it settled, which is not the same as proving it is
+    /// still going and is deliberately not named as though it were: a document
+    /// that says a run stopped while standing behind its journal is in here too,
+    /// because a stale document is not proof of anything it says.
     ///
     /// Boxed because the document is the largest thing here by two orders of
     /// magnitude, and this value is built once per owned run: an unboxed variant
     /// would make every settled and undecidable run pay for the one that is
     /// reported.
-    Unsettled(Box<RunSummary>),
+    NotProvenSettled(Box<RunSummary>),
     /// Nothing established either, and watching it would not clear that.
     Undecidable(String),
 }
@@ -270,7 +288,7 @@ fn decide(paths: &RunPaths) -> Decided {
     if (summary.stop_recorded || summary.graph_complete) && stamped(paths, &summary) {
         return Decided::Settled;
     }
-    Decided::Unsettled(Box::new(summary))
+    Decided::NotProvenSettled(Box::new(summary))
 }
 
 /// Whether a document accounts for the journal beside it as it stands now.
