@@ -45,7 +45,7 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
     let session = session(args)?;
     let root = ledger::runs_root();
     let mut reported: Vec<String> = Vec::new();
-    let owned = owned_by(&root, &session)?;
+    let owned = discover_owned_runs(&root, &session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
     for paths in owned.runs {
         match decide(&paths) {
@@ -132,7 +132,8 @@ fn session(args: &UnwatchedArgs) -> Result<String> {
         })
 }
 
-/// Every run root under `root` whose launch record names `session`.
+/// Walk the runs root, and answer with every run root under it whose launch record
+/// names `session`.
 ///
 /// **Ownership is a positive claim.** A root whose launch record is absent or
 /// unreadable, and one naming no session, belongs to nobody and is passed over in
@@ -144,10 +145,12 @@ fn session(args: &UnwatchedArgs) -> Result<String> {
 /// exists and cannot be read **is** — it is the question this verb cannot ask,
 /// and answering it as "nothing is unwatched" is the silence the whole verb exists
 /// to end.
-fn owned_by(root: &Path, session: &str) -> Result<Owned> {
+fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Owned::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Discovered::default())
+        }
         Err(error) => {
             return Err(Error::Ledger {
                 path: root.to_path_buf(),
@@ -155,7 +158,7 @@ fn owned_by(root: &Path, session: &str) -> Result<Owned> {
             })
         }
     };
-    let mut owned = Owned::default();
+    let mut owned = Discovered::default();
     for entry in entries {
         // llmlint: ignore-block[changed_behavior_has_e2e] an entry the filesystem lists and
         // then refuses to describe is a host condition no portable journey can set —
@@ -175,7 +178,17 @@ fn owned_by(root: &Path, session: &str) -> Result<Owned> {
             }
         };
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let paths = RunPaths::under(root, &entry.file_name().to_string_lossy());
+        // Asked for as text rather than converted to it. A lossy conversion would
+        // put a replacement character where a byte was and then read *that* path —
+        // which is another directory, or none — where what a name that is not text
+        // means is that this build cannot name the run. It cannot be one this verb
+        // reports either: a run id is one path segment of `[A-Za-z0-9._-]`, so the
+        // line would name a run nobody could type. So it is passed over with the
+        // roots that belong to nobody, which is what it is.
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let paths = RunPaths::under(root, &name);
         // The launch record and nothing else. Read leniently, exactly as every
         // other reader of it: a record this build cannot parse names no session,
         // and a run belonging to nobody is passed over.
@@ -198,7 +211,7 @@ fn owned_by(root: &Path, session: &str) -> Result<Owned> {
 /// report an incomplete look at the root as a complete one — and for this verb, an
 /// incomplete look is exactly how a run nobody is watching goes unmentioned.
 #[derive(Default)]
-struct Owned {
+struct Discovered {
     /// The run roots whose launch record names the resolved session.
     runs: Vec<RunPaths>,
     /// What could not be resolved, each already worded for standard error.

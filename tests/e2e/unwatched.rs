@@ -381,16 +381,16 @@ fn state_of(pid: u32) -> String {
     String::from_utf8_lossy(&listed.stdout).trim().to_string()
 }
 
-/// Five records that are **not** live watches, each refused for its own reason and
+/// Six records that are **not** live watches, each refused for its own reason and
 /// each leaving the run reported.
 ///
-/// One journey rather than five, because the fixture is the expensive part and the
+/// One journey rather than six, because the fixture is the expensive part and the
 /// claim is the same claim: the record is decided against this host as it stands,
 /// so every way of naming a process that is not watching this run reads as nothing
 /// watching it. Each record is a copy of the one a real watch wrote, with exactly
 /// the field under test changed.
 #[test]
-fn a_reused_pid_another_host_an_empty_token_another_run_and_another_schema_are_not_live_watches() {
+fn a_reused_pid_another_host_an_empty_token_another_run_a_schema_and_a_stamp_are_not_live() {
     let world = World::new("unwatched-refused");
     world.script("build.wait", "hold");
     let run = held(&world, "unwatchedrefused");
@@ -428,7 +428,7 @@ fn a_reused_pid_another_host_an_empty_token_another_run_and_another_schema_are_n
         edit(&mut held);
         held.to_string()
     };
-    let cases: [(&str, String, &str); 5] = [
+    let cases: [(&str, String, &str); 6] = [
         (
             "a pid this host has since handed to another process",
             mine(&|held| held["started"] = json!("linux-proc-stat:1")),
@@ -452,6 +452,11 @@ fn a_reused_pid_another_host_an_empty_token_another_run_and_another_schema_are_n
         (
             "a record at a schema version this build does not read",
             mine(&|held| held["schema_version"] = json!(WATCHER_SCHEMA_VERSION + 1)),
+            "cannot be read",
+        ),
+        (
+            "a record whose stamp is not the instant it says it is",
+            mine(&|held| held["began_at"] = json!("some time yesterday")),
             "cannot be read",
         ),
     ];

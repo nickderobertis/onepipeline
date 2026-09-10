@@ -1488,13 +1488,18 @@ impl<'a> Row<'a> {
             usize::try_from(*self.summary.node_counts.get(word.as_str()).unwrap_or(&0))
                 .unwrap_or(usize::MAX)
         };
+        // Saturating rather than summed, because every one of these counts is
+        // *external input* — a document on disk that some other build wrote, and
+        // that a hand-edit can put any number in — and a plain sum of them
+        // overflows into a panic on a debug build rather than into a row that
+        // reads oddly.
         let total = self
             .summary
             .node_counts
             .values()
             .copied()
             .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-            .sum();
+            .fold(0usize, usize::saturating_add);
         tally(
             counted(NodeStatus::Done),
             total,
