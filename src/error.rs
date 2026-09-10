@@ -170,6 +170,17 @@ pub const EXIT_RUNS_UNWATCHED: i32 = 6;
 /// able to tell that from the run settling, from a surface waiting and from the
 /// wait running out — and the record beside it names *which* node, so neither
 /// answer is read out of prose.
+///
+/// **This number is shared with [`EXIT_RUNS_UNWATCHED`], which is `unwatched`'s
+/// answer that at least one owned run has nothing watching it.** The reason is on
+/// both constants so that a reader meets it at whichever one they open, and it is
+/// stated where the contract lives — divergence entry 66 — rather than only in the
+/// suppression beside it. Every code above [`EXIT_NOTHING_DRIVING`] belongs to a
+/// single verb's protocol: an exit status is per invocation and a caller always
+/// knows which verb it ran, so this is one number carrying two meanings on two
+/// commands rather than one meaning overloaded, and no caller can meet both. The
+/// same reading is why `watch` *reuses* [`EXIT_NOTHING_DRIVING`] from the shared
+/// set instead of taking a number of its own, which entry 58 records.
 pub const EXIT_NODE_SETTLED: i32 = 6;
 
 #[cfg(test)]

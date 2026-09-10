@@ -3456,6 +3456,14 @@ three new public constants in `src/error.rs`, `EXIT_SURFACE_WAITING`,
 spoken for by a different question and overloading either would put a caller back
 to reading prose.
 
+**Entry 66 later gave `unwatched` that same `6`**, on the reading this paragraph
+already takes: every code above `3` belongs to a single verb's protocol, an exit
+status is per invocation, and a caller always knows which verb it ran — so the two
+are one number carrying two meanings on two commands, and no caller can meet both.
+It is noted here as well as there so that a reader arriving at either entry meets
+it. Reusing `3` for a run nothing is driving, above, is the same reading applied to
+the shared set rather than to a verb's own.
+
 **The selector, and why the wait may now have no bound.** Everything above was
 built for a wait a caller *bounded*, and a bound is a number nobody knows: the run
 this entry comes from went forty-five minutes without a line while its driver died
