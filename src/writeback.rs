@@ -334,6 +334,21 @@ impl Writeback {
             pending = next;
         }
     }
+
+    /// The run is being driven again after a close-out, so the retry schedule the
+    /// close-out suspends goes back on.
+    ///
+    /// A driver that finds a queued edit on its way out applies it and goes on
+    /// driving the run, which puts it back in the phase where a failed projection
+    /// waits out its growing interval rather than being retried inside a bounded
+    /// window that has ended.
+    pub fn driving_again(&self) {
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.phase = RunPhase::Running;
+            ready.notify_all();
+        }
+    }
 }
 
 impl Drop for Writeback {
@@ -1133,7 +1148,7 @@ mod tests {
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     fn snapshot(status: NodeStatus) -> Snapshot {
@@ -1158,6 +1173,33 @@ mod tests {
 
         assert!(pending.queue(first.clone()));
         assert!(pending.latest.as_ref() == Some(&first));
+    }
+
+    /// A driver that goes on driving after a close-out puts the retry schedule back.
+    ///
+    /// The close-out suspends it so a terminal snapshot is not left sitting out a
+    /// minute's backoff inside a two-second window, which is right for a run that is
+    /// ending and wrong for one that is not: an edit claimed on the way out sends the
+    /// loop round again, and a projection that keeps failing under a suspended schedule
+    /// is retried as fast as the store can refuse it. Asserted on the phase itself
+    /// because that is the whole of what the two schedules differ by.
+    #[test]
+    fn the_close_out_phase_is_lifted_when_the_run_is_driven_again() {
+        let writeback = Writeback {
+            pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
+        };
+        writeback.wait_briefly();
+        assert!(
+            writeback.pending.0.lock().expect("the state").phase == super::RunPhase::ClosingOut,
+            "the close-out did not put the run into its closing-out phase"
+        );
+
+        writeback.driving_again();
+        assert!(
+            writeback.pending.0.lock().expect("the state").phase == super::RunPhase::Running,
+            "a run driven on after a close-out is still in its closing-out phase, so a \
+             failing projection is retried with no interval at all"
+        );
     }
 
     /// A run's own end, arriving while the worker is waiting out a retry interval, is

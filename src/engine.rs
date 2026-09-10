@@ -652,7 +652,7 @@ impl Dispatch {
 /// reader afterwards would call the run undriven while the driver that won was
 /// still working on it.
 pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
-    OwnershipLock::acquire(paths, "drive")
+    OwnershipLock::acquire(paths, ledger::DRIVE_VERB)
 }
 
 /// Drive one run's graph to settlement, in this process, under a lock the
@@ -685,10 +685,185 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     let mut state = Projected::open(paths);
     report_unreadable_records(paths, &state);
 
-    let outcome = converge(paths, &mut journal, &mut state, &launch)?;
+    let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
-    lock.release();
+    // The **last** claim on the command queue, after everything this driver owed
+    // the run is written. Claimed until the queue is empty, and the result
+    // written again whenever a claim moved the graph — this is the run's last
+    // word on what became of it. It cannot spin, because the queue's cursor only
+    // advances, and the release itself is [`let_go_of`]'s.
+    let channel = ChannelState::new(paths);
+    let mut lock = lock;
+    loop {
+        // Everything the queue is holding, applied and then recorded — the run's
+        // last word has to carry an edit applied after it was written.
+        let mut moved = false;
+        while reconcile_edits(
+            paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &launch,
+            &mut BTreeMap::new(),
+        )? {
+            moved = true;
+        }
+        if moved {
+            outcome = graph::state_of(&state.statuses());
+            record_result(paths, &state, outcome)?;
+        }
+        // And then the run itself, let go of under the handover: the empty check
+        // and the release are one section, so an edit accepted after this driver
+        // stopped claiming is an edit accepted from a run that is free.
+        match let_go_of(paths, lock) {
+            LettingGo::Released => break,
+            LettingGo::QueueMoved(back) => lock = back,
+            // Nothing was looked at and nothing released, so this driver does not
+            // release the run either: it leaves the claim standing over a process
+            // that is ending, which the next writer reclaims, rather than opening
+            // the window an accepted edit falls into.
+            LettingGo::NotHandedOver(held, why) => {
+                eprintln!(
+                    "onepipeline: run '{}' is being left claimed rather than released: {why}. \
+                     Its next writer reclaims it — `onepipeline adopt {}` — and any edit on \
+                     its queue is applied then",
+                    paths.run, paths.run
+                );
+                held.abandon();
+                break;
+            }
+        }
+    }
     Ok(outcome)
+}
+
+/// What a writer that tried to let go of a run found on its way out.
+pub(crate) enum LettingGo {
+    /// The queue was empty under the handover, and the run is released.
+    Released,
+    /// The queue moved instead, so the run is **still held** — here it is back.
+    QueueMoved(OwnershipLock),
+    /// The handover could not be taken, so **nothing was looked at and nothing
+    /// released**: the run is still held, and here it is back with the reason.
+    ///
+    /// The alternative is the race this gate exists to close, so there is no
+    /// answer here that releases the run: what a caller does with it is report it
+    /// and leave the claim standing, which the next writer reclaims.
+    NotHandedOver(OwnershipLock, Error),
+}
+
+/// Let go of a run under the handover gate, or hand the lock back because the
+/// queue moved.
+///
+/// **The final empty check and the release are one section.** Reading the queue
+/// and then releasing as two is the race this exists to close: a submitter that
+/// asked whether anything was driving the run between them is told yes by a
+/// process that has already decided there is nothing to apply, and its edit is
+/// accepted onto a queue nothing will claim. The window is a preemption rather
+/// than a duration, so nothing about how little happens between the two closes
+/// it — only holding the gate across both does.
+///
+/// So a submission is one of two things and never a third: it reached the queue
+/// before this read, and this writer applies it before it lets go; or it comes
+/// after this release, and the ask it begins with finds the run free.
+///
+/// Deliberately **not** where an edit is applied: what is under the gate is a
+/// file read and a file remove, so a holder is never inside a subprocess or a
+/// conversation. A queue that moved sends the caller back to apply it with the
+/// gate already dropped.
+pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
+    let handover = match ledger::Handover::hold(paths) {
+        Ok(handover) => handover,
+        Err(why) => return LettingGo::NotHandedOver(lock, why),
+    };
+    let letting = letting_go_under_the_handover(paths, lock);
+    drop(handover);
+    letting
+}
+
+/// The section itself, for a caller already inside the handover — apart from its
+/// gate so a test holding the gate can be the other party.
+fn letting_go_under_the_handover(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
+    if ChannelState::new(paths).claimable_commands().is_empty() {
+        lock.release();
+        return LettingGo::Released;
+    }
+    LettingGo::QueueMoved(lock)
+}
+
+/// Where a submitter's commands went.
+pub(crate) enum Accepted {
+    /// Onto the run's durable queue, behind whatever is driving it, under this
+    /// id.
+    Queued(u64),
+    /// Nowhere yet: nothing is driving the run, and here is the run — the caller
+    /// is its writer and applies the commands itself.
+    NothingIsDriving(OwnershipLock),
+}
+
+/// Take a place behind whatever is driving the run, or take the run.
+///
+/// **The ask and the submission are one section**, under the same gate
+/// [`let_go_of`] takes, which is what makes the answer still true when the
+/// commands land: an owner cannot let go of the run between this ask and this
+/// submission, and one that let go before the ask is one this ask does not find.
+///
+/// Whether a reconciler is running is asked by *taking the run's lock*, which is
+/// the same question and the only answer that cannot be raced.
+pub(crate) fn accept(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    author: crate::channel::Author,
+    commands: &[Command],
+) -> Result<Accepted> {
+    // A gate this process could not take refuses the submission rather than
+    // making it: nothing reaches the queue, so nothing is reported accepted that
+    // no writer is going to see.
+    let handover = ledger::Handover::hold(paths)?;
+    let accepted = accepting_under_the_handover(paths, channel, author, commands);
+    drop(handover);
+    accepted
+}
+
+/// The section itself, for a caller already inside the handover — apart from its
+/// gate for the reason [`letting_go_under_the_handover`] is.
+fn accepting_under_the_handover(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    author: crate::channel::Author,
+    commands: &[Command],
+) -> Result<Accepted> {
+    match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
+        Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
+        Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
+        Err(other) => Err(other),
+    }
+}
+
+/// Reconcile whatever a run's command queue is holding, as the run's writer.
+///
+/// What `reply` runs when the wait for a reconciler ran out and the driver it
+/// queued its envelope behind has gone: the same three phases the loop runs, the
+/// same durable queue, behind the same cursor — so an envelope some other writer
+/// already claimed is not claimed again here and nothing is applied twice. The
+/// caller holds the run's ownership lock, which is what makes this process the
+/// writer; nothing is in flight, because nothing is driving the run.
+/// Answers nothing: **what** the queue held is read off the queue's own answers,
+/// which is where the caller's envelope is named and where every other envelope
+/// it reconciled is named too.
+pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
+    let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    let mut journal = Journal::open(paths);
+    let mut state = Projected::open(paths);
+    reconcile_edits(
+        paths,
+        &mut journal,
+        &mut state,
+        &ChannelState::new(paths),
+        &launch,
+        &mut BTreeMap::new(),
+    )?;
+    Ok(())
 }
 
 /// The reconcile loop: converge the actual frontier toward the desired graph.
@@ -939,14 +1114,29 @@ fn converge(
             // message can arrive: the graph is as converged as it will get.
             // A merge path still being asked about is the exception the second
             // clause above carries, because `blocked` is a *settled* status.
-            if graph::is_terminal(&statuses) {
-                break;
-            }
+            //
             // A node that is neither settled nor startable is gated by
             // something only an edit or an attestation can clear, and both
-            // arrive through the channel.
-            if !any_node_can_still_move(&statuses) {
-                break;
+            // arrive through the channel — which is the other way this loop is
+            // over, and it leaves the same way: not before this driver has taken
+            // the queue's last claim.
+            if graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses) {
+                match close_out_and_drain(
+                    paths,
+                    journal,
+                    state,
+                    launch,
+                    &writeback,
+                    &mut in_flight,
+                    &statuses,
+                )? {
+                    LastClaim::FoundNothing => break,
+                    LastClaim::MovedTheRun => {
+                        derived = None;
+                        unpublished = true;
+                        continue;
+                    }
+                }
             }
         }
 
@@ -1019,9 +1209,31 @@ fn converge(
                 &mut outside,
             )?
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] no journey can drive this arm:
+        // `wait_for_work` answers `None` only for its receiver's `Disconnected`, and this
+        // loop owns a `Sender` for its whole lifetime, so no invocation reaches it. It
+        // closes the run out and claims the queue because both exits must, and the
+        // reachable one is driven by
+        // `driver::an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`.
         let Some(arrived) = arrived else {
-            break;
+            match close_out_and_drain(
+                paths,
+                journal,
+                state,
+                launch,
+                &writeback,
+                &mut in_flight,
+                &statuses,
+            )? {
+                LastClaim::FoundNothing => break,
+                LastClaim::MovedTheRun => {
+                    derived = None;
+                    unpublished = true;
+                    continue;
+                }
+            }
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
 
         // Everything that had **already arrived**, applied in this one pass:
         // narration and settlement share the channel, so taking one message a
@@ -1128,6 +1340,44 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    Ok(graph::state_of(&statuses_of(&mut derived, state)))
+}
+
+/// What a close-out's last claim on the command queue found, and so what the
+/// loop does next.
+enum LastClaim {
+    FoundNothing,
+    MovedTheRun,
+}
+
+/// Close the run out and take the command queue's **last claim**.
+///
+/// The holder of the run's ownership lock is the only party that can apply a
+/// queued edit, so the moment this driver stops claiming is the moment an
+/// accepted edit stops being applied by anybody. That moment used to be the
+/// middle of the pass the loop breaks out of, with the whole close-out still to
+/// run behind it — and the verbs lost there are the ones that window selects
+/// for, since `retry`, `requeue` and settling a wrong record are reached for on
+/// a run that is not progressing.
+///
+/// [`LastClaim::MovedTheRun`] sends the loop round again rather than settling:
+/// a `retry` this driver applied is a node this driver dispatches. It cannot
+/// spin, because [`ChannelState::claim_commands`] advances its cursor as it
+/// claims.
+///
+/// The close-out itself is what the loop used to do after breaking, unchanged
+/// and in the same order. `final_statuses` is the caller's, which has just
+/// derived it, and is every node's status as the teardown leaves it — not the
+/// same as every node being settled.
+fn close_out_and_drain(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    launch: &LaunchRecord,
+    writeback: &Option<crate::writeback::Writeback>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    final_statuses: &BTreeMap<String, NodeStatus>,
+) -> Result<LastClaim> {
     // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
     // terminal projection failing and the surface reaching the planner before the run
     // settles. What it cannot drive is a projection *slow* enough to outlast this bounded
@@ -1135,13 +1385,9 @@ fn converge(
     // host-level process control rather than an input either CLI exposes, and the window
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
-    // Every node's status as the teardown leaves it, which is not the same as
-    // every node being settled: this also runs when the channel disconnected
-    // under a run that still has pending and blocked nodes.
-    let final_statuses = statuses_of(&mut derived, state);
     crate::loopstats::flush(paths)?;
-    if let Some(writeback) = &writeback {
-        writeback.publish(paths, launch, state, &final_statuses);
+    if let Some(writeback) = writeback {
+        writeback.publish(paths, launch, state, final_statuses);
         writeback.wait_briefly();
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
@@ -1150,7 +1396,33 @@ fn converge(
         report_unprojected(paths, journal, writeback)?;
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(graph::state_of(&final_statuses))
+
+    // The queue last, because the close-out is where the window is widest: a
+    // bounded wait on a store is time an edit can arrive in. The channel is a
+    // handle on the run's own paths, so this is the queue the loop has been
+    // claiming from all along.
+    if !reconcile_edits(
+        paths,
+        journal,
+        state,
+        &ChannelState::new(paths),
+        launch,
+        in_flight,
+    )? {
+        return Ok(LastClaim::FoundNothing);
+    }
+    if let Some(writeback) = writeback {
+        // llmlint: ignore-block[changed_behavior_has_e2e] what this restores is the
+        // *interval* between retries of a failing projection, which the close-out
+        // suspends so a terminal snapshot is not left sitting out a minute's backoff
+        // inside a two-second window. Its absence is a hot retry loop rather than a
+        // record any journey could read, and nothing a run writes differs by it —
+        // `writeback::the_close_out_phase_is_lifted_when_the_run_is_driven_again`
+        // holds it at the layer that owns the schedule.
+        writeback.driving_again();
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+    Ok(LastClaim::MovedTheRun)
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.
@@ -4704,6 +4976,220 @@ mod tests {
     use super::*;
     use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
     use crate::projection::Recorded;
+
+    /// A run directory of this test's own, emptied first.
+    fn handover_scratch(name: &str) -> RunPaths {
+        let dir = std::env::temp_dir().join(format!("onepipeline-handover-{name}-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("channel")).expect("a run directory");
+        RunPaths {
+            run: name.to_owned(),
+            dir,
+        }
+    }
+
+    /// A submitter's section, as `reply` runs it, for a caller holding the gate.
+    fn a_supervisor_submits(paths: &RunPaths) -> Accepted {
+        accepting_under_the_handover(
+            paths,
+            &ChannelState::new(paths),
+            crate::channel::Author::Planner,
+            &[Command::Cancel {
+                id: "node".to_owned(),
+                reason: None,
+            }],
+        )
+        .expect("the submission is answered")
+    }
+
+    /// Long enough that a section of two file operations would have finished
+    /// several times over, and short enough to pay twice in a unit test.
+    const LONG_ENOUGH_TO_HAVE_RUN: Duration = Duration::from_millis(200);
+
+    /// **The handover, both ways round.**
+    ///
+    /// A departing owner reads the queue, finds it empty and releases the run; a
+    /// submitter asks what is driving the run and queues behind it. Interleaved,
+    /// those two produce the one outcome neither party would accept — an envelope
+    /// accepted onto the queue of a run whose owner has just left it — and no
+    /// amount of *not doing anything* between the two closes it, because the
+    /// window is a preemption rather than a duration.
+    ///
+    /// Both orders are forced here: this thread holds the gate as one party and
+    /// runs that party's own section under it, while the other party's whole
+    /// call — gate and all — runs in a thread that cannot proceed until this one
+    /// lets go. Each half asserts that exclusion held before it asserts the
+    /// answer, because a gate that let both in would answer the same way by luck.
+    #[test]
+    fn a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free() {
+        // **The submitter is inside first.** The owner is on its way out and
+        // waiting at the gate, so what it reads when it gets in has to be this
+        // envelope: it may not let go of a run with an accepted edit on its queue.
+        let paths = handover_scratch("submitter-first");
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
+        let letting_go = std::thread::scope(|scope| {
+            let leaving = scope.spawn(|| let_go_of(&paths, held));
+            std::thread::sleep(LONG_ENOUGH_TO_HAVE_RUN);
+            assert!(
+                !leaving.is_finished(),
+                "the owner let go of the run while another party was inside the handover"
+            );
+            let accepted = a_supervisor_submits(&paths);
+            assert!(
+                matches!(accepted, Accepted::Queued(0)),
+                "the run was still driven, so the commands belong on its queue"
+            );
+            drop(gate);
+            leaving.join().expect("the owner lets go")
+        });
+        assert!(
+            matches!(letting_go, LettingGo::QueueMoved(_)),
+            "the departing owner let go of a run with an accepted edit on its queue"
+        );
+        std::fs::remove_dir_all(&paths.dir).ok();
+
+        // **The owner is inside first.** It reads an empty queue and releases the
+        // run in the same section, so the submitter's ask — which cannot happen
+        // until that section ends — finds the run free and takes it, rather than
+        // queueing behind an owner that has gone.
+        let paths = handover_scratch("owner-first");
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
+        let accepted = std::thread::scope(|scope| {
+            let submitting = scope.spawn(|| {
+                accept(
+                    &paths,
+                    &ChannelState::new(&paths),
+                    crate::channel::Author::Planner,
+                    &[Command::Cancel {
+                        id: "node".to_owned(),
+                        reason: None,
+                    }],
+                )
+                .expect("the submission is answered")
+            });
+            std::thread::sleep(LONG_ENOUGH_TO_HAVE_RUN);
+            assert!(
+                !submitting.is_finished(),
+                "the submitter was answered while another party was inside the handover"
+            );
+            let letting_go = letting_go_under_the_handover(&paths, held);
+            assert!(
+                matches!(letting_go, LettingGo::Released),
+                "nothing was on the queue, so the owner had nothing to stay for"
+            );
+            drop(gate);
+            submitting.join().expect("the submission is answered")
+        });
+        assert!(
+            matches!(accepted, Accepted::NothingIsDriving(_)),
+            "the submitter queued its commands behind an owner that had already gone"
+        );
+        assert!(
+            ChannelState::new(&paths).claimable_commands().is_empty(),
+            "an envelope reached the queue of a run nothing was driving"
+        );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A gate this host will not take at all: where its entries belong there is
+    /// something that is not a directory, which is what a run store an operator
+    /// has been in — or a filesystem that has run out — leaves behind.
+    fn a_gate_that_cannot_be_taken(paths: &RunPaths) {
+        std::fs::write(paths.channel("handover"), "not a directory")
+            .expect("the gate's place is taken by something else");
+    }
+
+    /// **A gate this process could not take stops both sections.**
+    ///
+    /// Failing open would put the two back where they were: an edit accepted onto
+    /// the queue of a run whose owner is releasing it, or an owner letting go
+    /// while an acceptance is in flight. So neither party does its section, and
+    /// each says what it did not do — the submitter that its commands were **not**
+    /// accepted, the owner that the run is left claimed rather than released.
+    #[test]
+    fn a_gate_this_process_cannot_take_stops_the_submission_and_the_release() {
+        let paths = handover_scratch("gate-refused");
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
+        a_gate_that_cannot_be_taken(&paths);
+
+        let refused = match accept(
+            &paths,
+            &ChannelState::new(&paths),
+            crate::channel::Author::Planner,
+            &[Command::Cancel {
+                id: "node".to_owned(),
+                reason: None,
+            }],
+        ) {
+            Ok(_) => panic!("commands were accepted without the gate that orders accepting"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.to_string().contains("nothing was accepted"),
+            "the refusal does not say the edit was not accepted: {refused}"
+        );
+        assert!(
+            ChannelState::new(&paths).claimable_commands().is_empty(),
+            "an edit was accepted onto the queue without the gate that orders it"
+        );
+
+        // And the other half: the run is handed back, not released.
+        let letting_go = let_go_of(&paths, held);
+        let LettingGo::NotHandedOver(still_held, why) = letting_go else {
+            panic!("the run was let go of without the gate that orders letting go");
+        };
+        assert!(
+            why.to_string().contains("nothing was released"),
+            "the answer does not say the run was not released: {why}"
+        );
+        assert!(
+            paths.lock().is_file(),
+            "the run's claim was dropped by a writer that could not hand it over"
+        );
+        still_held.abandon();
+        assert!(
+            paths.lock().is_file(),
+            "abandoning the claim removed it, so nothing is left for the next writer to \
+             reclaim"
+        );
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// **Contention that outlasts the patience is a refusal, not a free pass.**
+    ///
+    /// A holder inside a section of two file operations is worth waiting for, and
+    /// this bounds that wait — but reaching the bound establishes nothing about
+    /// whether the holder is still inside, because a live process can be stopped
+    /// for as long as anything likes. So the wait ends in the same answer an
+    /// unreachable gate gives: this process is not inside it.
+    #[test]
+    fn contention_outlasting_the_patience_refuses_rather_than_going_on_without_the_gate() {
+        let paths = handover_scratch("gate-contended");
+        // A live holder of this host — this thread — which is exactly the holder
+        // the wait exists for, and exactly the one time may not be read as gone.
+        let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
+
+        let waited = std::time::Instant::now();
+        let refused = ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("a gate somebody else is inside is not taken");
+        assert!(
+            waited.elapsed() >= Duration::from_millis(50),
+            "the patience was not spent before the answer: {:?}",
+            waited.elapsed()
+        );
+        assert!(
+            refused.to_string().contains("could not be taken"),
+            "the refusal does not say the gate was not taken: {refused}"
+        );
+        // The gate is still the holder's, and a refused attempt took nothing away
+        // from it.
+        drop(gate);
+        ledger::Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect("the gate is free once its holder lets go");
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
 
     /// The two things this change publishes outside the crate are spelled the
     /// same in the README, in the divergence record, and here.

@@ -1395,6 +1395,36 @@ impl ChannelState {
         Ok(id)
     }
 
+    /// Exactly what [`claim_commands`](Self::claim_commands) would take, **without**
+    /// taking it.
+    ///
+    /// What a writer about to let go of the run asks: whether there is anything
+    /// left for a reconciler to do. Claiming to find out would take envelopes off
+    /// the queue this process is not going to apply.
+    ///
+    /// Named for what a reconciler would claim rather than for everything the
+    /// file holds, because the two differ by a line no build can read: that line
+    /// is passed over here exactly as the claim passes over it, so a writer does
+    /// not stay for work nothing will ever take.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the leniency here is not this
+    // function's own: it reads the cursor and the queue exactly as `claim_commands` does,
+    // line for line, because the question it answers is what that call would take. A
+    // cursor or a record no build can read is passed over by both, and a writer that
+    // stayed for one would be waiting on work nothing will ever claim — which is the state
+    // that has no way out. What that leniency costs is `claim_commands`'s to answer for,
+    // and it predates this change.
+    pub(crate) fn claimable_commands(&self) -> Vec<QueuedCommands> {
+        let claimed_through: u64 =
+            crate::ledger::read_json_opt(&self.paths.channel("commands-cursor.json")).unwrap_or(0);
+        crate::ledger::read_lines(&self.paths.channel("commands.jsonl"))
+            .iter()
+            .filter_map(|line| serde_json::from_str::<QueuedCommands>(line).ok())
+            .filter(|queued| queued.id >= claimed_through)
+            .collect()
+    }
+
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+
     /// Claim the command envelopes the reconciler has not drained yet.
     pub fn claim_commands(&self) -> crate::Result<Vec<QueuedCommands>> {
         let cursor_path = self.paths.channel("commands-cursor.json");

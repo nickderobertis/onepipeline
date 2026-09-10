@@ -2697,6 +2697,11 @@ fn the_only_surface_kind_the_contract_names_is_check_in() {
 
 #[test]
 fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
+    // The contract's own sentence, verbatim, and the constants it assigns — both
+    // unchanged. What `reply` answers for an *accepted and still queued*
+    // envelope is `0` rather than the `1` this sentence gives it, which is
+    // divergence 67 and is stated there: `1` is still this build's constant and
+    // still what an unfinished run and a refused plan check exit at.
     assert!(CONTRACT.contains(
         "reply exit 0 = applied, 1 = accepted-not-yet-reconciled, 2 = refused/malformed"
     ));
@@ -2764,6 +2769,92 @@ fn the_divergence_record_names_the_envelope_version_this_build_writes_and_reads(
         block.get("envelope_version").is_none(),
         "entry 65 spells its version under the key entries 57 and 60 use for the reply \
          envelope's, which a consumer reads as that one"
+    );
+}
+
+/// What entry 66 says a delivered surface's record carries is what this build
+/// writes on it.
+///
+/// The contract names the kind and says nothing about its payload, so that entry
+/// is the only place the shape a consumer reads is written down.
+#[test]
+fn the_delivered_surfaces_instant_is_what_the_divergence_record_names() {
+    let block = divergence_block("66.");
+
+    let kind = block["delivery_kind"]
+        .as_str()
+        .expect("entry 66 names the kind that delivers a surface");
+    assert!(
+        PIPELINE_KINDS
+            .iter()
+            .any(|carried| carried.as_str() == kind),
+        "entry 66 names `{kind}`, which is not a kind this build emits"
+    );
+    assert_eq!(
+        block["queued_at_units"], "epoch-milliseconds",
+        "entry 66 spells the instant in units this crate does not record in"
+    );
+    assert_eq!(
+        serde_json::from_value::<Vec<String>>(block["carried_beside"].clone())
+            .expect("entry 66 names the fields the instant joins"),
+        ["kind", "message", "source", "blocking"]
+    );
+    let field = block["queued_at_field"]
+        .as_str()
+        .expect("entry 66 names the field");
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    assert!(
+        driver.contains(&format!("(\"{field}\", json!(surface.{field}))")),
+        "entry 66 names a field the hand-out does not write: {field}"
+    );
+    let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
+        .expect("the channel journeys ship");
+    assert!(
+        journeys.contains("fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued("),
+        "entry 66 names a journey the channel suite does not run"
+    );
+}
+
+/// The statuses entry 67 declares a reply exits at are this build's constants.
+///
+/// The contract fixes three codes for this verb and the code no longer writes
+/// one of them, so that entry is where the mapping a caller branches on lives.
+#[test]
+fn the_replys_exit_statuses_are_what_the_divergence_record_names() {
+    let block = divergence_block("67.");
+
+    assert_eq!(
+        block["reply_applied_exit"],
+        json!(EXIT_SUCCESS),
+        "entry 67 names a status this build does not exit at for an applied edit"
+    );
+    assert_eq!(
+        block["reply_queued_exit"],
+        json!(EXIT_SUCCESS),
+        "entry 67 names a status this build does not exit at for a queued edit"
+    );
+    assert_eq!(
+        block["reply_refused_exit"],
+        json!(EXIT_REFUSED),
+        "entry 67 names a status this build does not exit at for a refused edit"
+    );
+    assert_eq!(
+        block["reply_queued_exit"], block["reply_applied_exit"],
+        "entry 67 has a queued envelope answering with a status of its own again"
+    );
+    assert_ne!(
+        block["reply_queued_exit"],
+        json!(EXIT_QUEUED),
+        "entry 67 has a queued reply answering with the unfinished-run status again"
+    );
+    let driver =
+        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
+    assert!(
+        driver.contains("durable command queue")
+            && driver.contains("has to drive the run for them to")
+            && driver.contains("They are not to be sent"),
+        "the reply no longer says what a queued envelope is waiting for"
     );
 }
 
@@ -4620,9 +4711,14 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     );
     assert!(
         readme.contains(&format!(
-            "exits `{EXIT_SUCCESS}` when the reconciler applied it, `{EXIT_QUEUED}` when it is queued"
-        )) && readme.contains(&format!("and `{EXIT_REFUSED}` when")),
+            "exits `{EXIT_SUCCESS}` when the reconciler applied it, `{EXIT_SUCCESS}` when it is \
+             accepted and still queued"
+        )) && readme.contains(&format!("and `{EXIT_REFUSED}` when it was refused")),
         "the README's reply exit-code mapping no longer matches the crate's constants"
+    );
+    assert!(
+        !readme.contains(&format!("`{EXIT_QUEUED}` when it is queued")),
+        "the README still maps a queued reply to a non-zero status"
     );
 
     // Every view the README lists is a command the binary actually offers.
