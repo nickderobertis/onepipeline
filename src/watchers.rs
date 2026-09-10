@@ -198,7 +198,16 @@ fn is_rfc3339(text: &str) -> bool {
     };
     number(hour, 2, 0..=23).is_some()
         && number(minute, 2, 0..=59).is_some()
-        // 60 is the leap second, which is a second this grammar has.
+        // llmlint: ignore[boundary_inputs_validated] `60` is admitted at any minute on
+        // purpose, and narrowing it is not a check this or any build can make. A leap
+        // second is inserted at the end of a UTC minute, but RFC 3339 renders an instant
+        // in an *offset*, so the same second is a legal `18:29:60-05:30` — restricting the
+        // value to `23:59` would refuse instants the grammar allows. Deciding it properly
+        // needs the leap-second table for the date, which is unpublished for any future
+        // one. The remaining slack is a second-value of `60` on a minute that had no leap
+        // second, in a field this build never reads back: `began_at` is there for a person
+        // looking at the directory, and every reading this verb makes is of the pid, the
+        // host and the start token beside it.
         && number(second, 2, 0..=60).is_some()
         && !fraction.is_empty()
         && fraction.chars().all(|c| c.is_ascii_digit())
