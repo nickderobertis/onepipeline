@@ -690,6 +690,103 @@ const UNDECIDABLE: [Undecidable; 4] = [
 ];
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The verb decides a run whose merged store **cannot be read at all** exactly as it
+/// decides one whose store is readable — reporting the unsettled run, excluding the
+/// settled one, with each document current about what is at the store's path.
+///
+/// The direct proof that nothing on this path folds, and it does not depend on a
+/// clock. A stopwatch over a bigger journal can only ask whether the store was read
+/// by inference; this asks the filesystem, which refuses outright. A verb that
+/// folded would meet an error where a run's records are and decide out of an empty
+/// graph — reporting the settled run, or dropping the unsettled one's word — and a
+/// verb that reads the stored summary cannot tell the difference.
+///
+/// **Unreadable rather than absent**, so the document stays current on the ordinary
+/// terms: a real length and a real modification time it still matches, which is what
+/// every live run's document carries. The store is made unreadable by putting a
+/// **directory** where the records go — a path `stat` answers for and no process on
+/// any platform can read as a file, not a privileged one, which is what a mode of
+/// `000` cannot promise. `results` over the same run is the discriminator: it folds
+/// by design, and it loses what this verb keeps.
+#[test]
+fn the_verb_decides_runs_whose_merged_store_cannot_be_read() {
+    let world = World::new("unwatched-unreadablestore");
+    world.script("build.work", "the worker wrote this\n");
+    let settled_run = settled(&world, "unwatchedsettledstore");
+    world.script("build.wait", "hold");
+    let reported = held(&world, "unwatchedheldstore");
+
+    let before = world.run(&["unwatched"]);
+    before.exited(RUNS_UNWATCHED).out_has(&reported);
+    let answer = before.stdout.clone();
+    assert!(
+        !answer.contains(&settled_run),
+        "the settled run was reported before its store went anywhere: {answer}"
+    );
+    let folded_before = world.run(&["results", &reported]).exited(0).stdout.clone();
+
+    for run in [&settled_run, &reported] {
+        store_unreadable(&paths_of(&world, run));
+        assert!(
+            std::fs::read(paths_of(&world, run).journal()).is_err(),
+            "{run}'s store can still be read, so nothing below is a claim"
+        );
+    }
+
+    let after = world.run(&["unwatched"]);
+    after.exited(RUNS_UNWATCHED);
+    assert_eq!(
+        after.stdout, answer,
+        "the verb answered differently once the stores it must not read could not be read"
+    );
+    assert!(
+        after.stderr.is_empty(),
+        "a run whose settlement was decided from a current document was reported \
+         undecidable once its store became unreadable: {}",
+        after.stderr
+    );
+    // And the stores really were where a fold would have gone: the view that folds
+    // cannot render them any more.
+    let folded_after = world.run(&["results", &reported]).exited(0).stdout.clone();
+    assert_ne!(
+        folded_after, folded_before,
+        "the detail read was unchanged by the store becoming unreadable, so this journey \
+         proved nothing: {folded_after}"
+    );
+    world.release("build.go");
+}
+
+/// Put something at the store's path that **cannot be read as a file**, leaving the
+/// document current about it.
+///
+/// A directory, because it is the one form of "unreadable" every platform agrees on
+/// and no privilege overrides: `open` refuses it everywhere and `stat` still answers,
+/// so the length and modification time the document is stamped with are real
+/// readings of what is at that path.
+///
+// llmlint: ignore-block[tests_mirror_real_usage] no verb puts a directory where a run's
+// records go, and none could: what it stands in for is a store this process cannot read — a
+// permission, a device that is refusing, a file another mount has taken over — and the
+// document beside it is this build's own carrying the stamp this build's own writer records
+// for what the path now holds. Every claim afterwards is read off the compiled binary's own
+// streams.
+fn store_unreadable(paths: &RunPaths) {
+    std::fs::remove_file(paths.journal()).expect("the run's merged store");
+    std::fs::create_dir(paths.journal()).expect("something unreadable at the store's path");
+    let about = std::fs::metadata(paths.journal()).expect("what is at the store's path");
+    let modified = about
+        .modified()
+        .expect("a modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("an instant past the epoch")
+        .as_millis();
+    let mut summary = document(paths);
+    summary["journal_len"] = json!(about.len());
+    summary["journal_mtime_ms"] = json!(u64::try_from(modified).expect("a millisecond count"));
+    std::fs::write(paths.summary(), summary.to_string()).expect("the document");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A run whose settlement cannot be decided at all is named on **standard error**
 /// with the reason, is absent from standard output, and changes no exit status.
 ///
@@ -1031,11 +1128,26 @@ const ASKING_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
 /// fails.
 const SINGLE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// What the same question may take once those journals hold ten times as much.
+/// A **regression guard**, and deliberately not the evidence for anything.
 ///
-/// Twice its own median over the unmultiplied root. Whatever the host was doing is
-/// in both figures, so this compares the verb with itself rather than with a clock.
-const GROWTH_BOUND: u32 = 2;
+/// What it is not: a measurement of whether the journal is read. Across eight runs
+/// of these journeys on this host the same code produced ratios from 0.42x to
+/// 2.72x, and on two of three pairs in one run the fixture with **ten times the
+/// journal** came back faster — 68.962 -> 29.236 ms and 101.611 -> 51.367 ms. An
+/// instrument that reports the grown fixture as twice as fast in two of three
+/// trials is measuring the host, not a dependence on journal size, and no amount of
+/// preparation makes it into evidence when the noise is larger than the effect. The
+/// proof of that property is
+/// `the_listing_views_render_a_run_whose_merged_store_cannot_be_read` and its
+/// counterpart over the verb: a store that cannot be read at all, which no clock
+/// and no host speed enters into.
+///
+/// What it is: a ceiling above every ratio yet observed, kept so that a change
+/// which made this path *linear* in the store — a fold is three to four orders of
+/// magnitude, and `runs --mine` over a comparable root took 74.1 s before this work
+/// — fails here as well as at the absolute bound. Sized from the 2.72x worst
+/// observation with room, rather than from what a passing run happened to give.
+const GROWTH_GUARD: u32 = 5;
 
 /// How many invocations each median is taken over, after one warm-up.
 ///
@@ -1183,14 +1295,19 @@ fn median(world: &World, argv: &[&str], expected: i32) -> std::time::Duration {
     took[TIMED / 2]
 }
 
-/// Over a host-sized runs root this verb answers in well under a second, and
-/// tenfold the journal bytes barely moves it.
+/// Over a host-sized runs root this verb answers in well under a second.
 ///
-/// The two halves are one claim. The **bound** is about where this runs: at the end
-/// of every manager turn, in a hook the harness waits for, so a check that cost
-/// seconds would be turned off — and a check that is turned off is the prose it
-/// replaced. The **ratio** says what it is fast because of, by multiplying the one
-/// input a fold is linear in and watching the clock stay where it was.
+/// **The bound is the claim**, and it is about where this runs: at the end of every
+/// manager turn, in a hook the harness waits for, so a check that cost seconds
+/// would be turned off — and a check that is turned off is the prose it replaced.
+/// Both measurements are held to it, over the unmultiplied root and over ten times
+/// the journal bytes.
+///
+/// The ratio between those two is kept as [`GROWTH_GUARD`] and is **not** evidence
+/// that the journal goes unread; that constant says why, and
+/// [`the_verb_decides_runs_whose_merged_store_cannot_be_read`] is where the property
+/// is actually proven — over a store that cannot be read at all, which no clock
+/// enters into.
 ///
 /// **What the rows are is asserted, not assumed.** A clock over a degenerate
 /// fixture is the one way this journey could report green while measuring nothing,
@@ -1323,10 +1440,10 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     binary_in_cache();
     let after = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
-        after <= before * GROWTH_BOUND,
+        after <= before * GROWTH_GUARD,
         "`onepipeline unwatched` took {after:?} over {grown} journal byte(s) against {before:?} \
-         over {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
-         verb that reads no journal is held to"
+         over {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_GUARD}x \
+         regression guard, which no run of this has approached"
     );
     // And the grown root is held to the same absolute bound the unmultiplied one
     // is, which is the statement that does not depend on a ratio at all: ten
@@ -1753,13 +1870,13 @@ fn a_run_root_whose_name_is_not_a_run_id_is_passed_over() {
 
 /// Put the binary back in the page cache before a measurement.
 ///
-/// The one thing these journeys measure that is not the command: the compiled test
-/// binary is a quarter of a gigabyte, this fixture writes ten gibibytes over it,
-/// and the machine's page cache is smaller than the two together — so the second
-/// measurement pays to page the binary back in on **every** `exec`, which is a cost
-/// of the fixture rather than of what is being timed. Read before both
-/// measurements, so what they differ by is not what the kernel happened to be
-/// holding when each began.
+/// Measurement hygiene, and stated as no more than that: both measurements in a
+/// journey read the binary first, so neither begins from a cache state the other
+/// did not have. **What that is worth is unestablished** — no run has been taken
+/// with this and without it, all else equal — and nothing this suite asserts rests
+/// on it. It is here because a quarter-gigabyte binary and a ten-gibibyte fixture
+/// share one page cache, and a measurement that begins by not knowing which of the
+/// two is resident is one nobody can read.
 fn binary_in_cache() {
     let read = std::fs::read(crate::harness::binary()).expect("the binary under test");
     assert!(!read.is_empty(), "the binary under test is empty");

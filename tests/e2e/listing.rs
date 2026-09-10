@@ -112,6 +112,25 @@ fn stamp_of(paths: &RunPaths) -> (u64, u64) {
 /// document carrying it is **current** rather than stale. What that buys the
 /// journey is the sharpest possible statement of the rule: the store is gone, and
 /// anything still rendering read something else.
+/// Put something at the store's path that **cannot be read as a file**, leaving the
+/// document current about it.
+///
+/// A directory, because it is the one form of "unreadable" every platform agrees on
+/// and no privilege overrides: `open` refuses it everywhere, and `stat` still
+/// answers, so the length and modification time the document is stamped with are
+/// real readings of what is at that path. The document is re-stamped afterwards for
+/// exactly that reason — it is this build's own document carrying the stamp this
+/// build's own writer records for what the path now holds.
+fn store_unreadable(paths: &RunPaths) {
+    std::fs::remove_file(paths.journal()).expect("the run's merged store");
+    std::fs::create_dir(paths.journal()).expect("something unreadable at the store's path");
+    let (len, modified) = stamp_of(paths);
+    let mut summary = document(paths);
+    summary["journal_len"] = json!(len);
+    summary["journal_mtime_ms"] = json!(modified);
+    put_back(paths, &summary);
+}
+
 fn store_taken_away(paths: &RunPaths) {
     let mut summary = document(paths);
     summary["journal_len"] = json!(0);
@@ -168,6 +187,85 @@ fn the_listing_views_render_a_run_whose_merged_store_is_not_there() {
     assert_ne!(
         folded_after, folded_before,
         "the detail read was unchanged by the store going away, so the listing \
+         proved nothing: {folded_after}"
+    );
+}
+
+/// Every listing renders a run whose merged store **cannot be read at all**,
+/// exactly as it renders one whose store is readable — with the run's own document
+/// current, and current *about that store*.
+///
+/// This is the direct proof of the rule, and it does not depend on a clock. A
+/// journey that measures how long a listing takes over a bigger journal is asking a
+/// stopwatch whether the journal was read; this asks the filesystem, which answers
+/// outright. A listing that folded would open the store and get an error where its
+/// records used to be, and would render a run with nothing in it; a listing that
+/// reads the stored summary cannot tell the difference and renders what it rendered
+/// before. There is no host speed, no ratio and no threshold in that.
+///
+/// **Unreadable, rather than absent**, which is what makes it sharper than
+/// [`the_listing_views_render_a_run_whose_merged_store_is_not_there`] beside it:
+/// removing the store changes what the document has to stamp — `(0, 0)`, the
+/// reading for a run with no journal — while this leaves the stamp a real length
+/// and a real modification time that the document still matches. So the row is
+/// served on the ordinary path, the one every live run takes, rather than on the
+/// path for a run whose store is missing.
+///
+/// The store is made unreadable by putting a **directory** where the records go: a
+/// path `stat` still answers for, and that no process on any platform can read as a
+/// file — not a privileged one, which is what a mode of `000` cannot promise. The
+/// discriminator is on the same output: `results` over the same run *is* a detail
+/// read, and it loses exactly what the listings keep.
+#[test]
+fn the_listing_views_render_a_run_whose_merged_store_cannot_be_read() {
+    let world = World::new("listing-unreadable");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(
+        &world,
+        "unreadable",
+        vec![agent("build", &[]), agent("docs", &["build"])],
+    );
+    let paths = paths_of(&world, &run);
+
+    let before = listed(&world);
+    for rendered in &before {
+        assert!(
+            rendered.contains(&run) && rendered.contains("2/2 done"),
+            "the listing does not report the run it was asked about: {rendered}"
+        );
+    }
+    let folded_before = world.run(&["results", &run]).exited(0).stdout.clone();
+
+    store_unreadable(&paths);
+    assert!(
+        std::fs::read(paths.journal()).is_err(),
+        "the store this journey is about can still be read, so nothing below is a claim"
+    );
+    let document = document(&paths);
+    assert_eq!(
+        (
+            document["journal_len"].as_u64(),
+            document["journal_mtime_ms"].as_u64()
+        ),
+        {
+            let (len, modified) = stamp_of(&paths);
+            (Some(len), Some(modified))
+        },
+        "the document is not current about what is at the store's path, so this run \
+         would be refolded and the journey would be about the fallback instead"
+    );
+
+    assert_eq!(
+        listed(&world),
+        before,
+        "a listing rendered differently once the store it must not read could not be read"
+    );
+    // And the store really was where those facts would have come from: the view that
+    // folds cannot render them any more.
+    let folded_after = world.run(&["results", &run]).exited(0).stdout.clone();
+    assert_ne!(
+        folded_after, folded_before,
+        "the detail read was unchanged by the store becoming unreadable, so the listings \
          proved nothing: {folded_after}"
     );
 }
@@ -453,12 +551,26 @@ const LANDING_VERDICTS: [&str; 2] = ["not landed", "landing undecided"];
 /// code, and this one is set where only a return to folding could cross it.
 const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// What the same render may take once those journals hold ten times as much.
+/// A **regression guard**, and deliberately not the evidence for anything.
 ///
-/// Twice its own median over the unmultiplied root. Whatever the host was doing
-/// is in both figures, so this compares the listing with itself rather than with
-/// a clock.
-const GROWTH_BOUND: u32 = 2;
+/// What it is not: a measurement of whether the journal is read. Across eight runs
+/// of these journeys on this host the same code produced ratios from 0.42x to
+/// 2.72x, and on two of three pairs in one run the fixture with **ten times the
+/// journal** came back faster — 68.962 -> 29.236 ms and 101.611 -> 51.367 ms. An
+/// instrument that reports the grown fixture as twice as fast in two of three
+/// trials is measuring the host, not a dependence on journal size, and no amount of
+/// preparation makes it into evidence when the noise is larger than the effect. The
+/// proof of that property is
+/// `the_listing_views_render_a_run_whose_merged_store_cannot_be_read` and its
+/// counterpart over the verb: a store that cannot be read at all, which no clock
+/// and no host speed enters into.
+///
+/// What it is: a ceiling above every ratio yet observed, kept so that a change
+/// which made this path *linear* in the store — a fold is three to four orders of
+/// magnitude, and `runs --mine` over a comparable root took 74.1 s before this work
+/// — fails here as well as at the absolute bound. Sized from the 2.72x worst
+/// observation with room, rather than from what a passing run happened to give.
+const GROWTH_GUARD: u32 = 5;
 
 /// How many renders each median is taken over, after one warm-up.
 ///
@@ -590,15 +702,18 @@ fn median(world: &World, argv: &[&str]) -> std::time::Duration {
     took[TIMED / 2]
 }
 
-/// Over a host-sized runs root, each of the three renders in seconds — and
-/// tenfold the journal bytes barely moves any of them.
+/// Over a host-sized runs root, each of the three renders in seconds.
 ///
-/// The two halves are one claim. The **bound** says the listing is fast over a
-/// root a fold could not survive; the **ratio** says why, by moving the one input
-/// a fold is linear in and watching the clock stay where it was. Neither is a
-/// figure about this host: 74.1 s was measured for `runs --mine` over a
-/// comparable root before this, and the bound is set an order of magnitude below
-/// that so only a return to folding can cross it.
+/// **The bound is the claim**: 74.1 s was measured for `runs --mine` over a
+/// comparable root before this work, and the bound is set an order of magnitude
+/// below that, so only a return to folding can cross it. Both measurements are held
+/// to it, over the unmultiplied root and over ten times the journal bytes.
+///
+/// The ratio between those two is kept as [`GROWTH_GUARD`] and is **not** evidence
+/// that the journal goes unread; that constant says why, and
+/// [`the_listing_views_render_a_run_whose_merged_store_cannot_be_read`] is where the
+/// property is actually proven — over a store that cannot be read at all, which no
+/// clock enters into.
 ///
 /// **What the rows are is asserted, not assumed.** A clock over a degenerate
 /// fixture is the one way this journey could report green while measuring
@@ -822,10 +937,10 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     for (argv, was) in LISTINGS.iter().zip(before) {
         let took = median(&world, argv);
         assert!(
-            took <= was * GROWTH_BOUND,
+            took <= was * GROWTH_GUARD,
             "`onepipeline {}` took {took:?} over {grown} journal byte(s) against {was:?} over \
-             {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
-             bounded read is held to",
+             {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_GUARD}x \
+             regression guard, which no run of this has approached",
             argv.join(" ")
         );
         // And the grown root is held to the same absolute bound the unmultiplied
@@ -1060,13 +1175,13 @@ fn no_listing_command_opens_a_run_store_that_is_there() {
 
 /// Put the binary back in the page cache before a measurement.
 ///
-/// The one thing these journeys measure that is not the command: the compiled test
-/// binary is a quarter of a gigabyte, this fixture writes ten gibibytes over it,
-/// and the machine's page cache is smaller than the two together — so the second
-/// measurement pays to page the binary back in on **every** `exec`, which is a cost
-/// of the fixture rather than of what is being timed. Read before both
-/// measurements, so what they differ by is not what the kernel happened to be
-/// holding when each began.
+/// Measurement hygiene, and stated as no more than that: both measurements in a
+/// journey read the binary first, so neither begins from a cache state the other
+/// did not have. **What that is worth is unestablished** — no run has been taken
+/// with this and without it, all else equal — and nothing this suite asserts rests
+/// on it. It is here because a quarter-gigabyte binary and a ten-gibibyte fixture
+/// share one page cache, and a measurement that begins by not knowing which of the
+/// two is resident is one nobody can read.
 fn binary_in_cache() {
     let read = std::fs::read(crate::harness::binary()).expect("the binary under test");
     assert!(!read.is_empty(), "the binary under test is empty");

@@ -2573,10 +2573,17 @@ const SETTLED_BYTES: u64 = 32 * 1024 * 1024;
 /// Sixty seconds, twice: a journey that waited longer could reach nextest's own
 /// `terminate-after` — six sixty-second periods — and be killed rather than
 /// measured, which is worse than a measurement taken over a disk that is still
-/// busy. Measured on this host: ten gibibytes had 204 MB left to write when a
-/// two-minute wait ran out, and the figures either side of it were within 3% of
-/// each other regardless, because what the wait is protecting against is mostly
-/// already handled by putting the binary back in the cache.
+/// busy.
+///
+/// Observed on this host, at a two-minute bound, in one run of the two host-sized
+/// journeys: the **listing** journey ran out with 204 MB left to write, and its
+/// medians that run were 51.198 → 72.955 ms, 68.962 → 29.236 ms and 101.611 →
+/// 51.367 ms; the **unwatched** journey, later in the same run, reported no
+/// timeout and measured 8.287 → 8.039 ms. Those are two different measurements and
+/// neither explains the other — in particular, **nothing here establishes what the
+/// wait is worth**: no run has been taken with it and without it, all else equal,
+/// so its effect is unmeasured. It is kept as hygiene rather than as a
+/// demonstrated correction, and nothing this suite asserts rests on it.
 const SETTLING: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How many bytes this host says it has yet to write back, or `None` where it will
