@@ -4505,10 +4505,25 @@ person.
   recording* looks like, and treating that as proof of settlement is how the one
   run this verb exists to find would be dropped.
 - **A run whose settlement cannot be decided at all** — no document, one that
-  cannot be read, or one at a schema version this build refuses — is **not
-  reported**. It is named on standard error with that reason and changes no exit
-  status: such a run is most often an old settled run whose document is gone, and
-  blocking on it would never clear by watching it.
+  cannot be read, one at a schema version **ahead** of this build, or one that is
+  another run's — is **not reported**. It is named on standard error with that
+  reason and changes no exit status: such a run is most often an old settled run
+  whose document is gone, and blocking on it would never clear by watching it.
+- **A document at a schema version this build has moved *past* is decided, not
+  undecidable**, and the distinction is between an answer and the absence of one.
+  Such a document is there, is well-formed, and says outright that its fields are
+  an earlier build's to mean — which settles the only question this verb asks of
+  it, in the negative: nothing in it may be read as this build's `stop_recorded`
+  or `graph_complete`, so the run is **not excluded**, is reported when nothing is
+  watching it, and counts toward the non-zero exit. An answer that could not be
+  obtained is never the one that silences a run. Its standing word is then read
+  from the launch record alone, because reading a field of that document would be
+  reading it by a meaning its own version says is not this build's; the
+  consequence is that such a run reads `ACTIVE` or `DRIVER DEAD` and never
+  `PARKED`, having no `last_write_at` this build may take. A version *ahead* of
+  this build is the opposite case and stays undecidable: it was written by a build
+  that knows things this one does not, and this one has no reading of it at all,
+  not even that negative one.
 - **Reported** when the launch record names the resolved session, the run is not
   excluded, its settlement was decidable, and no record in its `watchers/`
   directory is a live watch. One line per reported run on standard output, naming
@@ -4586,9 +4601,12 @@ read as gone on the very next invocation, with nothing having cleaned up and no
 interval having elapsed; five records that are not live watches, each refused for
 its own reason; three concurrent watches recorded apart, holding the run watched
 until the last of them ends; a settled run never reported and the same run reported
-once its document falls behind its journal; the three undecidable documents named
+once its document falls behind its journal; the four undecidable documents named
 on standard error and changing no status; a run whose only watcher record cannot be
-read reported all the same; roots belonging to nobody passed over; the option
+read reported all the same; the superseded-schema document decided the other way
+— reported on standard output and counted toward the status, from a fixture whose
+own fields say the run settled so that the two readings disagree; roots belonging
+to nobody passed over; the option
 deciding against an environment naming another session, both ways round; both
 refusals; and — over four hundred run roots holding a gibibyte of journals, and
 then ten — the bound this verb has to meet to be asked at the end of every turn,

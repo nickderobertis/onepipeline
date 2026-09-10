@@ -653,10 +653,13 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
 
 /// The four words a reported run's line can carry, as entry 68 states them.
 ///
-/// Named as a set because the one journey that cannot predict which of them it
-/// will get is the one below: the word there is read from the launch record alone,
-/// and what that record says about the driver is what the host says about a pid
-/// now.
+/// Named as a set because two journeys here assert the word without being able to
+/// predict which of the four they will get, for different reasons. The one below
+/// reads it from the launch record alone, and what that record says about the
+/// driver is what the host says about a pid now. The scale journey asserts it as
+/// the guard its whole bound rests on: a fixture can go degenerate — a clone that
+/// carried no run state would be excluded or refused, every other assertion would
+/// pass, and the bound would be met over rows with nothing in them.
 const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
 
 /// A document at a schema this build has **moved past** is *decided*: the run is
@@ -757,7 +760,8 @@ type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 ///
 /// Function pointers rather than a table of data, because what distinguishes them
 /// is what is done to the file: a build that never wrote a document, a writer
-/// killed mid-write, and a build that knows more than this one.
+/// killed mid-write, a build that knows more than this one, and a run root copied
+/// from another run's.
 ///
 /// **A schema this build has moved past is deliberately not here.** It is an
 /// answer rather than the absence of one — the file is there, it is well-formed,
@@ -1264,14 +1268,6 @@ const GROWTH_GUARD: u32 = 5;
 /// nobody has paged in, and a median rather than a mean because the outlier this
 /// has to survive is another test on the same host, not a slow invocation.
 const TIMED: usize = 5;
-
-/// The word every reported row carries, whichever of the four it is.
-///
-/// Asserted rather than assumed, and this is the guard the whole bound rests on: a
-/// fixture can go degenerate — a clone that carried no run state would be excluded
-/// or refused, every other assertion would pass, and the bound would be met over
-/// rows with nothing in them.
-const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
 
 /// One run root cloned from a real one, under a new id and a new owner.
 ///
