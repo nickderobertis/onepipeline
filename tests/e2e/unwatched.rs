@@ -901,3 +901,498 @@ fn stamp_of(paths: &RunPaths) -> (Option<u64>, Option<u64>) {
         Some(u64::try_from(modified).expect("a millisecond count")),
     )
 }
+
+/// How many run roots the scale journey assembles.
+///
+/// Four hundred, because that is the shape the bound is about: a supervisory host
+/// accumulates run roots and never sheds them, and the one this verb was written
+/// for held 491 when the work began.
+const SCALED_RUNS: usize = 400;
+
+/// How many bytes of journal those roots hold together at the first measurement.
+///
+/// One gibibyte, spread evenly. The host this was written for held 11 GB across
+/// its roots; a gibibyte is the smallest total at which reading them would be
+/// unmistakably the thing being paid for rather than process start.
+const SCALED_JOURNAL_BYTES: u64 = 1 << 30;
+
+/// What the second measurement multiplies that total by, with the run count held
+/// fixed.
+///
+/// The two measurements together are the claim: the first says this verb is fast
+/// enough to ask at the end of every turn, and the second says what it is fast
+/// *because of* — a tenfold change in the one input a fold is linear in barely
+/// moves it.
+const JOURNAL_MULTIPLE: u64 = 10;
+
+/// How many of those runs the asked-about session owns.
+///
+/// **A handful**, because that is the shape: a manager holds a few live runs on a
+/// host that has accumulated hundreds, and everything this verb does past
+/// discovery is proportional to the few.
+const SCALED_OWNED: usize = 3;
+
+/// What the median of five consecutive invocations may take.
+///
+/// Half a second, because of *where* this runs: at the end of every manager turn,
+/// in a hook the harness waits for. A check that cost seconds would be turned off,
+/// and a check that is turned off is the prose it replaced.
+const ASKING_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What no single one of those five may take.
+///
+/// A second — twice the median bound, so one unlucky invocation on a loaded host
+/// is a bound rather than a flake, and a verb that occasionally took seconds still
+/// fails.
+const SINGLE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What the same question may take once those journals hold ten times as much.
+///
+/// Twice its own median over the unmultiplied root. Whatever the host was doing is
+/// in both figures, so this compares the verb with itself rather than with a clock.
+const GROWTH_BOUND: u32 = 2;
+
+/// How many invocations each median is taken over, after one warm-up.
+///
+/// The warm-up is discarded because what it measures is mostly a debug binary
+/// nobody has paged in, and a median rather than a mean because the outlier this
+/// has to survive is another test on the same host, not a slow invocation.
+const TIMED: usize = 5;
+
+/// The word every reported row carries, whichever of the four it is.
+///
+/// Asserted rather than assumed, and this is the guard the whole bound rests on: a
+/// fixture can go degenerate — a clone that carried no run state would be excluded
+/// or refused, every other assertion would pass, and the bound would be met over
+/// rows with nothing in them.
+const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
+
+/// One run root cloned from a real one, under a new id and a new owner.
+///
+/// Everything but the journal is the template's own file, because everything but
+/// the journal is what this verb reads: the launch record and the summary document
+/// are this build's own, written by a real run driven through the binary, and only
+/// the three facts that must name *this* run rather than the one it was copied from
+/// are rewritten.
+// llmlint: ignore-block[tests_mirror_real_usage] four hundred run roots is a *host*, not a
+// command: no verb makes one, and the only honest way to hold the shape is to assemble it.
+// What is assembled is this build's own output — one real run driven through the compiled
+// binary, cloned — rather than documents invented here.
+fn cloned_run(template: &RunPaths, root: &std::path::Path, id: &str, session: &str) -> RunPaths {
+    let paths = RunPaths::under(root, id);
+    std::fs::create_dir_all(&paths.dir).expect("a run root");
+    let journal = template
+        .journal()
+        .file_name()
+        .expect("the journal has a name")
+        .to_owned();
+    for entry in std::fs::read_dir(&template.dir).expect("the template run") {
+        let entry = entry.expect("an entry of the template run");
+        if !entry.file_type().expect("its kind").is_file() || entry.file_name() == journal {
+            continue;
+        }
+        std::fs::copy(entry.path(), paths.dir.join(entry.file_name())).expect("a copied file");
+    }
+    for path in [paths.launch(), paths.summary()] {
+        let mut held: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("a copied document"))
+                .expect("a document");
+        held["run_id"] = json!(id);
+        held["session"] = json!(session);
+        // A pid means nothing across machines, so a run recorded elsewhere reads as
+        // the live work it is — which is the **expensive** row: it is not excluded,
+        // so it goes on to be decided, to have its watchers read, and to be given a
+        // word.
+        held["host"] = json!("another-host");
+        std::fs::write(&path, held.to_string()).expect("the document");
+    }
+    paths
+}
+
+/// Grow one run's journal to `bytes` and stamp its document for the store that
+/// leaves.
+///
+/// The filler is the template run's **own records**, repeated: real journal lines,
+/// so a reader that folded one of these would do the work a fold of a real run
+/// does. The stamp is written after the bytes, so what the document claims is what
+/// the file holds — which is what makes it *current*, and the state the bound is
+/// about.
+fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
+    use std::io::Write;
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths.journal())
+            .expect("the run's journal"),
+    );
+    let mut held = std::fs::metadata(paths.journal()).map_or(0, |about| about.len());
+    while held < bytes {
+        file.write_all(filler).expect("journal records");
+        held += filler.len() as u64;
+    }
+    file.flush().expect("journal records");
+    // Forced to the device before this returns, rather than left as dirty pages for
+    // the kernel to write back **while the next measurement runs**: ten gibibytes of
+    // writeback competing with the reads being timed is the host's clock rather than
+    // this verb's.
+    file.get_ref().sync_all().expect("journal records on disk");
+    drop(file);
+
+    let about = std::fs::metadata(paths.journal()).expect("the run's journal");
+    let modified = about
+        .modified()
+        .expect("a modification time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("an instant past the epoch")
+        .as_millis();
+    let mut summary = document(paths);
+    summary["journal_len"] = json!(about.len());
+    summary["journal_mtime_ms"] = json!(u64::try_from(modified).expect("a millisecond count"));
+    std::fs::write(paths.summary(), summary.to_string()).expect("the document");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// One invocation's stdout and status, taken **without** the harness's own look at
+/// the world.
+///
+/// `World::run` captures a dump of every run root beside the output, which is
+/// exactly the read this journey is about the binary not making — over four hundred
+/// roots it is the harness that would be reading the gigabytes, and every figure
+/// below would be its.
+fn asked(world: &World, argv: &[&str]) -> (i32, String) {
+    let out = world.cmd(argv).output().expect("the binary runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+fn median(world: &World, argv: &[&str], expected: i32) -> std::time::Duration {
+    let mut took: Vec<std::time::Duration> = Vec::with_capacity(TIMED);
+    for nth in 0..=TIMED {
+        let began = std::time::Instant::now();
+        let out = world.cmd(argv).output().expect("the binary runs");
+        let elapsed = began.elapsed();
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "`onepipeline {}` answered {:?}: {}",
+            argv.join(" "),
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The first is the warm-up: what it measures is mostly a debug binary
+        // nobody has paged in.
+        if nth > 0 {
+            took.push(elapsed);
+        }
+    }
+    took.sort_unstable();
+    println!("  {:<16} {took:?}", argv.join(" "));
+    assert!(
+        took[TIMED - 1] < SINGLE_BOUND,
+        "one of five invocations took {:?}, past the {SINGLE_BOUND:?} no single one may take",
+        took[TIMED - 1]
+    );
+    took[TIMED / 2]
+}
+
+/// Over a host-sized runs root this verb answers in well under a second, and
+/// tenfold the journal bytes barely moves it.
+///
+/// The two halves are one claim. The **bound** is about where this runs: at the end
+/// of every manager turn, in a hook the harness waits for, so a check that cost
+/// seconds would be turned off — and a check that is turned off is the prose it
+/// replaced. The **ratio** says what it is fast because of, by multiplying the one
+/// input a fold is linear in and watching the clock stay where it was.
+///
+/// **What the rows are is asserted, not assumed.** A clock over a degenerate
+/// fixture is the one way this journey could report green while measuring nothing,
+/// so before it times anything it reads the reported rows back and holds them to
+/// the shape the bound is set against.
+#[test]
+fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journals_hold() {
+    // Every run on this root was last written moments ago, so the threshold that
+    // decides `PARKED` is moved down to make the rows take the **whole** path a
+    // real host's older runs take — the run's channel read included. A bound
+    // measured over rows that skipped it would be a bound about the cheap case.
+    let world = World::new("unwatched-scale").with_env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    world.script("build.wait", "hold");
+
+    // The template: a real run with a dispatch held open, which is what an
+    // unwatched run *is*. Cloned before it is stopped, so every clone carries an
+    // unsettled document; the template itself is then stopped, which excludes it
+    // and leaves nothing writing to this root while the clock runs.
+    let template = paths_of(&world, &held(&world, "unwatchedtemplate"));
+    let filler = std::fs::read(template.journal()).expect("the template's own records");
+    assert!(!filler.is_empty(), "the template run recorded nothing");
+
+    let per_run = SCALED_JOURNAL_BYTES / SCALED_RUNS as u64;
+    let stranger = "another-planner";
+    let mut assembled: Vec<RunPaths> = Vec::new();
+    for nth in 0..SCALED_RUNS {
+        let owner = if nth < SCALED_OWNED {
+            world.session.as_str()
+        } else {
+            stranger
+        };
+        let paths = cloned_run(&template, &world.runs, &format!("scaled-{nth:04}"), owner);
+        journal_of(&paths, &filler, per_run);
+        assembled.push(paths);
+    }
+    world.run(&["stop", &template.run, "--force"]).exited(0);
+    world.release("build.go");
+
+    let held_bytes = |assembled: &[RunPaths]| -> u64 {
+        assembled
+            .iter()
+            .map(|paths| std::fs::metadata(paths.journal()).map_or(0, |about| about.len()))
+            .sum()
+    };
+    let bytes = held_bytes(&assembled);
+    assert!(
+        bytes >= SCALED_JOURNAL_BYTES,
+        "the root holds {bytes} journal byte(s), short of the {SCALED_JOURNAL_BYTES} this \
+         measures over"
+    );
+    assert!(
+        std::fs::read_dir(&world.runs)
+            .expect("the runs root")
+            .count()
+            >= SCALED_RUNS,
+        "the root does not hold the {SCALED_RUNS} run roots this bound is about"
+    );
+
+    // Exactly the runs this session owns, out of the four hundred on the root, and
+    // each row is the shape the bound is set against.
+    let (code, rows) = asked(&world, &["unwatched"]);
+    assert_eq!(code, RUNS_UNWATCHED, "{rows}");
+    assert_eq!(
+        rows.lines().count(),
+        SCALED_OWNED,
+        "over {SCALED_RUNS} run roots this verb reported something other than the \
+         {SCALED_OWNED} unwatched runs this session owns:\n{rows}"
+    );
+    for row in rows.lines() {
+        assert!(
+            STANDING_WORDS.iter().any(|word| row.contains(word)),
+            "a reported row carries none of {STANDING_WORDS:?}, so this fixture is not the \
+             shape it measures: {row}"
+        );
+        assert!(
+            row.contains("onepipeline watch"),
+            "a reported row does not say what to do about it: {row}"
+        );
+    }
+    // Said out loud, because the whole bound below is a clock over these rows and a
+    // reader who cannot see what they are cannot weigh it.
+    println!("  the rows this bound is measured over:\n{rows}");
+
+    let before = median(&world, &["unwatched"], RUNS_UNWATCHED);
+    assert!(
+        before < ASKING_BOUND,
+        "`onepipeline unwatched` took {before:?} over {SCALED_RUNS} run roots holding {bytes} \
+         journal byte(s), past the {ASKING_BOUND:?} a check asked at the end of every turn is \
+         held to"
+    );
+
+    // The same root, with the one input a fold is linear in multiplied by ten and
+    // the run count held exactly where it was.
+    for paths in &assembled {
+        let held = std::fs::metadata(paths.journal())
+            .expect("the journal")
+            .len();
+        journal_of(paths, &filler, held * JOURNAL_MULTIPLE);
+    }
+    // The documents this verb reads, back in the cache the first measurement found
+    // them in. Writing ten gibibytes evicts them, and a median taken over cold
+    // documents is a reading of the host's page cache rather than of the verb.
+    for paths in &assembled {
+        for document in [paths.summary(), paths.launch()] {
+            let _ = std::fs::read(document);
+        }
+    }
+    let grown = held_bytes(&assembled);
+    assert!(
+        grown >= bytes * JOURNAL_MULTIPLE,
+        "the grown root holds {grown} journal byte(s), short of {JOURNAL_MULTIPLE} times the \
+         {bytes} it held"
+    );
+    let (code, grown_rows) = asked(&world, &["unwatched"]);
+    assert_eq!(code, RUNS_UNWATCHED);
+    assert_eq!(
+        grown_rows, rows,
+        "the answer changed when the journals grew, so the run count or the fixture moved"
+    );
+
+    let after = median(&world, &["unwatched"], RUNS_UNWATCHED);
+    assert!(
+        after <= before * GROWTH_BOUND,
+        "`onepipeline unwatched` took {after:?} over {grown} journal byte(s) against {before:?} \
+         over {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
+         verb that reads no journal is held to"
+    );
+    println!(
+        "  unwatched     {before:?} over {SCALED_RUNS} roots holding {bytes} journal byte(s), \
+         {after:?} over {grown}"
+    );
+}
+
+/// Every path the process **opened**, as the kernel recorded it, whatever status it
+/// returned.
+///
+/// The command is the one `World` composes — same binary, same environment — with
+/// the tracer wrapped around it, so what is observed is the invocation a user makes
+/// rather than a second one assembled here. The status is not asserted, because
+/// this verb's whole answer *is* a status and the trace is about what it read to
+/// reach one.
+///
+/// It **refuses** rather than passes where the tracer will not run: an observation
+/// nobody made is not an observation of nothing, and this is the one journey whose
+/// claim is entirely about what the process did.
+#[cfg(target_os = "linux")]
+fn opened_by(world: &World, argv: &[&str], into: &std::path::Path) -> Vec<String> {
+    let inner = world.cmd(argv);
+    let mut traced = std::process::Command::new("strace");
+    traced
+        // Children too: a verb that shelled out to read a store would have read it
+        // just the same.
+        .arg("-f")
+        .arg("-qq")
+        .arg("-e")
+        .arg("trace=openat,open")
+        .arg("-o")
+        .arg(into)
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .stdin(std::process::Stdio::null());
+    for (key, value) in inner.get_envs() {
+        match value {
+            Some(value) => traced.env(key, value),
+            None => traced.env_remove(key),
+        };
+    }
+    traced.output().unwrap_or_else(|error| {
+        panic!(
+            "this journey's whole claim is what the process opened, and the tracer would not \
+             run: strace: {error}. Install strace, or run the suite where ptrace is permitted \
+             — a journey that cannot observe is not a journey that observed nothing."
+        )
+    });
+    let trace = std::fs::read_to_string(into).expect("the trace the tracer wrote");
+    // Each line names its path in the first quoted field, and a line carrying no
+    // path is a resumption or a signal rather than an open.
+    let opened: Vec<String> = trace
+        .lines()
+        .filter_map(|line| line.split_once('"'))
+        .filter_map(|(_, rest)| rest.split_once('"'))
+        .map(|(path, _)| path.to_owned())
+        .collect();
+    assert!(
+        !opened.is_empty(),
+        "the tracer recorded no open at all, so it observed nothing: {trace}"
+    );
+    opened
+}
+
+/// `unwatched` opens **no run's merged event store**, over a root where every store
+/// is present — including the runs whose summary document is absent and stale,
+/// which are exactly the two a reader is tempted to fold.
+///
+/// What the wall clock cannot establish. A bound over a host-sized root rules out a
+/// fold that dominates the clock; it would still pass a process that opened a store
+/// and threw the bytes away, and on a host holding eleven gigabytes of journals
+/// throwing them away is the whole cost. So this asks the **kernel** what the
+/// process opened.
+///
+/// The **positive control** is what makes the silence a measurement: `results` over
+/// one of the same runs is a detail read, is traced the same way in the same
+/// journey, and does open the store. A tracer that saw nothing at all would pass the
+/// first half and fail the second.
+///
+/// **Linux, and deliberately not skipped anywhere.** There is no portable way to ask
+/// another process what it opened, so the observation is made on the platform this
+/// crate's deterministic tier and coverage floor are measured on, where it runs every
+/// time and refuses if it cannot.
+#[cfg(target_os = "linux")]
+#[test]
+fn unwatched_opens_no_run_store_that_is_there() {
+    let world = World::new("unwatched-traced");
+    world.script("build.work", "the worker wrote this\n");
+    // Three runs this session owns, in the three states this verb's settlement
+    // reading meets: a current document, none at all, and one behind its journal.
+    let current = settled(&world, "unwatchedcurrent");
+    let absent = settled(&world, "unwatchedabsent");
+    let stale = settled(&world, "unwatchedstale");
+    world.script("build.wait", "hold");
+    let reported = held(&world, "unwatchedheld");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb removes the document its run's
+    // journal writer maintains, and none moves it behind its journal: a build that never
+    // wrote one and a writer killed between its append and the document beside it are the two
+    // states under test. The stale document is this build's own with one recorded length
+    // moved, which is exactly what that writer would have left.
+    std::fs::remove_file(paths_of(&world, &absent).summary()).expect("the document");
+    let paths = paths_of(&world, &stale);
+    let mut behind = document(&paths);
+    behind["journal_len"] = json!(1);
+    std::fs::write(paths.summary(), behind.to_string()).expect("the document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let watched: Vec<String> = vec![current, absent, stale, reported.clone()];
+    for run in &watched {
+        assert!(
+            paths_of(&world, run).journal().is_file(),
+            "{run}'s merged store is not there, so this journey would be about nothing"
+        );
+    }
+
+    let opened = opened_by(&world, &["unwatched"], &world.root.join("trace.txt"));
+    // The trace is of the read under test: the launch records are what discovery
+    // opens, and this verb opened them.
+    for run in &watched {
+        let launch = paths_of(&world, run).launch().display().to_string();
+        assert!(
+            opened.contains(&launch),
+            "`onepipeline unwatched` never opened {run}'s launch record, so this trace is not \
+             of the read under test: {opened:?}"
+        );
+    }
+    for run in &watched {
+        let journal = paths_of(&world, run).journal();
+        assert!(
+            !opened.contains(&journal.display().to_string()),
+            "`onepipeline unwatched` opened {}: this verb may not read a run's merged event \
+             store, for any run and least of all for one whose document is absent or stale",
+            journal.display()
+        );
+    }
+    // And nothing named like one, however it was reached — a store opened through a
+    // relative path or another run's root is the same read.
+    let named_like_a_store = std::path::Path::new(&paths_of(&world, &reported).journal())
+        .file_name()
+        .expect("the journal has a name")
+        .to_owned();
+    assert!(
+        !opened
+            .iter()
+            .any(|path| std::path::Path::new(path).file_name() == Some(&*named_like_a_store)),
+        "`onepipeline unwatched` opened a run's merged event store: {opened:?}"
+    );
+
+    // The control. `results` folds by design, so it opens exactly what the verb
+    // above must not — which is what says the tracer was watching this binary's
+    // opens rather than recording an empty room.
+    let opened = opened_by(
+        &world,
+        &["results", &reported],
+        &world.root.join("trace-detail.txt"),
+    );
+    let journal = paths_of(&world, &reported).journal().display().to_string();
+    assert!(
+        opened.contains(&journal),
+        "`results` did not open the store it folds, so nothing above was observed: {opened:?}"
+    );
+    world.release("build.go");
+}
