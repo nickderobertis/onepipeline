@@ -2523,7 +2523,8 @@ pub fn ended(child: std::process::Child) {
     child.wait_with_output().expect("the child ends");
 }
 
-/// Wait until the kernel has finished writing back what a fixture just wrote.
+/// Give the kernel time to finish writing back what a fixture just wrote, and
+/// return whether it did.
 ///
 /// For the host-sized journeys, and for the one thing they measure that is not the
 /// code: each grows four hundred journals to ten gibibytes and then times a
@@ -2539,12 +2540,15 @@ pub fn ended(child: std::process::Child) {
 /// the whole of it, which is what makes a ratio between two measurements a
 /// statement about the command.
 ///
+/// **Bounded, and it says when the bound was what ended it** — which is why it is
+/// spelled as letting the writeback settle rather than as waiting until it has: a
+/// disk that is still busy after [`SETTLING`] gets the measurement it would have
+/// got anyway, on a line saying how much was left, rather than a suite that hangs.
+///
 /// **Linux, where the kernel says so.** `/proc/meminfo` carries `Dirty` and
 /// `Writeback` in kilobytes; everywhere else this returns at once, because there is
-/// no portable way to ask and a wait that guessed would be a sleep. It is bounded
-/// either way: a host that never settles gets the measurement it would have got
-/// anyway, and says so rather than hanging the suite.
-pub fn writeback_settled() {
+/// no portable way to ask and a wait that guessed would be a sleep.
+pub fn let_writeback_settle() {
     let settled = waited_for(SETTLING, std::time::Duration::from_millis(200), || {
         dirty_bytes().is_none_or(|held| held <= SETTLED_BYTES)
     });

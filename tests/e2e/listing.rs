@@ -44,7 +44,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, lifecycle, plan_of, writeback_settled, World};
+use crate::harness::{agent, let_writeback_settle, lifecycle, plan_of, World};
 
 use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION};
 
@@ -766,7 +766,7 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     // with the fixture rather than one still writing it: what is being compared is
     // the render, and the ten gibibytes written below would otherwise be in the
     // second figure and not the first.
-    writeback_settled();
+    let_writeback_settle();
     binary_in_cache();
 
     let mut before = Vec::new();
@@ -805,7 +805,7 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     }
     // And again, for the write that just happened — this is the one the ratio is
     // about, and `fsync` per file only puts that file's pages on the device.
-    writeback_settled();
+    let_writeback_settle();
     let grown = held(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,

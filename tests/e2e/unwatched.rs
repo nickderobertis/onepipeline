@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, writeback_settled, World, NODE_SETTLED, RUNS_UNWATCHED};
+use crate::harness::{agent, let_writeback_settle, plan_of, World, NODE_SETTLED, RUNS_UNWATCHED};
 
 use onepipeline::views::{RunPaths, WATCHER_SCHEMA_VERSION};
 
@@ -1278,7 +1278,7 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     // with the fixture rather than one still writing it: what is being compared is
     // the verb, and the ten gibibytes written below would otherwise be in the second
     // figure and not the first.
-    writeback_settled();
+    let_writeback_settle();
     binary_in_cache();
     let before = median(&world, &["unwatched"], RUNS_UNWATCHED);
     assert!(
@@ -1306,7 +1306,7 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
     }
     // And again, for the write that just happened — this is the one the ratio is
     // about, and `fsync` per file only puts that file's pages on the device.
-    writeback_settled();
+    let_writeback_settle();
     let grown = held_bytes(&assembled);
     assert!(
         grown >= bytes * JOURNAL_MULTIPLE,
