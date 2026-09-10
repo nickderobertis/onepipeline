@@ -596,29 +596,60 @@ impl Drop for Armed {
 /// characters.
 ///
 /// Two watches must not write one file, and a pid the kernel has handed round
-/// again must not land on its predecessor's record. Both halves of the value are
-/// for that: the counter tells two watches armed in one process apart, and the
-/// clock tells this process's watches from those of whatever held the pid before
-/// it.
+/// again must not land on its predecessor's record. Both halves are for that: the
+/// counter tells two watches armed in one process apart, and the seed tells this
+/// process's watches from those of whatever held the pid before it.
 ///
-/// **It does not promise more than that, and does not need to.** A clock this host
-/// will not read leaves the first half at zero, so a reused pid whose predecessor
-/// also met a broken clock could compose the same name — and even then nothing is
-/// lost, because the two are never on disk together: the predecessor's record names
-/// the same pid with *its* start token, which this host proves is not this process,
-/// so the sweep this writer runs before it writes has already removed it.
+/// **A clock this host would not read is not time zero.** What stood here mixed
+/// the wall clock with a zero substituted where it could not be read, which on
+/// such a host left the whole name a function of a counter that restarts with the
+/// process — so two watches that met a broken clock could compose one name, and
+/// the identity was unique per *process* rather than per watch. It defended that
+/// on the sweep having already removed the predecessor's record, and that defence
+/// is false: a record whose owner this host cannot disprove is deliberately kept
+/// ([`WatchStanding::proved_gone`]). So the seed below is what a name is told
+/// apart by, the clock is one contributor to it and never the only one, and a
+/// clock nobody read contributes nothing rather than a value nobody took.
 ///
 /// Staleness is never decided by a name. What this buys is only that two live
 /// records are two files.
 fn nonce() -> String {
     static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
-        });
-    format!("{nanos:016x}{seq:04x}")
+    minted(
+        seq,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_nanos()),
+    )
+}
+
+/// The name itself, out of the counter and whatever the clock gave.
+///
+/// Taken apart from the host that answers it for the reason [`token_standing`] is:
+/// a clock this host will not read cannot be staged by a journey on a host whose
+/// clock works, and it is the exact case the value this replaces got wrong. Handed
+/// the reading as a value, the case is drivable — see this module's own tests.
+///
+/// The seed is a fresh [`std::collections::hash_map::RandomState`], whose
+/// documented property is the whole of what is wanted here: two of them are
+/// unlikely to produce the same result for the same values. It is seeded from the
+/// host's own randomness rather than from anything this process could fail to
+/// read, so unlike the clock it has no absent answer to fold.
+fn minted(seq: u64, clock: Option<u128>) -> String {
+    use std::hash::{BuildHasher, Hasher};
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(seq);
+    // Contributed only where it was read. A reading nobody took is not a reading
+    // of zero, and writing one in would put every watch on a clockless host back
+    // on the one name its counter gives.
+    if let Some(nanos) = clock {
+        hasher.write_u128(nanos);
+    }
+    let seeded = hasher.finish();
+    format!("{seeded:016x}{seq:04x}")
 }
 
 #[cfg(test)]
@@ -736,6 +767,43 @@ mod tests {
         );
 
         assert_ne!(nonce(), nonce());
+    }
+
+    /// A name is told apart by something that cannot be absent, so a clock this
+    /// host would not read takes nothing away from it.
+    ///
+    /// The regression this stands on is exact. The value this replaced was the
+    /// wall clock with a zero written in where it could not be read, beside a
+    /// counter that restarts with the process — so on a host whose clock answers
+    /// nothing, every first watch of every process minted the *same* name, and the
+    /// identity was unique per process where it has to be unique per watch. Driven
+    /// here rather than through a journey because no journey on a host whose clock
+    /// works can stage the reading: [`minted`] takes it as a value for exactly
+    /// that.
+    ///
+    /// Both halves are asserted, because both are the defect: the same counter
+    /// with **no** clock, which is the host that broke it, and the same counter
+    /// with the **same** clock, which is what two processes on a stopped one see.
+    #[test]
+    fn two_watches_that_read_no_clock_at_all_are_still_two_names() {
+        assert_ne!(
+            minted(7, None),
+            minted(7, None),
+            "a clock this host would not read left the name a function of the counter, and a \
+             counter restarts with the process"
+        );
+        assert_ne!(
+            minted(0, Some(1_757_000_000_000_000_000)),
+            minted(0, Some(1_757_000_000_000_000_000)),
+            "two watches that read one instant composed one name"
+        );
+        // And it is still the shape entry 68 states, whatever the clock said.
+        for name in [minted(0, None), minted(u64::MAX, Some(u128::MAX))] {
+            assert!(
+                name.len() >= 8 && name.chars().all(|c| c.is_ascii_hexdigit()),
+                "`{name}` is not the hexadecimal name entry 68 asks for"
+            );
+        }
     }
 
     /// The instant this crate's own writer produces is one, and the shapes RFC
