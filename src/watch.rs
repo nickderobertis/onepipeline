@@ -4,10 +4,13 @@
 //! the proposal it waits on and the record of what this cost before there was a
 //! verb; the README documents it for a caller. Neither is restated here.
 //!
-//! The one thing worth saying beside the code: everything in this module
-//! **reads**, exactly as [`crate::views`] does. A watch takes no lock a writer
-//! needs, consumes no surface and records nothing, so any number of them may sit
-//! on a live run at once — watching a run is not supervising it.
+//! The one thing worth saying beside the code: this module takes no lock a writer
+//! needs and consumes no surface, so any number of watches may sit on a live run
+//! at once — watching a run is not supervising it. The single exception, and the
+//! reason there is now something to say: a watch records **itself**, in one
+//! document per live watch under the run's own root, so that a process which is
+//! not watching the run can ask whether anything is. That record is
+//! [`crate::watchers`], and `onepipeline unwatched` is what reads it.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -156,6 +159,16 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
     let mut view = RunView::open(paths)?;
     let mut fresh = tail(paths, &mut cursor);
     let selectors = Selectors::resolve(&args.until, &view, &fresh)?;
+
+    // The record that says this run is being watched, written once every refusal
+    // above has been made — a command that never watched anything leaves no
+    // evidence that it did — and removed when this returns. It is the one thing
+    // this verb writes, and it is written **best effort and silently**: a runs
+    // root this process may not write costs a reader the knowledge that this watch
+    // exists and costs the watch itself nothing, so it changes neither this verb's
+    // output nor any of its statuses. See `src/watchers.rs` for why its absence
+    // may never be relied upon.
+    let _armed = crate::watchers::Armed::arm(paths);
 
     loop {
         for event in fresh

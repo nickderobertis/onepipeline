@@ -105,6 +105,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let filter = read_filter(&view, &args.read)?;
             crate::watch::watch(&args, &paths, &filter)
         }
+        Verb::Unwatched(args) => crate::unwatched::unwatched(&args),
         Verb::Results(args) => {
             print!("{}", views::results(&RunView::open(&resolve(&args.run)?)?));
             Ok(EXIT_SUCCESS)

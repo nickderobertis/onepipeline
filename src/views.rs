@@ -92,6 +92,20 @@ pub use crate::ledger::RunPaths;
 /// node: a field a consumer cannot name is a field it cannot read.
 pub use crate::summary::{Listing, NodeLanding, RunSummary, SUMMARY_SCHEMA_VERSION};
 
+/// What says a run is being **watched**, and what a reader makes of it now.
+///
+/// Re-exported where the views are, because deciding whether anything is watching
+/// a run is a read of the same kind as deciding whether anything is driving it —
+/// and a consumer that cannot name the record cannot render a run's watchers.
+/// [`Watchers::of`] is how the records are reached: the directory they sit in
+/// stays private, so a reader asks rather than composing a path.
+///
+/// The asymmetry is **inverted** against [`DriverLiveness`], deliberately, and
+/// `src/watchers.rs` states why: for a driver the worse error is reporting live
+/// work as dead, and for a watch it is reporting a run as watched while nothing is
+/// watching it.
+pub use crate::watchers::{Watch, WatchStanding, WatcherRecord, Watchers, WATCHER_SCHEMA_VERSION};
+
 /// One run's timing and usage, with a breakdown that sums exactly to its wall
 /// clock.
 ///
@@ -1325,6 +1339,18 @@ fn review_then_supersede(run: &str, rejected: &HeldNodes) -> String {
 /// there would send a planner to intervene in finished work.
 pub fn liveness_word(view: &RunView) -> &'static str {
     Standing::of(view).word()
+}
+
+/// The same word off one row of a **bounded listing**, for a verb that reports a
+/// run without folding it.
+///
+/// The listing's own reading, reached rather than reimplemented: `runs` prints
+/// this word for this run, and a second derivation of it would be a second
+/// standing to keep true. Reading it costs what a row costs — the host's answer
+/// about the recorded driver and the run's own channel — and no part of the run's
+/// merged event store.
+pub(crate) fn summary_standing_word(root: &Path, summary: &RunSummary) -> &'static str {
+    Standing::of_row(&Row::of(root, summary)).word()
 }
 
 /// Whether a run has **settled**: every node of its graph reached a state the

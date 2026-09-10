@@ -73,6 +73,13 @@ mod store;
 mod summary;
 mod surface;
 mod turns;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/unwatched.rs` and is not restated here; this declaration is the other
+// site the rule reads, and what it adds is only that the module belongs to this binary for
+// the same reason `mod listing` above does — what it exercises is `watchers`, `unwatched`,
+// `summary` and `views`, which any change under `src/` can move.
+mod unwatched;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod views;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] twelve journeys,
 // 15.1s together, driving the binary they test — cheaper than single journeys already in

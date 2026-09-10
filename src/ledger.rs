@@ -253,6 +253,37 @@ impl RunPaths {
         self.dir.join("checkpoint.json")
     }
 
+    /// The directory holding one record per live **watch** of this run.
+    ///
+    /// A directory of small records rather than one document, for the reason
+    /// [`dispatches`](Self::dispatches) is one: any number of watches may sit on
+    /// one run at once and they start and end independently, so a single file
+    /// would be read, edited, and rewritten by several of them and a lost update
+    /// there is a watch nothing can find.
+    ///
+    /// Crate-visible, like [`checkpoint`](Self::checkpoint) and unlike its
+    /// neighbours here: `docs/contract.md` names six members of this type, and a
+    /// reader of these records reaches them through
+    /// [`views::Watchers::of`](crate::views::Watchers::of) rather than by
+    /// composing a path — so publishing the directory would be a second promise
+    /// about the same documents.
+    pub(crate) fn watchers(&self) -> PathBuf {
+        self.dir.join("watchers")
+    }
+
+    /// One watch's record, named by the process holding it and a value unique to
+    /// that watch.
+    ///
+    /// Both halves are load-bearing. The pid alone is not a name: several watches
+    /// of one run may run in one process, and two of them would write one entry
+    /// with the first to end taking the survivor's record away. And a pid the
+    /// kernel has handed round again is not its predecessor, so a name that were
+    /// only a pid would let a new watch land on an old record — which is why
+    /// staleness is decided by a record's *content* and never by its name.
+    pub(crate) fn watcher(&self, pid: u32, nonce: &str) -> PathBuf {
+        self.watchers().join(format!("{pid}-{nonce}.json"))
+    }
+
     /// The single-writer ownership lock the engine verbs hold.
     pub fn lock(&self) -> PathBuf {
         self.dir.join("owner.lock")

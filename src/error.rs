@@ -133,6 +133,22 @@ pub const EXIT_SURFACE_WAITING: i32 = 4;
 /// watch printed.
 pub const EXIT_WATCH_ELAPSED: i32 = 5;
 
+/// At least one run this session owns has nothing watching it.
+///
+/// `unwatched`'s own answer, and a status rather than the refused
+/// [`EXIT_REFUSED`] because a caller has to tell "runs are unwatched" from "this
+/// verb could not answer": a hook that read a refusal as an answer would go quiet
+/// on exactly the runs it was installed to find, and one that read the answer as a
+/// refusal would report every turn as broken.
+///
+/// **The same number [`EXIT_NODE_SETTLED`] carries, on a different verb.** These
+/// codes are a per-verb protocol — `4`, `5` and `6` are `watch`'s five returns and
+/// no other verb spells any of them — so the pair is one number with two meanings
+/// on two commands rather than one meaning overloaded, and a caller of either verb
+/// branches unambiguously. Named separately so that neither verb's returns are read
+/// off the other's constant.
+pub const EXIT_RUNS_UNWATCHED: i32 = 6;
+
 /// A node the wait was told to return on settled.
 ///
 /// `watch`'s fifth return, and a status of its own for the same reason the two

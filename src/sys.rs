@@ -962,6 +962,93 @@ fn platform_process_may_be_live(pid: u32) -> bool {
     waited != WAIT_OBJECT_0
 }
 
+/// Whether a process has **terminated and is only waiting for its parent to reap
+/// it**.
+///
+/// Asked separately because it is the one death both halves of the ordinary proof
+/// report as life. A terminated child whose parent has not `wait`ed for it keeps
+/// its pid — that is the whole reason the kernel keeps the entry — so
+/// [`process_may_be_live`] answers `true` for it, and `/proc/<pid>/stat` still
+/// carries the very start ticks [`process_start_token`] was read from, so a token
+/// recorded while it was working still matches. Driven on a Linux host on
+/// 2026-09-09: `state field: Z | start ticks: 176110055 | kill(pid,0) succeeded`.
+/// Only the state field moves.
+///
+/// That matters most where it is most likely: a process killed by a parent that
+/// then goes on running is a zombie until that parent reaps it or dies, which is
+/// exactly what a watch killed out from under a supervisor looks like.
+///
+/// `true` only where this host **says so**. Every other answer — a process that
+/// is running, a pid this host will not describe — is `false`, because this is a
+/// reading of one specific state rather than a liveness verdict: a caller for
+/// which the unknown resolves toward "gone" gets that from the token comparison
+/// beside this, which needs the same unreadable record.
+pub fn process_terminated_awaiting_parent(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    platform_process_terminated_awaiting_parent(pid)
+}
+
+/// From Linux's own process record: field 3 of `/proc/<pid>/stat`, which is `Z`
+/// for a terminated process nobody has reaped.
+///
+/// Parsed from the final `)` for the reason [`platform_process_start_token`]
+/// states — the parenthesized command in field 2 may itself hold spaces and
+/// parentheses — after which the state is the first whitespace-separated value.
+#[cfg(target_os = "linux")]
+fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, after_command)| after_command.split_whitespace().next())
+        == Some(ZOMBIE_STATE)
+}
+
+/// Through `ps` on the Unix targets without procfs, in the fixed environment
+/// [`ps_process_start_token`] uses and for the same reason: the reading has to be
+/// a function of the process rather than of whoever is asking.
+///
+/// `state` is a code whose first character is the state itself and whose
+/// remainder is the flags `ps` decorates it with, so a zombie is `Z` followed by
+/// anything.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
+    crate::rendercost::process_spawned("ps");
+    let Ok(listed) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "state="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !listed.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(|state| state.starts_with(ZOMBIE_STATE))
+}
+
+/// Never on Windows, and not because the question is unanswerable there: a
+/// terminated process is not a live one whoever still holds a handle to it, and
+/// [`process_may_be_live`] already says so — it asks the handle, which becomes
+/// signalled when and only when the process ends, so there is no state here that
+/// reads as alive.
+#[cfg(windows)]
+fn platform_process_terminated_awaiting_parent(_pid: u32) -> bool {
+    false
+}
+
+/// How a Unix host spells a terminated process its parent has not reaped.
+#[cfg(unix)]
+const ZOMBIE_STATE: &str = "Z";
+
 /// What a host says about when one process started, kept as the opaque thing it
 /// is.
 ///
