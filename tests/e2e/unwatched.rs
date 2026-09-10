@@ -1545,3 +1545,75 @@ fn arming_a_watch_sweeps_the_records_it_has_proved_are_not_live_and_nothing_else
     watching.wait_with_output().expect("the watch returns");
     world.release("build.go");
 }
+
+/// A watch whose record cannot be written **runs exactly as it does without one**,
+/// and the run it is watching reads unwatched with the reason said out loud.
+///
+/// The write is best effort and silent, and this is both halves of what that has to
+/// mean. A runs root this process may not write costs a reader the knowledge that
+/// this watch exists and costs the watch itself nothing — so the verb's status and
+/// its records are the same as a watch that recorded itself, asserted against a
+/// control run in the same journey rather than against a remembered value. And the
+/// question asked about the run answers **unwatched**, because that is where every
+/// unknown here resolves: a watch nothing recorded is indistinguishable from no
+/// watch, and re-arming one is what clears it.
+#[test]
+fn a_watch_that_cannot_write_its_record_runs_as_it_does_with_one() {
+    let world = World::new("unwatched-unwritable");
+    world.script("build.wait", "hold");
+    let blocked = held(&world, "unwatchedblocked");
+    let control = held(&world, "unwatchedcontrol");
+
+    // A file where the directory of records goes, so creating it fails on every
+    // platform this builds for.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb puts a file there, and what
+    // this stands in for is a runs root the watching process may not write — a permission
+    // this crate cannot set portably, and one no interface offers. What is asserted
+    // afterwards is read off the compiled binary's own streams.
+    std::fs::write(watchers_dir(&world, &blocked), "not a directory")
+        .expect("something where the records go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // `--timeout 0` reads the run once and returns, which is a whole watch: it arms,
+    // reads, and reports. Both runs are in the same state, so both must answer the
+    // same way.
+    let watched = world.run(&["watch", &blocked, "--timeout", "0"]);
+    let same = world.run(&["watch", &control, "--timeout", "0"]);
+    assert_eq!(
+        watched.code, same.code,
+        "a watch that could not record itself returned {} where the same watch on a \
+         comparable run returned {}",
+        watched.code, same.code
+    );
+    let condition = |run: &crate::harness::Run| -> Value {
+        let last: Value = serde_json::from_str(
+            run.stdout
+                .lines()
+                .rfind(|line| !line.trim().is_empty())
+                .unwrap_or_else(|| panic!("`onepipeline {}` wrote nothing", run.args)),
+        )
+        .expect("the watch's last record is JSON");
+        json!({"watch": last["watch"], "condition": last["condition"], "exit": last["exit"]})
+    };
+    assert_eq!(
+        condition(&watched),
+        condition(&same),
+        "a watch that could not record itself wrote a different return record"
+    );
+    // The control did record itself and cleaned up after returning, which is what
+    // says the comparison above was against a watch that took the path this one
+    // could not.
+    assert!(
+        watchers_dir(&world, &control).is_dir(),
+        "the control watch never created the directory of records, so nothing distinguishes \
+         it from the blocked one"
+    );
+
+    // And the run whose watch left no record reads unwatched, with what could not be
+    // resolved named on standard error.
+    let asked = world.run(&["unwatched"]);
+    asked.exited(RUNS_UNWATCHED).out_has(&blocked);
+    asked.err_has(&blocked).err_has("watcher directory");
+    world.release("build.go");
+}

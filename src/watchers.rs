@@ -268,12 +268,9 @@ fn records(paths: &RunPaths) -> Vec<(PathBuf, Result<WatcherRecord, String>)> {
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        // llmlint: ignore-block[changed_behavior_has_e2e] a directory that exists and will
-        // not open, and an entry the filesystem lists and then refuses to name, are host
-        // conditions no portable journey can set — `src/ledger.rs`'s own listing carries
-        // the same suppression for the same two arms. What a user reaches is a *record*
-        // that cannot be read, and that is driven through the binary in
-        // `tests/e2e/unwatched.rs`.
+        // A directory that will not open at all. Reached by a watch that could not
+        // write its record — something else is at that path — which
+        // `tests/e2e/unwatched.rs` drives through the binary.
         Err(error) => {
             return vec![(
                 dir,
@@ -288,15 +285,22 @@ fn records(paths: &RunPaths) -> Vec<(PathBuf, Result<WatcherRecord, String>)> {
                 let record = read_record(&path);
                 (path, record)
             }
+            // llmlint: ignore-block[changed_behavior_has_e2e] an entry the filesystem lists
+            // and then refuses to describe is a host condition no portable journey can set
+            // — `src/ledger.rs`'s own listing carries the same suppression for the same
+            // arm. What it must not do is drop the entry, which would report an incomplete
+            // look at the directory as a complete one; the two answers a user *can* reach,
+            // a directory that will not open and a record that will not parse, are both
+            // driven through the binary in `tests/e2e/unwatched.rs`.
             Err(error) => (
                 dir.clone(),
                 Err(format!(
                     "an entry under the watcher directory cannot be read: {error}"
                 )),
             ),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         })
         .collect();
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     read.sort_by(|a, b| a.0.cmp(&b.0));
     read
 }

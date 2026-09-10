@@ -45,8 +45,9 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
     let session = session(args)?;
     let root = ledger::runs_root();
     let mut reported: Vec<String> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
-    for paths in owned_by(&root, &session)? {
+    let owned = owned_by(&root, &session)?;
+    let mut unresolved: Vec<String> = owned.unresolved;
+    for paths in owned.runs {
         match decide(&paths) {
             Decided::Settled => {}
             Decided::Undecidable(reason) => {
@@ -133,10 +134,10 @@ fn session(args: &UnwatchedArgs) -> Result<String> {
 /// exists and cannot be read **is** — it is the question this verb cannot ask,
 /// and answering it as "nothing is unwatched" is the silence the whole verb exists
 /// to end.
-fn owned_by(root: &Path, session: &str) -> Result<Vec<RunPaths>> {
+fn owned_by(root: &Path, session: &str) -> Result<Owned> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Owned::default()),
         Err(error) => {
             return Err(Error::Ledger {
                 path: root.to_path_buf(),
@@ -144,8 +145,26 @@ fn owned_by(root: &Path, session: &str) -> Result<Vec<RunPaths>> {
             })
         }
     };
-    let mut owned = Vec::new();
-    for entry in entries.flatten() {
+    let mut owned = Owned::default();
+    for entry in entries {
+        // llmlint: ignore-block[changed_behavior_has_e2e] an entry the filesystem lists and
+        // then refuses to describe is a host condition no portable journey can set —
+        // `src/ledger.rs`'s own listing carries the same suppression for the same arm. What
+        // it must not do is what it did before this arm existed: a scan that dropped it
+        // silently would report an *incomplete* look at the root as a complete one, which
+        // for this verb is a run nobody is watching passed over without a word.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                owned.unresolved.push(format!(
+                    "{}: an entry under the runs root cannot be read, so this look at it is \
+                     incomplete: {error}\n",
+                    root.display()
+                ));
+                continue;
+            }
+        };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let paths = RunPaths::under(root, &entry.file_name().to_string_lossy());
         // The launch record and nothing else. Read leniently, exactly as every
         // other reader of it: a record this build cannot parse names no session,
@@ -154,10 +173,26 @@ fn owned_by(root: &Path, session: &str) -> Result<Vec<RunPaths>> {
             continue;
         };
         if launch.owned_by(session) {
-            owned.push(paths);
+            owned.runs.push(paths);
         }
     }
     Ok(owned)
+}
+
+/// What discovery found: the runs the session owns, and what it could not resolve.
+///
+/// The second half is why this is a value rather than a list. Discovery is a walk
+/// over somebody else's directory, and an entry it is refused is **not** the same
+/// fact as a root that belongs to nobody: one is a run this verb decided about, and
+/// the other is a run it never saw. A scan that dropped the second silently would
+/// report an incomplete look at the root as a complete one — and for this verb, an
+/// incomplete look is exactly how a run nobody is watching goes unmentioned.
+#[derive(Default)]
+struct Owned {
+    /// The run roots whose launch record names the resolved session.
+    runs: Vec<RunPaths>,
+    /// What could not be resolved, each already worded for standard error.
+    unresolved: Vec<String>,
 }
 
 /// What this build could establish about one run's settlement.
