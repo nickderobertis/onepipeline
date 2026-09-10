@@ -43,7 +43,7 @@ use serde_json::{json, Value};
 
 use crate::harness::{agent, let_writeback_settle, plan_of, World, NODE_SETTLED, RUNS_UNWATCHED};
 
-use onepipeline::views::{RunPaths, WATCHER_SCHEMA_VERSION};
+use onepipeline::views::{RunPaths, SUMMARY_SCHEMA_VERSION, WATCHER_SCHEMA_VERSION};
 
 /// The status that says nothing this session owns is unwatched.
 ///
@@ -651,6 +651,103 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
     );
 }
 
+/// The four words a reported run's line can carry, as entry 68 states them.
+///
+/// Named as a set because the one journey that cannot predict which of them it
+/// will get is the one below: the word there is read from the launch record alone,
+/// and what that record says about the driver is what the host says about a pid
+/// now.
+const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
+
+/// A document at a schema this build has **moved past** is *decided*: the run is
+/// reported when nothing is watching it, and it counts toward the non-zero exit.
+///
+/// The distinction this journey exists for is between an answer and the absence of
+/// one, and it is the whole of why the two are not one arm. A document that is
+/// absent, half-written, or another run's leaves this build with nothing to say
+/// about the run — that is named on standard error and changes no status. A
+/// document at a superseded schema is *there*, is well-formed, and says outright
+/// that its fields are an earlier build's to mean: which settles the only question
+/// this verb asks of it, in the negative. It proves nothing, so the run is not
+/// excluded — and a run this verb exists to find must never be silenced by a
+/// reading nobody could take.
+///
+/// The fixture is chosen so that the two readings **disagree**: the document says
+/// the run stopped and its graph completed, so read by this build's own meaning it
+/// would be excluded outright, and the version is exactly what says this build may
+/// not read it that way. A run whose writer has finished is used for the same
+/// reason a settled run is used everywhere the document is edited by hand — it is
+/// the one state in which nothing is going to rewrite the file underneath the
+/// assertion.
+///
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes a document at a schema
+// this build has moved past, and none could: the writer stamps its own version. The state
+// is left by a run recorded under an earlier build and read under this one, and what is put
+// back is this build's own document with that one field moved. Every claim afterwards is
+// read off the compiled binary's own streams.
+#[test]
+fn a_document_at_a_superseded_schema_is_decided_rather_than_passed_over() {
+    let world = World::new("unwatched-superseded");
+    world.script("build.work", "the worker wrote this\n");
+    let run = settled(&world, "unwatchedsuperseded");
+    let paths = paths_of(&world, &run);
+    let written = document(&paths);
+
+    // At its own version the run is excluded, which is what the change below has
+    // to be measured against.
+    let asked = world.run(&["unwatched"]);
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "the fixture is not an excluded run: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+    assert!(
+        written["stop_recorded"] == json!(true) || written["graph_complete"] == json!(true),
+        "the document does not say the run settled, so refusing to read it proves nothing: \
+         {written}"
+    );
+
+    let mut older = written.clone();
+    older["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
+    std::fs::write(paths.summary(), older.to_string()).expect("the document");
+
+    let asked = world.run(&["unwatched"]);
+    asked
+        .exited(RUNS_UNWATCHED)
+        .out_has(&run)
+        .out_has("nothing has recorded a watch on it")
+        .out_has(&format!("onepipeline watch {run}"));
+    assert!(
+        asked.stderr.is_empty(),
+        "a run this verb decided about was also named as one it could not: {}",
+        asked.stderr
+    );
+    let reported = asked.stdout.lines().next().unwrap_or_default().to_string();
+    assert!(
+        STANDING_WORDS.iter().any(|word| reported.contains(word)),
+        "the line carries none of the words entry 68 states: {reported}"
+    );
+
+    // And beside a run nothing could be decided about, each answer lands where it
+    // belongs: the superseded one is on standard output and in the status, the
+    // undecided one is on standard error and in neither.
+    let undecided = settled(&world, "unwatchedalongside");
+    std::fs::remove_file(paths_of(&world, &undecided).summary()).expect("the document");
+    let asked = world.run(&["unwatched"]);
+    asked
+        .exited(RUNS_UNWATCHED)
+        .out_has(&run)
+        .err_has(&undecided);
+    assert!(
+        !asked.stdout.contains(&undecided),
+        "the undecided run reached standard output: {}",
+        asked.stdout
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// One state a summary document can be left in, and the way it is reached: what it
 /// is called, and what to do to the file to put it there.
 type Undecidable = (&'static str, fn(&std::path::Path, &Value));
@@ -660,7 +757,16 @@ type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 ///
 /// Function pointers rather than a table of data, because what distinguishes them
 /// is what is done to the file: a build that never wrote a document, a writer
-/// killed mid-write, and a build whose schema predates this one.
+/// killed mid-write, and a build that knows more than this one.
+///
+/// **A schema this build has moved past is deliberately not here.** It is an
+/// answer rather than the absence of one — the file is there, it is well-formed,
+/// and it says outright that its fields are an earlier build's to mean, which
+/// settles the only question asked of it: it proves nothing, so the run is not
+/// excluded. `a_document_at_a_superseded_schema_is_decided_rather_than_passed_over`
+/// is that half. A version *ahead* of this build is the one that stays here, and it
+/// is a different fact: a document written by a build that knows things this one
+/// does not, which this one has no reading of at all.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts the document
 // its run's journal writer maintains, and none could — each of the four is left by a
@@ -675,11 +781,11 @@ const UNDECIDABLE: [Undecidable; 4] = [
         std::fs::write(path, "{\"schema_ver").expect("the document");
     }),
     (
-        "a document at the schema a previous build wrote",
+        "a document at the schema a later build wrote",
         |path, written| {
-            let mut older = written.clone();
-            older["schema_version"] = json!(1);
-            std::fs::write(path, older.to_string()).expect("the document");
+            let mut ahead = written.clone();
+            ahead["schema_version"] = json!(SUMMARY_SCHEMA_VERSION + 1);
+            std::fs::write(path, ahead.to_string()).expect("the document");
         },
     ),
     ("a document that is another run's", |path, written| {
@@ -792,11 +898,14 @@ fn store_unreadable(paths: &RunPaths) {
 ///
 /// Four ways to reach it, because they are one fact to a reader and four different
 /// things on disk: no document, one that cannot be read, one at a schema version
-/// this build refuses, and one that is *another run's* — which is what a copied run
-/// root leaves, and is no more a description of this run than a document nobody
+/// **ahead** of this build, and one that is *another run's* — which is what a copied
+/// run root leaves, and is no more a description of this run than a document nobody
 /// wrote. Such a run is most often an old settled run
 /// whose document is gone, and blocking on it would never clear by watching it —
 /// so it is said out loud and passed over.
+///
+/// A schema this build has **moved past** is not one of the four, and the reason it
+/// is not is stated where the four are.
 #[test]
 fn a_run_whose_settlement_cannot_be_decided_is_named_on_standard_error_and_changes_no_status() {
     let world = World::new("unwatched-undecidable");

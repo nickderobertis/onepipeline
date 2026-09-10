@@ -39,8 +39,8 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
     let mut reported: Vec<String> = Vec::new();
     let owned = discover_owned_runs(&root, &session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
-    for paths in owned.runs {
-        match decide(&paths) {
+    for (paths, launch) in owned.runs {
+        match decide(&paths, &launch) {
             Decided::Settled => {}
             Decided::Undecidable(reason) => {
                 unresolved.push(format!("{}: {reason}\n", paths.run));
@@ -203,7 +203,7 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
             continue;
         };
         if launch.owned_by(session) {
-            owned.runs.push(paths);
+            owned.runs.push((paths, launch));
         }
     }
     Ok(owned)
@@ -219,8 +219,14 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
 /// incomplete look is exactly how a run nobody is watching goes unmentioned.
 #[derive(Default)]
 struct Discovered {
-    /// The run roots whose launch record names the resolved session.
-    runs: Vec<RunPaths>,
+    /// The run roots whose launch record names the resolved session, each with
+    /// the record that proved it.
+    ///
+    /// The record is carried rather than re-read: it was opened to decide
+    /// ownership, and it is the one thing this build can still say about a run
+    /// whose own summary document it may not read. Reading it a second time later
+    /// would be a second open per owned run for a fact already in hand.
+    runs: Vec<(RunPaths, LaunchRecord)>,
     /// What could not be resolved, each already worded for standard error.
     unresolved: Vec<String>,
 }
@@ -234,7 +240,9 @@ enum Decided {
     /// Nothing **proved** it settled, which is not the same as proving it is
     /// still going and is deliberately not named as though it were: a document
     /// that says a run stopped while standing behind its journal is in here too,
-    /// because a stale document is not proof of anything it says.
+    /// because a stale document is not proof of anything it says — and so is one
+    /// declaring a schema this build has moved past, whose fields say nothing this
+    /// build may read either way.
     ///
     /// Boxed because the document is the largest thing here by two orders of
     /// magnitude, and this value is built once per owned run: an unboxed variant
@@ -254,21 +262,46 @@ enum Decided {
 /// behind its journal is exactly what a run *still recording* looks like, and
 /// treating that as proof of settlement is how the one run this verb exists to
 /// find would be dropped.
-fn decide(paths: &RunPaths) -> Decided {
-    let summary = match std::fs::read_to_string(paths.summary())
-        .map_err(|error| format!("{error}"))
-        .and_then(|text| {
-            serde_json::from_str::<RunSummary>(&text).map_err(|error| format!("{error}"))
-        }) {
-        Ok(summary) => summary,
+///
+/// The other asymmetry is between the two ways a document can fail to be read.
+/// **An answer that could not be obtained is not an answer**, and on this path it
+/// must never be the one that silences a run — so a document that declares a
+/// version this build has moved past is *decided*: it is there, it is well-formed,
+/// and it says its fields are an earlier build's to mean, which settles the only
+/// question asked of it in the negative. Only a document that is absent, that this
+/// build could not read at all, or that is another run's leaves the question
+/// unasked.
+fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
+    let text = match std::fs::read_to_string(paths.summary()) {
+        Ok(text) => text,
         // Most often an old settled run whose document is gone, and blocking on it
         // would never clear by watching it — so it is named and passed over rather
         // than reported.
-        Err(reason) => {
+        Err(error) => {
             return Decided::Undecidable(format!(
                 "its settlement cannot be decided: its summary document could not be read: \
-                 {reason}"
+                 {error}"
             ))
+        }
+    };
+    let summary = match serde_json::from_str::<RunSummary>(&text) {
+        Ok(summary) => summary,
+        Err(refusal) => {
+            // A schema this build has moved past is the one refusal that is still
+            // an answer, and the answer is that this document proves nothing: the
+            // run is not excluded, and it is reported when nothing is watching it.
+            // The word on that line is then read from the launch record alone,
+            // because reading a field of *this* document would be reading it by a
+            // meaning its own version says is not this build's.
+            if crate::summary::version_this_build_moved_past(&text).is_some() {
+                return Decided::NotProvenSettled(Box::new(RunSummary::of_launch_alone(
+                    paths, launch,
+                )));
+            }
+            return Decided::Undecidable(format!(
+                "its settlement cannot be decided: its summary document could not be read: \
+                 {refusal}"
+            ));
         }
     };
     if summary.run_id != paths.run {

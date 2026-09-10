@@ -97,6 +97,36 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
     Ok(found)
 }
 
+/// The version a document *declares*, where it declares one this build has
+/// **moved past**.
+///
+/// Asked only where the strict read above has already refused, so a document at
+/// this build's own version is still parsed exactly once. What it answers is a
+/// **decision** rather than the absence of one: the file is there, it is
+/// well-formed, and it says outright that its fields mean what an earlier build
+/// meant by them. That settles the one thing `unwatched` ever asks a document —
+/// whether it proves the run stopped — in the negative, because nothing in it may
+/// be read as this build's `stop_recorded` or `graph_complete`.
+///
+/// **Only backwards.** A version *ahead* of this build was written by a build
+/// that knows things this one does not, and this one has no reading of it at all,
+/// not even that negative one. It stays what every other reader here makes of it:
+/// refused, and reported as a document that could not be read.
+pub(crate) fn version_this_build_moved_past(text: &str) -> Option<u32> {
+    /// The version field on its own, read **open** — every other key ignored,
+    /// because the whole point is to read a document whose other keys are another
+    /// build's to mean.
+    #[derive(Deserialize)]
+    struct Declared {
+        schema_version: u32,
+    }
+
+    serde_json::from_str::<Declared>(text)
+        .ok()
+        .map(|declared| declared.schema_version)
+        .filter(|declared| *declared < SUMMARY_SCHEMA_VERSION)
+}
+
 /// One node's change, as the **inputs** a listing decides its landing from.
 ///
 /// Everything here is a record of what the run observed; the decision itself is
@@ -432,6 +462,38 @@ impl RunSummary {
             }
         }
         self
+    }
+
+    /// The row this build can honestly render for a run whose own document it may
+    /// **not** read: the launch record, and no records at all.
+    ///
+    /// Not a document, and never written as one. `unwatched` builds one to reach
+    /// the listing's own standing word for a run whose summary declares a schema
+    /// this build has moved past — a run it must report rather than fold, so the
+    /// word has to come from what this build actually read. Everything a store
+    /// would have contributed is what a run that has recorded nothing carries,
+    /// because nothing is what was read; the launch record supplies the rest, and
+    /// it is the record every reader of a run already takes the driver's host and
+    /// pid from.
+    ///
+    /// The consequence is stated rather than hidden: with no `last_write_at` to
+    /// measure quiet against, such a run reads `ACTIVE` or `DRIVER DEAD` and never
+    /// `PARKED`. That is what the evidence supports, and the alternative — taking
+    /// a number out of a document whose own version says it means something else —
+    /// is exactly what that version exists to refuse.
+    pub(crate) fn of_launch_alone(paths: &RunPaths, launch: &LaunchRecord) -> Self {
+        Self::derive(
+            &paths.run,
+            launch,
+            &Store {
+                state: &RunState::default(),
+                event_count: 0,
+                last_event_kind: None,
+                timing: &telemetry::of_run(paths, &[]),
+                judged: &BTreeSet::new(),
+            },
+            (0, 0),
+        )
     }
 
     /// The same summary, always by folding the whole store.
