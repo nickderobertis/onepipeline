@@ -307,18 +307,25 @@ fn stamped(paths: &RunPaths, summary: &RunSummary) -> bool {
         // nothing is watching it. That is where every unknown on this path resolves.
         Err(_) => return false,
     };
-    let modified = about
+    // The same rule as the metadata above, and for the same reason: a modification
+    // time this host will not give, or one it gives from before the epoch, is a
+    // stamp that cannot be compared — and a stamp that cannot be compared has not
+    // matched. Read as a `0` it would agree with a document carrying `0`, which is
+    // what a run whose journal is *not there* carries, and would exclude a run on
+    // the strength of a reading nobody took.
+    let Some(modified) = about
         .modified()
         .ok()
         .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        });
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
+    else {
+        return false;
+    };
     (summary.journal_len, summary.journal_mtime_ms) == (about.len(), modified)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::error::EXIT_REFUSED;
     use crate::watchers::{WatchStanding, WatcherRecord, WATCHER_SCHEMA_VERSION};
@@ -332,7 +339,7 @@ mod tests {
     /// their own: a field the record grows and the entry does not name is surface
     /// nobody ruled on, and a name the entry keeps after the code dropped it is a
     /// promise to a person deciding about something that is not there.
-    fn divergence_entry() -> String {
+    pub(crate) fn divergence_entry() -> String {
         let record = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("docs")
@@ -350,7 +357,7 @@ mod tests {
     }
 
     /// The block the entry states its inventory in, as a value.
-    fn block() -> serde_json::Value {
+    pub(crate) fn block() -> serde_json::Value {
         let entry = divergence_entry();
         let block = entry
             .split_once("```json")

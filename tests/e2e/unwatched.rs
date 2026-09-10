@@ -763,14 +763,14 @@ fn a_run_whose_only_watcher_record_cannot_be_read_is_reported() {
     world.release("build.go");
 }
 
-/// A run root with no readable launch record, and one naming no session, are
-/// passed over with nothing said about them on either stream.
+/// A run root with no readable launch record — absent, or half-written — and one
+/// naming no session are passed over with nothing said about them on either stream.
 ///
 /// Ownership is a **positive claim**. The host this was written for holds seventy
 /// run roots with no launch record at all, and a verb that ran at the end of every
 /// turn and named them would be noise on every turn.
 #[test]
-fn a_root_with_no_launch_record_and_one_naming_no_session_are_passed_over() {
+fn roots_with_no_readable_launch_record_and_one_naming_no_session_are_passed_over() {
     let world = World::new("unwatched-unowned");
     world.script("build.wait", "hold");
 
@@ -790,14 +790,19 @@ fn a_root_with_no_launch_record_and_one_naming_no_session_are_passed_over() {
         "the anonymous launch recorded an attributable session after all"
     );
 
-    // And a directory that claims to be a run and records no launch at all.
+    // And two directories that claim to be runs and record no launch this build can
+    // read: one with no record at all, and one whose record is not a record.
     //
     // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a run root without a
-    // launch record — a `start` writes one before anything else — so the state is reached by
-    // making the directory. It is the state seventy roots on the host this verb was written
-    // for are in, left by builds and sweeps that predate the record.
+    // launch record — a `start` writes one before anything else — and none leaves half of
+    // one behind, so both states are reached by making them. The first is the state seventy
+    // roots on the host this verb was written for are in, left by builds and sweeps that
+    // predate the record; the second is a writer that died mid-write.
     let orphan = world.runs.join("unwatchedorphan");
     std::fs::create_dir_all(&orphan).expect("a run root");
+    let torn = world.runs.join("unwatchedtorn");
+    std::fs::create_dir_all(&torn).expect("a run root");
+    std::fs::write(torn.join("launch.json"), "{\"run_id\": \"unwatchedt").expect("half a record");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let asked = world.run(&["unwatched"]);
@@ -813,7 +818,11 @@ fn a_root_with_no_launch_record_and_one_naming_no_session_are_passed_over() {
     let mine = held(&world, "unwatchedmine");
     let asked = world.run(&["unwatched"]);
     asked.exited(RUNS_UNWATCHED).out_has(&mine);
-    for passed_over in [&nameless, &"unwatchedorphan".to_string()] {
+    for passed_over in [
+        &nameless,
+        &"unwatchedorphan".to_string(),
+        &"unwatchedtorn".to_string(),
+    ] {
         assert!(
             !asked.stdout.contains(passed_over) && !asked.stderr.contains(passed_over),
             "{passed_over} was written about: stdout {:?}, stderr {:?}",

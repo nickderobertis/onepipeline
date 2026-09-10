@@ -4417,6 +4417,9 @@ person.
     "its process ended and is waiting to be reaped",
     "its pid is not the process that recorded it"
   ],
+  "record_name": "<pid>-<nonce>.json",
+  "record_directory": "watchers",
+  "nonce_hex_at_least": 8,
   "options": ["session"],
   "exit_reported": 6,
   "exit_none_reported": 0,

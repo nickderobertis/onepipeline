@@ -533,17 +533,24 @@ impl Drop for Armed {
     }
 }
 
-/// A value unique to one watch, as at least eight hexadecimal characters.
+/// What tells one watch's record from another's in a file name, as hexadecimal
+/// characters.
 ///
-/// Unique per **watch** rather than per process, and that is the whole reason it
-/// exists: two concurrent watches on one run must not overwrite one another's
-/// record, and a pid the kernel has handed round again must not be mistaken for
-/// its predecessor by file name. Both halves are needed — the counter tells two
-/// watches armed in the same nanosecond of one process apart, and the clock tells
-/// this process's watches from those of whatever held the pid before it.
+/// Two watches must not write one file, and a pid the kernel has handed round
+/// again must not land on its predecessor's record. Both halves of the value are
+/// for that: the counter tells two watches armed in one process apart, and the
+/// clock tells this process's watches from those of whatever held the pid before
+/// it.
 ///
-/// Staleness is never decided by a name. What this buys is only that two records
-/// are two files.
+/// **It does not promise more than that, and does not need to.** A clock this host
+/// will not read leaves the first half at zero, so a reused pid whose predecessor
+/// also met a broken clock could compose the same name — and even then nothing is
+/// lost, because the two are never on disk together: the predecessor's record names
+/// the same pid with *its* start token, which this host proves is not this process,
+/// so the sweep this writer runs before it writes has already removed it.
+///
+/// Staleness is never decided by a name. What this buys is only that two live
+/// records are two files.
 fn nonce() -> String {
     static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -558,6 +565,61 @@ fn nonce() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name this build gives a record is the one entry 66 states.
+    ///
+    /// The entry is the only place the file name is written down — the contract
+    /// names none of this — and a second party reading that directory finds the
+    /// records by that shape. So the shape is driven from the entry's own block
+    /// rather than restated here: the directory, the pid before the separator, a
+    /// nonce of at least the hexadecimal characters it asks for, and the suffix.
+    #[test]
+    fn the_divergence_entry_names_the_file_this_build_writes() {
+        let block = crate::unwatched::tests::block();
+        let paths = RunPaths::under(std::path::Path::new("/runs"), "gated");
+        let minted = nonce();
+        let path = paths.watcher(4_242, &minted);
+
+        assert_eq!(
+            path.parent().and_then(|dir| dir.file_name()),
+            block["record_directory"].as_str().map(std::ffi::OsStr::new),
+            "entry 66 names a different directory than this build writes into"
+        );
+        let named = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the record has a name");
+        let shape = block["record_name"]
+            .as_str()
+            .expect("entry 66 names the file it writes");
+        let (before, after) = shape
+            .split_once("<nonce>")
+            .expect("the entry's shape names the nonce");
+        let before = before.replace("<pid>", "4242");
+        let held = named
+            .strip_prefix(&before)
+            .and_then(|rest| rest.strip_suffix(after))
+            .unwrap_or_else(|| {
+                panic!("`{named}` is not the `{shape}` entry 66 states, for pid 4242")
+            });
+        assert_eq!(
+            held, minted,
+            "the name carries something other than the nonce"
+        );
+        let least = usize::try_from(
+            block["nonce_hex_at_least"]
+                .as_u64()
+                .expect("entry 66 says how long the nonce is at least"),
+        )
+        .expect("a length");
+        assert!(
+            held.len() >= least && held.chars().all(|c| c.is_ascii_hexdigit()),
+            "`{held}` is not the at-least-{least} hexadecimal characters entry 66 asks for"
+        );
+
+        // And two of them differ, which is the whole reason the name carries one.
+        assert_ne!(nonce(), nonce());
+    }
 
     /// The instant this crate's own writer produces is one, and the shapes RFC
     /// 3339 also allows are too.
