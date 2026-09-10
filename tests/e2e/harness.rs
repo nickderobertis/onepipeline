@@ -2519,8 +2519,8 @@ pub fn ended(child: std::process::Child) {
     child.wait_with_output().expect("the child ends");
 }
 
-/// Give the kernel time to finish writing back what a fixture just wrote, and
-/// return whether it did.
+/// Give the kernel time to finish writing back what a fixture just wrote, saying
+/// so on a line where the bound rather than the disk ended the wait.
 ///
 /// For the host-sized journeys, and for the one thing they measure that is not the
 /// code: each grows four hundred journals to ten gibibytes and then times a

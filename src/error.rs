@@ -180,7 +180,7 @@ pub const EXIT_RUNS_UNWATCHED: i32 = 6;
 /// **Shared with [`EXIT_RUNS_UNWATCHED`]**, which is `unwatched`'s answer that an
 /// owned run has nothing watching it, on the reading above: a code above
 /// [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol. Divergence entries 58
-/// and 66 argue it.
+/// and 68 argue it.
 pub const EXIT_NODE_SETTLED: i32 = 6;
 
 #[cfg(test)]

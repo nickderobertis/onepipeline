@@ -104,14 +104,6 @@ fn stamp_of(paths: &RunPaths) -> (u64, u64) {
     )
 }
 
-/// Take the run's merged event store away, and stamp its document for a store
-/// that is not there.
-///
-/// `(0, 0)` is what this build stamps for a run whose journal it cannot stat,
-/// which is a real state — a run root written before its first record — so a
-/// document carrying it is **current** rather than stale. What that buys the
-/// journey is the sharpest possible statement of the rule: the store is gone, and
-/// anything still rendering read something else.
 /// Put something at the store's path that **cannot be read as a file**, leaving the
 /// document current about it.
 ///
@@ -131,6 +123,14 @@ fn store_unreadable(paths: &RunPaths) {
     put_back(paths, &summary);
 }
 
+/// Take the run's merged event store away, and stamp its document for a store
+/// that is not there.
+///
+/// `(0, 0)` is what this build stamps for a run whose journal it cannot stat,
+/// which is a real state — a run root written before its first record — so a
+/// document carrying it is **current** rather than stale. What that buys the
+/// journey is the sharpest possible statement of the rule: the store is gone, and
+/// anything still rendering read something else.
 fn store_taken_away(paths: &RunPaths) {
     let mut summary = document(paths);
     summary["journal_len"] = json!(0);

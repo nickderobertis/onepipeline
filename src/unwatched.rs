@@ -323,7 +323,7 @@ pub(crate) mod tests {
     use crate::watchers::{WatchStanding, WatcherRecord, WATCHER_SCHEMA_VERSION};
     use std::collections::BTreeSet;
 
-    /// Entry 66 of the divergence record, which is where this verb and the record
+    /// Entry 68 of the divergence record, which is where this verb and the record
     /// it reads are *proposed*.
     ///
     /// The tests below hold that proposal to what this build actually does, in

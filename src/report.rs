@@ -384,6 +384,20 @@ pub(crate) struct FailedVerdict {
 const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
     oneagentgraph::event::Role::from;
 
+/// The node one record's judge verdicts **failed**, where it failed one.
+///
+/// The same reading [`failed_verdicts`] takes, narrowed to the one question a
+/// listing asks — *did a judge turn this node down?* — and asked of a single
+/// record rather than of a whole store, so the run's own journal writer can fold
+/// the answer as it appends. The two cannot answer differently because this *is*
+/// that reading: it hands the one record to `failed_verdicts` as a slice of one,
+/// so a record this answers for is one that returns a verdict for it, and a
+/// record it passes over is one that returns none.
+pub(crate) fn a_judge_failed(event: &Envelope) -> Option<&str> {
+    let node = event.labels.node.as_deref()?;
+    (!failed_verdicts(std::slice::from_ref(event), node).is_empty()).then_some(node)
+}
+
 /// Every judge verdict that failed one node's dispatches, in settlement order.
 ///
 /// **Only a boolean verdict that came back false is one.** That is the whole of
@@ -405,20 +419,6 @@ const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
 /// than mined for whatever fields happen to be present: an attribution assembled
 /// out of the remains would put a sentence nobody wrote under a criterion nobody
 /// scored, which is the invented attribution these lines exist to replace.
-/// The node one record's judge verdicts **failed**, where it failed one.
-///
-/// The same reading [`failed_verdicts`] takes, narrowed to the one question a
-/// listing asks — *did a judge turn this node down?* — and asked of a single
-/// record rather than of a whole store, so the run's own journal writer can fold
-/// the answer as it appends. The two are held together by
-/// `summary::tests::a_judge_rejection_folds_a_record_at_a_time_the_way_a_whole_store_reads`:
-/// a record this answers for is one `failed_verdicts` returns a verdict for, and
-/// a record it passes over is one that returns none.
-pub(crate) fn a_judge_failed(event: &Envelope) -> Option<&str> {
-    let node = event.labels.node.as_deref()?;
-    (!failed_verdicts(std::slice::from_ref(event), node).is_empty()).then_some(node)
-}
-
 pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
     events
         .iter()
