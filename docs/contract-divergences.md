@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–65 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–66 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 65 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 66 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -4253,3 +4253,191 @@ a preceding reader knows and the version-1 journal this build has to keep readin
 The envelope shape itself is held to `tests/golden/envelope-v2.json`, with
 `tests/golden/envelope-v1.json` beside it as what the version before this one
 looked like.
+
+## 66. Nothing on disk says a run is being watched, so nothing can ask which run is not — OPEN
+
+**Proposal (for the planner who owns the contract): add `onepipeline unwatched
+[--session <ID>]` to the Views line with an exit status of its own, and add the
+per-watch record it decides from to the shipped surface —
+`views::WatcherRecord`, `views::Watch`, `views::WatchStanding`,
+`views::Watchers`, `views::WATCHER_SCHEMA_VERSION`, and
+`error::EXIT_RUNS_UNWATCHED`.**
+
+Entry 58 added the verb a supervisor puts in a wake loop. It did not add a way to
+ask whether anybody ran it: `src/watch.rs` said outright that a watch "consumes no
+surface and records nothing", so a watched run and an unwatched one were the same
+run on disk. The cost is measured and it is the operator's own: *"no matter what I
+do with instructions the manager still forgets to arm the watch sometimes and then
+things can just be sitting for hours with no activity until I come back to ask
+what's going on."* Every fix attempted before this was prose in that host's
+instructions, and prose is remembered by the model or it is not. What a record
+makes possible is asking the question with a **script**, at the end of every
+manager turn, where the harness can refuse to let the turn end.
+
+### The record
+
+One document per live watch, at `watchers/<pid>-<nonce>.json` under the watched
+run's own root, beside `channel/` and `dispatches/`. A directory of small records
+rather than one document for the reason the dispatch registry is one: any number
+of watches may sit on one run at once and they start and end independently. The
+name carries a nonce of at least eight hexadecimal characters **unique to the
+watch** rather than to the pid, so two concurrent watches cannot overwrite one
+another and a reused pid cannot be mistaken for its predecessor by file name.
+**Staleness is decided by content, never by a name.** Its fields are in the block
+below rather than in prose here, and it is read closed — `deny_unknown_fields`,
+with a version the deserializer refuses — exactly as the summary document of entry
+56 is.
+
+**A record is a live watch when every one of six conditions holds**, and is not
+one otherwise: it parses at a version this build reads; its `run_id` is the run
+whose directory it sits in; its `host` is this host; its `pid` may be live by
+`sys::process_may_be_live`'s own reading; that process is **not a terminated one
+awaiting its parent**; and a start token read now matches the recorded one, under
+which an empty recorded token never matches.
+
+**The fifth condition is not redundant, and this is measured rather than argued.**
+A process that has exited and whose parent has not reaped it answers `kill(pid,
+0)` successfully, and its `/proc/<pid>/stat` still carries the **same** start ticks
+the token was read from — only the state field changes, to `Z`. Driven on the host
+this was written for on 2026-09-09: `state field: Z | start ticks: 176110055 |
+kill(pid,0) succeeded`. So the other two readings alone count a dead watcher as
+watching, and they do it in exactly the case that matters most: a watch killed by a
+parent that then goes on running is a zombie until that parent reaps it or dies.
+`sys::process_terminated_awaiting_parent` reads the state and treats that as gone.
+
+**No heartbeat, no expiry, and no cleanup step stands between a watcher dying and
+its run reading unwatched.** Removing the record on a clean exit is permitted and
+is never relied upon, because the deaths that matter here have no clean exit —
+killed, crashed, out of memory, terminal closed. A writer arming a watch also
+removes the records it has itself **proved** are not live, so a long-watched run
+does not accumulate them without bound, and it removes nothing else: not a record
+naming another host, not one naming another run, and not one it could not read.
+The reading side removes nothing at all, exactly as everything in `views` reads.
+
+**The asymmetry is inverted here, deliberately, and it is the load-bearing
+decision.** `sys::process_may_be_live` resolves every unknown toward "still
+working", because for a *driver* the worse error is reporting live work as dead —
+`views::DriverLiveness` is built on that. For a *watch* the worse error is the
+other one: a run reported watched while nothing is watching it is precisely the
+silence this exists to end, and it costs hours, where the opposite error costs one
+re-armed watch. So a record this build cannot read is not a live watch, and a host
+that will not report a start token leaves records that are never live watches —
+every run on such a host reads unwatched, which is the honest answer rather than a
+defect and is the same rule `StartToken::matches` already applies to the ownership
+lock and the launch record.
+
+### The verb
+
+`onepipeline unwatched [--session <ID>]`, written for a **hook** rather than for a
+person.
+
+- **Session.** `--session <ID>` when given, otherwise `ONEPIPELINE_LAUNCHER_SESSION`.
+  Taken explicitly as well as from the environment because its consumer is a hook
+  handed the session it must ask about on standard input, while the environment it
+  runs in carries somebody else's. A session that resolves to nothing — no option,
+  and none in the environment — is a question the verb cannot ask and is refused
+  with the ordinary `2` rather than answered as owning nothing; a blank `--session
+  ""` is that same refusal rather than a fall-through to the environment.
+- **Runs root.** `$ONEPIPELINE_RUNS_DIR`, else `runs`, as every other verb resolves
+  it. A root that does not exist holds no runs and is not an error; one that exists
+  and cannot be read as a whole is the refusal above.
+- **Ownership is a positive claim.** A run root whose launch record is absent or
+  unreadable, and one naming no session, belongs to nobody and is passed over in
+  silence. The host this was written for holds seventy run roots with no launch
+  record at all, and a verb that ran at the end of every turn and named them would
+  be noise on every turn.
+- **Stopped and settled are read from the run's summary document and nothing
+  else.** A run is **excluded** when that document is readable at a version this
+  build reads, its `run_id` is the run, its `journal_len` and `journal_mtime_ms`
+  equal the journal's length and modification time as they stand now, and either
+  `stop_recorded` or `graph_complete` is true. The stamp is required **only for
+  exclusion**, and that asymmetry is the whole freshness rule: a run that has
+  stopped writing has a current document, so requiring the stamp costs a settled
+  run nothing — while a document behind its journal is what a run *still
+  recording* looks like, and treating that as proof of settlement is how the one
+  run this verb exists to find would be dropped.
+- **A run whose settlement cannot be decided at all** — no document, one that
+  cannot be read, or one at a schema version this build refuses — is **not
+  reported**. It is named on standard error with that reason and changes no exit
+  status: such a run is most often an old settled run whose document is gone, and
+  blocking on it would never clear by watching it.
+- **Reported** when the launch record names the resolved session, the run is not
+  excluded, its settlement was decidable, and no record in its `watchers/`
+  directory is a live watch. One line per reported run on standard output, naming
+  the run, the standing word `runs` gives it, why nothing is watching it, and the
+  command that watches it, ordered by run id as a listing orders its rows.
+  Everything unresolved goes on standard error, never on standard output, and
+  nothing at all is written on either stream when there is nothing to say.
+- **The standing word is the listing's own**, reached rather than reimplemented —
+  `views`' `Standing::of_row`, which is what `runs` prints for the same run. For
+  every run this verb reports that is `ACTIVE`, `PARKED`, `DRIVER DEAD` or
+  `UNDRIVEN`, because a run whose document says its graph is complete is excluded.
+  The one exception is the run whose document says so while being **behind its
+  journal**: its exclusion is refused because the stamp is stale, and the word is
+  then read from those same counts, so such a run can be reported `SETTLED`. That
+  is the honest reading of an untrustworthy document rather than a fifth verdict,
+  and it is named here because it is the one place the four words are not the whole
+  set.
+- **Exit statuses.** `0` when no run is reported, and `EXIT_RUNS_UNWATCHED` when at
+  least one is — a status of its own rather than the refused `2`, because a caller
+  has to tell "runs are unwatched" from "this verb could not answer". Its value is
+  `6`, the same number `EXIT_NODE_SETTLED` carries on `watch`: these codes are a
+  per-verb protocol — `4`, `5` and `6` are `watch`'s returns and no other verb
+  spells any of them — so the pair is one number with two meanings on two commands
+  rather than one meaning overloaded. **A read error never promotes or demotes the
+  status**: a root holding both a reported run and an owned run nothing could be
+  decided about answers `6` and names both, each on its own stream.
+- **Cost.** Discovery is proportional to the number of run roots, because ownership
+  lives in each run's own launch record and reading those is the only way to find
+  the owned ones — nothing else about a root is opened to decide it. Everything
+  after discovery is proportional to the runs the resolved session owns, and **no
+  run's merged event store is read on this path at any point**, including for a run
+  whose summary document is absent or stale. That is the rule entry 56 states for a
+  listing, held here by a verb that runs at the end of every turn.
+
+```json
+{
+  "schema_version": 1,
+  "fields": [
+    "schema_version",
+    "run_id",
+    "pid",
+    "host",
+    "started",
+    "began_at"
+  ],
+  "standings": [
+    "watching",
+    "its record names another run",
+    "its record names another host",
+    "its process is gone",
+    "its process ended and is waiting to be reaped",
+    "its pid is not the process that recorded it"
+  ],
+  "options": ["session"],
+  "exit_reported": 6,
+  "exit_none_reported": 0,
+  "exit_refused": 2
+}
+```
+
+`watch` is otherwise untouched: no flag, no line, no record and no exit status of
+it changed, and `tests/e2e/watch.rs` holds every one of its five returns where it
+was. What is new there is one write, made after every refusal that verb can give
+and removed when it returns.
+
+`tests/e2e/unwatched.rs` drives all of it through the compiled binary: a session
+owning no run and a runs root that is not there answered in silence; an unsettled
+run named with its standing word; a live watch holding a run off the list and the
+same run reported once that watch returns; a watch killed and **left unreaped**
+read as gone on the very next invocation, with nothing having cleaned up and no
+interval having elapsed; five records that are not live watches, each refused for
+its own reason; three concurrent watches recorded apart, holding the run watched
+until the last of them ends; a settled run never reported and the same run reported
+once its document falls behind its journal; the three undecidable documents named
+on standard error and changing no status; a run whose only watcher record cannot be
+read reported all the same; roots belonging to nobody passed over; the option
+deciding against an environment naming another session, both ways round; both
+refusals; and — over four hundred run roots holding a gibibyte of journals, and
+then ten — the bound this verb has to meet to be asked at the end of every turn,
+with the kernel asked what the process opened.

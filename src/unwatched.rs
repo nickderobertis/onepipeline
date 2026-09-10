@@ -232,3 +232,228 @@ fn stamped(paths: &RunPaths, summary: &RunSummary) -> bool {
         });
     (summary.journal_len, summary.journal_mtime_ms) == (about.len(), modified)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::EXIT_REFUSED;
+    use crate::watchers::{WatchStanding, WatcherRecord, WATCHER_SCHEMA_VERSION};
+    use std::collections::BTreeSet;
+
+    /// Entry 66 of the divergence record, which is where this verb and the record
+    /// it reads are *proposed*.
+    ///
+    /// The tests below hold that proposal to what this build actually does, in
+    /// **both** directions, on the terms entries 39, 41, 56 and 58 already hold
+    /// their own: a field the record grows and the entry does not name is surface
+    /// nobody ruled on, and a name the entry keeps after the code dropped it is a
+    /// promise to a person deciding about something that is not there.
+    fn divergence_entry() -> String {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split_once("\n## 66.")
+            .expect("this verb is recorded under entry 66")
+            .1
+            .to_string();
+        entry
+            .split_once("\n## ")
+            .map_or(entry.clone(), |(head, _)| head.to_string())
+    }
+
+    /// The block the entry states its inventory in, as a value.
+    fn block() -> serde_json::Value {
+        let entry = divergence_entry();
+        let block = entry
+            .split_once("```json")
+            .expect("entry 66 carries the json block these tests drive")
+            .1
+            .split_once("```")
+            .expect("the block is fenced")
+            .0;
+        serde_json::from_str(block).expect("entry 66's block is JSON")
+    }
+
+    /// Every standing this build reads a record as, exhaustively.
+    ///
+    /// The match is what makes it exhaustive: a variant added to the enum and left
+    /// out of this list fails to compile here rather than quietly leaving the
+    /// entry naming five of six answers.
+    fn every_standing() -> [WatchStanding; 6] {
+        let all = [
+            WatchStanding::Live,
+            WatchStanding::AnotherRun,
+            WatchStanding::AnotherHost,
+            WatchStanding::ProcessGone,
+            WatchStanding::AwaitingItsParent,
+            WatchStanding::NotThatProcess,
+        ];
+        for standing in all {
+            match standing {
+                WatchStanding::Live
+                | WatchStanding::AnotherRun
+                | WatchStanding::AnotherHost
+                | WatchStanding::ProcessGone
+                | WatchStanding::AwaitingItsParent
+                | WatchStanding::NotThatProcess => {}
+            }
+        }
+        all
+    }
+
+    /// The record's schema version and field inventory are the type's own.
+    ///
+    /// Built through the type rather than listed, exactly as the summary
+    /// document's inventory is: a field added to `WatcherRecord` does not compile
+    /// here until it is given a value, so what this answers is the whole inventory
+    /// a consumer can read.
+    #[test]
+    fn the_divergence_entry_names_the_record_this_build_writes() {
+        let block = block();
+        assert_eq!(
+            block["schema_version"].as_u64(),
+            Some(u64::from(WATCHER_SCHEMA_VERSION)),
+            "entry 66 states a schema version this build does not write"
+        );
+        let written = WatcherRecord {
+            schema_version: WATCHER_SCHEMA_VERSION,
+            run_id: "gated".into(),
+            pid: std::num::NonZeroU32::new(4_242).expect("a pid"),
+            host: "a-host".into(),
+            started: "linux-proc-stat:1".into(),
+            began_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+        let fields: BTreeSet<String> = serde_json::to_value(&written)
+            .expect("a record is an object")
+            .as_object()
+            .expect("a record is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let named: BTreeSet<String> =
+            serde_json::from_value(block["fields"].clone()).expect("entry 66 names the fields");
+        assert_eq!(
+            named, fields,
+            "entry 66's inventory is not the record this build writes"
+        );
+        // And the record round-trips, which is what makes the inventory a
+        // consumer's to read rather than one this build only writes.
+        let read: WatcherRecord =
+            serde_json::from_str(&serde_json::to_string(&written).expect("a record serializes"))
+                .expect("a record this build wrote reads back");
+        assert_eq!(read, written);
+    }
+
+    /// A record at any other version is refused rather than read as this one.
+    #[test]
+    fn a_record_at_another_schema_version_is_refused() {
+        let mut document = serde_json::json!({
+            "schema_version": WATCHER_SCHEMA_VERSION + 1,
+            "run_id": "gated",
+            "pid": 4_242,
+            "host": "a-host",
+            "started": "linux-proc-stat:1",
+            "began_at": "2026-01-01T00:00:00.000Z",
+        });
+        let refusal = serde_json::from_value::<WatcherRecord>(document.clone())
+            .expect_err("a version this build does not write is refused");
+        assert!(
+            refusal.to_string().contains("schema_version"),
+            "the refusal does not say what it refused: {refusal}"
+        );
+        // And a key this build does not know is refused too, rather than dropped:
+        // a record read half by this build's meaning and half by another's is what
+        // the version exists to stop.
+        document["schema_version"] = serde_json::json!(WATCHER_SCHEMA_VERSION);
+        document["watching_since_tick"] = serde_json::json!(1);
+        serde_json::from_value::<WatcherRecord>(document).expect_err("an unknown key is refused");
+    }
+
+    /// The entry names exactly the answers this build reads a record as.
+    #[test]
+    fn the_divergence_entry_names_every_standing_this_build_reads() {
+        let named: Vec<String> =
+            serde_json::from_value(block()["standings"].clone()).expect("entry 66 names them");
+        let read: Vec<String> = every_standing()
+            .iter()
+            .map(|standing| standing.as_str().to_string())
+            .collect();
+        assert_eq!(
+            named, read,
+            "entry 66 names a different set of standings than this build reads"
+        );
+        // One of them is the live one, and it is the only one.
+        let live = every_standing()
+            .into_iter()
+            .filter(|standing| standing.is_live())
+            .count();
+        assert_eq!(live, 1, "exactly one standing reads as watching");
+    }
+
+    /// The entry proposes a command **schema**, and clap is what a caller is
+    /// actually given.
+    #[test]
+    fn the_divergence_entry_proposes_exactly_the_options_this_build_offers() {
+        use clap::CommandFactory;
+
+        let named: BTreeSet<String> =
+            serde_json::from_value(block()["options"].clone()).expect("entry 66 names them");
+        let offered: BTreeSet<String> = crate::cli::Cli::command()
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "unwatched")
+            .expect("the binary offers `unwatched`")
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_string))
+            .collect();
+        assert_eq!(
+            named, offered,
+            "entry 66 proposes a different set of options than this build offers"
+        );
+        // And the entry's own prose spells the command a caller types, which is
+        // the part an operator reads rather than the block.
+        assert!(
+            divergence_entry().contains("onepipeline unwatched [--session <ID>]"),
+            "entry 66 does not spell the command it proposes"
+        );
+    }
+
+    /// The three statuses the entry states are the three this build returns.
+    ///
+    /// Named against the constants rather than against the numbers alone: the
+    /// whole reason `unwatched` has a status of its own is that a caller branches
+    /// on it, and a mapping quietly swapped here would leave a hook reading "no run
+    /// is unwatched" off the answer that says one is.
+    #[test]
+    fn the_divergence_entry_names_the_statuses_this_verb_returns() {
+        let block = block();
+        assert_eq!(
+            block["exit_reported"].as_i64(),
+            Some(i64::from(EXIT_RUNS_UNWATCHED))
+        );
+        assert_eq!(
+            block["exit_none_reported"].as_i64(),
+            Some(i64::from(EXIT_SUCCESS))
+        );
+        assert_eq!(
+            block["exit_refused"].as_i64(),
+            Some(i64::from(EXIT_REFUSED))
+        );
+        assert_ne!(
+            EXIT_RUNS_UNWATCHED, EXIT_SUCCESS,
+            "the answer that a run is unwatched cannot be told from the answer that none is"
+        );
+        assert_ne!(
+            EXIT_RUNS_UNWATCHED, EXIT_REFUSED,
+            "the answer that a run is unwatched cannot be told from a refusal"
+        );
+        // What a caller actually gets is asserted where the environment is this
+        // journey's own to set: `tests/e2e/unwatched.rs` drives both refusals
+        // through the compiled binary with nothing in its environment naming a
+        // session. Asserting it here would be a claim about whatever session the
+        // process running the tests happens to have been launched under.
+    }
+}
