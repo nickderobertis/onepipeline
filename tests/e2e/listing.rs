@@ -551,26 +551,42 @@ const LANDING_VERDICTS: [&str; 2] = ["not landed", "landing undecided"];
 /// code, and this one is set where only a return to folding could cross it.
 const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// A **regression guard**, and deliberately not the evidence for anything.
+/// What ten times the journal bytes may cost, against the same root's own figure.
 ///
-/// What it is not: a measurement of whether the journal is read. Across eight runs
-/// of these journeys on this host the same code produced ratios from 0.42x to
-/// 2.72x, and on two of three pairs in one run the fixture with **ten times the
-/// journal** came back faster — 68.962 -> 29.236 ms and 101.611 -> 51.367 ms. An
-/// instrument that reports the grown fixture as twice as fast in two of three
-/// trials is measuring the host, not a dependence on journal size, and no amount of
-/// preparation makes it into evidence when the noise is larger than the effect. The
-/// proof of that property is
-/// `the_listing_views_render_a_run_whose_merged_store_cannot_be_read` and its
+/// **Twice**, and it is a regression guard rather than the evidence that the
+/// journal goes unread. A fold is linear in the store, so a return to one is three
+/// to four orders of magnitude — `runs --mine` over a comparable root took 74.1 s
+/// before this work — and this catches it at the ratio as well as at
+/// [`LISTING_BOUND`]. What proves the property itself is
+/// [`the_listing_views_render_a_run_whose_merged_store_cannot_be_read`] and its
 /// counterpart over the verb: a store that cannot be read at all, which no clock
 /// and no host speed enters into.
+const GROWTH_BOUND: u32 = 2;
+
+/// The floor that ratio is taken against.
 ///
-/// What it is: a ceiling above every ratio yet observed, kept so that a change
-/// which made this path *linear* in the store — a fold is three to four orders of
-/// magnitude, and `runs --mine` over a comparable root took 74.1 s before this work
-/// — fails here as well as at the absolute bound. Sized from the 2.72x worst
-/// observation with room, rather than from what a passing run happened to give.
-const GROWTH_GUARD: u32 = 5;
+/// Both medians are tens of milliseconds — process start, four hundred small
+/// documents, and three repository reads — so a ratio between two figures that
+/// small measures the host rather than the code. Measured here: across eight runs
+/// of these journeys the same code produced ratios from 0.42x to 2.72x, and on two
+/// of three pairs in one run the fixture with **ten times the journal** came back
+/// faster — 68.962 -> 29.236 ms and 101.611 -> 51.367 ms. That is not a scaling
+/// effect in either direction; ten gibibytes written a moment earlier evict the
+/// pages of the binary being started, and there are two journeys in this binary
+/// that write ten gibibytes. So the ratio is taken against this floor rather than
+/// against a figure smaller than the noise around it, and every one of those
+/// observations sits under it.
+///
+/// Without it this assertion is a coin toss rather than a bound: in the run that
+/// settled this floor, `runs` came in at 30.4 -> 59.3 ms and `runs --mine` at 26.6
+/// -> 40.1 ms, while `status` on the same root in the same run went 37.0 -> 80.5
+/// ms — 2.18x, and a failure, out of three medians of five taken minutes apart on
+/// one unchanged binary.
+///
+/// What it still catches is what the bound is for: a fold of ten gibibytes takes
+/// **tens of seconds**, which is two orders of magnitude past this floor and past
+/// [`LISTING_BOUND`], which the grown root is held to as well.
+const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// How many renders each median is taken over, after one warm-up.
 ///
@@ -709,8 +725,9 @@ fn median(world: &World, argv: &[&str]) -> std::time::Duration {
 /// below that, so only a return to folding can cross it. Both measurements are held
 /// to it, over the unmultiplied root and over ten times the journal bytes.
 ///
-/// The ratio between those two is kept as [`GROWTH_GUARD`] and is **not** evidence
-/// that the journal goes unread; that constant says why, and
+/// The ratio between those two is [`GROWTH_BOUND`], taken against
+/// [`GROWTH_FLOOR`], and is **not** evidence that the journal goes unread; those
+/// constants say why, and
 /// [`the_listing_views_render_a_run_whose_merged_store_cannot_be_read`] is where the
 /// property is actually proven — over a store that cannot be read at all, which no
 /// clock enters into.
@@ -937,10 +954,10 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     for (argv, was) in LISTINGS.iter().zip(before) {
         let took = median(&world, argv);
         assert!(
-            took <= was * GROWTH_GUARD,
+            took <= was.max(GROWTH_FLOOR) * GROWTH_BOUND,
             "`onepipeline {}` took {took:?} over {grown} journal byte(s) against {was:?} over \
-             {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_GUARD}x \
-             regression guard, which no run of this has approached",
+             {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
+             bounded read is held to, taken against the {GROWTH_FLOOR:?} floor",
             argv.join(" ")
         );
         // And the grown root is held to the same absolute bound the unmultiplied
