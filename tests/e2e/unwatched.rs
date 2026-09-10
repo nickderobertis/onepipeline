@@ -1243,23 +1243,12 @@ const SINGLE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A **regression guard**, and deliberately not the evidence for anything.
 ///
-/// What it is not: a measurement of whether the journal is read. Across eight runs
-/// of these journeys on this host the same code produced ratios from 0.42x to
-/// 2.72x, and on two of three pairs in one run the fixture with **ten times the
-/// journal** came back faster — 68.962 -> 29.236 ms and 101.611 -> 51.367 ms. An
-/// instrument that reports the grown fixture as twice as fast in two of three
-/// trials is measuring the host, not a dependence on journal size, and no amount of
-/// preparation makes it into evidence when the noise is larger than the effect. The
-/// proof of that property is
-/// `the_listing_views_render_a_run_whose_merged_store_cannot_be_read` and its
-/// counterpart over the verb: a store that cannot be read at all, which no clock
-/// and no host speed enters into.
-///
-/// What it is: a ceiling above every ratio yet observed, kept so that a change
-/// which made this path *linear* in the store — a fold is three to four orders of
-/// magnitude, and `runs --mine` over a comparable root took 74.1 s before this work
-/// — fails here as well as at the absolute bound. Sized from the 2.72x worst
-/// observation with room, rather than from what a passing run happened to give.
+/// The same value and the same reasoning as the listing journey's constant of this
+/// name, which is where both are stated: a ratio between medians this small
+/// measures the host, five clears the worst noise yet seen on unchanged code and
+/// still fails a fold. What proves the journal goes unread is
+/// [`the_verb_decides_runs_whose_merged_store_cannot_be_read`] — a store that
+/// cannot be read at all, which no clock enters into.
 const GROWTH_GUARD: u32 = 5;
 
 /// How many invocations each median is taken over, after one warm-up.

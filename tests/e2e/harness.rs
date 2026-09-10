@@ -2522,19 +2522,12 @@ pub fn ended(child: std::process::Child) {
 /// Give the kernel time to finish writing back what a fixture just wrote, saying
 /// so on a line where the bound rather than the disk ended the wait.
 ///
-/// For the host-sized journeys, and for the one thing they measure that is not the
-/// code: each grows four hundred journals to ten gibibytes and then times a
-/// command against them, and the pages of that write are still on their way to the
-/// disk when the first invocation starts. The clock then reads the fixture's own
-/// write rather than the command — measured, the same command on the same root
-/// came back at 8.2 ms and at 31.8 ms depending on nothing but what the disk was
-/// still doing.
-///
-/// `fsync` on each file is not this: it puts *that file's* pages on the device and
-/// returns, while the rest of the machine's dirty pages — the run roots, the
-/// documents, the binary's own eviction — are still being written. This waits for
-/// the whole of it, which is what makes a ratio between two measurements a
-/// statement about the command.
+/// For the host-sized journeys: each grows four hundred journals to ten gibibytes
+/// and then times a command against them, and the pages of that write are still on
+/// their way to the disk when the first invocation starts, so the clock reads the
+/// fixture's write rather than the command. `fsync` per file does not cover it —
+/// that puts *one file's* pages on the device while the rest of the machine's
+/// dirty pages are still being written — and this waits for the whole of it.
 ///
 /// **Bounded, and it says when the bound was what ended it** — which is why it is
 /// spelled as letting the writeback settle rather than as waiting until it has: a
@@ -2571,14 +2564,8 @@ const SETTLED_BYTES: u64 = 32 * 1024 * 1024;
 /// measured, which is worse than a measurement taken over a disk that is still
 /// busy.
 ///
-/// Observed on this host, at a two-minute bound, in one run of the two host-sized
-/// journeys: the **listing** journey ran out with 204 MB left to write, and its
-/// medians that run were 51.198 → 72.955 ms, 68.962 → 29.236 ms and 101.611 →
-/// 51.367 ms; the **unwatched** journey, later in the same run, reported no
-/// timeout and measured 8.287 → 8.039 ms. Those are two different measurements and
-/// neither explains the other — in particular, **nothing here establishes what the
-/// wait is worth**: no run has been taken with it and without it, all else equal,
-/// so its effect is unmeasured. It is kept as hygiene rather than as a
+/// **Nothing establishes what the wait is worth**: no run has been taken with it
+/// and without it, all else equal. It is kept as hygiene rather than as a
 /// demonstrated correction, and nothing this suite asserts rests on it.
 const SETTLING: std::time::Duration = std::time::Duration::from_secs(60);
 

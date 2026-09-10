@@ -600,16 +600,14 @@ impl Drop for Armed {
 /// counter tells two watches armed in one process apart, and the seed tells this
 /// process's watches from those of whatever held the pid before it.
 ///
-/// **A clock this host would not read is not time zero.** What stood here mixed
-/// the wall clock with a zero substituted where it could not be read, which on
-/// such a host left the whole name a function of a counter that restarts with the
-/// process — so two watches that met a broken clock could compose one name, and
-/// the identity was unique per *process* rather than per watch. It defended that
-/// on the sweep having already removed the predecessor's record, and that defence
-/// is false: a record whose owner this host cannot disprove is deliberately kept
-/// ([`WatchStanding::proved_gone`]). So the seed below is what a name is told
-/// apart by, the clock is one contributor to it and never the only one, and a
-/// clock nobody read contributes nothing rather than a value nobody took.
+/// **A clock this host would not read is not time zero.** The seed rather than the
+/// clock is what a name is told apart by — the clock is one contributor to it and
+/// never the only one — so a clock nobody read contributes nothing instead of a
+/// value nobody took. Substituting zero there would leave the name a function of a
+/// counter that restarts with the process, which is an identity unique per
+/// *process* rather than per watch; the predecessor's record is no defence against
+/// that, since one whose owner this host cannot disprove is deliberately kept
+/// ([`WatchStanding::proved_gone`]).
 ///
 /// Staleness is never decided by a name. What this buys is only that two live
 /// records are two files.

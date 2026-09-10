@@ -553,32 +553,17 @@ const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A **regression guard**, and deliberately not the evidence for anything.
 ///
-/// What it is not: a measurement of whether the journal is read. Both medians are
-/// tens of milliseconds — process start, four hundred small documents, and three
-/// repository reads — so a ratio between two figures that small measures the host
-/// rather than the code. Across eight runs of these journeys the same code produced
-/// ratios from 0.42x to 2.72x, and on two of three pairs in one run the fixture
-/// with **ten times the journal** came back faster — 68.962 -> 29.236 ms and
-/// 101.611 -> 51.367 ms. An instrument that reports the grown fixture as twice as
-/// fast in two of three trials is measuring the host, not a dependence on journal
-/// size, and no amount of preparation makes it into evidence when the noise is
-/// larger than the effect. The proof of that property is
+/// Both medians are tens of milliseconds, so the ratio between them measures the
+/// host as much as the code: on unchanged code these journeys have given ratios
+/// from 0.42x to 2.72x, the grown fixture sometimes the faster of the two. Five
+/// clears the worst of that noise and still fails a fold, which is three to four
+/// orders of magnitude — `runs --mine` over a comparable root took 74.1 s before
+/// this work. A 300 ms floor stood here instead and made the bar 600 ms at these
+/// medians, which a tenfold regression walks through; ruled 2026-09-10.
+///
+/// What proves the journal goes unread is no clock at all:
 /// [`the_listing_views_render_a_run_whose_merged_store_cannot_be_read`] and its
-/// counterpart over the verb: a store that cannot be read at all, which no clock
-/// and no host speed enters into.
-///
-/// What it is: a ceiling above every ratio yet observed, kept so that a change
-/// which made this path *linear* in the store — a fold is three to four orders of
-/// magnitude, and `runs --mine` over a comparable root took 74.1 s before this work
-/// — fails here as well as at [`LISTING_BOUND`]. Sized from the 2.72x worst
-/// observation with room, rather than from what a passing run happened to give, and
-/// far enough below an order of magnitude that a tenfold regression cannot pass it.
-///
-/// **A floor stood here and does not any more.** Taking the ratio against 300 ms
-/// made the bar 600 ms at the medians actually measured, which a tenfold regression
-/// clears; a guard that cannot fail in the regime it runs in is not a guard. The
-/// noise the floor was answering is answered instead by sizing the ratio above the
-/// worst of it. Ruled by the planner who owns the contract on 2026-09-10.
+/// counterpart over the verb render over a store that cannot be read.
 const GROWTH_GUARD: u32 = 5;
 
 /// How many renders each median is taken over, after one warm-up.
