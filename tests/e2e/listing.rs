@@ -460,6 +460,23 @@ const LISTING_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 /// a clock.
 const GROWTH_BOUND: u32 = 2;
 
+/// The floor that ratio is taken against.
+///
+/// Both medians are tens of milliseconds — process start, four hundred small
+/// documents, and three repository reads — so the ratio between them measures the
+/// host as much as the code. Measured on this host inside one run of the suite:
+/// `runs` took 58.6 ms over the unmultiplied root and 133.0 ms over the grown one,
+/// and the same journey a run earlier took 27 ms against 45 ms. The difference is
+/// not a scaling effect — ten gibibytes written a moment earlier evict the pages of
+/// the binary being started, and there are now two journeys in this binary that
+/// write ten gibibytes — so the ratio is taken against this floor rather than
+/// against a figure smaller than the noise around it.
+///
+/// What it still catches is what it is for: a fold of ten gibibytes takes **tens of
+/// seconds**, which is two orders of magnitude past this floor and past
+/// [`LISTING_BOUND`], which the grown root is held to as well.
+const GROWTH_FLOOR: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// How many renders each median is taken over, after one warm-up.
 ///
 /// The warm-up is discarded because what it measures is mostly a debug binary
@@ -813,10 +830,19 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
     for (argv, was) in LISTINGS.iter().zip(before) {
         let took = median(&world, argv);
         assert!(
-            took <= was * GROWTH_BOUND,
+            took <= was.max(GROWTH_FLOOR) * GROWTH_BOUND,
             "`onepipeline {}` took {took:?} over {grown} journal byte(s) against {was:?} over \
              {bytes} — {JOURNAL_MULTIPLE} times the bytes moved it past the {GROWTH_BOUND}x a \
              bounded read is held to",
+            argv.join(" ")
+        );
+        // And the grown root is held to the same absolute bound the unmultiplied
+        // one is, which is the statement that does not depend on a ratio at all: a
+        // fold of ten gibibytes cannot come in under five seconds.
+        assert!(
+            took < LISTING_BOUND,
+            "`onepipeline {}` took {took:?} over {grown} journal byte(s), past the \
+             {LISTING_BOUND:?} a listing is held to",
             argv.join(" ")
         );
         println!(
