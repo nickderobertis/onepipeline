@@ -149,12 +149,12 @@ fn record(path: &std::path::Path) -> Value {
 
 /// Put a record under a run's watcher directory.
 ///
-/// llmlint: ignore-block[tests_mirror_real_usage] no verb writes a *stranger's* watcher
-/// record — the only writer is a watch recording itself on this host — and the states below
-/// are left by another machine, by a build whose schema predates this one, or by a writer
-/// that died mid-write. Every record put back is this build's own writer's, edited only
-/// where the state under test is the edit, and every claim afterwards is read off the
-/// compiled binary's own streams.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes a *stranger's* watcher
+// record — the only writer is a watch recording itself on this host — and the states below
+// are left by another machine, by a build whose schema predates this one, or by a writer
+// that died mid-write. Every record put back is this build's own writer's, edited only
+// where the state under test is the edit, and every claim afterwards is read off the
+// compiled binary's own streams.
 fn put(world: &World, run: &str, name: &str, body: &str) -> PathBuf {
     let dir = watchers_dir(world, run);
     std::fs::create_dir_all(&dir).expect("the watcher directory");
@@ -662,11 +662,11 @@ type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 /// is what is done to the file: a build that never wrote a document, a writer
 /// killed mid-write, and a build whose schema predates this one.
 ///
-/// llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts the document
-/// its run's journal writer maintains, and none could — each of the three is left by a
-/// build, a crash, or a copied run root rather than by an interface. What is put back is
-/// this build's own document, edited only where the state under test is the edit, and every
-/// claim afterwards is read off the compiled binary's own streams.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts the document
+// its run's journal writer maintains, and none could — each of the four is left by a
+// build, a crash, or a copied run root rather than by an interface. What is put back is
+// this build's own document, edited only where the state under test is the edit, and every
+// claim afterwards is read off the compiled binary's own streams.
 const UNDECIDABLE: [Undecidable; 4] = [
     ("no document at all", |path, _written| {
         std::fs::remove_file(path).expect("the document");
