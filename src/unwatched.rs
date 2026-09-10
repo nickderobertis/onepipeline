@@ -83,10 +83,20 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
     // llmlint: ignore-block[cli_output_contract] both streams are written here rather than
     // returned as one rendering, because the split *is* this verb's answer: the reported
     // runs are what a hook acts on and go on standard output, and everything unresolved is
-    // named on standard error where it changes no exit status. `src/driver.rs` records why
-    // a write to either is not an error this crate's exit codes can carry.
+    // named on standard error where it changes no exit status. A verb whose answer is two
+    // streams cannot hand one string to a caller that prints it.
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
+    // to a stream is one decision for all of them rather than this verb's, and
+    // `src/driver.rs` is where it is recorded and why: the exit codes are spent — `0`/`1`/
+    // `2` are `reply`'s verdicts and `3` is "nothing is driving the run" — so a write this
+    // verb returned as an error would have to carry a code that already means something
+    // else, and this one has two answers of its own on top of those. Making a closed pipe a
+    // first-class outcome is a change to the whole command surface and to the contract's
+    // exit codes, which belongs with the planner who owns them rather than in the one verb
+    // a diff happens to add.
     eprint!("{}", unresolved.concat());
     print!("{}", reported.concat());
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
     // llmlint: ignore-end[cli_output_contract]
     if reported.is_empty() {
         return Ok(EXIT_SUCCESS);

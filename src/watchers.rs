@@ -68,14 +68,17 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 /// missing any of these could not be decided against the host at all, and a
 /// record that cannot be decided is not a live watch — so accepting one would
 /// only move the refusal from the reader to the verdict.
-// llmlint: ignore[invalid_states_unrepresentable] the run id, the host and the two stamps
-// are `String`s for the reason `src/ledger.rs`'s own file-level suppression states, and
-// this is that file's records read back: `docs/contract.md` names no `RunId`, no `Host` and
-// no timestamp type, so a newtype here would be a public vocabulary the contract did not
-// ask for. What can be made unrepresentable is: `schema_version` is refused by the
-// deserializer, `pid` is a `NonZeroU32` rather than a checked `u32`, and `started` is
-// compared only through `sys::StartToken::matches`, which is what carries the rule that an
-// empty one never matches.
+// llmlint: ignore-block[invalid_states_unrepresentable] the run id, the host and the two
+// stamps are `String`s for the reason `src/ledger.rs`'s own file-level suppression states,
+// and this is that file's records read back: `docs/contract.md` names no `RunId`, no `Host`
+// and no timestamp type, so a newtype here would be a public vocabulary the contract did
+// not ask for, and a record an older build wrote has to be accepted as it stands rather
+// than as this build would mint it. The block covers the four declarations and stops at
+// the closing brace, because what is checked is checked: `schema_version` is refused by
+// the deserializer, `began_at` is refused unless it is the instant it says it is, `pid` is
+// a `NonZeroU32` rather than a checked `u32`, and `started` is compared only through
+// `sys::StartToken::matches`, which is what carries the rule that an empty one never
+// matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatcherRecord {
@@ -113,7 +116,90 @@ pub struct WatcherRecord {
     ///
     /// For a person reading the directory. It decides nothing: an interval is
     /// exactly what liveness here is never read from.
+    ///
+    /// **Refused unless it is one**, all the same, and not because anything here
+    /// parses it. This record is external input — a file on disk, written by some
+    /// other process, possibly some other build — and a field documented as an
+    /// instant that carries something else is a record this build did not write.
+    /// The refusal costs nothing and resolves where every unknown here resolves:
+    /// the record is not a live watch, and the run reads unwatched.
+    #[serde(deserialize_with = "an_instant")]
     pub began_at: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Read an RFC 3339 date and time, refusing anything that is not one.
+///
+/// The **shape** rather than a calendar: what this is for is telling an instant
+/// from something that is not one, and a date this host would not have produced is
+/// still an instant a person can read. Kept here rather than reached for from a
+/// dependency because it is the only place this crate parses one at all — every
+/// other timestamp it holds it *writes* — and a date-time library would be a
+/// dependency taken for six characters of punctuation.
+fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::Error> {
+    let found = String::deserialize(reader)?;
+    if !is_rfc3339(&found) {
+        return Err(serde::de::Error::custom(format!(
+            "began_at is '{found}', which is not an RFC 3339 instant"
+        )));
+    }
+    Ok(found)
+}
+
+/// Whether `text` has the shape RFC 3339 fixes for a date and time.
+///
+/// `YYYY-MM-DDThh:mm:ss`, then an optional fraction, then `Z` or an offset — the
+/// separator and the zone marker in either case, which the grammar allows and
+/// which this crate's own writer does not produce.
+fn is_rfc3339(text: &str) -> bool {
+    let digits = |part: &str| part.len() == part.chars().filter(char::is_ascii_digit).count();
+    let Some((date, rest)) = text.split_once(['T', 't']) else {
+        return false;
+    };
+    let [year, month, day] = date.split('-').collect::<Vec<_>>()[..] else {
+        return false;
+    };
+    if !(year.len() == 4 && month.len() == 2 && day.len() == 2)
+        || !digits(year)
+        || !digits(month)
+        || !digits(day)
+    {
+        return false;
+    }
+    let (clock, zone) = match rest.find(['Z', 'z', '+']) {
+        Some(at) => rest.split_at(at),
+        // A negative offset, whose sign is also the separator inside the time —
+        // which it cannot be, because the time holds none.
+        None => match rest.rfind('-') {
+            Some(at) => rest.split_at(at),
+            None => return false,
+        },
+    };
+    if !matches!(zone, "Z" | "z") {
+        let Some(offset) = zone
+            .strip_prefix('+')
+            .or_else(|| zone.strip_prefix('-'))
+            .and_then(|offset| offset.split_once(':'))
+        else {
+            return false;
+        };
+        if !(offset.0.len() == 2 && offset.1.len() == 2 && digits(offset.0) && digits(offset.1)) {
+            return false;
+        }
+    }
+    // The fraction is optional and any number of digits.
+    let (clock, fraction) = clock.split_once('.').unwrap_or((clock, "0"));
+    let [hour, minute, second] = clock.split(':').collect::<Vec<_>>()[..] else {
+        return false;
+    };
+    hour.len() == 2
+        && minute.len() == 2
+        && second.len() == 2
+        && digits(hour)
+        && digits(minute)
+        && digits(second)
+        && !fraction.is_empty()
+        && digits(fraction)
 }
 
 /// Whether one recorded watch is watching its run **now**, and where it is not,
@@ -430,4 +516,79 @@ fn nonce() -> String {
             u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
         });
     format!("{nanos:016x}{seq:04x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The instant this crate's own writer produces is one, and the shapes RFC
+    /// 3339 also allows are too.
+    ///
+    /// The reason this is a test rather than a glance: the check is what stands
+    /// between a record and a reader, and one written too tightly would refuse a
+    /// record another build wrote correctly — which reads as "nothing is watching
+    /// this run" and re-arms a watch that was already there.
+    #[test]
+    fn an_instant_is_one_in_every_shape_the_grammar_allows() {
+        for shape in [
+            "2026-09-09T18:21:04.123Z",
+            "2026-09-09T18:21:04Z",
+            "2026-09-09t18:21:04z",
+            "2026-09-09T18:21:04+02:00",
+            "2026-09-09T18:21:04-06:30",
+            "2026-09-09T18:21:04.000000001-06:30",
+        ] {
+            assert!(is_rfc3339(shape), "`{shape}` is an RFC 3339 instant");
+        }
+        assert!(
+            is_rfc3339(&sys::now_rfc3339()),
+            "this crate's own writer does not produce one: {}",
+            sys::now_rfc3339()
+        );
+    }
+
+    /// And what is not one is refused, including the near misses.
+    #[test]
+    fn what_is_not_an_instant_is_refused() {
+        for shape in [
+            "",
+            "now",
+            "2026-09-09",
+            "18:21:04Z",
+            "2026-9-9T18:21:04Z",
+            "2026-09-09T18:21Z",
+            "2026-09-09T18:21:04",
+            "2026-09-09T18:21:04.Z",
+            "2026-09-09T18:21:04+2:00",
+            "2026-09-09Txx:21:04Z",
+            "../../etc/passwd",
+        ] {
+            assert!(!is_rfc3339(shape), "`{shape}` is not an RFC 3339 instant");
+        }
+    }
+
+    /// A record whose stamp is not an instant is refused as a record, which is
+    /// what puts the check at the boundary rather than beside it.
+    #[test]
+    fn a_record_whose_stamp_is_not_an_instant_is_not_a_record() {
+        let document = |began_at: &str| {
+            serde_json::json!({
+                "schema_version": WATCHER_SCHEMA_VERSION,
+                "run_id": "gated",
+                "pid": 4_242,
+                "host": "a-host",
+                "started": "linux-proc-stat:1",
+                "began_at": began_at,
+            })
+        };
+        serde_json::from_value::<WatcherRecord>(document("2026-09-09T18:21:04.123Z"))
+            .expect("a record this build's own writer would have written");
+        let refusal = serde_json::from_value::<WatcherRecord>(document("some time yesterday"))
+            .expect_err("a stamp that is not an instant is refused");
+        assert!(
+            refusal.to_string().contains("began_at"),
+            "the refusal does not say what it refused: {refusal}"
+        );
+    }
 }

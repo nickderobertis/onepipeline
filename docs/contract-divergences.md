@@ -4286,7 +4286,10 @@ another and a reused pid cannot be mistaken for its predecessor by file name.
 **Staleness is decided by content, never by a name.** Its fields are in the block
 below rather than in prose here, and it is read closed — `deny_unknown_fields`,
 with a version the deserializer refuses — exactly as the summary document of entry
-56 is.
+56 is. `began_at` is refused there too unless it is the RFC 3339 instant it says it
+is: nothing reads it back, but it is a field of a document some other process on
+this host wrote, and one carrying something else is a record this build did not
+write.
 
 **A record is a live watch when every one of six conditions holds**, and is not
 one otherwise: it parses at a version this build reads; its `run_id` is the run
