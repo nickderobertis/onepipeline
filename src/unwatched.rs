@@ -1,7 +1,7 @@
 //! `onepipeline unwatched` — which of this session's runs has nothing watching
 //! it.
 //!
-//! What the verb promises, and why it exists at all, is entry 66 of
+//! What the verb promises, and why it exists at all, is entry 68 of
 //! `docs/contract-divergences.md`: the proposal it waits on. It is not restated
 //! here, on the terms [`crate::watch`] keeps beside its own entry.
 //!
@@ -339,8 +339,8 @@ pub(crate) mod tests {
         )
         .expect("the divergence record ships");
         let entry = record
-            .split_once("\n## 66.")
-            .expect("this verb is recorded under entry 66")
+            .split_once("\n## 68.")
+            .expect("this verb is recorded under entry 68")
             .1
             .to_string();
         entry
@@ -353,12 +353,12 @@ pub(crate) mod tests {
         let entry = divergence_entry();
         let block = entry
             .split_once("```json")
-            .expect("entry 66 carries the json block these tests drive")
+            .expect("entry 68 carries the json block these tests drive")
             .1
             .split_once("```")
             .expect("the block is fenced")
             .0;
-        serde_json::from_str(block).expect("entry 66's block is JSON")
+        serde_json::from_str(block).expect("entry 68's block is JSON")
     }
 
     /// Every standing this build reads a record as, exhaustively.
@@ -402,7 +402,7 @@ pub(crate) mod tests {
         assert_eq!(
             block["schema_version"].as_u64(),
             Some(u64::from(WATCHER_SCHEMA_VERSION)),
-            "entry 66 states a schema version this build does not write"
+            "entry 68 states a schema version this build does not write"
         );
         let written = WatcherRecord {
             schema_version: WATCHER_SCHEMA_VERSION,
@@ -420,10 +420,10 @@ pub(crate) mod tests {
             .cloned()
             .collect();
         let named: BTreeSet<String> =
-            serde_json::from_value(block["fields"].clone()).expect("entry 66 names the fields");
+            serde_json::from_value(block["fields"].clone()).expect("entry 68 names the fields");
         assert_eq!(
             named, fields,
-            "entry 66's inventory is not the record this build writes"
+            "entry 68's inventory is not the record this build writes"
         );
         // And the record round-trips, which is what makes the inventory a
         // consumer's to read rather than one this build only writes.
@@ -462,14 +462,14 @@ pub(crate) mod tests {
     #[test]
     fn the_divergence_entry_names_every_standing_this_build_reads() {
         let named: Vec<String> =
-            serde_json::from_value(block()["standings"].clone()).expect("entry 66 names them");
+            serde_json::from_value(block()["standings"].clone()).expect("entry 68 names them");
         let read: Vec<String> = every_standing()
             .iter()
             .map(|standing| standing.as_str().to_string())
             .collect();
         assert_eq!(
             named, read,
-            "entry 66 names a different set of standings than this build reads"
+            "entry 68 names a different set of standings than this build reads"
         );
         // One of them is the live one, and it is the only one.
         let live = every_standing()
@@ -486,7 +486,7 @@ pub(crate) mod tests {
         use clap::CommandFactory;
 
         let named: BTreeSet<String> =
-            serde_json::from_value(block()["options"].clone()).expect("entry 66 names them");
+            serde_json::from_value(block()["options"].clone()).expect("entry 68 names them");
         let offered: BTreeSet<String> = crate::cli::Cli::command()
             .get_subcommands()
             .find(|sub| sub.get_name() == "unwatched")
@@ -496,13 +496,13 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             named, offered,
-            "entry 66 proposes a different set of options than this build offers"
+            "entry 68 proposes a different set of options than this build offers"
         );
         // And the entry's own prose spells the command a caller types, which is
         // the part an operator reads rather than the block.
         assert!(
             divergence_entry().contains("onepipeline unwatched [--session <ID>]"),
-            "entry 66 does not spell the command it proposes"
+            "entry 68 does not spell the command it proposes"
         );
     }
 

@@ -1,6 +1,6 @@
 //! The **watcher record**: the evidence that a run is being watched.
 //!
-//! What the record is and what it promises is entry 66 of
+//! What the record is and what it promises is entry 68 of
 //! `docs/contract-divergences.md`, and is not restated here. What is worth saying
 //! beside the code is the two rules a maintainer has to keep apart, because
 //! nothing in the types enforces them:
@@ -684,7 +684,7 @@ mod tests {
         }
     }
 
-    /// The name this build gives a record is the one entry 66 states.
+    /// The name this build gives a record is the one entry 68 states.
     ///
     /// The entry is the only place the file name is written down — the contract
     /// names none of this — and a second party reading that directory finds the
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(
             path.parent().and_then(|dir| dir.file_name()),
             block["record_directory"].as_str().map(std::ffi::OsStr::new),
-            "entry 66 names a different directory than this build writes into"
+            "entry 68 names a different directory than this build writes into"
         );
         let named = path
             .file_name()
@@ -709,7 +709,7 @@ mod tests {
             .expect("the record has a name");
         let shape = block["record_name"]
             .as_str()
-            .expect("entry 66 names the file it writes");
+            .expect("entry 68 names the file it writes");
         let (before, after) = shape
             .split_once("<nonce>")
             .expect("the entry's shape names the nonce");
@@ -718,7 +718,7 @@ mod tests {
             .strip_prefix(&before)
             .and_then(|rest| rest.strip_suffix(after))
             .unwrap_or_else(|| {
-                panic!("`{named}` is not the `{shape}` entry 66 states, for pid 4242")
+                panic!("`{named}` is not the `{shape}` entry 68 states, for pid 4242")
             });
         assert_eq!(
             held, minted,
@@ -727,12 +727,12 @@ mod tests {
         let least = usize::try_from(
             block["nonce_hex_at_least"]
                 .as_u64()
-                .expect("entry 66 says how long the nonce is at least"),
+                .expect("entry 68 says how long the nonce is at least"),
         )
         .expect("a length");
         assert!(
             held.len() >= least && held.chars().all(|c| c.is_ascii_hexdigit()),
-            "`{held}` is not the at-least-{least} hexadecimal characters entry 66 asks for"
+            "`{held}` is not the at-least-{least} hexadecimal characters entry 68 asks for"
         );
 
         assert_ne!(nonce(), nonce());

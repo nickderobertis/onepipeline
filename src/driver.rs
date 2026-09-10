@@ -30,7 +30,7 @@ use crate::cli::{
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
 use crate::engine;
-use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
+use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_SUCCESS};
 use crate::filter::{self, EventFilter};
 use crate::graph::{self, GraphState};
 use crate::journal::{self, Journal};
@@ -1995,6 +1995,10 @@ fn next(args: &ReadArgs) -> Result<i32> {
             ("message", json!(surface.message)),
             ("source", json!(surface.source)),
             ("blocking", json!(surface.blocking)),
+            // When the text was true, beside the text: a surface is written in
+            // the present tense and this record's own stamp is the reading.
+            // Divergence 66 is why it is the queued instant and not an age.
+            ("queued_at", json!(surface.queued_at)),
         ]),
     )?;
 
@@ -2172,9 +2176,10 @@ enum Submitted {
         /// the record to find out what it just did.
         operations: Vec<edits::Operation>,
     },
-    /// Every command applied **by the run's own reconciler**, which is the
-    /// writer while a driver holds the run. What they became is in its record
-    /// rather than here.
+    /// Every command applied **by the run's own reconciler**, over the durable
+    /// queue: the driver holding the run, or this process once that driver had
+    /// gone and this one took the run over. What they became is in the run's
+    /// record rather than here.
     AppliedByRun {
         /// The reply's id in the channel.
         reply: u64,
@@ -2206,7 +2211,21 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         Submitted::AppliedByRun { reply } => {
             (Receipt::AppliedByRun { reply, verdict }, EXIT_SUCCESS)
         }
-        Submitted::Queued { reply } => (Receipt::Queued { reply, verdict }, EXIT_QUEUED),
+        // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares are
+        // told apart on stdout, by the receipt's `state`; the status answers whether the
+        // envelope was accepted, which sharing it is the whole point of. Divergence 67.
+        Submitted::Queued { reply } => {
+            // The status cannot say what is left to happen, so the words do.
+            eprintln!(
+                "onepipeline: the edits are on run '{}'s durable command queue and have \
+                 not been reconciled yet, so something has to drive the run for them to \
+                 take effect: they are applied by the driver holding it, or by \
+                 `onepipeline adopt {}` if nothing is driving it. They are not to be sent \
+                 again — a second copy is a second edit.",
+                paths.run, paths.run
+            );
+            (Receipt::Queued { reply, verdict }, EXIT_SUCCESS)
+        } // llmlint: ignore-end[cli_output_contract]
     };
     println!(
         "{}",
@@ -2610,8 +2629,13 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     // and with nothing driving the run this process becomes the single writer
     // and applies the edit itself. Execution is continuous, so there is no
     // boundary at which an edit has nothing to apply to.
-    match ledger::OwnershipLock::acquire(paths, "reply") {
-        Ok(lock) => {
+    //
+    // The ask and the submission are **one section**, under the handover gate an
+    // owner letting go of the run takes across its own last look at the queue —
+    // so the answer this fork is taken on is still true when the commands land.
+    // See [`engine::accept`].
+    match engine::accept(paths, &channel, envelope.author, &envelope.commands)? {
+        engine::Accepted::NothingIsDriving(lock) => {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
             let mut compiled: Vec<edits::Operation> = Vec::new();
@@ -2702,40 +2726,240 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                     }
                 }
             }
-            lock.release();
+            // This process was the run's writer, so it lets go of it the way a
+            // driver does: under the handover, and not while the queue holds
+            // something another supervisor's edit put there while this one was
+            // being applied.
+            let mut lock = lock;
+            loop {
+                match engine::let_go_of(paths, lock) {
+                    engine::LettingGo::Released => break,
+                    engine::LettingGo::QueueMoved(back) => {
+                        lock = back;
+                        engine::reconcile_queued(paths)?;
+                    }
+                    // The commands were applied; what could not be done is hand
+                    // the run on safely, so the claim is left standing for the
+                    // next writer to reclaim rather than released into the
+                    // window an edit accepted behind it would fall into.
+                    engine::LettingGo::NotHandedOver(held, why) => {
+                        eprintln!(
+                            "onepipeline: run '{}' is being left claimed rather than \
+                             released: {why}",
+                            paths.run
+                        );
+                        held.abandon();
+                        break;
+                    }
+                }
+            }
             deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::AppliedHere {
                 operations: compiled,
             })
         }
-        Err(Error::Locked { .. }) => {
-            let id = channel.submit(envelope.author, &envelope.commands)?;
+        engine::Accepted::Queued(id) => {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            let mut answered = None;
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    deliver_verdict_half(paths, &channel, envelope)?;
-                    if outcome.applied {
-                        return Ok(Submitted::AppliedByRun { reply: id });
-                    }
-                    return Err(Error::Refused(
-                        outcome
-                            .reason
-                            .unwrap_or_else(|| "the reconciler rejected the edit".into()),
-                    ));
+                    answered = Some(outcome);
+                    break;
                 }
                 std::thread::sleep(ATTACH_POLL);
             }
+            // The wait ran out with nothing answering, so the question this fork
+            // was taken on is asked again: is anything still driving this run?
+            // It is a different question now than it was — a driver that held the
+            // run when these commands were accepted can have died holding it
+            // since — and the answer is taken the only way it cannot be raced.
+            let answered = match answered {
+                Some(outcome) => Some(outcome),
+                None => take_the_run_over_and_answer(paths, &channel, id)?,
+            };
+            if let Some(outcome) = answered {
+                deliver_verdict_half(paths, &channel, envelope)?;
+                if outcome.applied {
+                    return Ok(Submitted::AppliedByRun { reply: id });
+                }
+                return Err(Error::Refused(
+                    outcome
+                        .reason
+                        .unwrap_or_else(|| "the reconciler rejected the edit".into()),
+                ));
+            }
 
-            // Accepted and durable, but not reconciled within the timeout: they
-            // remain queued, and this is not an instruction to resend. The
-            // verdict half does not wait on that — it answers a question rather
-            // than the graph, and the reader waiting for it is not the reader
-            // waiting for the edits — so it is delivered here as it is on every
-            // other path, and only the edits are reported still queued.
+            // Accepted and durable, but not reconciled: they remain queued, and
+            // this is not an instruction to resend. The verdict half does not
+            // wait on that — it answers a question rather than the graph, and the
+            // reader waiting for it is not the reader waiting for the edits — so
+            // it is delivered here as it is on every other path, and only the
+            // edits are reported still queued.
             deliver_verdict_half(paths, &channel, envelope)?;
             Ok(Submitted::Queued { reply: id })
         }
-        Err(other) => Err(other),
+    }
+}
+
+/// Take the run over and reconcile its queue where nothing is driving it any
+/// more, and answer what became of this envelope.
+///
+/// A driver that dies holding a run releases nothing, so the commands it never
+/// claimed wait for whatever takes the run next. This process accepted the edit,
+/// so it is what takes the run over.
+///
+/// **It never resubmits and never applies anything twice**: the envelope stays
+/// the one copy of itself on the durable queue and what runs here is the
+/// reconciler, behind that queue's own cursor. So an envelope another writer
+/// already claimed answers `None`, which reports it still queued rather than
+/// applying a second copy of commands that may be half applied — and so does a
+/// run something is still driving, because the lock is what says so.
+// llmlint: ignore-block[changed_behavior_has_e2e] the two answers this can give are
+// driven end to end — applied by
+// `driver::an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it`
+// and refused by `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`,
+// which is also where two replies contend for the run. What is left is failure *of the
+// takeover itself*: a lock this host will not create, and a reconcile that fails on the
+// run's own store. Neither is a state a journey can put a run into — there is no input to
+// either CLI that refuses one file to one process — and both leave the same answer the
+// wait already had, which is that the edits are queued.
+fn take_the_run_over_and_answer(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    id: u64,
+) -> Result<Option<crate::channel::CommandOutcome>> {
+    let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+    loop {
+        match ledger::OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
+            Ok(lock) => {
+                // Taking a lock is not instant, and whoever had it may have
+                // answered this envelope while it was being taken.
+                if let Some(outcome) = channel.outcome_of(id) {
+                    let_go_or_leave_the_claim(paths, lock);
+                    return Ok(Some(outcome));
+                }
+                let reconciled = engine::reconcile_queued(paths);
+                let_go_or_leave_the_claim(paths, lock);
+                reconciled?;
+                // Whatever the queue answered about *this* envelope, which is
+                // `None` where the reconciler's cursor had already passed it.
+                return Ok(channel.outcome_of(id));
+            }
+            // **Another reply is taking this run over at this instant**, and the
+            // queue it is reconciling is the one this envelope is on: two
+            // supervisors whose edits were accepted behind one driver both
+            // outlive it, and whichever reaches the lock first answers for both.
+            // So its answer is waited for rather than reported queued — an
+            // envelope being applied as this said so is the false report this
+            // whole path exists to end. Bounded by the same patience the caller
+            // already set, and the wait ends early either way: a holder that
+            // releases hands the lock over, and one that dies leaves a lock this
+            // process reclaims.
+            Err(Error::Locked { verb, .. })
+                if Holder::of(&verb) == Holder::AnotherTakeover && Instant::now() < deadline =>
+            {
+                if let Some(outcome) = channel.outcome_of(id) {
+                    return Ok(Some(outcome));
+                }
+                std::thread::sleep(ATTACH_POLL);
+            }
+            // Something is driving the run, which is the honest queued answer:
+            // there is a reconciler and it has not got to this envelope.
+            Err(Error::Locked { .. }) => return Ok(None),
+            // And a lock this build could not read or write at all leaves the
+            // same answer — the edits are queued either way — but not silently:
+            // nothing established whether anything is driving this run.
+            Err(unreadable) => {
+                eprintln!(
+                    "onepipeline: could not ask whether anything is driving run '{}', so the \
+                     edits below are reported as this build last knew them: {unreadable}",
+                    paths.run
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Let go of a run this process took over — draining anything that reached the
+/// queue while it was writing — or leave the claim standing where it cannot.
+///
+/// A takeover is an owner like any other and leaves the run the same way: the
+/// queue's last look and the release are one section, so an edit accepted after
+/// it stopped claiming is accepted from a run that is free.
+///
+/// A drain that *fails* here does not change this process's own answer, which is
+/// already decided — so it says what it is leaving behind and lets the run go
+/// rather than holding a run it cannot write, which is the one state nothing
+/// recovers from.
+// llmlint: ignore-block[changed_behavior_has_e2e] one arm here is covered and one is not.
+// The handover it cannot take is driven by
+// `tests::a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing`; what is left
+// is a reconcile that fails on the run's own store while this process holds it, which no
+// journey can put a run into — there is no input to either CLI that makes one file
+// unwritable to one process. What both guard, a queue that moved under a takeover on its
+// way out, is the call
+// `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
+// drives with two replies contending for one run.
+fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
+    let mut lock = lock;
+    loop {
+        match engine::let_go_of(paths, lock) {
+            engine::LettingGo::Released => return,
+            engine::LettingGo::QueueMoved(back) => {
+                lock = back;
+                if let Err(error) = engine::reconcile_queued(paths) {
+                    eprintln!(
+                        "onepipeline: run '{}' is being let go of with an edit still on its \
+                         command queue, which this process could not apply: {error}",
+                        paths.run
+                    );
+                    lock.release();
+                    return;
+                }
+            }
+            engine::LettingGo::NotHandedOver(held, why) => {
+                eprintln!(
+                    "onepipeline: run '{}' is being left claimed rather than released: {why}",
+                    paths.run
+                );
+                held.abandon();
+                return;
+            }
+        }
+    }
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// What is holding a run's ownership lock, as far as a waiting `reply` is
+/// concerned.
+///
+/// The lock record's `verb` is a wire string every acquirer writes, so it is read
+/// into this at the one place a decision turns on it: waiting on a holder is only
+/// ever right for one of the two, and a spelling nothing writes must not fall into
+/// that arm by being unequal to a literal.
+#[derive(Debug, PartialEq, Eq)]
+enum Holder {
+    /// Another `reply` applying what a driver that has gone did not.
+    AnotherTakeover,
+    /// A driver driving the run.
+    ADriver,
+    /// A verb this build does not know — a later release's, or a record it could
+    /// not read. **Not** a state to act on: waiting on a holder is right for one
+    /// of the three and this is not it, so an unrecognised one is answered the
+    /// way a driver is, which is the answer that assumes least.
+    Unrecognised,
+}
+
+impl Holder {
+    fn of(verb: &str) -> Self {
+        match verb {
+            ledger::REPLY_VERB => Self::AnotherTakeover,
+            ledger::DRIVE_VERB => Self::ADriver,
+            _ => Self::Unrecognised,
+        }
     }
 }
 
@@ -3235,6 +3459,39 @@ mod tests {
                 ..Node::default()
             }],
         }
+    }
+
+    /// A takeover that cannot hand the run on **leaves the claim standing**.
+    ///
+    /// Releasing it is the one thing that would let an edit be accepted by a run
+    /// whose owner has gone, and this process cannot establish that nothing is
+    /// about to accept one — so the claim stays, naming a process that is ending,
+    /// and the next writer reclaims it exactly as it reclaims a run whose driver
+    /// died. The gate is refused here the way a run store an operator has been in
+    /// refuses one: where its entries belong there is something that is not a
+    /// directory.
+    #[test]
+    fn a_takeover_that_cannot_hand_the_run_on_leaves_the_claim_standing() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-letgo-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("channel")).expect("a run directory");
+        let paths = RunPaths {
+            run: "letgo".to_owned(),
+            dir: dir.clone(),
+        };
+        let held = ledger::OwnershipLock::acquire(&paths, ledger::REPLY_VERB)
+            .expect("this process took the run over");
+        std::fs::write(paths.channel("handover"), "not a directory")
+            .expect("the gate's place is taken by something else");
+
+        let_go_or_leave_the_claim(&paths, held);
+
+        assert!(
+            paths.lock().is_file(),
+            "the run was released by a writer that could not hand it over, which is the \
+             window an edit accepted behind it falls into"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The role prose [`run_description`] must never carry again.

@@ -1425,6 +1425,397 @@ pub struct LockRecord {
     pub started: String,
 }
 
+/// Take `path` as this process's claim, or report who holds it.
+///
+/// [`OwnershipLock`]'s own acquisition: a run has one writer, and this is the
+/// file that says which process it is.
+///
+/// Taking a claim nobody holds is exclusive, because creating a file exclusively
+/// is what the filesystem decides. Reclaiming the claim of a holder this host can
+/// prove is gone is not one operation and cannot be — which is this lock's own
+/// long-standing shape, and what `adopt` recovers a dead driver's run by.
+/// [`Handover`] does not rest on it, and says there why.
+fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| Error::Ledger {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
+    let record = LockRecord {
+        pid: sys::pid(),
+        host: sys::hostname(),
+        acquired_at: sys::now_rfc3339(),
+        verb: verb.to_string(),
+        started: sys::process_start_token(sys::pid())
+            .map(|token| token.recorded().to_string())
+            .unwrap_or_default(),
+    };
+    let body = serde_json::to_string(&record)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let held_by: Option<LockRecord> = read_json_opt(path);
+            match held_by {
+                // A holder on this host that this host can prove is gone
+                // leaves a lock nothing will release. Reclaim it.
+                // llmlint: ignore-block[changed_behavior_has_e2e] two processes reclaiming
+                // one dead driver's run at the same instant is not a state a journey can
+                // place them in — `adopt` is what reaches this, and a suite can start two
+                // but not decide which microsecond each reads the record in. What this
+                // build does about it is stated above rather than promised away, and the
+                // gate that had to be exclusive does not rest on it.
+                Some(held)
+                    if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
+                {
+                    // Read back rather than written and assumed: a contender
+                    // that arrives after the winner reads the winner's record and
+                    // is refused, exactly as a live holder would have refused it.
+                    // Two that write at the same moment can each read their own
+                    // back — this narrows that window rather than closing it, and
+                    // the doc above says what rests on it and what does not.
+                    write_atomic(path, body.as_bytes())?;
+                    match read_json_opt::<LockRecord>(path) {
+                        Some(now) if now.pid == record.pid && now.host == record.host => Ok(()),
+                        Some(won_by) => Err(Error::Locked {
+                            run: run.to_string(),
+                            pid: won_by.pid,
+                            host: won_by.host,
+                            verb: won_by.verb,
+                        }),
+                        None => Err(Error::Locked {
+                            run: run.to_string(),
+                            pid: 0,
+                            host: sys::hostname(),
+                            verb: "an unreadable lock".to_string(),
+                        }),
+                    }
+                }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
+                Some(held) => Err(Error::Locked {
+                    run: run.to_string(),
+                    pid: held.pid,
+                    host: held.host,
+                    verb: held.verb,
+                }),
+                // An unreadable lock is still a claim. Refusing is the safe
+                // reading: the alternative is a second writer on a run
+                // whose first writer cannot be identified.
+                None => Err(Error::Locked {
+                    run: run.to_string(),
+                    pid: 0,
+                    host: sys::hostname(),
+                    verb: "an unreadable lock".to_string(),
+                }),
+            }
+        }
+        Err(e) => Err(Error::Ledger {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+/// The gate that makes **accepting a command** and **letting the run go** two
+/// things that cannot interleave.
+///
+/// A departing owner reads the command queue and, finding it empty, releases the
+/// run; a submitter asks whether anything is driving the run and, finding one,
+/// queues behind it. Interleaved, those two produce the outcome neither party
+/// would accept: an envelope accepted onto the queue of a run whose owner has
+/// just left. **No absence of I/O closes that** — the window is a preemption, not
+/// a duration — so both parties hold this across their pair, and one of the two
+/// orders happens instead.
+///
+/// What it deliberately does *not* guard is applying an edit: what it serializes
+/// is a file read and a file remove, so a holder is never inside a subprocess, a
+/// conversation or a graph fold. A party that cannot take it does neither of its
+/// two things and says so.
+///
+/// # What arbitrates it
+///
+/// The gate is the **highest-numbered entry that exists**, and its holder is
+/// whoever created that entry. Taking it means creating the number above the
+/// highest one seen, exclusively — so two parties that looked at the same moment
+/// and picked the same number meet **on one path**, where the filesystem decides:
+/// exactly one create succeeds, and the other looks again and finds a live holder
+/// to wait for.
+///
+/// That is the whole of it, and the two things it does not do are why it holds:
+///
+/// * **Nothing is ever numbered above a holder that is alive.** A number above
+///   the top is taken only when the top's holder is one this host can prove is
+///   gone, and every uncertainty — another host's entry, a body that cannot be
+///   read, a listing that cannot be read — counts as alive.
+/// * **No party ever removes an entry it did not create.** A dead holder's entry
+///   is left exactly where it is and stepped *over*, so there is no moment at
+///   which one process is deleting a file another has just taken. Stale entries
+///   are the residue of a process dying inside a two-file-operation section; they
+///   cost a name each and block nobody.
+///
+/// A name carrying its maker's own clock could do neither. Clocks disagree
+/// between machines, and one process can read its own before another and write it
+/// after, so a party arriving later could sort below the holder and both would
+/// read themselves in. A name carrying the maker's *identity* beside the number
+/// is worse still: two parties picking one number then create two different
+/// paths, and the filesystem is never asked to arbitrate at all.
+#[derive(Debug)]
+pub(crate) struct Handover {
+    /// The entry this process created, which nothing else ever removes.
+    entry: PathBuf,
+}
+
+/// Where the entries live: one directory per run, beside its channel.
+fn handover_entries(paths: &RunPaths) -> PathBuf {
+    paths.channel("handover")
+}
+
+/// The verb a `reply` writes into a run's ownership lock while it applies what
+/// the run's driver did not.
+///
+/// Read as well as written: it is how one reply taking a run over tells itself
+/// from a driver driving it, and the two answer differently.
+pub(crate) const REPLY_VERB: &str = "reply";
+
+/// The verb a driver writes into a run's ownership lock while it drives it.
+pub(crate) const DRIVE_VERB: &str = "drive";
+
+/// How long a party waits for a **live holder** before refusing.
+///
+/// A bound on patience and never a licence: what waits it out is a peer inside a
+/// section of two file operations, so reaching it means something is wrong with
+/// that peer rather than that the wait is over. Time establishes nothing about
+/// whether a holder is still inside — a live process can be stopped for as long
+/// as anyone likes — so the answer here is that the gate was **not taken**, and
+/// every caller's job is to do nothing that needed it.
+const HANDOVER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many times one attempt will lose the race for a number before it reports
+/// the gate untaken.
+const NUMBERS_TRIED: usize = 1_000;
+
+// llmlint: ignore-block[changed_behavior_has_e2e] what a journey can drive of this is
+// driven: `driver::an_edit_that_cannot_be_gated_is_refused_and_nothing_reaches_the_queue`
+// and `driver::a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed` are
+// real runs meeting a gate this host cannot take. What no journey can drive is which party
+// is inside the section when the other arrives, or which of two writes lands first: both
+// are decided in microseconds inside two processes, and no CLI input places anything
+// there. Those are driven instead by the cases beside this code in `tests` — two parties
+// that looked at one gate, an arrival while another is inside, a holder this host knows is
+// gone, and three it cannot account for — and from both sides at once by
+// `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`.
+impl Handover {
+    /// Hold the gate for this run, or report that this process is not inside it.
+    pub(crate) fn hold(paths: &RunPaths) -> Result<Self> {
+        Self::hold_within(paths, HANDOVER_PATIENCE)
+    }
+
+    /// The same, with the patience stated — which is how a test drives a
+    /// contention that outlasts it without waiting out the shipped bound.
+    pub(crate) fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
+        let dir = handover_entries(paths);
+        fs::create_dir_all(&dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+        let host = sys::hostname();
+        let deadline = std::time::Instant::now() + patience;
+        for _ in 0..NUMBERS_TRIED {
+            let top = highest_entry_in(&dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
+            // Somebody holds the gate, so far as this process can establish —
+            // and everything it cannot establish counts as somebody.
+            if top.is_some_and(|top| !holder_is_gone(&dir, top, &host)) {
+                if std::time::Instant::now() >= deadline {
+                    return Err(not_taken(
+                        &paths.run,
+                        &format!(
+                            "it has been held for {}s by a party this process cannot show \
+                             has gone",
+                            patience.as_secs()
+                        ),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            // A gate numbered to the ceiling is one nothing can be taken above,
+            // which is the refusal every other way of not getting in gives rather
+            // than a number that wraps. It is also what an entry this build
+            // cannot place reads as, so this is the arm that answers those.
+            let Some(below) = top.unwrap_or(0).checked_add(1).map(|_| top.unwrap_or(0)) else {
+                return Err(not_taken(
+                    &paths.run,
+                    "its order is at the highest number this build can write",
+                ));
+            };
+            match Self::take_above(paths, &dir, below, sys::pid(), &host)? {
+                Some(held) => return Ok(held),
+                // The number went to somebody else between the look and the
+                // write, which is the race this shape exists to arbitrate: look
+                // again, and find the party that won it.
+                None => continue,
+            }
+        }
+        Err(not_taken(
+            &paths.run,
+            &format!("{NUMBERS_TRIED} numbers in its order were taken while this process looked"),
+        ))
+    }
+
+    /// One attempt to take the number above `observed`, as `pid` of `host`.
+    ///
+    /// `None` where another party took that number first — which is the whole
+    /// arbitration, and is why the number alone names the file: two parties that
+    /// looked at the same moment write to **one path**, and the filesystem says
+    /// which of them holds it. The identity goes in the body, where it tells a
+    /// later waiter whether this holder is still there; in the name it would give
+    /// each party a path of its own and arbitrate nothing.
+    ///
+    /// Takes the identity rather than reading it, so that a test can be two
+    /// parties that looked at one gate.
+    fn take_above(
+        paths: &RunPaths,
+        dir: &Path,
+        observed: u64,
+        pid: u32,
+        host: &str,
+    ) -> Result<Option<Self>> {
+        let entry = dir.join(entry_named(observed + 1));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&entry)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(not_taken(&paths.run, &e.to_string())),
+        };
+        use std::io::Write;
+        if let Err(e) = file.write_all(body_of_entry(pid, host).as_bytes()) {
+            // An entry whose body never landed is one no waiter can read an
+            // identity out of, and so one they all wait on for ever. It goes with
+            // the attempt that failed to write it — this process created it, so
+            // this process is the one that may.
+            drop(file);
+            let _ = fs::remove_file(&entry);
+            return Err(not_taken(&paths.run, &e.to_string()));
+        }
+        Ok(Some(Self { entry }))
+    }
+}
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The highest-numbered entry in the gate, or `None` where nobody is in it.
+///
+/// A name outside the shape [`entry_named`] writes is **not** passed over: it is
+/// a claim this build cannot read, and the answer to a claim it cannot read is
+/// the same as to one it can — somebody is in there. So it reports the highest
+/// number it did read, and [`holder_is_gone`] answers that such a holder is not
+/// one this host can show has gone.
+fn highest_entry_in(dir: &Path) -> Result<Option<u64>> {
+    let listing = fs::read_dir(dir).map_err(|e| Error::Ledger {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    let mut highest: Option<u64> = None;
+    let mut a_name_this_build_did_not_write = false;
+    for entry in listing {
+        let name = entry
+            .map_err(|e| Error::Ledger {
+                path: dir.to_path_buf(),
+                source: e,
+            })?
+            .file_name();
+        match number_of_entry(Path::new(&name)) {
+            Some(number) => highest = Some(highest.map_or(number, |high: u64| high.max(number))),
+            None => a_name_this_build_did_not_write = true,
+        }
+    }
+    match (highest, a_name_this_build_did_not_write) {
+        // Something is in the gate that this build cannot place. It is not
+        // stepped over: `u64::MAX` is a holder no number can be taken above and
+        // no host can show has gone, so every party waits and then refuses.
+        (_, true) => Ok(Some(u64::MAX)),
+        (highest, false) => Ok(highest),
+    }
+}
+
+/// Whether the holder of entry `number` is one **this host** can prove is gone.
+///
+/// Every uncertainty answers `false`, because the only thing this decides is
+/// whether a party may number itself above that holder: a body it cannot read, an
+/// identity it cannot parse, and an entry another host wrote are each a holder it
+/// cannot rule out. A pid is only the host that issued it to judge.
+fn holder_is_gone(dir: &Path, number: u64, this_host: &str) -> bool {
+    let Ok(body) = fs::read_to_string(dir.join(entry_named(number))) else {
+        return false;
+    };
+    let Some((pid, host)) = identity_of_body(&body) else {
+        return false;
+    };
+    host == this_host && !sys::process_may_be_live(pid)
+}
+
+/// One entry's name: the number it holds in the gate's order, and nothing else.
+///
+/// **Nothing else on purpose.** The name is the path two parties picking the same
+/// number contend on, so anything in it that differs between them — an identity,
+/// a clock reading — would give each a path of its own and leave the race
+/// unarbitrated.
+fn entry_named(number: u64) -> String {
+    format!("{number:020}")
+}
+
+/// The number an entry's name holds, or `None` for a name outside that shape.
+fn number_of_entry(entry: &Path) -> Option<u64> {
+    let name = entry.file_name()?.to_str()?;
+    (name.len() == 20 && name.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| name.parse().ok())
+        .flatten()
+}
+
+/// What an entry carries: who holds it, for a waiter deciding whether they are
+/// still there, and for an operator reading one left behind.
+fn body_of_entry(pid: u32, host: &str) -> String {
+    format!("{pid} {host}")
+}
+
+/// The identity an entry's body carries, or `None` for a body this build cannot
+/// read — which is a holder it cannot show has gone.
+fn identity_of_body(body: &str) -> Option<(u32, &str)> {
+    let (pid, host) = body.trim().split_once(' ')?;
+    Some((pid.parse().ok()?, host))
+}
+
+/// The one answer a party that is not inside the gate gets, whatever kept it
+/// out: what it must not do, and why.
+fn not_taken(run: &str, because: &str) -> Error {
+    Error::Refused(format!(
+        "the handover gate of run '{run}' could not be taken, so nothing was accepted onto \
+         its command queue and nothing was released: {because}. This process is not inside \
+         the gate, and going on without it is what would let an edit be accepted by a run \
+         whose owner has already left"
+    ))
+}
+
+impl Drop for Handover {
+    /// Takes away the entry this process created, and never another's.
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.entry);
+    }
+}
+
 /// The run's ownership lock, released when this value is dropped.
 ///
 /// The process driving a run is the only writer of its graph and its journal's
@@ -1447,72 +1838,25 @@ impl OwnershipLock {
     /// the state `adopt` exists to recover from.
     pub fn acquire(paths: &RunPaths, verb: &str) -> Result<Self> {
         let path = paths.lock();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::Ledger {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
-        let record = LockRecord {
-            pid: sys::pid(),
-            host: sys::hostname(),
-            acquired_at: sys::now_rfc3339(),
-            verb: verb.to_string(),
-            started: sys::process_start_token(sys::pid())
-                .map(|token| token.recorded().to_string())
-                .unwrap_or_default(),
-        };
-        let body = serde_json::to_string(&record)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
-                    path: path.clone(),
-                    source: e,
-                })?;
-                Ok(Self { path, held: true })
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let held_by: Option<LockRecord> = read_json_opt(&path);
-                match held_by {
-                    // A holder on this host that this host can prove is gone
-                    // leaves a lock nothing will release. Reclaim it.
-                    Some(held)
-                        if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
-                    {
-                        write_atomic(&path, body.as_bytes())?;
-                        Ok(Self { path, held: true })
-                    }
-                    Some(held) => Err(Error::Locked {
-                        run: paths.run.clone(),
-                        pid: held.pid,
-                        host: held.host,
-                        verb: held.verb,
-                    }),
-                    // An unreadable lock is still a claim. Refusing is the safe
-                    // reading: the alternative is a second writer on a run
-                    // whose first writer cannot be identified.
-                    None => Err(Error::Locked {
-                        run: paths.run.clone(),
-                        pid: 0,
-                        host: sys::hostname(),
-                        verb: "an unreadable lock".to_string(),
-                    }),
-                }
-            }
-            Err(e) => Err(Error::Ledger { path, source: e }),
-        }
+        claim_or_report_the_holder(&path, &paths.run, verb)?;
+        Ok(Self { path, held: true })
     }
 
     /// Release the lock now rather than at the end of the scope.
     pub fn release(mut self) {
         self.remove();
+    }
+
+    /// Stop holding the lock **without** releasing the run.
+    ///
+    /// What a writer does when it cannot hand the run over safely: releasing it
+    /// there is the one thing that would let an edit be accepted by a run whose
+    /// owner has gone, and this leaves the claim standing instead. The record
+    /// then names a process that is about to end, which the next writer reclaims
+    /// on the spot — so the run is recovered by the same path that recovers one
+    /// whose driver died, rather than by nothing.
+    pub(crate) fn abandon(mut self) {
+        self.held = false;
     }
 
     fn remove(&mut self) {
@@ -1747,6 +2091,210 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{body_of_entry, entry_named, identity_of_body, number_of_entry, Handover};
+    use std::time::Duration;
+
+    /// A run directory of this test's own, emptied first.
+    fn gate_scratch(name: &str) -> RunPaths {
+        let dir = std::env::temp_dir().join(format!("onepipeline-gate-{name}-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("channel")).expect("a run directory");
+        RunPaths {
+            run: name.to_owned(),
+            dir,
+        }
+    }
+
+    /// Every entry the gate is holding, by number.
+    fn entries_in(paths: &RunPaths) -> Vec<u64> {
+        let mut numbers: Vec<u64> = std::fs::read_dir(paths.channel("handover"))
+            .expect("the gate's entries")
+            .filter_map(|entry| number_of_entry(std::path::Path::new(&entry.ok()?.file_name())))
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// **Two parties that looked at the same gate do not both enter it.**
+    ///
+    /// This is the interleaving no ordering by name survives and no sequential
+    /// test reaches: both parties look while the gate is empty, and only then
+    /// does either write. A name carrying its maker's identity beside the number
+    /// gives each of them a path of its own — so both creates succeed, both are
+    /// numbered 1, and whichever sorts lower reads itself in while the other is
+    /// already inside. The number alone is the name here, so the two meet on one
+    /// path and the filesystem says which of them holds it.
+    ///
+    /// The identities are the test's rather than this process's, because one
+    /// process cannot be two — and it is exactly two *identities* picking one
+    /// number that the broken shape let through.
+    #[test]
+    fn two_parties_that_looked_at_the_same_gate_do_not_both_enter_it() {
+        let paths = gate_scratch("looked-together");
+        let dir = paths.channel("handover");
+        std::fs::create_dir_all(&dir).expect("the gate's entries");
+
+        // Both look, and both see a gate nobody is in. Neither has written yet:
+        // this is the moment the second party is paused in.
+        let the_first_looked = super::highest_entry_in(&dir).expect("the gate reads");
+        let the_second_looked = super::highest_entry_in(&dir).expect("the gate reads");
+        assert_eq!((the_first_looked, the_second_looked), (None, None));
+
+        let first = Handover::take_above(&paths, &dir, 0, 200, "this-host")
+            .expect("the first party's write is answered")
+            .expect("the first party takes the gate");
+        let second = Handover::take_above(&paths, &dir, 0, 100, "this-host")
+            .expect("the second party's write is answered");
+
+        assert!(
+            second.is_none(),
+            "two parties took the same number, so both are inside the gate: {:?}",
+            entries_in(&paths)
+        );
+        assert_eq!(
+            entries_in(&paths),
+            vec![1],
+            "the gate holds an entry no party is accountable for"
+        );
+        // And the party that lost the race finds a holder rather than a way in.
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("the gate another party is inside is not taken");
+
+        drop(first);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// **A party arriving while another is inside is numbered above it**, and a
+    /// holder nothing can show has gone is never stepped over.
+    #[test]
+    fn a_party_arriving_while_another_is_inside_does_not_get_in() {
+        let paths = gate_scratch("late-arrival");
+        let inside = Handover::hold(&paths).expect("this thread is inside the gate");
+        assert_eq!(entries_in(&paths), vec![1]);
+
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("a gate another party is inside is not taken");
+        assert_eq!(
+            entries_in(&paths),
+            vec![1],
+            "an arrival numbered itself over a holder that is alive"
+        );
+
+        // And once the holder lets go, the next party is let in — above the
+        // entry it left, never in place of it.
+        drop(inside);
+        let next = Handover::hold(&paths).expect("the gate is free once its holder lets go");
+        drop(next);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A holder this host can prove is gone is **stepped over**, not removed.
+    ///
+    /// Removing it is what would let one party delete a file another has just
+    /// taken; the number above it is free, so nothing needs to be removed. The
+    /// entry a process that died inside the section leaves behind costs a name
+    /// and blocks nobody.
+    #[test]
+    fn a_holder_this_host_knows_is_gone_is_stepped_over_rather_than_removed() {
+        let paths = gate_scratch("holder-gone");
+        let dir = paths.channel("handover");
+        std::fs::create_dir_all(&dir).expect("the gate's entries");
+        std::fs::write(dir.join(entry_named(1)), body_of_entry(0, &sys::hostname()))
+            .expect("the entry a holder that died left behind");
+
+        let held = Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect("a gate whose holder is gone is taken");
+        assert_eq!(
+            entries_in(&paths),
+            vec![1, 2],
+            "the entry of the holder that is gone was removed rather than stepped over"
+        );
+        // And it is a gate like any other once taken.
+        Handover::hold_within(&paths, Duration::from_millis(50))
+            .expect_err("the gate is held, so a second party is refused");
+        drop(held);
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A holder this host **cannot** show has gone is waited on, whatever it is.
+    ///
+    /// Another host's pid, a body this build cannot read, and a name outside the
+    /// shape it writes are each a claim it cannot rule out — and the answer to a
+    /// claim it cannot rule out is the one it gives a live holder.
+    #[test]
+    fn a_holder_this_host_cannot_account_for_is_waited_on_rather_than_stepped_over() {
+        for (what, name, body) in [
+            (
+                "another host's",
+                entry_named(1),
+                body_of_entry(0, "somewhere-else"),
+            ),
+            (
+                "an unreadable body",
+                entry_named(1),
+                "not an identity".to_owned(),
+            ),
+            (
+                "a name from outside this build",
+                "handover.lock".to_owned(),
+                String::new(),
+            ),
+        ] {
+            let paths = gate_scratch("holder-unknown");
+            let dir = paths.channel("handover");
+            std::fs::create_dir_all(&dir).expect("the gate's entries");
+            std::fs::write(dir.join(&name), &body).expect("the entry is written");
+
+            Handover::hold_within(&paths, Duration::from_millis(50))
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("a gate held by {what} was taken, so two parties are inside it")
+                });
+            std::fs::remove_dir_all(&paths.dir).ok();
+        }
+    }
+
+    /// The entry's name and body are written by one pair of functions and read by
+    /// another, so the two are held to each other here rather than by a reader
+    /// noticing.
+    #[test]
+    fn a_gate_entrys_name_carries_its_number_and_its_body_the_holder() {
+        assert_eq!(
+            number_of_entry(std::path::Path::new(&entry_named(1))),
+            Some(1)
+        );
+        assert_eq!(
+            identity_of_body(&body_of_entry(4242, "a-host")),
+            Some((4242, "a-host"))
+        );
+        // Numbers compare as text in the order they are handed out, which is what
+        // makes the highest entry the holder.
+        assert!(entry_named(2) > entry_named(1));
+        assert!(entry_named(10) > entry_named(2));
+        assert!(entry_named(u64::MAX) > entry_named(1_000_000));
+
+        // A name or a body this build did not write is read as neither.
+        for stranger in [
+            "handover.lock",
+            "1",
+            "0000000000000000000x",
+            "-0000000000000000001",
+        ] {
+            assert_eq!(
+                number_of_entry(std::path::Path::new(stranger)),
+                None,
+                "'{stranger}' was read as a name this build wrote"
+            );
+        }
+        for stranger in ["", "notanumber a-host", "4242"] {
+            assert_eq!(
+                identity_of_body(stranger),
+                None,
+                "'{stranger}' was read as an identity this build wrote"
+            );
+        }
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

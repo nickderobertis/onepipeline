@@ -304,9 +304,14 @@ onepipeline reply run-1 <<<'{"version":3,"commands":[    # edit the live graph
 onepipeline attest run-1 design-approval                 # complete a human action
 ```
 
+<!-- llmlint: ignore[cli_output_contract] the two outcomes `0` covers are told apart on
+stdout, by the receipt's `state`; the status answers acceptance, and this verb reserves a
+non-zero one for a rejection to correct. -->
 Every edit is applied or rejected with a reason: `reply` exits `0` when the
-reconciler applied it, `1` when it is queued but not yet reconciled, and `2` when
-it was refused.
+reconciler applied it, `0` when it is accepted and still queued — durable,
+waiting for something to drive the run, and never an instruction to send again,
+which the reply says in words on stderr — and `2` when it was refused. A
+non-zero status from this verb is a rejection to correct.
 
 Two of those ops reach a node that is already running, and they are deliberately
 not the same lever:

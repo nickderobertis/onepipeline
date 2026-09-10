@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
+use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
@@ -972,6 +972,109 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
         "who owns this decision?"
     );
     assert_eq!(displaced.json()["surface"]["abandoned"], json!(true));
+    ended(pressing);
+    world.release("build.go");
+}
+
+/// The record of a hand-out says **when the text it carries was true**.
+///
+/// One queued surface handed out twice carries one instant and a second surface
+/// carries its own, which is what lets a reader tell a drained backlog from a
+/// condition that recurred — the reading a monitor got wrong off three records
+/// it could not date. Divergence 66.
+#[test]
+fn a_delivered_surface_is_recorded_with_the_instant_it_was_queued() {
+    use std::io::Write;
+
+    let world = World::new("channel-surface-instant");
+    world.script("build.wait", "hold");
+    let run = running(&world, "surfaceinstant", vec![agent("build", &[])]);
+
+    let serving = |asker: &str, frame: &str| {
+        let mut serving = world
+            .cmd(&["channel", "serve", &run])
+            .env(onepipeline::channel::ASKER_ENV, asker)
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(stdin, "{frame}").expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        drop(stdin);
+        serving
+    };
+
+    // One question, read once, and then left behind by the asker that raised it.
+    let asked = serving(
+        "the-asker-that-ended",
+        r#"{"kind":"blocker","message":"who owns this decision?","node":"build"}"#,
+    );
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let first = world.run(&["next", &run]);
+    first.exited(0).out_has("who owns this decision?");
+    let queued_at = first.json()["surface"]["queued_at"].clone();
+    assert!(queued_at.is_u64(), "{}", first.json());
+    ended(asked);
+
+    // A second question, from an asker that is waiting on it, which takes the
+    // slot the first was sitting in and puts it back among the readable ones.
+    let pressing = serving(
+        "some-other-dispatch",
+        r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
+    );
+    world.until("the second question to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 2
+    });
+    let second = world.run(&["next", &run]);
+    second.exited(0);
+    assert_eq!(
+        second.json()["surface"]["message"],
+        "whose call is the base?"
+    );
+    let second_queued_at = second.json()["surface"]["queued_at"].clone();
+
+    // And the first, handed out a second time: the same queued surface, the same
+    // text, and a second delivery of it.
+    let again = world.run(&["next", &run]);
+    again.exited(0);
+    assert_eq!(
+        again.json()["surface"]["message"],
+        "who owns this decision?"
+    );
+
+    let handed = world.events_of(&run, "planner-surfaced");
+    assert_eq!(handed.len(), 3, "{handed:?}");
+    // Two hand-outs of one queued surface carry one instant, so a reader holding
+    // both knows it is looking at one condition delivered twice rather than at a
+    // condition that recurred.
+    assert_eq!(handed[0]["payload"]["queued_at"], queued_at, "{handed:?}");
+    assert_eq!(handed[2]["payload"]["queued_at"], queued_at, "{handed:?}");
+    // And a separate surface carries its own, which is what makes the pair above
+    // evidence of anything.
+    assert_eq!(
+        handed[1]["payload"]["queued_at"], second_queued_at,
+        "{handed:?}"
+    );
+    assert_ne!(handed[1]["payload"]["queued_at"], queued_at, "{handed:?}");
+
+    // The four fields the record already carried say exactly what the surface
+    // handed over says, which is what they said before the fifth was added.
+    let delivered = first.json();
+    for field in ["kind", "message", "source", "blocking"] {
+        assert_eq!(
+            handed[0]["payload"][field], delivered["surface"][field],
+            "the delivery record's `{field}` is no longer the delivered surface's"
+        );
+    }
+    assert_eq!(handed[0]["payload"]["kind"], "blocker");
+    assert_eq!(handed[0]["payload"]["message"], "who owns this decision?");
+    assert_eq!(handed[0]["payload"]["blocking"], json!(true));
+
     ended(pressing);
     world.release("build.go");
 }
@@ -3023,7 +3126,12 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
         })
         .to_string(),
     );
-    submitted.exited(QUEUED).out_has("\"queued\"");
+    // Exit 0: accepted, durable, and not reconciled yet is not a refusal, and
+    // this verb's non-zero statuses are refusals to correct.
+    submitted
+        .exited(0)
+        .out_has("\"queued\"")
+        .err_has("has to drive the run");
     // Two fates, and the receipt names each: the ruling is gone to a reader and
     // the edits are still in the queue, which one word could only say one of.
     // Held to entry 64 here rather than only in the receipt journey, because this
