@@ -153,7 +153,7 @@ pub const EXIT_WATCH_ELAPSED: i32 = 5;
 /// is driving the run" rather than a number of its own, on the same reading of what
 /// these codes are. Entry 66 states this one, and it is the contract owner's to
 /// rule on.
-// llmlint: ignore[cli_output_contract] the rule reads these as one global code space, in
+// llmlint: ignore-block[cli_output_contract] the rule reads these as one global code space, in
 // which two outcomes sharing `6` are indistinguishable. They are not one space: every code
 // above `3` belongs to a single verb's protocol, `watch` alone spells `4`, `5` and `6`, and
 // `watch` already *reuses* `3` from the shared set by the contract owner's own ruling in
@@ -161,6 +161,7 @@ pub const EXIT_WATCH_ELAPSED: i32 = 5;
 // meet both meanings; giving this verb a seventh number instead would be inventing surface
 // the proposal in entry 66 does not carry. Raise it there, not here.
 pub const EXIT_RUNS_UNWATCHED: i32 = 6;
+// llmlint: ignore-end[cli_output_contract]
 
 /// A node the wait was told to return on settled.
 ///

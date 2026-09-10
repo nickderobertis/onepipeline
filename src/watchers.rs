@@ -214,7 +214,7 @@ fn is_rfc3339(text: &str) -> bool {
     };
     number(hour, 2, 0..=23).is_some()
         && number(minute, 2, 0..=59).is_some()
-        // llmlint: ignore[boundary_inputs_validated] `60` is admitted at any minute on
+        // llmlint: ignore-block[boundary_inputs_validated] `60` is admitted at any minute on
         // purpose, and narrowing it is not a check this or any build can make. A leap
         // second is inserted at the end of a UTC minute, but RFC 3339 renders an instant
         // in an *offset*, so the same second is a legal `18:29:60-05:30` — restricting the
@@ -225,6 +225,7 @@ fn is_rfc3339(text: &str) -> bool {
         // looking at the directory, and every reading this verb makes is of the pid, the
         // host and the start token beside it.
         && number(second, 2, 0..=60).is_some()
+        // llmlint: ignore-end[boundary_inputs_validated]
         && !fraction.is_empty()
         && fraction.chars().all(|c| c.is_ascii_digit())
 }
