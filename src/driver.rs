@@ -87,7 +87,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Attest(args) => attest(&args),
         Verb::Stop(args) => stop(&args),
         Verb::Runs(args) => runs(&args),
-        Verb::Status(args) => report(&args, views::status),
+        Verb::Status(args) => status(&args),
         Verb::Host => report(&OptionalRunArgs { run: None }, views::host),
         Verb::Monitor(args) => {
             let view = RunView::open(&resolve(&args.run)?)?;
@@ -105,6 +105,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let filter = read_filter(&view, &args.read)?;
             crate::watch::watch(&args, &paths, &filter)
         }
+        Verb::Unwatched(args) => crate::unwatched::unwatched(&args),
         Verb::Results(args) => {
             print!("{}", views::results(&RunView::open(&resolve(&args.run)?)?));
             Ok(EXIT_SUCCESS)
@@ -3339,6 +3340,32 @@ fn runs(args: &RunsArgs) -> Result<i32> {
         "{}",
         views::runs(&ledger::runs_root(), args.mine, &sys::launching_session())
     );
+    Ok(EXIT_SUCCESS)
+}
+
+/// `onepipeline status`.
+///
+/// The two halves of this verb are two different reads, and deliberately so. A
+/// named run is a **detail** read: it folds that run's merged store and reports
+/// what each of its nodes is doing. No run named is a **listing**, and a listing
+/// may never fold — it answers the run-level lines out of each run's bounded
+/// summary document, so asking a host what is running costs a document per run
+/// rather than every byte every run has recorded.
+fn status(args: &OptionalRunArgs) -> Result<i32> {
+    let rendered = match &args.run {
+        Some(run) => views::status(&views::Survey::of_one(RunView::open(&resolve(run)?)?)),
+        None => views::status_listed(&views::Listing::of(&ledger::runs_root())),
+    };
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a view
+    // to stdout is one decision for all thirty-one of them in this file, not this verb's:
+    // every view verb here prints the same way, and `src/AGENTS.md` records the exit codes
+    // as spent — `0`/`1`/`2` are `reply`'s verdicts, `3` is "nothing is driving the run" —
+    // so a write this one returned as an error would have to carry a code that already
+    // means something else. Making a closed pipe a first-class outcome is a change to the
+    // whole command surface and to the contract's exit codes, which belongs with the
+    // planner who owns them rather than in the one verb a diff happens to touch.
+    print!("{rendered}");
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
     Ok(EXIT_SUCCESS)
 }
 

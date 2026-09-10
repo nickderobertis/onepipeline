@@ -253,6 +253,37 @@ impl RunPaths {
         self.dir.join("checkpoint.json")
     }
 
+    /// The directory holding one record per live **watch** of this run.
+    ///
+    /// A directory of small records rather than one document, for the reason
+    /// [`dispatches`](Self::dispatches) is one: any number of watches may sit on
+    /// one run at once and they start and end independently, so a single file
+    /// would be read, edited, and rewritten by several of them and a lost update
+    /// there is a watch nothing can find.
+    ///
+    /// Crate-visible, like [`checkpoint`](Self::checkpoint) and unlike its
+    /// neighbours here: `docs/contract.md` names six members of this type, and a
+    /// reader of these records reaches them through
+    /// [`views::Watchers::of`](crate::views::Watchers::of) rather than by
+    /// composing a path — so publishing the directory would be a second promise
+    /// about the same documents.
+    pub(crate) fn watchers(&self) -> PathBuf {
+        self.dir.join("watchers")
+    }
+
+    /// One watch's record, named by the process holding it and a value unique to
+    /// that watch.
+    ///
+    /// Both halves are load-bearing. The pid alone is not a name: several watches
+    /// of one run may run in one process, and two of them would write one entry
+    /// with the first to end taking the survivor's record away. And a pid the
+    /// kernel has handed round again is not its predecessor, so a name that were
+    /// only a pid would let a new watch land on an old record — which is why
+    /// staleness is decided by a record's *content* and never by its name.
+    pub(crate) fn watcher(&self, pid: u32, nonce: &str) -> PathBuf {
+        self.watchers().join(format!("{pid}-{nonce}.json"))
+    }
+
     /// The single-writer ownership lock the engine verbs hold.
     pub fn lock(&self) -> PathBuf {
         self.dir.join("owner.lock")
@@ -817,36 +848,18 @@ impl LaunchRecord {
         (!self.envelope_reviewer.is_empty()).then_some(self.envelope_reviewer.as_str())
     }
 
-    /// Whether this record attributes the launch to a session at all.
-    ///
-    /// Two spellings of the same nothing: `unknown`, which is what
-    /// [`sys::launching_session`] answers where the environment identifies
-    /// nobody, and **empty**, which is what a record carrying no `session` key
-    /// defaults to and what a launcher that wrote a blank one recorded. Reading
-    /// them apart would make a run written before the key existed *ownable* by
-    /// whichever reader also had no session.
-    fn attributed(&self) -> bool {
-        !self.session.is_empty() && self.session != sys::UNKNOWN_LAUNCHER
-    }
-
     /// Whether `session` is the session that launched this run.
     ///
     /// An unattributed launch is nobody's, including the reader's — a
     /// provenance-less run never displays as the caller's, and never accepts a
     /// command that ownership guards.
     pub fn owned_by(&self, session: &str) -> bool {
-        self.attributed() && self.session == session
+        owned_by(&self.session, session)
     }
 
     /// How a view names this run's owner.
     pub fn owner_label(&self, session: &str) -> String {
-        if !self.attributed() {
-            "[unknown]".to_string()
-        } else if self.session == session {
-            "[mine]".to_string()
-        } else {
-            format!("[{}:{}]", self.launcher, sys::session_digest(&self.session))
-        }
+        owner_label(&self.launcher, &self.session, session)
     }
 
     /// The driver pid this record names, when it names one a reader may act on.
@@ -899,6 +912,42 @@ impl LaunchRecord {
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     pub fn pacemaker_interval(&self) -> Option<u64> {
         (self.heartbeat_interval > 0).then_some(self.heartbeat_interval)
+    }
+}
+
+/// Whether a recorded session attributes a launch to anybody at all.
+///
+/// Two spellings of the same nothing: `unknown`, which is what
+/// [`sys::launching_session`] answers where the environment identifies nobody,
+/// and **empty**, which is what a record carrying no `session` key defaults to
+/// and what a launcher that wrote a blank one recorded. Reading them apart would
+/// make a run written before the key existed *ownable* by whichever reader also
+/// had no session.
+fn attributed(recorded: &str) -> bool {
+    !recorded.is_empty() && recorded != sys::UNKNOWN_LAUNCHER
+}
+
+/// Whether `reader` is the session a launch was recorded under.
+///
+/// A free function rather than a method, because two documents carry that
+/// recorded session — the launch record, and the summary document a listing
+/// reads instead of it — and one reading over both is what keeps a run from
+/// being this session's on one view and nobody's on the other.
+pub(crate) fn owned_by(recorded: &str, reader: &str) -> bool {
+    attributed(recorded) && recorded == reader
+}
+
+/// How a view names the owner of a launch recorded under `recorded`.
+///
+/// The counterpart of [`owned_by`], shared by both documents for the same
+/// reason.
+pub(crate) fn owner_label(launcher: &str, recorded: &str, reader: &str) -> String {
+    if !attributed(recorded) {
+        "[unknown]".to_string()
+    } else if recorded == reader {
+        "[mine]".to_string()
+    } else {
+        format!("[{launcher}:{}]", sys::session_digest(recorded))
     }
 }
 

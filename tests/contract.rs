@@ -48,7 +48,7 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
-use onepipeline::views::{RunPaths, RunSummary, RunTelemetry, SUMMARY_SCHEMA_VERSION};
+use onepipeline::views::{NodeLanding, RunPaths, RunSummary, RunTelemetry, SUMMARY_SCHEMA_VERSION};
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -1949,6 +1949,19 @@ fn summary_fields() -> BTreeSet<String> {
         started: Some("linux-proc-stat:1".into()),
         timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
             .expect("the telemetry golden reads back into the types"),
+        parked: vec!["idle".into()],
+        judge_rejected: vec!["publish".into()],
+        landings: [(
+            "publish".to_string(),
+            NodeLanding {
+                landing: "unlanded".into(),
+                branch: Some("onepipeline/gated".into()),
+                repo: Some("nickderobertis/onepipeline".into()),
+                drafted: false,
+            },
+        )]
+        .into_iter()
+        .collect(),
         journal_len: 8_192,
         journal_mtime_ms: 1_786_000_000_100,
     };
@@ -1956,6 +1969,27 @@ fn summary_fields() -> BTreeSet<String> {
         .expect("a summary is an object")
         .as_object()
         .expect("a summary is an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// Every field one node's landing inputs carry, on the same terms.
+///
+/// A second inventory because the document grew a **nested** type, and a field
+/// added inside one is exactly as unreadable to a consumer nobody told as a field
+/// added beside it.
+fn landing_fields() -> BTreeSet<String> {
+    let landing = NodeLanding {
+        landing: "unlanded".into(),
+        branch: Some("onepipeline/gated".into()),
+        repo: Some("nickderobertis/onepipeline".into()),
+        drafted: true,
+    };
+    serde_json::to_value(&landing)
+        .expect("a landing is an object")
+        .as_object()
+        .expect("a landing is an object")
         .keys()
         .cloned()
         .collect()
@@ -1982,6 +2016,13 @@ fn the_summary_document_is_what_the_divergence_record_names() {
         named,
         summary_fields(),
         "entry 56's inventory is not the document this build writes"
+    );
+    let landings: BTreeSet<String> = serde_json::from_value(block["landing_fields"].clone())
+        .expect("entry 56 names the landing inputs' fields");
+    assert_eq!(
+        landings,
+        landing_fields(),
+        "entry 56's landing inventory is not what this build writes"
     );
 }
 

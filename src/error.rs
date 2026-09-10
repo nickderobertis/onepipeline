@@ -146,6 +146,29 @@ pub const EXIT_SURFACE_WAITING: i32 = 4;
 /// watch printed.
 pub const EXIT_WATCH_ELAPSED: i32 = 5;
 
+/// At least one run this session owns has nothing watching it.
+///
+/// `unwatched`'s own answer, and a status rather than the refused
+/// [`EXIT_REFUSED`] because a caller has to tell "runs are unwatched" from "this
+/// verb could not answer": a hook that read a refusal as an answer would go quiet
+/// on exactly the runs it was installed to find, and one that read the answer as a
+/// refusal would report every turn as broken.
+///
+/// **The same number [`EXIT_NODE_SETTLED`] carries, on a different verb**, because
+/// every code above [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol and a
+/// caller always knows which verb it ran. Divergence entry 68 is where that is
+/// argued and ruled on; it is named on both constants so a reader meets it at
+/// whichever one they open.
+// llmlint: ignore-block[cli_output_contract] the rule reads these as one global code space, in
+// which two outcomes sharing `6` are indistinguishable. They are not one space: every code
+// above `3` belongs to a single verb's protocol, `watch` alone spells `4`, `5` and `6`, and
+// `watch` already *reuses* `3` from the shared set by the contract owner's own ruling in
+// divergence entry 58. A caller runs one verb and branches on its returns, so no caller can
+// meet both meanings; giving this verb a seventh number instead would be inventing surface
+// the proposal in entry 68 does not carry. Raise it there, not here.
+pub const EXIT_RUNS_UNWATCHED: i32 = 6;
+// llmlint: ignore-end[cli_output_contract]
+
 /// A node the wait was told to return on settled.
 ///
 /// `watch`'s fifth return, and a status of its own for the same reason the two
@@ -153,6 +176,11 @@ pub const EXIT_WATCH_ELAPSED: i32 = 5;
 /// able to tell that from the run settling, from a surface waiting and from the
 /// wait running out — and the record beside it names *which* node, so neither
 /// answer is read out of prose.
+///
+/// **Shared with [`EXIT_RUNS_UNWATCHED`]**, which is `unwatched`'s answer that an
+/// owned run has nothing watching it, on the reading above: a code above
+/// [`EXIT_NOTHING_DRIVING`] belongs to one verb's protocol. Divergence entries 58
+/// and 68 argue it.
 pub const EXIT_NODE_SETTLED: i32 = 6;
 
 #[cfg(test)]

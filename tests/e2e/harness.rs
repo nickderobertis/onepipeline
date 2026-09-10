@@ -373,6 +373,10 @@ pub const WATCH_ELAPSED: i32 = onepipeline::error::EXIT_WATCH_ELAPSED;
 /// A `watch` returning because a node it was told to return on settled.
 pub const NODE_SETTLED: i32 = onepipeline::error::EXIT_NODE_SETTLED;
 
+/// `unwatched` answering that at least one run this session owns has nothing
+/// watching it.
+pub const RUNS_UNWATCHED: i32 = onepipeline::error::EXIT_RUNS_UNWATCHED;
+
 /// clap's exit code for a usage error.
 pub const USAGE_ERROR: i32 = 2;
 
@@ -2513,6 +2517,76 @@ impl World {
 /// off a stream it took, or is ending a server whose output it never claimed.
 pub fn ended(child: std::process::Child) {
     child.wait_with_output().expect("the child ends");
+}
+
+/// Give the kernel time to finish writing back what a fixture just wrote, saying
+/// so on a line where the bound rather than the disk ended the wait.
+///
+/// For the host-sized journeys: each grows four hundred journals to ten gibibytes
+/// and then times a command against them, and the pages of that write are still on
+/// their way to the disk when the first invocation starts, so the clock reads the
+/// fixture's write rather than the command. `fsync` per file does not cover it —
+/// that puts *one file's* pages on the device while the rest of the machine's
+/// dirty pages are still being written — and this waits for the whole of it.
+///
+/// **Bounded, and it says when the bound was what ended it** — which is why it is
+/// spelled as letting the writeback settle rather than as waiting until it has: a
+/// disk that is still busy after [`SETTLING`] gets the measurement it would have
+/// got anyway, on a line saying how much was left, rather than a suite that hangs.
+///
+/// **Linux, where the kernel says so.** `/proc/meminfo` carries `Dirty` and
+/// `Writeback` in kilobytes; everywhere else this returns at once, because there is
+/// no portable way to ask and a wait that guessed would be a sleep.
+pub fn let_writeback_settle() {
+    let settled = waited_for(SETTLING, std::time::Duration::from_millis(200), || {
+        dirty_bytes().is_none_or(|held| held <= SETTLED_BYTES)
+    });
+    if !settled {
+        println!(
+            "  the kernel is still writing back {:?} byte(s) after {SETTLING:?}; what follows \
+             is measured over a disk that is still busy",
+            dirty_bytes()
+        );
+    }
+}
+
+/// What the kernel may still be holding before a measurement is its own.
+///
+/// Thirty-two mebibytes: far below the ten gibibytes a host-sized fixture writes,
+/// and far above the ordinary churn of a machine that is doing nothing in
+/// particular — so this waits for the fixture and not for idleness.
+const SETTLED_BYTES: u64 = 32 * 1024 * 1024;
+
+/// How long that wait may take before the measurement is made anyway.
+///
+/// Sixty seconds, twice: a journey that waited longer could reach nextest's own
+/// `terminate-after` — six sixty-second periods — and be killed rather than
+/// measured, which is worse than a measurement taken over a disk that is still
+/// busy.
+///
+/// **Nothing establishes what the wait is worth**: no run has been taken with it
+/// and without it, all else equal. It is kept as hygiene rather than as a
+/// demonstrated correction, and nothing this suite asserts rests on it.
+const SETTLING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many bytes this host says it has yet to write back, or `None` where it will
+/// not say.
+#[cfg(target_os = "linux")]
+fn dirty_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let held = |key: &str| -> Option<u64> {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.split_whitespace().next())
+            .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
+            .map(|kilobytes| kilobytes * 1024)
+    };
+    Some(held("Dirty:")? + held("Writeback:")?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn dirty_bytes() -> Option<u64> {
+    None
 }
 
 /// Poll until `ready` holds, reporting whether it did before the deadline.

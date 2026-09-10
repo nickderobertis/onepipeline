@@ -68,6 +68,8 @@ pub enum Command {
     Monitor(ReadArgs),
     /// Block until a run needs a supervisor, saying so as it waits.
     Watch(WatchArgs),
+    /// Which of a session's runs has nothing watching it.
+    Unwatched(UnwatchedArgs),
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -499,6 +501,21 @@ pub struct WatchArgs {
     /// which one did.
     #[arg(long, value_name = "CONDITION", default_values_t = [WatchUntil::Surface])]
     pub until: Vec<WatchUntil>,
+}
+
+/// `onepipeline unwatched`.
+///
+/// The session is taken as an option **as well as** from the environment, and
+/// that is the whole of the argument surface. Its consumer is a hook that is
+/// handed the session it must ask about on standard input, while the environment
+/// it runs in carries somebody else's — so a verb that could only read the
+/// environment would answer confidently about the wrong session.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct UnwatchedArgs {
+    /// The launching session whose runs to ask about. Omitted, the session
+    /// `ONEPIPELINE_LAUNCHER_SESSION` names.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.
