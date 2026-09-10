@@ -713,8 +713,6 @@ fn a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barel
          measures over"
     );
 
-    // Exactly the runs this session owns, out of the four hundred on the root —
-    // and each of those rows carries a landing this render decided.
     let owned_rows = rendered(&world, &["runs", "--mine"]);
     assert_eq!(
         owned_rows.lines().count(),

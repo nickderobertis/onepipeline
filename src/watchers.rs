@@ -749,7 +749,6 @@ mod tests {
             "`{held}` is not the at-least-{least} hexadecimal characters entry 66 asks for"
         );
 
-        // And two of them differ, which is the whole reason the name carries one.
         assert_ne!(nonce(), nonce());
     }
 
