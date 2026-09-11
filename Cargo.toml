@@ -412,23 +412,39 @@ onevcs = "0.21.0"
 # `src/note.rs` re-exports them through `oneagentgraph::note` rather than
 # restating them — a second declaration is a shape that drifts, and a note that
 # satisfied the copy would still be refused by the conversation it was written
-# for. `oneagentgraph` 0.3.15 requires the same release, so the one resolution
-# rule above already holds the pair together.
-onejudge = "0.7.0"
+# for.
+#
+# 0.8.1 is where that pair stands now, and moving it is **not optional**:
+# `oneagentgraph` 0.3.17 — inside the caret above, so the lock takes it whether
+# this line moves or not — requires `onejudge 0.8.1`, and `^0.7.0` admits no
+# 0.8.x because pre-1.0 the minor is the breaking position. Left at 0.7.0 the
+# graph carries onejudge twice, which is the state `just engines-current` refuses
+# outright rather than reports: each copy is separately current, and the note
+# vocabulary `src/note.rs` re-exports would be one copy's while the verdicts
+# `src/report.rs` reads off `member-settled` were the other's. `onejudge::note`
+# is unchanged across the move — 0.8.0 re-asks an unparseable supervisor answer
+# instead of failing the member, and lets an evaluator verify the finished tree
+# read-only — so nothing here reads differently; what moved is which copy exists.
+onejudge = "0.8.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.7.0 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.15 requires
-# 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
-# double writes the one its consumer parses. If onejudge's pin moves and this
-# one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
-# — which names the drift rather than hiding it. Nothing this crate publishes
-# links it.
-oneharness-core = "0.12"
+# The reader is **onejudge**, so this pin is whatever onejudge links, and it moves
+# when that does: at 0.8.1 onejudge requires `oneharness-core 0.13.0`, as does
+# `oneagentgraph` 0.3.17, so the shared `0.13` requirement resolves one
+# compatible copy and the double writes the one its consumer parses. Held at
+# `0.12` while onejudge moved, this would be the second engine the lock carried
+# twice — `tests/e2e/turns.rs` fails on a report shape onejudge cannot read,
+# which names the drift rather than hiding it, and `just engines-current` refuses
+# the doubled lock before a test gets that far. What the move costs the double is
+# one field: 0.13's `RunResult::observed_model` — the model the harness itself
+# reported the turn ran under — which `crates/testfakes`'s `fake-oneharness`
+# writes absent, because a double that invented one would be answering a
+# question no journey here asks. Nothing this crate publishes links it.
+oneharness-core = "0.13"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was

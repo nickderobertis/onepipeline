@@ -72,7 +72,7 @@ enum Occurs {
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 13] = [
+const FLAGS: [(&str, Takes, Occurs); 14] = [
     ("--compact", Takes::Nothing, Occurs::Once),
     ("--events", Takes::Nothing, Occurs::Once),
     ("--history", Takes::Nothing, Occurs::Once),
@@ -88,6 +88,13 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
     ("--prompt-file", Takes::AValue, Occurs::Once),
     ("--history-name", Takes::AValue, Occurs::Once),
     ("--session", Takes::AValue, Occurs::Once),
+    // The permission mode the turn runs under. onejudge sends it from 0.8.0, on
+    // the evaluator turns it now runs read-only so a judge verifies the finished
+    // tree rather than editing it; the agent turn carries none. Accepted and
+    // nothing more — the real CLI's own mode is enforcement this process has
+    // nothing to enforce, and onejudge reads the report's `permission_mode` back
+    // for no decision, so a double echoing it would be inventing an oracle.
+    ("--mode", Takes::AValue, Occurs::Once),
 ];
 
 /// Refuses an argv the real `oneharness run` would not take.
@@ -816,6 +823,7 @@ fn report(
             status: outcome.status(),
             prompt: None,
             model: None,
+            observed_model: None,
             exit_code: Some(outcome.code()),
             duration_ms: Some(1),
             telemetry: None,

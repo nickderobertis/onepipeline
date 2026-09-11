@@ -106,6 +106,24 @@ fn linked(name: &str) -> Vec<String> {
     found
 }
 
+/// A release of one engine that is newer than what this build links and still
+/// inside the requirement the manifest states for it.
+///
+/// Derived from the linked version rather than written down, for the reason
+/// [`linked`] reads the lock at all: a fixture version copied here is a second
+/// copy of a pin, and it rots silently the day the requirement moves a minor.
+/// It rotted exactly that way once — the `oneharness-core` fixture stayed at
+/// `0.12.100` when the requirement went to `0.13`, so the release the index
+/// served was one the caret no longer admitted and the check correctly said
+/// nothing about it. Same major and minor, patch far above any real one, so it
+/// is inside every caret that admits what the lock already holds.
+fn a_release_above(linked_version: &str) -> String {
+    let (series, _patch) = linked_version
+        .rsplit_once('.')
+        .expect("a linked version is major.minor.patch");
+    format!("{series}.100")
+}
+
 /// The requirement `[workspace.dependencies]` states for one engine.
 ///
 /// Read from the manifest for the reason [`linked`] reads the lock: written
@@ -340,11 +358,13 @@ fn the_currency_check_passes_when_every_engine_is_the_newest_its_requirement_per
 fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
     let stale_harness = &linked("oneharness-core")[0];
+    let ahead_graph = a_release_above(stale_graph);
+    let ahead_harness = a_release_above(stale_harness);
     let index = index_serving(
         "stale",
         &[
-            ("oneagentgraph", "0.3.100", false),
-            ("oneharness-core", "0.12.100", false),
+            ("oneagentgraph", &ahead_graph, false),
+            ("oneharness-core", &ahead_harness, false),
         ],
     );
 
@@ -358,7 +378,8 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     let report = String::from_utf8_lossy(&run.stderr);
     assert!(
         report.contains(&format!(
-            "oneagentgraph: links {stale_graph}, but its requirement already permits 0.3.100"
+            "oneagentgraph: links {stale_graph}, but its requirement already permits \
+             {ahead_graph}"
         )),
         "the refusal does not name what oneagentgraph resolves and what it could:\n{}",
         said(&run)
@@ -374,7 +395,7 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     assert!(
         report.contains(&format!(
             "oneharness-core: links {stale_harness}, but its requirement already permits \
-             0.12.100"
+             {ahead_harness}"
         )),
         "the refusal skipped the engine this workspace links only for its doubles, which is \
          the one a generic check is most likely to drop:\n{}",
@@ -542,7 +563,8 @@ fn the_release_note_records_the_version_of_every_engine_the_build_links() {
 fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
     let pinned = required("oneagentgraph");
-    let index = index_serving("notes-stale", &[("oneagentgraph", "0.3.100", false)]);
+    let ahead_graph = a_release_above(stale_graph);
+    let index = index_serving("notes-stale", &[("oneagentgraph", &ahead_graph, false)]);
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
     assert!(
         run.status.success(),
@@ -553,8 +575,8 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let notes = String::from_utf8_lossy(&run.stdout);
     assert!(
         notes.contains(&format!(
-            "| `oneagentgraph` | **{stale_graph}** | `{pinned}` | **0.3.100** — this release \
-             is behind it |"
+            "| `oneagentgraph` | **{stale_graph}** | `{pinned}` | **{ahead_graph}** — this \
+             release is behind it |"
         )),
         "the note records the version without saying it is behind what the requirement \
          permits:\n{}",
@@ -562,7 +584,8 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     );
     assert!(
         notes.contains(&format!(
-            "- `oneagentgraph` links {stale_graph}; the requirement already permitted 0.3.100."
+            "- `oneagentgraph` links {stale_graph}; the requirement already permitted \
+             {ahead_graph}."
         )),
         "the note carries no warning naming the engine that is behind, so a reader still has \
          to diff the lock to learn it:\n{}",
