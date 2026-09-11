@@ -54,6 +54,9 @@ const NOTE: &str = "the reviewer asked for a smaller diff; stop editing src/old.
 /// the worker should go about it.
 const CRITERION: &str = "`version.txt` holds `v: 2`";
 
+/// The planner's own note a node can be launched with, rendered as observed state.
+const PLANNER_CONTEXT: &str = "the fixture moved to fixtures/v2 before this node was launched";
+
 /// The instruction the shipped judge side opens with, which is how a recorded
 /// prompt says which party it was for.
 ///
@@ -1275,7 +1278,12 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
     world.repository("change-auto", &[]);
     world.script("harness.work", "the worker wrote this\n");
     world.script("gh.checks", "llmlint completed failure required");
-    held_conversation(&world, run, vec![lifecycle("service", &[])]);
+    // The planner's own carried note, which the node is launched with: it rode
+    // in as the first dispatch's context, and the continuation is the engine's
+    // — not a dispatch anybody asked for — so it is owed there too.
+    let mut service = lifecycle("service", &[]);
+    service["context"] = json!(PLANNER_CONTEXT);
+    held_conversation(&world, run, vec![service]);
 
     // The ruling, addressed to both parties, delivered into the held worker
     // turn — so it is read by the worker and, with the worker's response, by the
@@ -1371,8 +1379,11 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         NOTE,
         CRITERION,
         // And the diagnosis is still there beside it: carrying the note did not
-        // cost the worker the failure it was re-dispatched over.
+        // cost the worker the failure it was re-dispatched over — nor the
+        // planner's own note the node was launched with, which the first
+        // attempt was given and the continuation keeps above the diagnosis.
         "## Planner context",
+        PLANNER_CONTEXT,
         "checks-failed",
     ] {
         assert!(
@@ -1384,6 +1395,21 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         !dispatched[0][0].contains("## Manager notes"),
         "the first dispatch was composed with a note that had not been delivered yet:\n{}",
         dispatched[0][0]
+    );
+    assert!(
+        dispatched[0][0].contains(PLANNER_CONTEXT) && !dispatched[0][0].contains("checks-failed"),
+        "the first dispatch was not composed with the planner's note alone:\n{}",
+        dispatched[0][0]
+    );
+    let planner_note_at = opening
+        .find(PLANNER_CONTEXT)
+        .expect("the planner's note is in the continuation");
+    let diagnosis_at = opening
+        .find("The previous attempt's publication failed")
+        .expect("the diagnosis is in the continuation");
+    assert!(
+        planner_note_at < diagnosis_at,
+        "the planner's note does not lead the continuation's context:\n{opening}"
     );
     // The second conversation's opening is the composed task and nothing else,
     // which is what the stream says about it too.

@@ -100,8 +100,10 @@ resolver = "2"
 #   that its note delivery goes through `oneagentgraph::control::note`, the path
 #   that release stamps as `delivered`, and `src/agentgraph.rs` holds the field
 #   against the linked library so a pin below 0.3.16 fails rather than reads
-#   differently. A **lock floor** rather than a requirement: `^0.3.15` already
-#   admits it, so only the resolution moved.
+#   differently. Written as the **requirement** as well as the resolution —
+#   `^0.3.15` would have admitted it — because the note seam this crate publishes
+#   now promises a stamped delivery, and a manifest that still said 0.3.15 would
+#   be stating a floor below what that promise needs.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
