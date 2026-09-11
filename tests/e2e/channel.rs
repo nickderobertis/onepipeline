@@ -744,6 +744,33 @@ fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_a
         .exited(0)
         .out_lacks("nobody is waiting on")
         .out_has("2 planner update(s) waiting (1 blocker, 1 planner-question)");
+    // And the run's own record carries the correction under the question's
+    // id, beside the line that said nobody was waiting on it: the record ends
+    // on the question being attended rather than on a statement that stopped
+    // being true, and the surface it carries is no longer marked — the flag is
+    // omitted where it is false, so its absence is what the attended line
+    // shows.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let of_question: Vec<(Value, Value)> = record
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|e| {
+                panic!("the run wrote a surface record that is not JSON ({e}): {line}")
+            })
+        })
+        .filter(|line| line["id"] == json!(0))
+        .map(|line| (line["event"].clone(), line["abandoned"].clone()))
+        .collect();
+    assert_eq!(
+        of_question,
+        vec![
+            (json!("queued"), Value::Null),
+            (json!("abandoned"), json!(true)),
+            (json!("attended"), Value::Null),
+        ],
+        "{record}"
+    );
     ended(rearmed);
 
     // The manager reads it, which is what puts a question where a verdict can

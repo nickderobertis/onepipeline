@@ -1325,6 +1325,12 @@ impl ChannelState {
     /// beside its projection so that a writer which appended and then died
     /// before it wrote the projection still wakes the loop, whose read of the
     /// queue is what folds that record in.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the state that half
+    // exists for is a writer dying between its append and its write of the
+    // projection, which no journey can arrange on purpose — every push the
+    // binary makes writes both — so `a_record_appended_without_its_projection_
+    // still_moves_the_fingerprint` places that append against the real files
+    // and holds that the fingerprint moves and the read folds it.
     pub(crate) fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             queue: mark(&self.queue_path()),
@@ -1332,6 +1338,7 @@ impl ChannelState {
             commands: mark(&self.paths.channel("commands.jsonl")),
         }
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The live queue: the projection, brought up to date with every record the
     /// surface log has grown by since the projection was written.
@@ -2550,11 +2557,13 @@ mod tests {
     ///
     /// Every transition a surface can make is driven here — queued, replaced as
     /// a check-in, claimed, abandoned, attended, answered — and after each the
-    /// projection is lost three ways: deleted, replaced with something that is
-    /// not a queue, and overwritten with a copy taken earlier, which is the
-    /// stale write-back the lost update was. Each time the read answers exactly
-    /// what it answered before, and writes the repaired projection back so the
-    /// next read is one read again.
+    /// projection is lost six ways. Three lose the file: deleted, replaced with
+    /// something that is not a queue, and overwritten with a copy taken
+    /// earlier, which is the stale write-back the lost update was. Three keep
+    /// it stamped at the log's length and move its claims under the stamp: its
+    /// waiting surfaces emptied, its counter reset, and its seal removed. Each
+    /// time the read answers exactly what it answered before, and writes the
+    /// repaired projection back so the next read is one read again.
     #[test]
     fn the_queue_is_rebuilt_from_the_log_alone_whatever_became_of_the_projection() {
         let root = std::env::temp_dir().join(format!("onepipeline-rebuilt-{}", crate::sys::pid()));
@@ -2568,7 +2577,7 @@ mod tests {
         // What the projection said before the transition under test: the stale
         // copy a racing reader would have written back over it.
         let mut earlier = std::fs::read(&queue_path).ok();
-        let lost_three_ways = |channel: &ChannelState, earlier: &Option<Vec<u8>>, what: &str| {
+        let lost_six_ways = |channel: &ChannelState, earlier: &Option<Vec<u8>>, what: &str| {
             let expected = channel.queue();
             let stamped = expected
                 .accounted
@@ -2576,8 +2585,9 @@ mod tests {
             let current = std::fs::read(&queue_path).expect("the projection was written");
             // A stamped document whose claims moved under an intact stamp — and
             // under an intact seal, which no longer seals them — is one nothing
-            // here wrote: the same three ways a writer's claims can be wrong
-            // while its stamp still matches the log's length.
+            // here wrote: the three ways a writer's claims can be wrong while
+            // its stamp still matches the log's length, beside the three ways
+            // the file itself can be lost.
             let claims_moved = |edit: &dyn Fn(&mut serde_json::Value)| -> Vec<u8> {
                 let mut document: serde_json::Value =
                     serde_json::from_slice(&current).expect("the projection is JSON");
@@ -2640,7 +2650,7 @@ mod tests {
         };
         let mut step = |what: &str, act: &dyn Fn(&ChannelState)| {
             act(&channel);
-            lost_three_ways(&channel, &earlier, what);
+            lost_six_ways(&channel, &earlier, what);
             earlier = std::fs::read(&queue_path).ok();
         };
 
@@ -2901,6 +2911,53 @@ mod tests {
             "a refused fold moved the projection"
         );
         // And the record the fold could not read is still there for the next one.
+        let queue = channel.queue();
+        assert_eq!(
+            queue.waiting.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A record a writer appended and died before projecting still wakes the
+    /// loop, which folds it in.
+    ///
+    /// The loop waits on the fingerprint and reads nothing until it moves, so
+    /// a record that reached the log and never the projection would be one the
+    /// loop slept through until something else woke it. The log is marked
+    /// beside the projection for exactly that record: here it is placed as the
+    /// dead writer left it — appended, with the projection untouched — and the
+    /// fingerprint moves, and the read that follows hands the record over.
+    #[test]
+    fn a_record_appended_without_its_projection_still_moves_the_fingerprint() {
+        let root = std::env::temp_dir().join(format!("onepipeline-logmark-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "logmark");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        channel.push(surface(0, false)).expect("queued");
+        let projected = std::fs::read(channel.queue_path()).expect("the projection");
+        let seen = channel.fingerprint();
+
+        crate::ledger::append_line(
+            &channel.log_path(),
+            &serde_json::to_string(&SurfaceRecord {
+                event: Some(SurfaceEvent::Queued),
+                surface: surface(1, true),
+            })
+            .expect("a record"),
+        )
+        .expect("the log grows");
+        assert_eq!(
+            std::fs::read(channel.queue_path()).expect("the projection"),
+            projected,
+            "the append moved the projection, so this proves nothing about the log's mark"
+        );
+        assert_ne!(
+            channel.fingerprint(),
+            seen,
+            "a record appended without its projection left the fingerprint where it was"
+        );
         let queue = channel.queue();
         assert_eq!(
             queue.waiting.iter().map(|s| s.id).collect::<Vec<_>>(),
