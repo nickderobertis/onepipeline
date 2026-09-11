@@ -1108,7 +1108,9 @@ impl Queue {
                         .retain(|existing| existing.source != source::CHECK_IN);
                 }
                 self.waiting.push(surface.clone());
-                self.next_id = self.next_id.max(surface.id + 1);
+                // Saturating, so an id no writer here allocated cannot take the fold
+                // down with it: the record is folded and the counter stays put.
+                self.next_id = self.next_id.max(surface.id.saturating_add(1));
             }
             SurfaceEvent::Claimed => {
                 let Some(at) = self.waiting.iter().position(|w| w.id == surface.id) else {
