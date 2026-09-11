@@ -1110,6 +1110,188 @@ fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown(
     );
 }
 
+/// Two notes in one envelope reach the worker on **two** turns, and each
+/// presentation the run records names the note that turn really opened on — and
+/// a note whose next presentation never happened gets no receipt for it.
+///
+/// The conversation acknowledges a note into a live worker turn only when that
+/// turn ends and the next opens carrying it, and the envelope's notes are
+/// offered one at a time: the second is offered while the turn carrying the
+/// first is live, so it opens the turn after. The two acknowledgements reach the
+/// run's record together, in one commit, at one instant — so nothing about
+/// *when* they were recorded tells the two turns apart, and a watch that read
+/// any `delivered` worker turn as every pending note's presentation stamped the
+/// second note on the first note's turn. The dispatch is cancelled while the
+/// second note's turn is held, so neither note's judge presentation happens,
+/// and the record must say so for both.
+#[test]
+fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them() {
+    let world = World::new("note-two-turns");
+    let run = "twoturns";
+    let first = "the reviewer asked for a smaller diff; stop editing src/old.rs";
+    let second = "leave the changelog alone; release-plz writes it";
+    // Every worker turn of the one node is held and released on its own — an
+    // empty marker holds them all — so the turn carrying the second note is
+    // still open when the cancel arrives. One node only: a second one's turns
+    // would take the same gates.
+    world.script("turn.hold-each", "");
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    // The reply blocks until both notes are acknowledged, which is until the
+    // turn carrying the first has ended and the one carrying the second has
+    // opened — so it runs on its own thread while this one releases the turns.
+    // And while it blocks, the run's writer relays nothing: the turn carrying
+    // the first note is waited for at the harness the double records, never in
+    // the journal, which cannot show it until the reply returns.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let mut reply = world.agentgraph_cmd(&["reply", run]);
+    let body = json!({"version": 2, "commands": [
+        note_op("build", "worker", first, None),
+        note_op("build", "worker", second, None),
+    ]})
+    .to_string();
+    let replied = std::thread::spawn(move || {
+        use std::io::Write;
+        let mut child = reply
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin is piped")
+            .write_all(body.as_bytes())
+            .expect("the envelope is written");
+        child.wait_with_output().expect("the binary runs")
+    });
+    releasing.join().expect("the releasing thread finishes");
+    // The first note's turn is open and held; release it so the second note is
+    // acknowledged into the turn after it — promptly, because the seam waits a
+    // bounded time for that acknowledgement and answers `carried` past it.
+    world.until("the turn carrying the first note to open", |world| {
+        worked(world).len() >= 2
+    });
+    // The second note is offered the moment the first is acknowledged, which is
+    // the moment that turn opened; the offer is the reconciler's own step, with
+    // nothing durable to watch for, so it is given the same short pause the
+    // release above gives a queued note before the turn it is bound for ends.
+    std::thread::sleep(Duration::from_secs(2));
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let output = replied.join().expect("the reply thread finishes");
+    assert!(
+        output.status.success(),
+        "the envelope was not applied: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    world.until("the turn carrying the second note to open", |world| {
+        worked(world).len() >= 3
+    });
+    // Both notes reached a live turn, and the record says so of each.
+    let committed: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .map(|event| event["payload"]["operations"][0].clone())
+        .collect();
+    assert_eq!(committed.len(), 2, "{committed:#?}");
+    assert!(
+        committed
+            .iter()
+            .all(|operation| operation["reached"] == json!("worker")),
+        "a note did not reach the worker's turn: {committed:#?}"
+    );
+
+    // Cancelled while the second note's turn is held: neither note's judge
+    // presentation ever happens.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "cancel", "id": "build", "reason": "stop here"})),
+        )
+        .exited(0);
+    world.until("the held dispatch to be reaped at its deadline", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+
+    // Which turn opened on which note, from the producer's own record.
+    let openings = openings_of(&world, run, "build");
+    let turn_carrying = |text: &str| -> u64 {
+        let carrying: Vec<&TurnStarted> = openings
+            .iter()
+            .filter(|opening| opening.instruction.contains(text))
+            .collect();
+        assert_eq!(
+            carrying.len(),
+            1,
+            "{text:?} opened {} turns, not one:\n{openings:#?}",
+            carrying.len()
+        );
+        assert_eq!(
+            carrying[0].origin,
+            Some(Origin::Delivered),
+            "{:?}",
+            carrying[0]
+        );
+        carrying[0].turn
+    };
+    let first_turn = turn_carrying(first);
+    let second_turn = turn_carrying(second);
+    assert!(second_turn > first_turn, "{openings:#?}");
+
+    // Each presentation names the note that turn really opened on, and nobody
+    // is recorded as shown a note on a turn that did not carry it. No judge
+    // presentation at all: the conversation was reaped before one.
+    let shown = presentations_of(&world, run, "build");
+    let mut recorded: Vec<(String, String, u64)> = shown
+        .iter()
+        .map(|event| {
+            (
+                event["payload"]["text"]
+                    .as_str()
+                    .expect("a note")
+                    .to_string(),
+                event["payload"]["party"]
+                    .as_str()
+                    .expect("a party")
+                    .to_string(),
+                event["payload"]["turn"].as_u64().expect("a turn"),
+            )
+        })
+        .collect();
+    recorded.sort();
+    let mut expected = vec![
+        (first.to_string(), "worker".to_string(), first_turn),
+        (second.to_string(), "worker".to_string(), second_turn),
+    ];
+    expected.sort();
+    assert_eq!(
+        recorded, expected,
+        "the presentations recorded are not one per note on the turn that opened on \
+         it:\n{shown:#?}"
+    );
+
+    // Released so the held turn ends with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle"] {
+        release(&world.fakes, gate);
+    }
+}
+
 /// A `retry`'s replacement is composed from the manager's own task, so the notes
 /// the node it supersedes read are **spent** by it — and its record says so.
 ///

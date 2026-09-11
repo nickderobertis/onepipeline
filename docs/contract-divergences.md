@@ -4739,10 +4739,15 @@ release stamps as `delivered`, and holds the field against the linked library in
    cancelled or failed between the two presentations leaves the first recorded,
    the second unrecorded, and no claim anywhere that the second party saw
    anything. A turn that opened before the note was offered is never read as its
-   presentation, whatever order the loop meets the records in. Each `note-shown`
-   names its **evidence** — `delivered-origin`, `opening-task`,
-   `instruction-text`, or `answering-turn` — so a reader knows whether the
-   producer said so or this crate read it off the words. The block below is what
+   presentation, whatever order the loop meets the records in. A worker turn is
+   a **particular** note's presentation only where its opening instruction
+   carries that note's text: the producer's stamp says the turn opened on *a*
+   note, and two notes in one envelope are acknowledged a turn apart and reach
+   the record at one instant, so the stamp alone put the second on the first's
+   turn. An instruction the payload bound cut short of the text confirms
+   nothing. Each `note-shown` names its **evidence** — `delivered-origin`,
+   `opening-task`, `instruction-text`, or `answering-turn` — so a reader knows
+   whether the producer said so or this crate read it off the words. The block below is what
    `tests/contract.rs` holds `note::Reached::shown_at_delivery` and `routed_to`
    to, and what `note`'s own tests hold the evidence spellings to.
 
@@ -4753,7 +4758,14 @@ release stamps as `delivered`, and holds the field against the linked library in
    `turn-interrupted delivered=true` and the correction's text opened the
    worker's turn 2 — a presentation made by a lever outside the note seam (an
    `interrupt` issued by hand) inside the same dispatch, with no receipt
-   anywhere. The seam routed nothing, so `routed_to` is empty and honest; but
+   anywhere. Reproduced here, the mechanism is the producer's own: the linked
+   `oneagentgraph` waits **30 seconds** for the conversation's acknowledgement,
+   and a note offered into a live worker turn is acknowledged only when that
+   turn ends — so a turn longer than that answers *"did not take the note
+   within 30 seconds"*, this crate records `carried`, and the interrupt the seam
+   already issued delivers the note when the turn does end. That is the
+   producer's to rule on and is not restated as a defect of this record; what
+   this record owes is to say what then happened. The seam routed nothing, so `routed_to` is empty and honest; but
    the dispatch's watch now holds a carried note too, and a worker turn whose
    opening **instruction carries the note's whole text** — not one cut short of
    it by the payload bound — is recorded as the worker's presentation with
@@ -4794,7 +4806,9 @@ unrecorded, with no `note-shown` and no `shown_to` claiming otherwise; a note
 recorded `carried` while the dispatch was live whose text the supervising side
 then read into the worker's next turn, recorded as shown to the worker from the
 instruction's text and to the judge from the answering turn; and a note carried
-to a node's next dispatch recorded as shown by that dispatch's opening turn.
+to a node's next dispatch recorded as shown by that dispatch's opening turn;
+and two notes in one envelope, opening two turns, each recorded on its own turn
+and neither given a judge's receipt when the dispatch is reaped before one.
 
 ```json
 {

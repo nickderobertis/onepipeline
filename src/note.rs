@@ -700,6 +700,14 @@ impl Routing {
 
     /// Advance on a relayed turn of `party`, answering what that turn is
     /// evidence of where it is a presentation this route was owed.
+    ///
+    /// A worker turn is **this note's** presentation only where its opening
+    /// instruction carries this note's text: the producer's `delivered` stamp
+    /// says the turn opened on *a* note, and several notes routed at once — two
+    /// in one envelope are acknowledged one turn apart and recorded at one
+    /// instant — open separate turns, so the stamp alone would put every
+    /// pending note on the first of them. An instruction cut short of the text
+    /// by the payload bound is no evidence either way, and confirms nothing.
     fn presented_by(
         &mut self,
         party: Party,
@@ -707,7 +715,9 @@ impl Routing {
         text: &str,
     ) -> Option<Evidence> {
         let turn = opened.turn;
-        let delivered = opened.origin == Some(oneagentgraph::event::Origin::Delivered);
+        let carries_this_note = opened.instruction.contains(text);
+        let delivered =
+            opened.origin == Some(oneagentgraph::event::Origin::Delivered) && carries_this_note;
         let shown_to_both = Self::NextTurnToOpen {
             worker_shown: true,
             judge_shown: true,
@@ -725,10 +735,8 @@ impl Routing {
                     Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn: turn });
                 Some(Evidence::OpeningTask)
             }
-            // The whole text, and never a turn cut short of it: an instruction
-            // bounded before the note's end is not evidence either way.
             (Party::Worker, Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingWorker))
-                if !opened.instruction_truncated && opened.instruction.contains(text) =>
+                if carries_this_note =>
             {
                 *self = Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingJudge {
                     worker_turn: turn,
@@ -1162,10 +1170,22 @@ mod tests {
 
     /// A relayed turn, as the producer publishes it.
     fn turn(seq: u64, at: u64, role: &str, turn: u64, origin: Option<&str>) -> Envelope {
+        turn_on(seq, at, role, turn, origin, "do it")
+    }
+
+    /// The same, opening on `instruction`.
+    fn turn_on(
+        seq: u64,
+        at: u64,
+        role: &str,
+        turn: u64,
+        origin: Option<&str>,
+        instruction: &str,
+    ) -> Envelope {
         let mut payload = payload(&[
             ("turn", json!(turn)),
             ("role", json!(role)),
-            ("instruction", json!("do it")),
+            ("instruction", json!(instruction)),
             ("started_at", json!(crate::sys::rfc3339_from_millis(at))),
         ]);
         if let Some(origin) = origin {
@@ -1224,8 +1244,27 @@ mod tests {
             .is_empty());
         // Nor a supervisor turn ahead of the worker's delivered one.
         assert!(watch.observe(&turn(4, 1_200, "user", 2, None)).is_empty());
+        // Nor a delivered turn that opened on some **other** note: the stamp
+        // says a note, and the instruction says which.
+        assert!(watch
+            .observe(&turn_on(
+                5,
+                1_250,
+                "assistant",
+                3,
+                Some("delivered"),
+                "## Notes delivered to you during this run\n\n- carry on"
+            ))
+            .is_empty());
 
-        let shown = watch.observe(&turn(5, 1_300, "assistant", 3, Some("delivered")));
+        let shown = watch.observe(&turn_on(
+            5,
+            1_300,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- stop",
+        ));
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert_eq!(shown[0].party, Party::Worker);
         assert_eq!(shown[0].turn, 3);
@@ -1249,7 +1288,14 @@ mod tests {
         let mut watch = Presentations::default();
         watch.routed_by_the_conversation(recorded("ruling", Reached::Supervisor), 2_000);
         assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
-        let shown = watch.observe(&turn(9, 2_200, "assistant", 6, Some("delivered")));
+        let shown = watch.observe(&turn_on(
+            9,
+            2_200,
+            "assistant",
+            6,
+            Some("delivered"),
+            "the supervisor was told: ruling",
+        ));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].party, Party::Worker);
 
@@ -1275,14 +1321,21 @@ mod tests {
             recorded("stop re-running the tier", Reached::Carried),
             5_000,
         );
-        let mut cut = turn(13, 5_100, "assistant", 2, Some("supervisor"));
-        cut.payload
-            .insert("instruction".into(), json!("stop re-running the tier"));
+        // An instruction the payload bound cut short of the text says nothing
+        // either way, and confirms nothing.
+        let mut cut = turn_on(
+            13,
+            5_100,
+            "assistant",
+            2,
+            Some("supervisor"),
+            "The manager says: stop re-running",
+        );
         cut.payload
             .insert("instruction_truncated".into(), json!(true));
         assert!(
             watch.observe(&cut).is_empty(),
-            "a truncated instruction is no evidence"
+            "an instruction cut short of the text was read as carrying it"
         );
         let mut other = turn(14, 5_200, "assistant", 3, Some("supervisor"));
         other
@@ -1303,6 +1356,51 @@ mod tests {
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert_eq!(shown[0].party, Party::Supervisor);
         assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
+
+        // Two notes routed at one instant — one envelope, acknowledged a turn
+        // apart — are each recorded on the turn that opened on them, and a
+        // supervisor turn answering the first's turn is shown the first alone.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(recorded("first ruling", Reached::Worker), 6_000);
+        watch.routed_by_the_conversation(recorded("second ruling", Reached::Worker), 6_000);
+        let shown = watch.observe(&turn_on(
+            17,
+            6_100,
+            "assistant",
+            2,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- first ruling",
+        ));
+        assert_eq!(
+            shown
+                .iter()
+                .map(|shown| shown.note.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first ruling"],
+            "{shown:?}"
+        );
+        let shown = watch.observe(&turn_on(
+            18,
+            6_200,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- second ruling",
+        ));
+        assert_eq!(
+            shown
+                .iter()
+                .map(|shown| (shown.note.text.as_str(), shown.turn))
+                .collect::<Vec<_>>(),
+            [("second ruling", 3)],
+            "{shown:?}"
+        );
+        let shown = watch.observe(&turn(19, 6_300, "user", 3, None));
+        assert_eq!(
+            shown.len(),
+            2,
+            "both were carried by turns the judge's answer follows: {shown:?}"
+        );
 
         // Nothing the conversation routes nowhere is watched at all.
         let mut watch = Presentations::default();
