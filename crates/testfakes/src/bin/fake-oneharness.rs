@@ -263,7 +263,38 @@ struct Config {
 /// One `[harness.<id>]` section, as far as this process reads it.
 #[derive(serde::Deserialize)]
 struct HarnessSection {
-    model: Option<String>,
+    model: Option<Model>,
+}
+
+/// A model name, from a config's `[harness.<id>].model` or a `harness.serves`
+/// script.
+///
+/// A type for the reason [`Identity`] is one: a blank is not a model, and a
+/// result carrying `model: ""` would be a candidate asked for nothing and
+/// refused for serving something else. Constructed only by [`Model::named`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Model(String);
+
+impl Model {
+    /// The model `raw` names, or the reason it names none.
+    fn named(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("names no model".to_string());
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Model {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::named(&raw).map_err(|reason| serde::de::Error::custom(format!("`model` {reason}")))
+    }
 }
 
 /// One harness identity, which is a name.
@@ -322,7 +353,7 @@ impl<'de> serde::Deserialize<'de> for Chain {
 struct Selection {
     chain: Chain,
     /// The `model` of each `[harness.<id>]` section that states one, by id.
-    requested: BTreeMap<String, String>,
+    requested: BTreeMap<String, Model>,
 }
 
 impl Selection {
@@ -342,8 +373,8 @@ impl Selection {
     }
 
     /// The model `identity` was asked to run under, where its section states one.
-    fn requested(&self, identity: &Identity) -> Option<&str> {
-        self.requested.get(identity.as_str()).map(String::as_str)
+    fn requested(&self, identity: &Identity) -> Option<&Model> {
+        self.requested.get(identity.as_str())
     }
 }
 
@@ -509,7 +540,10 @@ fn work(
     }
 
     let mut report = report(outcome.text(), Some(events), outcome, &ran.identity, mode);
-    report.results[0].observed_model = ran.observed_model.clone();
+    report.results[0].observed_model = ran
+        .observed_model
+        .as_ref()
+        .map(|model| model.as_str().to_string());
     if let Some(refused) = ran.refused {
         // The candidate stepped past goes first, as oneharness orders a chain's
         // attempts, and the fallback block says which one ran — with the reason
@@ -560,7 +594,7 @@ struct Ran {
     /// only where the harness stand-in reports one, which is where a journey
     /// scripted `harness.serves`. `None` is the honest answer on every other
     /// path, exactly as it is on every oneharness path but codex's app-server.
-    observed_model: Option<String>,
+    observed_model: Option<Model>,
     /// The first candidate, refused before any token was spent, in oneharness's
     /// own result shape — the one a supervisor attributes and a chain steps past.
     refused: Option<RunResult>,
@@ -583,17 +617,17 @@ fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, Strin
             refused: None,
         });
     };
-    if served.is_empty() {
-        return Err("harness.serves names no model for the server to report".to_string());
-    }
+    let served = Model::named(&served).map_err(|reason| format!("harness.serves {reason}"))?;
     match selection.requested(first) {
-        Some(requested) if requested != served => {
+        Some(requested) if *requested != served => {
             let next = selection.after(first).ok_or_else(|| {
                 format!(
-                    "the chain names nothing after '{}', which was refused for serving {served:?} \
-                     where {requested:?} was requested; a chain this double steps past has a \
-                     next candidate",
-                    first.as_str()
+                    "the chain names nothing after '{}', which was refused for serving {:?} \
+                     where {:?} was requested; a chain this double steps past has a next \
+                     candidate",
+                    first.as_str(),
+                    served.as_str(),
+                    requested.as_str()
                 )
             })?;
             Ok(Ran {
@@ -614,10 +648,10 @@ fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, Strin
 /// because the server named a model other than the requested one: no exit code,
 /// because the server was torn down rather than exited, and the `error` composed
 /// by that library's [`DialogueRefusal`] so the sentence is oneharness's.
-fn refused(identity: &Identity, requested: &str, served: &str) -> RunResult {
+fn refused(identity: &Identity, requested: &Model, served: &Model) -> RunResult {
     let refusal = DialogueRefusal::ModelMismatch {
-        requested: requested.to_string(),
-        observed: served.to_string(),
+        requested: requested.as_str().to_string(),
+        observed: served.as_str().to_string(),
     };
     RunResult {
         harness: identity.as_str().into(),
@@ -627,8 +661,8 @@ fn refused(identity: &Identity, requested: &str, served: &str) -> RunResult {
         available: true,
         status: Status::Nonzero,
         prompt: None,
-        model: Some(requested.to_string()),
-        observed_model: Some(served.to_string()),
+        model: Some(requested.as_str().to_string()),
+        observed_model: Some(served.as_str().to_string()),
         exit_code: None,
         duration_ms: Some(1),
         telemetry: None,
