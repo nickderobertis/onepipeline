@@ -952,6 +952,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         branch: Some("topic".into()),
         title: Some("feat: x".into()),
         body: Some("why".into()),
+        draft: true,
         execution_checkout: Some("checkout".into()),
         steps: Some(Vec::new()),
         resume: Some(Resume {

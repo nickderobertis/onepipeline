@@ -71,6 +71,16 @@ pub(crate) fn body_is_newer(declared: u32) -> String {
     )
 }
 
+/// What a plan below [`PLAN_SCHEMA_VERSION`] naming `draft` is told, for
+/// [`body_is_newer`]'s reason: a planner who asked for a draft and had the ask
+/// ignored would find that out from a change request that landed.
+pub(crate) fn draft_is_newer(declared: u32) -> String {
+    format!(
+        "`draft` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
+         {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
+    )
+}
+
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
@@ -694,6 +704,19 @@ pub struct Node {
     // so an e2e for it would pin a promise the other six do not make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Leave the change request this node publishes as a **draft** at closeout,
+    /// for a person to lift: opened as one where the session holds none, and
+    /// held as one where the worker opened it.
+    ///
+    /// The node settles `done` with outcome `change-draft` and no landing, and
+    /// its dependents proceed — it is not `complete-but-draft`, because nothing
+    /// in the run will ever lift it; that status is for a draft a release arrives
+    /// to lift, and it holds the run. Where the node also awaits a release, the
+    /// release reason wins and the node settles `complete-but-draft` as it would
+    /// have. Refused at load on a node whose resolved publication opens no change
+    /// request, since a draft is a state of one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,

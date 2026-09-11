@@ -226,9 +226,17 @@ impl Executor for LocalExecutor {
             WorkspaceSpec::Path(path) => (path.clone(), None),
             WorkspaceSpec::VcsSession(request) => {
                 let session = crate::vcs::session_open(request)?;
+                remember_worktree(&session);
                 (session.worktree.clone(), Some(session))
             }
         };
+        // The session this dispatch works in: the one just opened, or — for every
+        // later dispatch of the same node, which names the worktree rather than
+        // asking for a session of its own — the one this executor opened there.
+        let token = session
+            .as_ref()
+            .map(|session| session.token.0.clone())
+            .or_else(|| session_of_worktree(&dir));
         // Relayed: this dispatch is read turn by turn into the merged store.
         let node_sets = node_sets(&req.labels, &req.controls)?;
         // Every node-scope launch a run starts is one of that run's
@@ -239,7 +247,7 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
-        let env = prepare_dispatch_env(&req.labels)?;
+        let env = prepare_dispatch_env(&req.labels, token.as_deref())?;
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
@@ -311,12 +319,48 @@ impl Executor for LocalExecutor {
 /// proposal this answers.
 pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
+/// The sessions this executor opened, by the worktree each handed back.
+///
+/// A lifecycle node's first dispatch asks for a session and every later one —
+/// its remaining steps and its drafting dispatch — names the worktree that
+/// session opened, because a second session on the same branch would reclaim
+/// the first. The token is not on that request: [`WorkspaceSpec::Path`] is a
+/// directory and the contract fixes it as one. So the executor that opened the
+/// session is what remembers which one, which is the same fact
+/// [`WorkspaceSpec::VcsSession`] states — the machine running the dispatch is
+/// the one that opened the session there. A path nothing here opened answers
+/// nothing, which is every direct node's dispatch.
+fn opened_worktrees() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<PathBuf, String>>
+{
+    static OPENED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, String>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    // A poisoned lock holds a map a panicking thread was mid-insert into, which
+    // is still a map of sessions this process opened.
+    OPENED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Record the session a dispatch just opened, against the worktree it works in.
+fn remember_worktree(session: &onevcs::Session) {
+    opened_worktrees().insert(session.worktree.clone(), session.token.0.clone());
+}
+
+/// The session this executor opened at a worktree, if it opened one there.
+fn session_of_worktree(worktree: &Path) -> Option<String> {
+    opened_worktrees().get(worktree).cloned()
+}
+
 /// Compose what every dispatch this executor makes carries in its own
 /// environment, **making** the scratch directory one of those pairs names.
 ///
 /// The **run id** is what the operator's `ask-manager` wrapper addresses a
 /// manager by, and a dispatch outside a run carries none for the same reason it
-/// registers nothing. The **scratch directory** is this dispatch's alone, which
+/// registers nothing. The **runs root** goes beside it, absolute, so a dispatch
+/// that runs `onepipeline transcript` reads this run's store from wherever it
+/// is working. The **session** is the `onevcs` token whose worktree the dispatch
+/// runs in, so a worker can address its own session; a dispatch in no session
+/// carries none. The **scratch directory** is this dispatch's alone, which
 /// is why the launch below declares [`Environment::PerLaunch`]: the pair has to
 /// live somewhere no sibling dispatch can read or overwrite, and that is a
 /// process rather than a map. The **asker** is that same uniqueness read as an
@@ -329,12 +373,24 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// [`Error::Ledger`] where the scratch directory cannot be made: a promised
 /// directory that is not there would fail the agent's writes one at a time, and
 /// those failures read as the agent's own work going wrong.
-fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
+fn prepare_dispatch_env(labels: &Labels, session: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id
         .iter()
         .map(|run| (crate::agentgraph::RUN_ID_ENV.to_string(), run.clone()))
         .collect();
+    // Absolute, because the dispatch does not run where this process was
+    // started: the default root is the relative `runs`, which from inside a
+    // worktree names a directory that is not there.
+    let root = crate::ledger::runs_root();
+    let root = std::path::absolute(&root).unwrap_or(root);
+    env.push((
+        crate::agentgraph::RUNS_DIR_ENV.to_string(),
+        root.display().to_string(),
+    ));
+    if let Some(token) = session {
+        env.push((crate::agentgraph::SESSION_ENV.to_string(), token.to_owned()));
+    }
     let scratch = make_node_scratch_dir(labels)?.display().to_string();
     // The asker's name is the scratch directory's own path rather than a second
     // thing minted beside it: what has to be true of it is that every session
@@ -718,7 +774,8 @@ mod tests {
         };
 
         let scratch = |labels: &Labels| {
-            let env = prepare_dispatch_env(labels).expect("the dispatch's environment is composed");
+            let env =
+                prepare_dispatch_env(labels, None).expect("the dispatch's environment is composed");
             let (_, value) = env
                 .iter()
                 .find(|(key, _)| key == NODE_SCRATCH_DIR_ENV)
@@ -754,7 +811,7 @@ mod tests {
         std::fs::write(&blocked, "not a directory").expect("the blocking file is written");
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &blocked);
         assert!(matches!(
-            prepare_dispatch_env(&labels),
+            prepare_dispatch_env(&labels, None),
             Err(Error::Ledger { .. })
         ));
 

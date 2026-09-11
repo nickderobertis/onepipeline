@@ -478,19 +478,25 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
 fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
     for node in &plan.tasks {
         let named = |what: String| Refusal::node(&node.id, what);
-        // The version is the whole of what `body` is checked for, and deliberately.
-        // It is one of seven publication-only optional fields the common node shape
-        // carries — `title`, `branch`, `merge_policy`, `base_branch`, `repo_type` and
-        // `workflow` are the others — and what makes a node a lifecycle node is
-        // `repo`. None of the other six is refused on a node kind that never
-        // publishes, so refusing this one alone would answer a planner differently
-        // for the same mistake depending on which field they made it in.
+        // The version is the whole of what `body` is checked for here, and
+        // deliberately. It is one of eight publication-only optional fields the
+        // common node shape carries — `title`, `branch`, `merge_policy`,
+        // `base_branch`, `repo_type`, `workflow` and `draft` are the others — and
+        // what makes a node a lifecycle node is `repo`. None of the other seven is
+        // refused on a node kind that never publishes, so refusing this one alone
+        // would answer a planner differently for the same mistake depending on
+        // which field they made it in. (`draft` is also held to its repository's
+        // publication, in `destination`, because a draft is a state of a change
+        // request — that is a rule about the repository and not about the kind.)
         // llmlint: ignore[boundary_inputs_validated] the paragraph above is the decision:
         // the schema struct's `deny_unknown_fields` is this document's boundary, and what a
         // node kind does with a field it does not use is the plan shape's own convention
         // rather than a validation this field is missing.
         if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::body_is_newer(plan.schema_version)).field("body"));
+        }
+        if node.draft && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
+            return Err(named(crate::plan::draft_is_newer(plan.schema_version)).field("draft"));
         }
         if plan.schema_version >= crate::plan::PLAN_SCHEMA_VERSION
             && node.repo.is_some()

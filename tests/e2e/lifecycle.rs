@@ -1548,6 +1548,18 @@ fn tasks_dispatched_to(world: &World, run: &str, node: &str) -> Vec<String> {
 /// to a change request the host was asked to land.
 const RED: &str = "llmlint completed failure required";
 
+/// How many `gh` invocations a host outage has to refuse for the
+/// **publication's** first read of the host to be the one refused.
+///
+/// The closeout asks the host whether the session already holds a change
+/// request before anything is drafted or published — that is what decides
+/// whether it finishes a change request the worker opened or opens one — and
+/// that read is the first invocation a lifecycle node makes. So an outage that
+/// ends after one call ends on the closeout's read, and the publication after it
+/// meets a host that answers; two is the closeout's read and the publication's
+/// own, which is the ending every journey scripting this is about.
+const PUBLICATION_READ_OUTAGE: &str = "2";
+
 /// The name of a required check reported the way every GitHub matrix job is
 /// named: with a space in it.
 const MATRIX_CHECK: &str = "check (macos-latest)";
@@ -1904,7 +1916,7 @@ fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() 
     let repo = world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.merged", "");
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
 
     let run = settle(&world, "rereadhost", vec![lifecycle("service", &[])]);
     let result = world.run_json(&run, "result.json");
@@ -1966,7 +1978,7 @@ fn a_verdict_that_arrives_on_a_later_read_routes_exactly_as_it_always_has() {
     // The host is out for one call — so the first publication ends with its push
     // on the origin and the path behind it unread — and reports the check red
     // once it is back.
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
     world.script("gh.checks", RED);
 
     let run = settle(&world, "rereadverdict", vec![lifecycle("service", &[])]);
@@ -2015,7 +2027,7 @@ fn a_later_read_that_answers_with_the_change_open_settles_it_done_and_unlanded()
     world.script("service.work", "the worker wrote this\n");
     // Out for one call, which is the outage that ends: the push reaches the
     // origin and the path behind it goes unread, and the read after it answers.
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
 
     let run = settle(&world, "rereadopen", vec![lifecycle("service", &[])]);
     let result = world.run_json(&run, "result.json");
@@ -2066,7 +2078,7 @@ fn an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery() {
     world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.merged", "");
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
 
     let run = settle(&world, "rereadunusable", vec![lifecycle("service", &[])]);
     let result = world.run_json(&run, "result.json");
@@ -2144,16 +2156,18 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
         detail.contains("the merge path was read 1 time and never answered"),
         "the cancelled run kept re-reading the host: {detail}"
     );
-    // And the host was asked exactly once, which is the same fact from the far
-    // side: each of these publications fails on its first call to `gh`.
-    let asked = world
-        .invocations()
-        .into_iter()
-        .filter(|invocation| invocation["tool"] == "gh")
-        .count();
+    // And the host was asked exactly twice, which is the same fact from the far
+    // side: once by the closeout, asking whether the session already holds a
+    // change request, and once by the publication, which fails on its first
+    // call to `gh`. A third call would be the loop reading the merge path again.
+    let asked: Vec<String> = gh_calls(&world)
+        .iter()
+        .map(|call| call.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
+        .collect();
     assert_eq!(
-        asked, 1,
-        "a run being torn down went on polling the host {asked} times"
+        asked,
+        vec!["pr list".to_string(), "api user".to_string()],
+        "a run being torn down went on polling the host: {asked:?}"
     );
 }
 
@@ -2260,7 +2274,7 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
     // The host is out for exactly one call, which is the read behind the push
     // this node makes. Everything after it — including the dependent's own
     // publication, which this host merges — meets a host that answers.
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
     world.script("gh.merged", "");
 
     let path = world.plan(
@@ -2390,7 +2404,7 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
     // Out for one call, which is the read behind this node's push. Nothing lands
     // the branch afterwards, so every ask that follows is answered and answered
     // negatively.
-    world.script("gh.outage", "1");
+    world.script("gh.outage", PUBLICATION_READ_OUTAGE);
 
     let run = settle(
         &world,
@@ -5084,4 +5098,225 @@ fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_b
         .exited(0)
         .out_has("infrastructure-failure")
         .out_has("is also this session's base");
+}
+
+/// The `gh` invocations a run made, each as its argv, in order.
+fn gh_calls(world: &World) -> Vec<Vec<String>> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "gh")
+        .map(|call| serde_json::from_value(call["args"].clone()).expect("the argv"))
+        .collect()
+}
+
+/// The `gh pr <verb>` invocations a run made, by verb.
+fn gh_pr_calls(world: &World, verb: &str) -> Vec<Vec<String>> {
+    gh_calls(world)
+        .into_iter()
+        .filter(|call| call.first().map(String::as_str) == Some("pr"))
+        .filter(|call| call.get(1).map(String::as_str) == Some(verb))
+        .collect()
+}
+
+/// The `turn-activity` records one node's dispatches under one persona wrote,
+/// which is where a double reports the task it was handed and the environment
+/// it read.
+fn turns_of(world: &World, run: &str, node: &str, persona: &str) -> Vec<serde_json::Value> {
+    world
+        .journal(run)
+        .into_iter()
+        .filter(|event| {
+            event["kind"] == "turn-activity"
+                && event["labels"]["node"] == node
+                && event["labels"]["persona"] == persona
+        })
+        .collect()
+}
+
+/// The task the drafting dispatch of one node was handed.
+fn drafting_task_of(world: &World, run: &str, node: &str) -> String {
+    let turns = turns_of(world, run, node, "pr-author");
+    assert_eq!(
+        turns.len(),
+        1,
+        "the drafting dispatch did not run exactly once: {turns:?}"
+    );
+    turns[0]["payload"]["task"]
+        .as_str()
+        .expect("the drafting dispatch echoes its task")
+        .to_string()
+}
+
+/// The opening sentence every drafting dispatch is given, byte for byte: the
+/// consumer host reads it out of this binary to hold its own drafter to the same
+/// prompt, so a journey holds the composed task to it rather than to a prefix.
+const DRAFTING_TASK: &str = "Read this branch's diff and write the change request's body, \
+     following the repository's own template. The task this branch delivered:";
+
+/// The journey the whole change exists for: a worker opened its session's change
+/// request as a **draft** while it worked and started the description, and the
+/// closeout finishes that change request rather than opening another — the
+/// drafter is shown it, the drafted description is written onto it under the
+/// plan's title, and the same publication that lands the change lifts the draft.
+///
+/// Every half is held against the host, through the real `onevcs`: one change
+/// request and never a second, the description it carries after the closeout,
+/// the lift, and the node settling on the very word a fresh publication under
+/// `change-open` settles on — told apart from one only by its settlement detail.
+#[test]
+fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
+    let world = World::new("lifecycle-worker-draft");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // The worker's own draft: its own title, and a description it started.
+    world.script("service.drafts", "wip: what the worker called it");
+    world.script(
+        "service.drafts-body",
+        "## What\nHalf written by the worker.\n",
+    );
+    world.script(
+        "pr-author.body",
+        "## What\nFinished from the diff and the worker's transcript.\n",
+    );
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land what the worker made");
+    let path = world.plan("finished", &plan_of("finished", vec![node]));
+    world
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
+        .settled();
+    let run = "finished";
+
+    // One change request on the host, opened by the worker as a draft, and no
+    // second one beside it for the same branch.
+    let created = gh_pr_calls(&world, "create");
+    assert_eq!(created.len(), 1, "{created:?}\n{}", why(&world, run));
+    assert!(
+        created[0].iter().any(|arg| arg == "--draft"),
+        "the worker's change request was not opened as a draft: {:?}",
+        created[0]
+    );
+    let opened = world.changes_opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "a second change request was opened: {opened:?}"
+    );
+
+    // The host now carries the drafted description under the plan's own title,
+    // whatever the worker opened it under.
+    assert_eq!(
+        opened[0]["body"],
+        "## What\nFinished from the diff and the worker's transcript.",
+        "the drafted description did not reach the change request: {opened:?}\n{}",
+        why(&world, run)
+    );
+    assert_eq!(opened[0]["title"], "feat: land what the worker made");
+    assert_eq!(
+        gh_pr_calls(&world, "edit").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    // And the draft was lifted: the closeout marked it ready for review.
+    assert_eq!(
+        gh_pr_calls(&world, "ready").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+
+    // The node settles on the publication's own words — the same word a fresh
+    // `change-open` publication settles on — and its detail is what tells it
+    // apart from one.
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
+    assert_eq!(node["outcome"], "change-open", "{node}");
+    assert_eq!(node["landing"], "unlanded", "{node}");
+    let url = node["change_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the node names no change request: {node}"))
+        .to_string();
+    assert!(
+        url.ends_with(&format!("/pull/{}", opened[0]["number"])),
+        "the node names a change request the host did not open: {url} vs {opened:?}"
+    );
+    let url = url.as_str();
+    let settled = world.events_of(run, "node-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(
+        settled[0]["payload"]["detail"],
+        "the worker opened the change request as a draft; the closeout wrote the drafted \
+         description onto it and marked it ready for review",
+        "{}",
+        settled[0]
+    );
+    assert!(
+        world.events_of(run, "body-not-drafted").is_empty(),
+        "a body that was drafted was reported as one that was not"
+    );
+
+    // The drafting dispatch was handed the composed task: the opening sentence
+    // byte for byte, the node's task, the change request as the worker left it,
+    // and how to read the worker's transcript — in that order.
+    let task = drafting_task_of(&world, run, "service");
+    assert!(task.starts_with(DRAFTING_TASK), "{task}");
+    let change_section = format!(
+        "\n\n## Change request\n{url}\nHeld as a draft by the worker: yes\n\n\
+         ### Description as the worker left it\n## What\nHalf written by the worker.\n"
+    );
+    let at = task
+        .find(&change_section)
+        .unwrap_or_else(|| panic!("the drafting task does not show the change request:\n{task}"));
+    let transcript = format!("\n\n## Worker transcript\n`onepipeline transcript {run} service`");
+    let after = task.find(&transcript).unwrap_or_else(|| {
+        panic!("the drafting task does not say how to read the transcript:\n{task}")
+    });
+    assert!(at < after, "the sections are out of order:\n{task}");
+    assert!(
+        task.contains("ONEPIPELINE_RUN_ID") && task.contains("ONEPIPELINE_RUNS_DIR"),
+        "the drafting task does not name what the transcript verb reads:\n{task}"
+    );
+    let task_section = task.find("## What").expect("the node's task is rendered");
+    assert!(
+        task_section < at,
+        "the node's task does not precede the change request:\n{task}"
+    );
+
+    // The session's own records of what happened to the change request reach
+    // the run's journal, in the Review phase, unrewritten and stamped with the
+    // node they belong to.
+    for kind in ["change-drafted", "change-described", "draft-lifted"] {
+        let records = world.events_of(run, kind);
+        assert_eq!(
+            records.len(),
+            1,
+            "{kind}: {records:?}\n{}",
+            why(&world, run)
+        );
+        assert_eq!(
+            records[0]["labels"]["node"], "service",
+            "{kind}: {}",
+            records[0]
+        );
+        assert_eq!(records[0]["phase"], "review", "{kind}: {}", records[0]);
+    }
+    assert_eq!(
+        world.events_of(run, "change-drafted")[0]["payload"]["kind"],
+        "held"
+    );
+    let described = &world.events_of(run, "change-described")[0];
+    assert_eq!(
+        described["payload"]["title"],
+        "feat: land what the worker made"
+    );
+    assert_eq!(described["payload"]["url"], json!(url));
+
+    // And `results` and `status` show the node as one that published, with the
+    // detail beside it.
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has(url)
+        .out_has("marked it ready for review");
 }

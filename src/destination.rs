@@ -91,10 +91,10 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
             continue;
         };
         // Nothing to ask about is not a node that went unchecked: a node stating
-        // no title and consuming nothing has neither of the two properties these
-        // rules are about, so a repository that does not resolve leaves it exactly
-        // as checked as it ever was.
-        if node.title.is_none() && node.consumes.is_empty() {
+        // no title, consuming nothing and asking for no draft has none of the
+        // three properties these rules are about, so a repository that does not
+        // resolve leaves it exactly as checked as it ever was.
+        if node.title.is_none() && node.consumes.is_empty() && !node.draft {
             continue;
         }
         let destination = resolved
@@ -113,7 +113,11 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
         // not publish under. A rule that could not be *asked* is not an answer, so
         // that one is reported and the next is still put.
         type Rule = fn(&Node, &Destination) -> std::result::Result<Option<Refusal>, String>;
-        for ask in [consumes_refusal as Rule, title_refusal as Rule] {
+        for ask in [
+            consumes_refusal as Rule,
+            draft_refusal as Rule,
+            title_refusal as Rule,
+        ] {
             match ask(node, destination) {
                 Ok(Some(refusal)) => return Err(refusal),
                 Ok(None) => {}
@@ -347,6 +351,46 @@ fn consumes_refusal(
             ),
         )
         .field("consumes"),
+    ))
+}
+
+/// The refusal a node earns for asking that its change request be left as a
+/// draft on an identity that opens none.
+///
+/// The same condition [`consumes_refusal`] applies, for the same reason: a draft
+/// is a state of a change request, and a publication that opens none — which is
+/// `local-direct`, the one policy that lands with git alone — has nothing for it
+/// to be a state of. `onevcs` would refuse the publication outright at the last
+/// step of the node; this refuses it where the plan is read, before anything is
+/// dispatched, in the shape `consumes` is refused in.
+fn draft_refusal(
+    node: &Node,
+    destination: &Destination,
+) -> std::result::Result<Option<Refusal>, String> {
+    if !node.draft {
+        return Ok(None);
+    }
+    let publication = match node.merge_policy {
+        Some(stated) => stated,
+        None => destination.publication.clone()?,
+    };
+    if opens_a_change_request(publication) {
+        return Ok(None);
+    }
+    Ok(Some(
+        Refusal::node(
+            &node.id,
+            format!(
+                "it is declared `draft: true`, and its repository {identity} publishes with \
+                 {publication}, which opens no change request at all — so there is nothing to \
+                 leave as a draft, and `onevcs` refuses the publication outright at the last \
+                 step of the node. Publish it under a change-* policy, on this node or in that \
+                 repository's own rules, or drop `draft`",
+                identity = destination.resolved.identity,
+                publication = spell(publication),
+            ),
+        )
+        .field("draft"),
     ))
 }
 
@@ -852,6 +896,88 @@ mod tests {
         narrowed.merge_policy = Some(MergePolicy::ChangeAuto);
         assert!(consumes_refusal(&narrowed, &unreadable)
             .expect("a node that named its own change-* policy needs no resolved one")
+            .is_none());
+    }
+
+    /// A `draft` is refused exactly where a `consumes` is: on a publication that
+    /// opens no change request, whichever of the node and its repository says so.
+    ///
+    /// The end-to-end half is
+    /// `plan_check::a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch`;
+    /// what is held here is each arm of the rule against a stated destination,
+    /// including the one that cannot be answered for want of the policy.
+    #[test]
+    fn a_draft_is_refused_wherever_its_publication_opens_no_change_request() {
+        let drafting = |policy: Option<MergePolicy>| Node {
+            id: "held".to_owned(),
+            repo: Some("service".to_owned()),
+            draft: true,
+            merge_policy: policy,
+            ..Node::default()
+        };
+        let refusal = draft_refusal(&drafting(None), &destination(MergePolicy::LocalDirect))
+            .expect("the policy is known, so the rule is answerable")
+            .expect("a draft on a local-direct repository is refused");
+        assert_eq!(refusal.node.as_deref(), Some("held"));
+        assert_eq!(refusal.field.as_deref(), Some("draft"));
+        for named in [
+            "node 'held'",
+            "`draft: true`",
+            "github.com/owner/service",
+            "local-direct",
+        ] {
+            assert!(
+                refusal.message.contains(named),
+                "the refusal does not name {named}: {}",
+                refusal.message
+            );
+        }
+
+        let loads = |why: &str, node: &Node, destination: &Destination| {
+            assert!(
+                draft_refusal(node, destination)
+                    .expect("the rule is answerable")
+                    .is_none(),
+                "{why}"
+            );
+        };
+        loads(
+            "a repository that opens a change request has one to leave as a draft",
+            &drafting(None),
+            &destination(MergePolicy::ChangeAuto),
+        );
+        loads(
+            "a node that named a change-* policy opens a change request to draft",
+            &drafting(Some(MergePolicy::ChangeOpen)),
+            &destination(MergePolicy::LocalDirect),
+        );
+        let mut undrafted = drafting(None);
+        undrafted.draft = false;
+        loads(
+            "a node asking for no draft has nothing to refuse",
+            &undrafted,
+            &destination(MergePolicy::LocalDirect),
+        );
+        assert!(
+            draft_refusal(
+                &drafting(Some(MergePolicy::LocalDirect)),
+                &destination(MergePolicy::ChangeAuto)
+            )
+            .expect("the rule is answerable")
+            .is_some(),
+            "a node that named `local-direct` itself was let through on its repository's answer"
+        );
+
+        // The one arm that cannot be answered: the policy was needed and unread.
+        let unreadable = Destination {
+            resolved: resolved(),
+            publication: Err("`onevcs rules check service` states no `publication:` line".into()),
+        };
+        let why = draft_refusal(&drafting(None), &unreadable)
+            .expect_err("a rule that needs the policy cannot be answered without it");
+        assert!(why.contains("states no `publication:` line"), "{why}");
+        assert!(draft_refusal(&undrafted, &unreadable)
+            .expect("a node asking for no draft needs no policy")
             .is_none());
     }
 

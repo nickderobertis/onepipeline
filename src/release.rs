@@ -1606,6 +1606,21 @@ pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
 pub(crate) const HELD_DETAIL: &str =
     "complete, and left as a draft as the plan asked, for a person to mark ready for review";
 
+/// Why a change request the plan asked to leave as a draft is one, in the words
+/// `onevcs` records on the change request's own stream.
+///
+/// The sentence a person reads off `change-drafted`, so it says whose decision
+/// the draft is: the plan's, and not a release's. Composed here beside the other
+/// reason this crate hands that library so both are spelled in one module.
+pub(crate) fn held_reason(node: &str) -> onevcs::DraftReason {
+    onevcs::DraftReason::Held {
+        because: format!(
+            "node '{node}' is declared `draft: true`, so its change request is left as a draft \
+             for a person to mark ready for review"
+        ),
+    }
+}
+
 /// The pair a reference row can be asked about: what the sibling resolves the
 /// work by, and which of that repository's targets carries it.
 ///

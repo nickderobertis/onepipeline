@@ -14,11 +14,12 @@
 //!
 //! # Reached by calling it, never by spawning it
 //!
-//! All four operations this crate performs are `onevcs` **library** calls:
-//! [`onevcs::Vcs::open_session`], [`onevcs::publish`], [`onevcs::close_session`], and
-//! [`EventStream`]. No process is started and no output is parsed, and the
-//! values that come back are the sibling's own types rather than a restatement
-//! of them here.
+//! Every operation this crate performs is a `onevcs` **library** call:
+//! [`onevcs::Vcs::open_session`], [`onevcs::publish`], [`onevcs::close_session`],
+//! [`EventStream`], and — for a change request the session already holds —
+//! [`onevcs::session_change`] and [`onevcs::describe_change`]. No process is
+//! started and no output is parsed, and the values that come back are the
+//! sibling's own types rather than a restatement of them here.
 //!
 //! That is not only about process cost. `onevcs publish` answers a *person* with
 //! one line of English — `merged at SHA`, `change request open at URL` — and
@@ -175,6 +176,57 @@ pub fn publish(
             title,
             body: body.map(str::to_owned),
             draft: draft.cloned(),
+        },
+    )
+    .map_err(refusal)
+}
+
+/// The session's own change request — the one a publication of it would adopt —
+/// as the host holds it now, or `None` when the host holds none.
+///
+/// Asked at the closeout, before anything is drafted, because it decides which
+/// closeout this is: a session whose worker opened its change request as a draft,
+/// or whose earlier attempt opened one, is finished off rather than published
+/// beside — the description is *written onto* that change request and the same
+/// publication lifts and lands it. The read is the sibling's `change show`, and
+/// it never opens one.
+///
+/// **`Err` is the host not having answered**, which is a different fact from
+/// *none*: a host that could not be asked has not said the session holds nothing,
+/// and the caller says so and publishes as it always has rather than reading
+/// silence as an answer.
+pub fn session_change(token: &SessionToken) -> Result<Option<onevcs::SessionChange>> {
+    onevcs::session_change(&providers(), token).map_err(refusal)
+}
+
+/// Write a drafted description onto the session's own change request, and answer
+/// with the change as the host holds it after the write.
+///
+/// The title is the node's, on every write, so the change request carries the
+/// plan's subject whatever the worker opened it under — it is the squash subject
+/// a `change-auto` merge lands under, and `onevcs` holds it to the repository's
+/// own `commit-msg` hook exactly as it holds a publication's. It is checked here
+/// where the request is built, for [`publish`]'s reason. The body crosses as the
+/// prose it is, for the same reason a publication's does.
+///
+/// # Errors
+///
+/// The sibling's own refusal: a session holding no change request, a title the
+/// hook turns down, or a host that would not take the write.
+pub fn describe_change(
+    token: &SessionToken,
+    title: Option<&str>,
+    body: &str,
+) -> Result<onevcs::SessionChange> {
+    let title = title
+        .map(|title| title.parse::<Subject>().map_err(sibling))
+        .transpose()?;
+    onevcs::describe_change(
+        &providers(),
+        token,
+        &onevcs::ChangeDescription {
+            title,
+            body: body.to_owned(),
         },
     )
     .map_err(refusal)
