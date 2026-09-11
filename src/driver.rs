@@ -902,6 +902,7 @@ fn keep_the_run_watched(
     // refuses is said on this driver's own log rather than ending the watch:
     // the run is still being driven, and an unwatched run is the worse failure.
     let mut journal = Journal::open(watch.paths);
+    // Keyed by stream inside, so a replacement observer's chains are its own.
     let mut chains = engine::ChainRecords::default();
     while driving.load(Ordering::Acquire) {
         for envelope in observer.logged_envelopes() {
@@ -919,9 +920,6 @@ fn keep_the_run_watched(
             if watch.restart(observer).is_none() {
                 return;
             }
-            // A replacement is a new chain: what the one that died stepped past
-            // says nothing about what this one will.
-            chains = engine::ChainRecords::default();
         }
         std::thread::sleep(ATTACH_POLL);
     }

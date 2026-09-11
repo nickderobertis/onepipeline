@@ -3290,25 +3290,15 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
 }
 
 /// A worker asked for a change that produced none leaves an empty branch, and the
-/// node fails naming it rather than settling `done` under the no-change word.
+/// node fails naming it rather than settling `done` under the no-change word —
+/// which the documentation reserves for a node that **declared** it expects no
+/// diff, and under which a plan that omitted the declaration was invisible.
 ///
-/// The modelling error this makes visible: a node whose job was an external side
-/// effect needed its checkout, built and probed against it, and committed
-/// nothing — its task said so outright, and its plan did not. The engine went on
-/// to draft a change request for a branch zero commits ahead of its base, and
-/// then settled the node `done` with `no-changes`, the word the documentation
-/// reserves for a node that **declared** it expects no diff and settled without
-/// a dispatch — so the omission was invisible in every view, and the only thing
-/// between such a plan and an empty change request was somebody noticing.
-///
-/// Now nothing is drafted and nothing is published for a branch level with its
-/// base, and with the declaration absent and this dispatch having committed
-/// nothing the node settles `failed` under a word of its own, naming the branch
-/// and what it was measured against, so a manager decides between the two
-/// repairs the detail offers. The sibling's own `NothingToPublish` is untouched:
-/// a branch that *is* ahead and whose tree the base already carries still reaches
-/// it, and `a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes`
-/// holds the other level case.
+/// Nothing is drafted and nothing is published for a branch level with its
+/// base. `a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes`
+/// holds the level case that is a success, and the sibling's own
+/// `NothingToPublish` — a branch that *is* ahead with a tree the base carries —
+/// is untouched.
 #[test]
 fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
     let world = World::new("lifecycle-nothing");

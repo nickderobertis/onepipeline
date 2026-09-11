@@ -243,22 +243,26 @@ fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_e
 /// as a finding naming the candidate the chain stopped at, what it stepped past
 /// and what the candidate said — and fails no node by itself.
 ///
-/// A candidate that refuses to run is stepped past, and the producer says so.
-/// A candidate that ran and produced no usable result stops the chain: the
-/// identities behind it are never tried, and the only record was a death whose
-/// cause is `unclassified` and whose detail pointed a reader at a field that
-/// reached no supervisory surface. One pacemaker died that way every interval
-/// for a whole night — 107 deaths across eight runs, three identities behind it
-/// never tried on any of them, every indicator green. Stopping a chain is a
-/// decision a supervisor should see, so it is a finding on the planner channel;
-/// the node settles on the death exactly as it did before, because the finding
-/// is the decision the classifier could not make and not a verdict.
+/// A candidate that refuses to run is stepped past, and the producer says so; a
+/// candidate that ran and produced no usable result stops the chain with the
+/// identities behind it never tried, and the only record is this death. That is
+/// a decision for a supervisor, so it is a finding; the node settles on the
+/// death exactly as it did before.
 #[test]
 fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_chain_stopped() {
     let world = World::new("boundary-unclassified");
-    // The chain stepped past one candidate that would not run, ran on the next,
-    // and the member died on it with a cause the producer could not name.
-    world.script("build.refused", "- - fake-provider/first auth\n");
+    // Two turns of one member, each with a chain of its own. The first stepped
+    // past one candidate and ran on the next; the second stepped past *that*
+    // one, ran on the one behind it, and the member died on it with a cause the
+    // producer could not name. The chain the finding names is the second's.
+    world.script(
+        "build.served",
+        "agent 1 fake-provider/first\nagent 2 fake-provider/claude-code\n",
+    );
+    world.script(
+        "build.refused",
+        "agent 1 fake-provider/zero auth\nagent 2 fake-provider/first quota\n",
+    );
     world.script(
         "build.died-as",
         "provider-failure unclassified the harness answered with no usable result; see \
@@ -280,10 +284,10 @@ fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_c
         .expect("a finding says something");
     for named in [
         "node 'build'",
-        // The candidate the chain stopped at: the identity the default turn ran on.
         "stopped at fake-provider/claude-code",
         "no identity behind that candidate was tried",
-        "stepped past: fake-provider/first [auth]",
+        // The second turn's chain, and only it.
+        "stepped past: fake-provider/first [quota]\n",
         "detail: the harness answered with no usable result; see `raw_response` on the \
          transcript",
         "Nothing was failed on this",
@@ -293,6 +297,10 @@ fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_c
             "the finding does not say {named:?}:\n{message}"
         );
     }
+    assert!(
+        !message.contains("fake-provider/zero"),
+        "the finding named a candidate an earlier turn's chain stepped past:\n{message}"
+    );
 
     // And the node settled as it always has on a provider death: the finding
     // fails nothing and changes nothing about the settlement.

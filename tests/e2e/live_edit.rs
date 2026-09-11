@@ -2222,20 +2222,11 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
 /// settlement ends the park, its dependents start, and the run reports itself
 /// complete.
 ///
-/// The case this exists for. A monitor parked a node whose deliverable was
-/// already on its base, a manager settled it `done` from that evidence, and the
-/// node read *parked and settled at once* — the park lives on the definition
-/// and outranks every recorded status, so the run counted the node unfinished
-/// for as long as it lasted, its dependents stayed behind the gate, and an
-/// adopted driver found nothing to dispatch because everything was idle. The
-/// only op that cleared a park was `requeue`, which returns the node for a
-/// redispatch against work already on the base and refuses across authorship,
-/// so a node the monitor parked and the planner settled was in a state neither
-/// party's operations resolved.
-///
-/// Both halves are read off the run rather than off the edit: the dependent's
-/// dispatch is the scheduler no longer holding it, and the result's `complete`
-/// is the counter no longer reading the park.
+/// The park lives on the definition and outranks every recorded status, and
+/// `requeue` — the only other op that clears one — refuses across authorship
+/// and would redispatch the node. Both halves are read off the run rather than
+/// off the edit: the dependent's dispatch is the scheduler no longer holding
+/// it, and the result's `complete` is the counter no longer reading the park.
 #[test]
 fn a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete() {
     let world = World::new("edit-park-settled");

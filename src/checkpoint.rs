@@ -84,17 +84,12 @@ use crate::projection::{self, RunState};
 /// one: a reader that folded from fields meaning something else would report a
 /// state nobody recorded. See [`crate::summary`], which states the same.
 ///
-/// Moved by a change to what the **fold** does as well as by one to the
-/// document's shape, because the document is a cache of the fold. Version 2
-/// carries the same fields as version 1 and was cut when a settlement started
-/// ending a node's park (`projection::settlement_ends_the_park`): a version-1
-/// document written by the build before it holds, for a node parked and then
-/// settled inside its covered prefix, a park this build's fold would have taken
-/// off — and its seal corroborates it, because the seal is over the state the
-/// writer computed rather than the state this build would compute. Refusing it
-/// costs the one whole-store fold every run paid before this document existed,
-/// and it is what lets a run that was stuck under that park report itself
-/// complete on the first read after the upgrade.
+/// Moved by a change to what the **fold** computes as well as by one to the
+/// document's shape, because the document is a cache of the fold and its seal
+/// covers the state a writer computed, not the state this build would. Version
+/// 2 has version 1's fields; it was cut when a settlement started ending a
+/// node's park (`projection::settlement_ends_the_park`), so a cached fold that
+/// still holds the park is refolded rather than resumed from.
 pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 
 /// Read the version, refusing a document this build cannot honestly read.

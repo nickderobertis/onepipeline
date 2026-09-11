@@ -1291,25 +1291,13 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
 /// Whether a node settling at this status ends the park it was under.
 ///
 /// A park is the planner's own idle, and [`graph::derive`] reads it ahead of every
-/// recorded status. That is right for the one settlement a park itself produces:
-/// `cancel` parks a node *and* stops its dispatch, which settles `cancelled` a
-/// moment later, and the node has to go on reading `parked` — `requeue` is the
-/// way back from that, and nothing about it is finished. It was wrong for every
-/// other settlement. A node cancelled while its publication was already under way
-/// settled `done` seventy-five seconds after its park, with its deliverable on
-/// its base, and read *parked and settled at once* for the rest of the run: the
-/// counter, the run state and an adopted driver all read the park rather than
-/// the outcome, so the run could never report itself complete and the driver
-/// found nothing to dispatch because everything was idle rather than because
-/// nothing was left. A manager's `settle` — the documented repair for a record
-/// that is wrong — reached the same state, because it wrote the outcome and
-/// nothing wrote off the park.
-///
-/// So the two outcomes a `settle` can name end the park, whichever path
-/// recorded them — the run's own settlement of a dispatch, or a settlement from
-/// evidence — and a node whose outcome is recorded is idle by nobody's decision.
-/// `cancelled` is the park's own effect and keeps it; a human step's `waiting`
-/// and a draft's `complete-but-draft` are not outcomes and change nothing.
+/// recorded status. That is right for the one settlement a park itself produces
+/// — `cancel` stops the dispatch, which settles `cancelled`, and `requeue` is the
+/// way back — and wrong for every other: a node whose outcome is recorded is
+/// idle by nobody's decision, and one left parked reads unfinished for the rest
+/// of the run. So the two outcomes a `settle` can name end the park, whichever
+/// path recorded them; `cancelled` keeps it, and a human step's `waiting` or a
+/// draft's `complete-but-draft` is not an outcome.
 fn settlement_ends_the_park(status: NodeStatus) -> bool {
     matches!(status, NodeStatus::Done | NodeStatus::Failed)
 }

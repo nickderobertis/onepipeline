@@ -1685,11 +1685,8 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// reference and forces a rewiring cascade through its dependents. So the record
 /// of what became of the node moves, the node keeps its id and its lineage by
 /// construction rather than by care — and the park comes off, because a node
-/// whose outcome is recorded is idle by nobody's decision. Left on, a node one
-/// party parked and another settled read *parked and settled at once*, and no
-/// operation of either party's resolved it: `requeue` was the only op that
-/// cleared a park, and it returns the node for a redispatch against work its
-/// base already carries.
+/// whose outcome is recorded is idle by nobody's decision and `requeue`, the only
+/// other op that clears one, sends the node back for a redispatch.
 ///
 /// Five refusals, and each one is a different thing to do next. Blank evidence:
 /// the journal would record the reason for a state as nothing. A landing that is
@@ -1989,14 +1986,9 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         // A settlement from evidence is a fact about the run's *record*: the
         // node keeps its id, its lineage, and its dependents' edges, and what
         // moves is folded where the recorded statuses are. The one thing it
-        // takes off the definition is the park. A park is the planner's own
-        // idle, and `graph::derive` reads it ahead of every recorded status —
-        // so a node parked and then settled from evidence read *parked and
-        // settled at once*: the run counted it unfinished for as long as it
-        // lasted, and the only op that clears a park is a `requeue`, which
-        // sends the node back for a redispatch against work its base already
-        // carries. A node whose outcome is now recorded is idle by nobody's
-        // decision, so the settlement ends the park wherever it is folded.
+        // takes off the definition is the park, which `graph::derive` reads
+        // ahead of every recorded status: a node whose outcome is recorded is
+        // idle by nobody's decision. See `compile_settle`.
         Operation::SettledFromEvidence { node, .. } => {
             if let Some(node) = graph.get_mut(node) {
                 node.parked = false;

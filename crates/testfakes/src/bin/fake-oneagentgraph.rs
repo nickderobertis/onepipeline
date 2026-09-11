@@ -391,22 +391,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // identity that ran and produced nothing usable — said the way the real
         // graph says it: a `member-died` on this stream, and the graph going on
         // watching. Scripted `observer.died-as` on `<key>.died-as`'s grammar,
-        // with `observer.served` naming the identity its turn ran on. The
-        // member is the shipped pacemaker's own name.
+        // with `observer.refused` on `<key>.refused`'s naming what its chain
+        // stepped past first. The member is the shipped pacemaker's own name,
+        // and it is single-sided: it publishes no invocation, exactly as the
+        // real one does not.
         if let Some(script) = fake::node_script(dir, "observer", "died-as") {
             let mut labels = stamped(args);
             labels.insert("member".to_string(), "check-in".into());
-            if let Some(identity) = fake::node_script(dir, "observer", "served") {
-                publish_oneharness_session(
-                    &labels,
-                    "observer",
-                    0,
-                    &(
-                        oneagentgraph::event::Role::Agent,
-                        1,
-                        identity.trim().to_owned(),
-                    ),
-                );
+            if let Some(refused) = fake::node_script(dir, "observer", "refused") {
+                refuse_candidates_under(&labels, &refused);
             }
             publish_deaths(&labels, &script);
         }
@@ -838,7 +831,12 @@ fn publish_deaths(
 /// for a payload nothing produces, and the whole point of the journey it serves
 /// is that a consumer reads the identity and the side off the real one.
 fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &str) {
-    let labels = member_labels(args, node, step);
+    refuse_candidates_under(&member_labels(args, node, step), script);
+}
+
+/// The same, under labels a caller composed: a node's dispatch names its node,
+/// the observer graph names none.
+fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, script: &str) {
     // Above every seq `emit` uses — the turn's own envelopes and one per
     // invocation it published — because these are written after it: a
     // producer's seq is its own statement of the order it wrote things in.

@@ -419,17 +419,15 @@ fn the_launch_record_exists_before_the_member_the_launcher_starts_reads_the_ledg
 /// classify reaches the manager as a finding, from a **detached** driver whose
 /// observer logs rather than relays.
 ///
-/// The incident itself. A retained driver's observer writes to the driver log,
-/// which nothing reads, so a pacemaker that died every interval on one identity
-/// left 107 identical payloads in files nobody opens while the health report
-/// read that identity available. The driver is the only reader that log has, so
-/// it reads the observer's envelopes out of it for this one thing and raises
-/// it on the channel naming the candidate and what it said. No node is involved
-/// and none is failed: the observer goes on watching as it did.
+/// A retained driver's observer writes to the driver log, which nothing else
+/// reads, so the driver reads the observer's envelopes out of it for this one
+/// thing. No node is involved and none is failed: the observer goes on watching.
 #[test]
 fn a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding() {
     let world = World::new("driver-observer-unclassified");
-    world.script("observer.served", "fake-provider/claude-code");
+    // The pacemaker is single-sided, so its stream names what its chain stepped
+    // past and never the candidate that then ran; the finding says so.
+    world.script("observer.refused", "- - fake-provider/first auth\n");
     world.script(
         "observer.died-as",
         "provider-failure unclassified the pacemaker's turn produced no usable result\n",
@@ -461,7 +459,8 @@ fn a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_fin
         .expect("a finding says something");
     for named in [
         "the run's observer graph (member 'check-in')",
-        "stopped at fake-provider/claude-code",
+        "stopped at a candidate the stream did not name",
+        "stepped past: fake-provider/first [auth]",
         "detail: the pacemaker's turn produced no usable result",
     ] {
         assert!(
@@ -475,7 +474,7 @@ fn a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_fin
     world
         .run(&["next", &run])
         .exited(0)
-        .out_has("stopped at fake-provider/claude-code");
+        .out_has("stepped past: fake-provider/first [auth]");
 
     world.release("observer.go");
     world.release("build.go");
@@ -495,7 +494,7 @@ fn a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_fin
 #[test]
 fn an_attached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding() {
     let world = World::new("driver-observer-unclassified-attached");
-    world.script("observer.served", "fake-provider/claude-code");
+    world.script("observer.refused", "- - fake-provider/first auth\n");
     world.script(
         "observer.died-as",
         "provider-failure unclassified the pacemaker's turn produced no usable result\n",
@@ -537,9 +536,11 @@ fn an_attached_observers_unclassified_provider_death_reaches_the_manager_as_a_fi
         let message = finding["payload"]["message"]
             .as_str()
             .expect("a finding says something");
+        // Each restarted observer's chain is its own: what the one before it
+        // stepped past is named once, on that one's finding.
         assert!(
             message.contains("the run's observer graph (member 'check-in')")
-                && message.contains("stopped at fake-provider/claude-code"),
+                && message.contains("stepped past: fake-provider/first [auth]\n"),
             "{message}"
         );
         assert!(finding["labels"]["node"].is_null(), "{finding}");
