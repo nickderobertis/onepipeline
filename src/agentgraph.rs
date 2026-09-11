@@ -2610,6 +2610,17 @@ mod tests {
         // The three values the producer states, on the opening a turn answers.
         // `delivered` first: it is the one this crate's own note seam depends on
         // being stamped, and the one whose absence caused the incident.
+        //
+        // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the three
+        // spellings are deliberately literal rather than derived from the
+        // producer's `Origin`: naming that type here is a compile error below
+        // the floor, and a compile error says a symbol is missing rather than
+        // that the lock is stale, which is the whole reason this test is written
+        // in items the older resolution also has. Exhaustiveness is not this
+        // crate's to hold — it relays the payload opaquely and reads no variant
+        // by name — and `tests/note/main.rs` reads the values back through the
+        // producer's own type against a real conversation, so a renamed one
+        // fails there.
         for origin in ["delivered", "supervisor", "task"] {
             let opened =
                 serde_json::from_value::<oneagentgraph::event::TurnStarted>(serde_json::json!({

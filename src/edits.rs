@@ -236,6 +236,12 @@ pub enum Operation {
     // `compile_note`; the note's own two narrowable values are **not** strings here — the
     // addressee is a closed enum and the text and criterion are the seam's validated
     // newtypes, so a record this build did not write is refused by their own conversions.
+    // `shown_to` is a **durable record field** beside `reached` rather than a derivation
+    // of it, for the reason `NodeParked::reason` is one: it is written from
+    // `Reached::shown_to` by the one function that builds this record, and a record an
+    // older build wrote carries none — a reader that re-derived it would be inventing a
+    // fact that build never recorded, and one that refused the pair would lose the
+    // delivery along with it.
     /// A manager's note was delivered into a node's live conversation, or carried
     /// to that node's next dispatch because no turn of it took the note.
     ///

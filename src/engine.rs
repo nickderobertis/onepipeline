@@ -1287,7 +1287,10 @@ fn converge(
                     if !again.carried.is_empty() {
                         payload.insert(
                             crate::note::CARRIED_KEY.to_string(),
-                            crate::note::payload_of(&again.carried),
+                            crate::note::payload_of(
+                                &again.carried,
+                                crate::note::Composition::IntoATask,
+                            ),
                         );
                     }
                     journal.emit(
@@ -3179,11 +3182,11 @@ fn start_ready(
         // reading the node's history can tell a ruling that survived from one
         // that has to be re-issued. Only what a conversation **read**: a note
         // no turn took rides in as the node's own context, and is not spent.
-        let spent = spent_by(paths, state, &node.id);
+        let spent = spent_by(paths, state, &node.id)?;
         if !spent.is_empty() {
             payload.insert(
                 crate::note::SPENT_KEY.to_string(),
-                crate::note::payload_of(&spent),
+                crate::note::payload_of(&spent, crate::note::Composition::Nowhere),
             );
         }
         journal.emit(
@@ -3234,18 +3237,24 @@ fn start_ready(
 /// which is a change rather than a pass, and the same fold the continuation
 /// composes its own notes from, so the two cannot disagree about what a
 /// dispatch was owed.
-fn spent_by(paths: &RunPaths, state: &RunState, node: &str) -> Vec<crate::note::Consumed> {
+///
+/// # Errors
+///
+/// [`crate::note::standing`]'s: a record of this crate's own that cannot be read
+/// as what it says it carries, which ends the pass rather than announcing a
+/// dispatch as having spent nothing.
+fn spent_by(paths: &RunPaths, state: &RunState, node: &str) -> Result<Vec<crate::note::Consumed>> {
     let journal = journal::read(&paths.journal());
-    let mut spent = crate::note::standing(&journal, node).read;
+    let mut spent = crate::note::standing(&journal, node)?.read();
     for superseded in state
         .superseded
         .iter()
         .filter(|(_, replacement)| replacement.as_str() == node)
         .map(|(superseded, _)| superseded)
     {
-        spent.extend(crate::note::standing(&journal, superseded).spent());
+        spent.extend(crate::note::standing(&journal, superseded)?.notes());
     }
-    spent
+    Ok(spent)
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.

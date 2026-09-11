@@ -4689,9 +4689,15 @@ release stamps as `delivered`, and holds the field against the linked library in
    plan or a manager caused — the first dispatch of a node, a `requeue`, a
    `retry`'s replacement — carries `notes_spent`: every note a conversation of
    the node's last dispatch read that this dispatch was composed without, and,
-   for a replacement, everything the node it supersedes was ever delivered. Both
+   for a replacement, everything that stood for the node it supersedes — what
+   its last dispatch was composed with and everything delivered since. Both
    are omitted when empty, so a dispatch composed with no note and spending none
-   reads exactly as it did before the keys existed.
+   reads exactly as it did before the keys existed. A record of either that this
+   build cannot read as a list of notes is **refused by name** rather than read
+   past, on both threads that fold it: a continuation composed without the notes
+   it could not read would be the silent loss this entry exists to end, so that
+   node settles `infrastructure-failure` saying which record and what to do, and
+   the reconcile loop's pass ends on the same sentence.
 
 3. **A manager-initiated re-dispatch keeps entry 60's ruling.** A `requeue` and a
    `retry` compose from the plan and the manager's own `amend` or task, as they
@@ -4700,8 +4706,10 @@ release stamps as `delivered`, and holds the field against the linked library in
    that has to be re-issued rather than believing a receipt that reads `worker`.
    `tests/note/main.rs`'s
    `a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch` holds
-   both halves: the requeued dispatch is composed without the note and its record
-   names it spent.
+   both halves for a `requeue`: the requeued dispatch is composed without the
+   note and its record names it spent; and
+   `a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so`
+   holds them for a `retry`.
 
 4. **`note-delivered` says who was shown the note.** `shown_to` is the
    conversation's own routing written down where the run records the delivery,
@@ -4726,8 +4734,12 @@ a real two-party conversation: a note delivered into a live worker turn read bac
 off the stream as a `delivered` turn, beside the supervisor's own `supervisor`
 turns and the opening `task`; a lifecycle node whose publication the host rejects
 dispatched again by the engine with that note in its second conversation's
-opening task and in its judge's hands, and the record naming it carried; and the
-requeue above, spending it by name.
+opening task and in its judge's hands, and the record naming it carried; the
+requeue and the retry above, spending it by name; a dispatch a note was carried
+to composing it as context and spending nothing; and `shown_to` under every
+disposition a journey can reach — `worker`, `supervisor`, `judged-with`, and
+`carried` — with `queued` held by the unit table alone, for the reason
+`note::Reached` states over that variant.
 
 ```json
 {

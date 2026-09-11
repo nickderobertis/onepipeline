@@ -140,7 +140,36 @@ pub fn execute(
         // ruling issued during one attempt is in the hands of the judge that
         // rules on the next. Read here, once, and handed to both the record and
         // the composition, so the two cannot name different notes.
-        notes = crate::note::standing_for(paths, &node.id).composed();
+        notes = match crate::note::standing_for(paths, &node.id) {
+            Ok(standing) => standing.notes(),
+            // A record this build cannot read is refused rather than read past:
+            // continuing without the notes would compose the very dispatch this
+            // fold exists to prevent, and saying so is the one honest answer.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can
+            // type reaches this arm: the records the fold refuses are this crate's own,
+            // and its writers check what they write, so reaching it means a journal
+            // edited by hand — which would prove the fixture rather than the code. The
+            // refusal itself is held by `note::tests`, which drives the fold over such a
+            // record; what this arm adds is the settlement, which is `stopped_retrying`'s
+            // shape with the fold's own sentence as its detail.
+            Err(why) => {
+                return Settlement {
+                    detail: Some(format!(
+                        "the node was not dispatched again: {why}. The branch {} still \
+                         carries the work; re-issue any note the earlier attempt was given \
+                         and `retry` the node",
+                        preserved.branch
+                    )),
+                    branch: Some(preserved.branch.clone()),
+                    ..Settlement::plain(
+                        &node.id,
+                        NodeStatus::Failed,
+                        Some(engine::INFRASTRUCTURE_FAILURE),
+                    )
+                };
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        };
         // Another `node-dispatched` rather than a kind of its own, so a reader
         // counting dispatches sees the retry without a second word to learn.
         let _ = tx.send(Message::Redispatched(Box::new(engine::Redispatch {

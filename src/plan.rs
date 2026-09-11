@@ -1186,7 +1186,6 @@ mod tests {
                     .expect("a usable note"),
                 criterion: None,
                 reached: crate::note::Reached::Worker,
-                shown_to: vec![crate::note::Party::Worker, crate::note::Party::Supervisor],
             },
             crate::note::Consumed {
                 addressee: crate::note::Addressee::Worker,
@@ -1199,7 +1198,6 @@ mod tests {
                         .expect("a usable criterion"),
                 ),
                 reached: crate::note::Reached::Carried,
-                shown_to: vec![crate::note::Party::Worker, crate::note::Party::Supervisor],
             },
         ];
         let rendered = step.rendered_task_carrying(&node, &[], &notes);

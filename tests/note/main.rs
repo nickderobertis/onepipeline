@@ -890,6 +890,12 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         json!("carried"),
         "a note no turn took was not named as carried: {operation}"
     );
+    // Nobody has been shown it yet, and the record says nobody rather than
+    // guessing at the dispatch that will.
+    assert!(
+        operation.get("shown_to").is_none(),
+        "a note nobody has read yet is recorded as shown to somebody: {operation}"
+    );
 
     world.until("the run to settle", |world| {
         world.events_of(run, "node-settled").len() >= 2
@@ -909,6 +915,114 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         first.iter().any(|instruction| instruction.contains(NOTE)),
         "the carried note did not reach the dispatch it was carried to:\n{first:#?}"
     );
+    // And that dispatch's record does not call the note spent: it was composed
+    // with it, as the node's own context. Only a note a conversation **read**
+    // that a later dispatch is composed without is spent.
+    let records = dispatch_records_of(&world, run, "later");
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert!(
+        records[0]["payload"].get("notes_spent").is_none(),
+        "the dispatch a note was carried to reported it spent: {}",
+        records[0]
+    );
+}
+
+/// A `retry`'s replacement is composed from the manager's own task, so the notes
+/// the node it supersedes read are **spent** by it — and its record says so.
+///
+/// The manager-initiated re-dispatch entry 60 ruled on, kept as ruled: nothing
+/// of the superseded node's conversation is composed into the replacement, and
+/// `amend` or the replacement's own task is where a ruling that has to survive
+/// goes. What is new is that the replacement's dispatch names what it spent, so a
+/// manager who retried a node without restating a ruling learns that from the
+/// record rather than from the replacement's judge.
+///
+/// The node is retried **while running**, which is what leaves a conversation
+/// that read the note for the replacement to supersede: a node that completed
+/// would refuse the retry, and one that failed would have nothing live to have
+/// read it. Every worker turn of `build` is held, as in the requeue journey
+/// above, so it is still in flight when the retry arrives.
+#[test]
+fn a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so() {
+    let world = World::new("note-retry-spent");
+    let run = "retryspent";
+    world.script("turn.hold-each", "Do build.");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("turn.hold", "hold");
+    world.script("judge.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("keep", &[])]),
+    );
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    assert_eq!(recorded(&world, run)["reached"], json!("worker"));
+
+    // Superseded while its reopened turn is still held: the retry cancels that
+    // dispatch and adds the replacement, which dispatches once the superseded
+    // one has been reaped at its deadline.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({
+                "op": "retry",
+                "id": "build",
+                "node": {
+                    "id": "build-again",
+                    "persona": "engineer",
+                    "task": "## What\nDo build again.",
+                },
+            })),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    world.until("the replacement to be dispatched", |world| {
+        !dispatch_records_of(world, run, "build-again").is_empty()
+    });
+
+    let records = dispatch_records_of(&world, run, "build-again");
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let spent = records[0]["payload"]["notes_spent"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the replacement does not say what its superseded node read: {}",
+                records[0]
+            )
+        });
+    assert_eq!(spent.len(), 1, "{spent:#?}");
+    assert_eq!(spent[0]["text"], json!(NOTE), "{spent:#?}");
+    assert_eq!(spent[0]["reached"], json!("worker"), "{spent:#?}");
+    assert!(
+        records[0]["payload"].get("notes_carried").is_none(),
+        "a replacement composed from the manager's own task carried a note: {}",
+        records[0]
+    );
+
+    // Released so the held turns end with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle", "judge.go"] {
+        release(&world.fakes, gate);
+    }
 }
 
 /// The other direction: a note a running turn **did** take is not also carried to
@@ -1300,6 +1414,13 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
         json!("supervisor"),
         "the note did not reach the party whose turn was live: {operation}"
     );
+    // Both parties, from this record alone: the judge now, and the worker with
+    // the decision it re-took — which the two assertions below then observe.
+    assert_eq!(
+        operation["shown_to"],
+        json!(["worker", "supervisor"]),
+        "{operation}"
+    );
 
     // The judge read it as its own, addressed to it...
     let judge = judged(&world);
@@ -1358,6 +1479,14 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
     assert!(
         operation["completion_reason"].is_string(),
         "the record does not carry the reason the work was passed: {operation}"
+    );
+    // The one disposition a party read alone: the decision was completion, so no
+    // worker turn followed for the note to ride to — and the record says so
+    // rather than leaving a note addressed to both to read as reaching both.
+    assert_eq!(
+        operation["shown_to"],
+        json!(["supervisor"]),
+        "a note only the judge read is recorded as shown to the worker too: {operation}"
     );
 
     // And the judge really was told it, under the addressing it was sent with.

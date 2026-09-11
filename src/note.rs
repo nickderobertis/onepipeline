@@ -365,10 +365,8 @@ pub(crate) fn of(
 /// than referenced, because a note has no id of its own: the record that says a
 /// dispatch was given a note has to be able to say *which*, and a reader
 /// verifying that a ruling reached the party it was for reads it off this without
-/// joining another record. [`shown_to`](Self::shown_to) is the one field that is
-/// not the delivery's: a note composed into a dispatch's task is read by both
-/// parties — the task is the first message of the transcript the judge is handed —
-/// whichever party the conversation it was delivered into showed it to.
+/// joining another record. Who was shown it is not a field here: it is decided by
+/// the disposition and by where the note is being written — see [`Composition`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Consumed {
     /// Whose task it said it was updating.
@@ -381,9 +379,6 @@ pub(crate) struct Consumed {
     /// What became of it when it was delivered.
     #[serde(flatten)]
     pub reached: Reached,
-    /// The parties that were shown it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub shown_to: Vec<Party>,
 }
 
 /// The payload key under which a `node-dispatched` names the notes the dispatch
@@ -402,45 +397,114 @@ pub(crate) const CARRIED_KEY: &str = "notes_carried";
 /// than believe the receipt.
 pub(crate) const SPENT_KEY: &str = "notes_spent";
 
-/// The notes a node's **current** dispatch holds, as the run's record has them.
+/// Where a list of notes is being written, which decides who each was shown to.
+///
+/// A note composed into a dispatch's task is read by both parties — the task is
+/// the first message of the transcript the judge is handed — whatever the
+/// conversation it was first delivered into did with it. One written down as
+/// spent was shown to whoever its own disposition says, and nobody since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Composition {
+    /// Into a dispatch's task, under [`CARRIED_KEY`].
+    IntoATask,
+    /// Into no dispatch, under [`SPENT_KEY`].
+    Nowhere,
+}
+
+impl Consumed {
+    /// The parties this note was shown to, written where it is being written.
+    pub(crate) fn shown_to(&self, composition: Composition) -> &'static [Party] {
+        match composition {
+            Composition::IntoATask => &[Party::Worker, Party::Supervisor],
+            Composition::Nowhere => self.reached.shown_to(),
+        }
+    }
+}
+
+/// One note as a `node-dispatched` writes it: the note, and who it was shown to
+/// under the key it is written under.
+///
+/// A view for writing rather than a second shape: `shown_to` is derived at the
+/// moment of writing from the disposition and the [`Composition`], so a record
+/// cannot carry a `shown_to` that contradicts its own `reached`.
+#[derive(Serialize)]
+struct Written<'a> {
+    #[serde(flatten)]
+    note: &'a Consumed,
+    #[serde(skip_serializing_if = "<[Party]>::is_empty")]
+    shown_to: &'a [Party],
+}
+
+/// The value a `node-dispatched` carries a list of notes as, under the key the
+/// composition names.
+pub(crate) fn payload_of(notes: &[Consumed], composition: Composition) -> Value {
+    let written: Vec<Written<'_>> = notes
+        .iter()
+        .map(|note| Written {
+            note,
+            shown_to: note.shown_to(composition),
+        })
+        .collect();
+    serde_json::to_value(written).unwrap_or_else(|_| Value::Array(Vec::new()))
+}
+
+/// Where one standing note sits relative to the node's current dispatch, which
+/// decides whether that dispatch's conversation has read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// Composed into the current dispatch's task, so read by both of its parties
+    /// whatever the disposition it was first delivered under.
+    ComposedIntoIt,
+    /// Delivered since the current dispatch was composed; whether a party read
+    /// it is its own disposition's to say.
+    DeliveredSince,
+}
+
+/// One standing note and where it sits — exactly one place, so a note cannot be
+/// both composed into the dispatch and delivered after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub note: Consumed,
+    pub placement: Placement,
+}
+
+impl Held {
+    /// Whether a conversation of the node's current dispatch has read this note.
+    fn read(&self) -> bool {
+        match self.placement {
+            Placement::ComposedIntoIt => true,
+            Placement::DeliveredSince => self.note.reached.a_conversation_read_it(),
+        }
+    }
+}
+
+/// The notes a node's **current** dispatch holds, as the run's record has them:
+/// what that dispatch was composed with, and every note the run delivered to
+/// the node since — each in exactly one of those two places.
 ///
 /// Folded off the journal rather than kept in memory, because the two readers of
 /// it are on different threads and neither owns the answer: the dispatch thread
 /// composing the node's next attempt, and the reconcile loop about to announce a
-/// dispatch that was composed without them. Each starts from the node's last
-/// `node-dispatched` — the notes that dispatch was composed with — and adds every
-/// note the run delivered to the node since.
+/// dispatch that was composed without them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Standing {
-    /// Notes a conversation of the node's current dispatch has read: what that
-    /// dispatch was composed with, and every delivery since that a party took.
-    pub read: Vec<Consumed>,
-    /// Notes delivered since that dispatch was composed that **no** turn took, and
-    /// which are therefore owed to the node's next dispatch.
-    pub carried: Vec<Consumed>,
+    /// Every note, in the order the run recorded them.
+    pub held: Vec<Held>,
 }
 
 impl Standing {
-    /// Every note of both kinds, in the order the run recorded them, as the
-    /// node's next dispatch is composed with them.
-    ///
-    /// A dispatch's task reaches both parties, so each is stamped as shown to
-    /// both — whatever the conversation it was first delivered into did with it.
-    pub(crate) fn composed(&self) -> Vec<Consumed> {
-        self.read
-            .iter()
-            .chain(&self.carried)
-            .cloned()
-            .map(|note| Consumed {
-                shown_to: vec![Party::Worker, Party::Supervisor],
-                ..note
-            })
-            .collect()
+    /// Every note, as the node's next dispatch is composed with all of them.
+    pub(crate) fn notes(&self) -> Vec<Consumed> {
+        self.held.iter().map(|held| held.note.clone()).collect()
     }
 
-    /// Everything here, as a dispatch composed **without** any of it spends it.
-    pub(crate) fn spent(&self) -> Vec<Consumed> {
-        self.read.iter().chain(&self.carried).cloned().collect()
+    /// The notes a conversation of the node's current dispatch has read.
+    pub(crate) fn read(&self) -> Vec<Consumed> {
+        self.held
+            .iter()
+            .filter(|held| held.read())
+            .map(|held| held.note.clone())
+            .collect()
     }
 }
 
@@ -448,11 +512,19 @@ impl Standing {
 ///
 /// A `node-dispatched` resets the fold to what that dispatch was composed with —
 /// [`CARRIED_KEY`], or nothing for a dispatch composed with none — and a
-/// committed `note` adds its note to whichever of the two lists its disposition
-/// says: read, where a party of the conversation took it, and carried where none
-/// did. A record this build cannot read as either contributes nothing, exactly as
-/// the projection folds it.
-pub(crate) fn standing(journal: &[Envelope], node: &str) -> Standing {
+/// committed `note` adds its note. Both are this crate's own records, and both
+/// are **refused** rather than read past where they cannot be read: a
+/// `notes_carried` that is not a list of notes, or an operation list this build
+/// cannot parse, would otherwise decide *by its absence* which rulings a dispatch
+/// is composed with, which is the silent loss this fold exists to end. The
+/// refusal names the record, so a reader is sent at the line rather than at the
+/// run.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the record that could not be read as what its kind
+/// says it is.
+pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
     let mut standing = Standing::default();
     for envelope in journal {
         // A dispatch is stamped with its node; a committed edit is not — it may
@@ -461,21 +533,35 @@ pub(crate) fn standing(journal: &[Envelope], node: &str) -> Standing {
             if envelope.labels.node.as_deref() != Some(node) {
                 continue;
             }
-            standing = Standing {
-                read: envelope
-                    .payload
-                    .get(CARRIED_KEY)
-                    .and_then(|carried| serde_json::from_value(carried.clone()).ok())
-                    .unwrap_or_default(),
-                carried: Vec::new(),
+            let composed: Vec<Consumed> = match envelope.payload.get(CARRIED_KEY) {
+                None => Vec::new(),
+                Some(carried) => serde_json::from_value(carried.clone())
+                    .map_err(|error| unreadable_record(envelope, CARRIED_KEY, &error))?,
             };
+            standing.held = composed
+                .into_iter()
+                .map(|note| Held {
+                    note,
+                    placement: Placement::ComposedIntoIt,
+                })
+                .collect();
             continue;
         }
-        let Some(operations) = envelope.payload.get("operations").and_then(|value| {
-            serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
-        }) else {
+        let is_a_commit = [
+            crate::event::PipelineKind::EditCommitted,
+            crate::event::PipelineKind::CommandAccepted,
+        ]
+        .iter()
+        .any(|kind| envelope.kind.0 == kind.as_str());
+        if !is_a_commit || envelope.source != crate::event::Source::Pipeline {
+            continue;
+        }
+        let Some(operations) = envelope.payload.get("operations") else {
             continue;
         };
+        let operations: Vec<crate::edits::Operation> =
+            serde_json::from_value(operations.clone())
+                .map_err(|error| unreadable_record(envelope, "operations", &error))?;
         for operation in operations {
             let crate::edits::Operation::NoteDelivered {
                 node: whose,
@@ -483,39 +569,45 @@ pub(crate) fn standing(journal: &[Envelope], node: &str) -> Standing {
                 text,
                 criterion,
                 reached,
-                shown_to,
+                ..
             } = operation
             else {
                 continue;
             };
-            if whose != node {
-                continue;
-            }
-            let consumed = Consumed {
-                addressee,
-                text,
-                criterion,
-                shown_to,
-                reached: reached.clone(),
-            };
-            if reached.a_conversation_read_it() {
-                standing.read.push(consumed);
-            } else {
-                standing.carried.push(consumed);
+            if whose == node {
+                standing.held.push(Held {
+                    note: Consumed {
+                        addressee,
+                        text,
+                        criterion,
+                        reached,
+                    },
+                    placement: Placement::DeliveredSince,
+                });
             }
         }
     }
-    standing
+    Ok(standing)
+}
+
+/// The refusal for a record of this crate's own that cannot be read as what its
+/// kind says it carries.
+fn unreadable_record(envelope: &Envelope, field: &str, error: &serde_json::Error) -> Error {
+    Error::Invalid(format!(
+        "the run's record of the notes delivered to its nodes cannot be read: `{}` record \
+         {}/{} carries a `{field}` this build cannot read ({error}), so which notes a \
+         dispatch is composed with cannot be decided from it",
+        envelope.kind.0, envelope.stream, envelope.seq
+    ))
 }
 
 /// The same, read off the run's own journal.
-pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Standing {
+///
+/// # Errors
+///
+/// [`standing`]'s.
+pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     standing(&crate::journal::read(&paths.journal()), node)
-}
-
-/// The value a `node-dispatched` carries a list of notes as.
-pub(crate) fn payload_of(notes: &[Consumed]) -> Value {
-    serde_json::to_value(notes).unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 #[cfg(test)]
@@ -592,17 +684,23 @@ mod tests {
             delivered(3, "other", "not yours", Reached::Worker),
             delivered(4, "build", "landed nowhere", Reached::Carried),
         ];
-        let before = standing(&journal, "build");
-        assert_eq!(texts(&before.read), ["first ruling"]);
-        assert_eq!(texts(&before.carried), ["landed nowhere"]);
-        // Composed into the next dispatch, both are shown to both parties —
-        // a task is the first message of the transcript the judge reads —
-        // whatever the conversation they were first delivered into did.
-        let composed = before.composed();
-        assert_eq!(texts(&composed), ["first ruling", "landed nowhere"]);
-        assert!(composed
-            .iter()
-            .all(|note| note.shown_to == [Party::Worker, Party::Supervisor]));
+        let before = standing(&journal, "build").expect("the record reads");
+        assert_eq!(texts(&before.notes()), ["first ruling", "landed nowhere"]);
+        // Read by this dispatch's conversation: the one a turn took. The one
+        // that landed nowhere is owed forward and not yet read by anybody.
+        assert_eq!(texts(&before.read()), ["first ruling"]);
+
+        // Composed into the next dispatch, both are written as shown to both
+        // parties — a task is the first message of the transcript the judge
+        // reads — whatever the conversation they were first delivered into did;
+        // written as spent, each says what its own disposition says.
+        let composed = payload_of(&before.notes(), Composition::IntoATask);
+        assert_eq!(composed[0]["shown_to"], json!(["worker", "supervisor"]));
+        assert_eq!(composed[1]["shown_to"], json!(["worker", "supervisor"]));
+        assert_eq!(composed[1]["reached"], json!("carried"));
+        let spent = payload_of(&before.notes(), Composition::Nowhere);
+        assert_eq!(spent[0]["shown_to"], json!(["worker", "supervisor"]));
+        assert!(spent[1].get("shown_to").is_none(), "{spent}");
 
         // A continuation composed with them resets the fold to exactly them, and
         // a dispatch composed with none resets it to nothing: what an earlier
@@ -612,15 +710,21 @@ mod tests {
             journal::PipelineKind::NodeDispatched,
             5,
             Some("build"),
-            &[("attempt", json!(2)), (CARRIED_KEY, payload_of(&composed))],
+            &[("attempt", json!(2)), (CARRIED_KEY, composed)],
         ));
         continued.push(delivered(6, "build", "second ruling", Reached::Supervisor));
-        let after = standing(&continued, "build");
+        let after = standing(&continued, "build").expect("the record reads");
         assert_eq!(
-            texts(&after.read),
+            texts(&after.notes()),
             ["first ruling", "landed nowhere", "second ruling"]
         );
-        assert!(after.carried.is_empty());
+        // The note that landed nowhere was composed into this dispatch's task,
+        // so its conversation has read it: nothing is owed forward, and a
+        // dispatch composed without it would spend it.
+        assert_eq!(
+            texts(&after.read()),
+            ["first ruling", "landed nowhere", "second ruling"]
+        );
 
         let mut fresh = continued.clone();
         fresh.push(pipeline(
@@ -629,7 +733,112 @@ mod tests {
             Some("build"),
             &[("attempt", json!(1))],
         ));
-        assert_eq!(standing(&fresh, "build"), Standing::default());
+        assert_eq!(
+            standing(&fresh, "build").expect("the record reads"),
+            Standing::default()
+        );
+    }
+
+    /// A record of this crate's own that cannot be read as what it says it
+    /// carries is refused, naming the record — never read past, because a
+    /// dispatch composed without the notes it cannot read is the silent loss the
+    /// fold exists to end.
+    #[test]
+    fn a_record_the_fold_cannot_read_is_refused_by_name_rather_than_read_past() {
+        let carried_wrong = vec![pipeline(
+            journal::PipelineKind::NodeDispatched,
+            1,
+            Some("build"),
+            &[("attempt", json!(2)), (CARRIED_KEY, json!("a ruling"))],
+        )];
+        let refused =
+            standing(&carried_wrong, "build").expect_err("a string is not a list of notes");
+        let said = refused.to_string();
+        assert!(
+            said.contains("node-dispatched") && said.contains("s/1") && said.contains(CARRIED_KEY),
+            "the refusal does not name the record or the field: {said}"
+        );
+
+        let operations_wrong = vec![pipeline(
+            journal::PipelineKind::EditCommitted,
+            2,
+            None,
+            &[("operations", json!([{"kind": "from-the-future"}]))],
+        )];
+        let refused = standing(&operations_wrong, "build")
+            .expect_err("an operation this build does not know is not read past");
+        assert!(
+            refused.to_string().contains("`operations`"),
+            "the refusal does not name the field: {refused}"
+        );
+
+        // A sibling's record is not this crate's to read, whatever it is called.
+        let mut foreign = pipeline(
+            journal::PipelineKind::EditCommitted,
+            3,
+            None,
+            &[("operations", json!("not ours"))],
+        );
+        foreign.source = Source::Agentgraph;
+        assert_eq!(
+            standing(&[foreign], "build").expect("a sibling's record is passed over"),
+            Standing::default()
+        );
+    }
+
+    /// The names this module writes are the ones divergence entry 69 states, so
+    /// the record and the document cannot drift apart: the two payload keys, the
+    /// field a delivery is stamped with, and the heading a re-dispatch renders
+    /// the notes under.
+    ///
+    /// Read here rather than in `tests/contract.rs` because the constants are
+    /// the crate's own and not part of its published surface; the table of who
+    /// each disposition shows a note to is held there, through the public
+    /// [`Reached::shown_to`].
+    #[test]
+    fn the_names_this_module_writes_are_the_ones_the_divergence_record_states() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("69."))
+            .expect("the record carries entry 69");
+        let block: Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 69's block is JSON"))
+            .expect("entry 69 carries the json block this test drives");
+        assert_eq!(
+            block["node_dispatched_keys"],
+            json!([CARRIED_KEY, SPENT_KEY]),
+            "the keys a `node-dispatched` carries are not the ones entry 69 names"
+        );
+        assert_eq!(
+            block["heading"],
+            json!(crate::plan::MANAGER_NOTES_HEADING),
+            "the heading a re-dispatch renders the notes under is not the one entry 69 names"
+        );
+        // The field name is read off what the operation really writes rather
+        // than off a constant, because serde's attribute is the one source of it.
+        let written = serde_json::to_value(Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Worker,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: Reached::Worker.shown_to().to_vec(),
+            reached: Reached::Worker,
+        })
+        .expect("it serializes");
+        let field = block["note_delivered_field"]
+            .as_str()
+            .expect("entry 69 names the field");
+        assert!(
+            written.get(field).is_some(),
+            "a delivery is not stamped under the field entry 69 names (`{field}`): {written}"
+        );
     }
 
     /// The parties each disposition puts a note in front of, written on the
