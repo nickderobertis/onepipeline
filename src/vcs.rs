@@ -2581,16 +2581,26 @@ mod tests {
             "rebase"
         );
 
+        // The patch comes off a side branch of the base's, like the pick above,
+        // so `main` stays at the seed and the applied commit is a commit of its
+        // own that the landing then carries. Taken off `main` itself, the
+        // landing only fast-forwards when `am` reproduces the base's very
+        // object — same tree, same parent, same author date, and a committer
+        // date in the same second — which a slow runner does not give, and
+        // which would land nothing even when it did.
         let (base, applied) = a_cut_worktree("applied");
+        git_in(&base, &["checkout", "-q", "-b", "side"]);
         commit_in(&base, "patch.md");
         let patch = std::process::Command::new("git")
-            .args(["format-patch", "-1", "--stdout", "HEAD"])
+            .args(["format-patch", "-1", "--stdout", "side"])
             .current_dir(&base)
             .output()
             .expect("git runs");
         assert!(patch.status.success());
+        git_in(&base, &["checkout", "-q", "main"]);
         std::fs::write(applied.join("../patch.mbox"), &patch.stdout).expect("the patch");
         git_in(&applied, &["am", "-q", "../patch.mbox"]);
+        assert_eq!(level(&applied), None, "an applied patch read as level");
         land(&applied);
         assert_eq!(wrote(&applied), Some(Wrote::ACommitTheBaseCarries), "am");
 
