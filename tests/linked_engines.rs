@@ -979,7 +979,6 @@ fn the_remedy_printed_in_the_mixed_case_performed_with_cargo_moves_the_lock_to_t
     }
     let starting = fs::read_to_string(&lock).expect("the starting lock");
 
-    // The registry moves past the lock.
     let index = index_serving(
         "mixed-remedy/index",
         &[
@@ -1022,7 +1021,6 @@ fn the_remedy_printed_in_the_mixed_case_performed_with_cargo_moves_the_lock_to_t
         said(&run)
     );
 
-    // Performed as printed.
     let performed = Command::new(env!("CARGO"))
         .args(&remedy[1..])
         .arg("--offline")
