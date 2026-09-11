@@ -376,7 +376,7 @@ index_versions() {
     # closing brace, or 0 where it never closes. What it decides lands in
     # DEP_BAD and DEPS rather than in a return value, because the walk has to
     # go on past an entry this cannot read to find the end of the record.
-    function read_dep(s, i,   n, c, key, name, req, kind, active, pkg, saw_name, saw_req, saw_kind, saw_pkg, ok_name, ok_req, ok_kind, ok_pkg, name_twice, twice) {
+    function read_dep(s, i,   n, c, key, name, req, kind, active, pkg, saw_name, saw_req, saw_kind, saw_pkg, ok_name, ok_req, ok_kind, ok_pkg, identity_twice, twice) {
       n = length(s)
       active = "always"
       i = skip_ws(s, i + 1)
@@ -413,8 +413,8 @@ index_versions() {
           # `null` is how the registry spells "not renamed".
           if (key == "package" && LIT == "null") ok_pkg = 1
         }
-        if (key == "name")      { if (saw_name) name_twice = 1; saw_name = 1 }
-        else if (key == "package") { if (saw_pkg) name_twice = 1; saw_pkg = 1 }
+        if (key == "name")      { if (saw_name) identity_twice = 1; saw_name = 1 }
+        else if (key == "package") { if (saw_pkg) identity_twice = 1; saw_pkg = 1 }
         else if (key == "req")  { if (saw_req)  twice = 1; saw_req  = 1 }
         else if (key == "kind") { if (saw_kind) twice = 1; saw_kind = 1 }
         i = skip_ws(s, i)
@@ -426,7 +426,7 @@ index_versions() {
       # An entry whose name cannot be read, or that names two, is one this
       # cannot tell from a sibling, so it is refused; one that names some other
       # crate is skipped whole, whatever else is on it.
-      if (!ok_name || name_twice || (saw_pkg && !ok_pkg)) { DEP_BAD = 1; return i + 1 }
+      if (!ok_name || identity_twice || (saw_pkg && !ok_pkg)) { DEP_BAD = 1; return i + 1 }
       if (pkg != "") name = pkg
       if (!(name in SIBLING)) return i + 1
       if (!ok_req || !ok_kind || twice) { DEP_BAD = 1; return i + 1 }
@@ -654,12 +654,13 @@ for name in "${SIBLINGS[@]}"; do
   # The newest release in the window that this manifest's own sibling
   # requirements admit — which is the only release the lock can be *behind*.
   permitted=""
-  # Every release in the window they do not, as `version dep req dep_req`; and
-  # the newest of them, which is the one worth a line.
+  # Every release in the window they do not, as `version dep dep_req
+  # manifest_req` — what the release requires of the sibling and what this
+  # manifest states for it; and the newest of them, which is the one worth a line.
   held=()
   held_newest=""
   # What the record about to be answered requires of the siblings, as
-  # `dep kind req`, gathered off the `requires` lines that precede its own.
+  # `dep kind active req`, gathered off the `requires` lines that precede its own.
   pending=()
   # Each tag `index_versions` emits names a different way the record was
   # unreadable, so the refusal says what it saw rather than that something was

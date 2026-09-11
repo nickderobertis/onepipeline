@@ -149,8 +149,8 @@ fn index_path(name: &str) -> String {
 // reference cargo publishes, and the drift gate is the registry itself —
 // `.github/workflows/engine-currency.yml` runs the same script over the live index
 // on every pull request and a member renamed there is refused by name. The
-// sibling relationships in `requires_today` are the real graph's shape at the
-// requirements this manifest states, so the fixture admits what the lock links
+// sibling edges in `requires_admitted` are the real graph's, at requirements
+// synthesized from this manifest so the fixture admits what the lock links
 // whatever the pins say; the registry's actual entries are read by that live run,
 // not reconciled against this copy.
 /// What one release requires of one crate, as its index record states it:
@@ -193,19 +193,20 @@ fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement
     )
 }
 
-/// What each engine requires of the others, in the shape the registry records
-/// for the real graph today: the turn engine requires the harness core and the
-/// verdict vocabulary, the verdict vocabulary requires the harness core, and the
-/// test-support crate requires the exact engine it doubles. Each at the
-/// requirement this manifest itself states for that engine, so a fixture record
-/// is admitted by construction whatever the pins say when this runs.
+/// Sibling requirements a fixture record of `name` carries, admitted by this
+/// manifest by construction: each is the caret of the requirement the manifest
+/// itself states for that engine, so the record stays admissible whatever the
+/// pins say when this runs. The *edges* are the real graph's — the turn engine
+/// requires the harness core and the verdict vocabulary, the verdict vocabulary
+/// requires the harness core, the test-support crate requires the engine it
+/// doubles — but the requirements are synthesized, not the registry's.
 ///
 /// The one `dev` entry is the real graph's too — `oneagentgraph` requires
 /// `onevcs` as a dev-dependency, at a window this manifest does not admit — and
 /// it is here because it is the entry a reader gets wrong first: cargo never
 /// resolves a dependency's dev-dependencies, so counting it would hold every
 /// `oneagentgraph` release back on a requirement no build ever meets.
-fn requires_today(name: &str) -> Vec<(String, String, &'static str)> {
+fn requires_admitted(name: &str) -> Vec<(String, String, &'static str)> {
     let caret = |dep: &str| (dep.to_string(), format!("^{}", required(dep)), "normal");
     match name {
         "oneagentgraph" => vec![
@@ -270,7 +271,7 @@ fn index_serving(case: &str, extra: &[Served]) -> String {
     let _ = fs::remove_dir_all(&root);
 
     for name in SIBLINGS {
-        let today = requires_today(name);
+        let today = requires_admitted(name);
         let today: Vec<Requirement> = today
             .iter()
             .map(|(dep, req, kind)| (dep.as_str(), req.as_str(), *kind))
@@ -819,6 +820,39 @@ fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
         String::from_utf8_lossy(&run.stdout)
             .contains("2.9.9 is held back by onejudge = \"0.0\" (2.9.9 requires onejudge ^9.0.0)"),
         "the held-back line does not name the sibling by the crate it is:\n{}",
+        said(&run)
+    );
+}
+
+/// A `package` spelled `null` is a dependency that was not renamed, read by
+/// its `name`.
+///
+/// The registry omits the member for such an entry, but its format allows the
+/// `null` spelling, and a reader that took it for a crate called `null` would
+/// skip a sibling's requirement as foreign.
+#[test]
+fn a_sibling_requirement_whose_package_is_null_is_read_by_its_name() {
+    let fixture = tree("null-package", &CARET_SHAPES);
+    let entry = repo_root()
+        .join(&fixture.index)
+        .join(index_path("oneagentgraph"));
+    let served = fs::read_to_string(&entry).expect("the fixture index entry");
+    fs::write(
+        &entry,
+        format!(
+            "{served}{{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{{\"name\":\"onejudge\",\
+             \"package\":null,\"req\":\"^9.0.0\",\"kind\":\"normal\",\"optional\":false,\
+             \"target\":null}}],\"yanked\":false}}\n"
+        ),
+    )
+    .expect("one more record in it");
+    let run = linked_engines(&fixture.args());
+    assert!(
+        run.status.success()
+            && String::from_utf8_lossy(&run.stdout).contains(
+                "2.9.9 is held back by onejudge = \"0.0\" (2.9.9 requires onejudge ^9.0.0)"
+            ),
+        "a sibling requirement with `package` spelled null was not read as the sibling's:\n{}",
         said(&run)
     );
 }
@@ -1498,6 +1532,21 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "dep-with-name-twice",
             "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"serde\",\
              \"name\":\"onejudge\",\"req\":\"^0.0.7\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-restyped-package",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"judge\",\
+             \"package\":5,\"req\":\"^0.0.7\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-package-twice",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"judge\",\
+             \"package\":\"onejudge\",\"package\":\"serde\",\"req\":\"^0.0.7\",\"kind\":\"normal\"}],\
+             \"yanked\":false}",
             "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
              check cannot read",
         ),
