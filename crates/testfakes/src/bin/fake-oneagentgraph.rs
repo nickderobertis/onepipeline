@@ -392,12 +392,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // graph says it: a `member-died` on this stream, and the graph going on
         // watching. Scripted `observer.died-as` on `<key>.died-as`'s grammar,
         // with `observer.refused` on `<key>.refused`'s naming what its chain
-        // stepped past first. The member is the shipped pacemaker's own name,
-        // and it is single-sided: it publishes no invocation, exactly as the
-        // real one does not.
+        // stepped past first. The member is the one the graph this double was
+        // launched with declares on a schedule, read off that document; it is
+        // single-sided, and publishes no invocation, exactly as the real one
+        // does not.
         if let Some(script) = fake::node_script(dir, "observer", "died-as") {
+            let pacemaker = fake::scheduled_member(&graph).unwrap_or_else(|why| fake::fail(&why));
             let mut labels = stamped(args);
-            labels.insert("member".to_string(), "check-in".into());
+            labels.insert("member".to_string(), pacemaker.into());
             if let Some(refused) = fake::node_script(dir, "observer", "refused") {
                 refuse_candidates_under(&labels, &refused);
             }

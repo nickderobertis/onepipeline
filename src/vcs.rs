@@ -904,6 +904,15 @@ pub fn level_with_base(
     // `HEAD` to, and the entry's own subject, which is the action; the three are
     // split on spaces a stamp and a commit name never contain. A stamp this
     // build cannot read leaves the entry out: it is not evidence either way.
+    //
+    // llmlint: ignore[changed_behavior_has_e2e] the stamp is whole seconds, so an entry
+    // from the second this dispatch began in is taken as this dispatch's. Comparing
+    // strictly would drop a worker's own first-second commit — which the doubles here
+    // write within the second — for an edge no path reaches: a worktree is taken up
+    // again only by a later run pinned to the same branch, after the run that left it
+    // has stopped, and nothing here starts one inside the second the last one committed
+    // in. The reuse journey in `tests/e2e/session_reuse.rs` drives the reuse that does
+    // happen, and the unit test drives the boundary through git's own clock.
     let began = began
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
