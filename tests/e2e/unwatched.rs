@@ -2277,28 +2277,22 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
 /// The measured report, reproduced: a run the **previous release** drove to
 /// settlement is not reported by this one.
 ///
-/// What was measured on 2026-09-11 was `unwatched-stop-hook-fixes`, settled at
-/// 14:10:42Z and printed `DRIVER DEAD` at exit `6` ten minutes later while every
-/// view called it `SETTLED`. Its driver was the **0.26.1** binary: the run's own
-/// `adopt` node is what moved the host to 0.27.0, whose package landed at
-/// 14:10:58Z, sixteen seconds *after* `node-settled`. So the document that
-/// driver left was current for its journal and recorded `graph_complete: true` —
-/// at `schema_version: 1`, which 0.27.0 had moved past — and the verb's rule for
-/// a superseded schema decided it *reported*, reading the standing word off the
-/// launch record alone, which is the `DRIVER DEAD` measured. Every other run that
-/// release completed was reported the same way until a view happened to refresh
-/// it; `stop` refreshed this one. None of the observer, the adoption or the
-/// lifecycle streams was necessary: they are driven here because the measured
-/// run had them, and the journey reproduces the report with or without them.
+/// Entry 68 records the measurement. What matters to the fixture is what that
+/// run's driver left — a document current for its journal, recording
+/// `graph_complete: true`, at the schema this build has moved past — and that
+/// the verb's old rule reported such a document unread, reading the standing
+/// word off the launch record alone, which is the `DRIVER DEAD` measured. None
+/// of the observer, the adoption or the lifecycle streams is necessary to reach
+/// it; they are driven because the measured run had them, through
+/// [`settled_over_the_measured_shape`]. The document is then put where the
+/// previous release's writer leaves it and the verb is asked with no view
+/// between.
 ///
-/// So the shape is [`settled_over_the_measured_shape`] with the document then put
-/// where the previous release's writer leaves it, and the verb asked with no view
-/// between. The rule this holds is entry 68's amended clause 4: a document at a
-/// schema this build has moved past is **refreshed** — folded once and rewritten
-/// at this build's schema, exactly as `runs` refreshes it — and then decided as
-/// any other document. A settled run is excluded, and the document it leaves
-/// behind is this build's own, current for the journal, so the next turn's
-/// question costs nothing again.
+/// The rule held is entry 68's amended clause 4: such a document is
+/// **refreshed** — folded once and rewritten at this build's schema, exactly as
+/// `runs` refreshes it — and then decided as any other. A settled run is
+/// excluded, and the document it leaves behind is this build's own, current for
+/// the journal, so the next turn's question costs nothing again.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a document
 // at a schema it has moved past, and none could: the writer stamps its own version. The

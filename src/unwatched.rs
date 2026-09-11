@@ -252,39 +252,16 @@ enum Decided {
     Undecidable(String),
 }
 
-/// Read one run's settlement out of its **summary document**, folding its store
-/// for exactly one reason: to bring a document an earlier build wrote to this
-/// build's schema, as `runs` does for the same run.
+/// Read one run's settlement out of its **summary document**, on the rule entry
+/// 68 states: excluded on a current document that records settlement, undecidable
+/// on a stale one that does, reported on one that records none.
 ///
-/// The stamp is required **only for exclusion**, and that asymmetry is the whole
-/// freshness rule. A run that has stopped writing has a current document, so
-/// requiring the stamp costs a settled run nothing — while a document that is
-/// behind its journal is exactly what a run *still recording* looks like, and
-/// treating that as proof of settlement is how the one run this verb exists to
-/// find would be dropped.
-///
-/// A document whose own record says it settled and whose stamp is **stale** is a
-/// third answer, not the second: it is neither excluded (a stale stamp is no
-/// proof of settlement) nor reported (`6` means *proven* unwatched, and a
-/// document that records settlement is not that proof either). It is named on
-/// standard error as undecidable and changes no exit status — the same terms a
-/// document this build cannot read is passed over on. Only a document recording
-/// **no** settlement reaches the reported path, and it reaches it whether its
-/// stamp is fresh or stale, because that is what a run still recording looks
-/// like.
-///
-/// The other asymmetry is between the two ways a document can fail to be read. A
-/// document that declares a version this build has **moved past** is one an
-/// earlier build of this engine wrote and left current for its journal — every
-/// run the previous release settled carries one until something refreshes it —
-/// so it is **refreshed** here, folded once through [`RunSummary::of`] and
-/// rewritten at this build's schema, and then decided as any other document. It
-/// is neither reported unread, which is what was measured — every run the
-/// previous release completed reported at `6` on the first turn after an upgrade
-/// — nor passed over, which would silence a run still being driven by that
-/// release's binary. Only a document that is absent, that this build could not
-/// read at all, that is another run's, or that a *later* build wrote leaves the
-/// question unasked.
+/// The one fold on this path is for a document at a schema this build has moved
+/// **past** — the previous release's, current for its journal on every run that
+/// release settled. It is refreshed through [`RunSummary::of`], the reader `runs`
+/// refreshes it with, and then decided like any other: reporting it unread is
+/// what the entry records as measured, and passing it over would silence a run
+/// still being driven by that release's binary.
 fn decide(paths: &RunPaths) -> Decided {
     let text = match std::fs::read_to_string(paths.summary()) {
         Ok(text) => text,
