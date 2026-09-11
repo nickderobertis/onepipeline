@@ -767,14 +767,27 @@ pub struct LevelBranch {
     /// clone carries one, and the local base otherwise — the same ref the
     /// sibling's own publication compares against.
     pub base: String,
-    /// Whether a commit **this dispatch wrote** is on the branch — and so, the
-    /// branch being level, on the base. Movement alone is not that: a worker
-    /// that fast-forwarded or reset its branch onto a commit the base already
-    /// had moved HEAD and wrote nothing, and a report that the base carried what
-    /// it committed would be false. Nor is a commit an earlier dispatch wrote in
-    /// the same worktree, which a session taken up again still remembers. See
-    /// [`level_with_base`] for the evidence.
-    pub committed: bool,
+    /// What this dispatch wrote to the branch, as far as the worktree's own
+    /// record says. See [`level_with_base`] for the evidence.
+    pub wrote: Wrote,
+}
+
+/// What a dispatch wrote to a level branch: the one distinction that decides
+/// its settlement, named rather than carried as a flag.
+///
+/// Movement alone is neither: a worker that fast-forwarded or reset its branch
+/// onto a commit the base already had moved `HEAD` and wrote nothing, and a
+/// report that the base carried what it committed would be false. Nor is a
+/// commit an earlier dispatch wrote in the same worktree, which a session taken
+/// up again still remembers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    /// No commit of this dispatch's is on the branch: it wrote none, or reset
+    /// away what it wrote.
+    Nothing,
+    /// A commit this dispatch wrote is on the branch — and so, the branch being
+    /// level, already on the base.
+    ACommitTheBaseCarries,
 }
 
 /// Whether one entry of the worktree's `HEAD` reflog records a commit being
@@ -786,6 +799,13 @@ pub struct LevelBranch {
 /// fast-forward — each of which created the commit the entry points at. A
 /// `reset`, a `checkout`, a fast-forward, and a `rebase (start)`/`(finish)` moved
 /// `HEAD` onto a commit that already existed, and are not that.
+// llmlint: ignore[changed_behavior_has_e2e] `git commit`, a fast-forward and a reset are
+// driven end to end by `tests/e2e/lifecycle.rs`'s three level-branch journeys and
+// `tests/e2e/session_reuse.rs`'s stranded retry — the acts a worker double performs. The
+// other spellings here are git's own for the same act, and each is driven over **real
+// git** in this module's `a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone`,
+// so the subject matched is the one git stamps rather than one written out; a journey per
+// git verb would prove git's reflog rather than this crate.
 fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
     let subject = subject.trim();
     if subject.starts_with("commit")
@@ -824,13 +844,9 @@ fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
 /// commit counts only while the branch still carries it: one written and then
 /// reset away is not on the base whatever the reflog says.
 ///
-/// This crate runs git itself here, which `docs/contract-divergences.md` entry 35
-/// records it otherwise does not, and for the reason that entry gives for the
-/// place it *can*: inside a session the worktree and the base are the sibling's
-/// own record, named by [`working_session`], so there is no repository to guess
-/// at. What the sibling offers is the same comparison at publication, answered as
-/// `PublishOutcome::NothingToPublish` after a drafting dispatch has been spent
-/// reaching it — and no read of a session's standing before that.
+/// This crate runs git itself here, inside a session and against the worktree
+/// and base the session's own record names; why that is the one place it may is
+/// `docs/contract-divergences.md` entry 35.
 pub fn level_with_base(
     worktree: &std::path::Path,
     base: &str,
@@ -905,7 +921,7 @@ pub fn level_with_base(
             (stamped >= began && reflog_entry_wrote_a_commit(subject)).then(|| sha.to_owned())
         })
         .collect();
-    let mut committed = false;
+    let mut wrote = Wrote::Nothing;
     for sha in &written {
         // Exit 1 is git's answer "not an ancestor", which the closure reports as
         // a refusal; only a refusal to answer at all leaves the read undecided,
@@ -917,7 +933,7 @@ pub fn level_with_base(
             .output()
         {
             Ok(answered) if answered.status.success() => {
-                committed = true;
+                wrote = Wrote::ACommitTheBaseCarries;
                 break;
             }
             Ok(answered) if answered.status.code() == Some(1) => {}
@@ -928,7 +944,7 @@ pub fn level_with_base(
     Some(LevelBranch {
         branch,
         base: compared,
-        committed,
+        wrote,
     })
 }
 
@@ -2421,18 +2437,25 @@ mod tests {
     /// A level branch is told apart by whether **this dispatch wrote a commit**
     /// the branch carries, and movement alone is not that.
     ///
-    /// Six worktrees, one per situation the read has to tell apart, over real
-    /// git: the reflog and the ancestry are git's own, and what the read claims
-    /// — "the base already carries what this dispatch committed" — is only true
-    /// where a commit was written here and is still on the branch. A worker that
-    /// fast-forwarded or reset onto a commit the base already had moved `HEAD`
-    /// and committed nothing, and used to be reported as the former.
+    /// One worktree per situation the read has to tell apart, over real git: the
+    /// reflog and the ancestry are git's own, and what the read claims — "the
+    /// base already carries what this dispatch committed" — is only true where a
+    /// commit was written here, since this dispatch began, and is still on the
+    /// branch. A worker that fast-forwarded or reset onto a commit the base
+    /// already had moved `HEAD` and committed nothing, and used to be reported as
+    /// the former; so did one taking up a worktree an earlier dispatch had
+    /// committed in.
     #[test]
     fn a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
         // Begun at the epoch: every entry the worktree's reflog holds is this
         // dispatch's, which is what a fresh cut gives.
-        let level = |worktree: &std::path::Path| {
-            super::level_with_base(worktree, "main", std::time::UNIX_EPOCH)
+        let level =
+            |worktree: &std::path::Path| super::level_with_base(worktree, "main", UNIX_EPOCH);
+        let wrote = |worktree: &std::path::Path| level(worktree).map(|read| read.wrote);
+        let land = |worktree: &std::path::Path| {
+            git_in(worktree, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+            git_in(worktree, &["fetch", "-q", "origin"]);
         };
 
         // Fresh: level, and nothing written.
@@ -2442,7 +2465,7 @@ mod tests {
             Some(LevelBranch {
                 branch: "work".into(),
                 base: "origin/main".into(),
-                committed: false,
+                wrote: Wrote::Nothing,
             })
         );
 
@@ -2456,25 +2479,78 @@ mod tests {
             commit_in(&base, "landed-by-somebody-else.md");
             git_in(&worktree, &["fetch", "-q", "origin"]);
             git_in(&worktree, &catch_up);
-            let read = level(&worktree).unwrap_or_else(|| panic!("{name}: not read as level"));
-            assert!(
-                !read.committed,
+            assert_eq!(
+                wrote(&worktree),
+                Some(Wrote::Nothing),
                 "{name}: a worker that moved onto a commit the base already had was read as \
                  having committed it"
             );
         }
 
-        // The worker wrote a commit and landed it on the base itself: written
-        // here, still on the branch, and the base carries it.
+        // Every way git writes a commit here, each landed on the base by the
+        // worker itself: written here, still on the branch, and the base carries
+        // it. `git commit` is what a worker ordinarily runs; the rest are git's
+        // other spellings of the same act, each driven for real so the reflog
+        // subject read is the one git stamps rather than one written out here.
         let (_, landed) = a_cut_worktree("landed");
         commit_in(&landed, "mine.md");
-        git_in(&landed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
-        git_in(&landed, &["fetch", "-q", "origin"]);
+        land(&landed);
+        assert_eq!(wrote(&landed), Some(Wrote::ACommitTheBaseCarries), "commit");
+
+        // Picked off a side branch of the base's, and `-x`, so the pick is a
+        // commit of its own rather than — same tree, same parent, same second —
+        // the very object it was picked from.
+        let (base, picked) = a_cut_worktree("picked");
+        git_in(&base, &["checkout", "-q", "-b", "side"]);
+        commit_in(&base, "elsewhere.md");
+        git_in(&base, &["checkout", "-q", "main"]);
+        git_in(&picked, &["fetch", "-q", "origin"]);
+        git_in(&picked, &["cherry-pick", "-x", "origin/side"]);
+        // A pick is a new commit, so the base does not carry it until it is
+        // landed: ahead by one until then.
+        assert_eq!(level(&picked), None, "a cherry-picked commit read as level");
+        land(&picked);
         assert_eq!(
-            level(&landed).map(|read| read.committed),
-            Some(true),
-            "a commit written here that the base took was not read as one"
+            wrote(&picked),
+            Some(Wrote::ACommitTheBaseCarries),
+            "cherry-pick"
         );
+
+        let (base, merged) = a_cut_worktree("merged");
+        commit_in(&merged, "mine.md");
+        commit_in(&base, "theirs.md");
+        git_in(&merged, &["fetch", "-q", "origin"]);
+        git_in(
+            &merged,
+            &["merge", "-q", "--no-ff", "-m", "merge", "origin/main"],
+        );
+        land(&merged);
+        assert_eq!(wrote(&merged), Some(Wrote::ACommitTheBaseCarries), "merge");
+
+        let (base, rebased) = a_cut_worktree("rebased");
+        commit_in(&rebased, "mine.md");
+        commit_in(&base, "theirs.md");
+        git_in(&rebased, &["fetch", "-q", "origin"]);
+        git_in(&rebased, &["rebase", "-q", "origin/main"]);
+        land(&rebased);
+        assert_eq!(
+            wrote(&rebased),
+            Some(Wrote::ACommitTheBaseCarries),
+            "rebase"
+        );
+
+        let (base, applied) = a_cut_worktree("applied");
+        commit_in(&base, "patch.md");
+        let patch = std::process::Command::new("git")
+            .args(["format-patch", "-1", "--stdout", "HEAD"])
+            .current_dir(&base)
+            .output()
+            .expect("git runs");
+        assert!(patch.status.success());
+        std::fs::write(applied.join("../patch.mbox"), &patch.stdout).expect("the patch");
+        git_in(&applied, &["am", "-q", "../patch.mbox"]);
+        land(&applied);
+        assert_eq!(wrote(&applied), Some(Wrote::ACommitTheBaseCarries), "am");
 
         // The worker wrote a commit and then reset it away: written here, but
         // the branch no longer carries it, so the base does not either.
@@ -2482,8 +2558,8 @@ mod tests {
         commit_in(&undone, "undone.md");
         git_in(&undone, &["reset", "-q", "--hard", "origin/main"]);
         assert_eq!(
-            level(&undone).map(|read| read.committed),
-            Some(false),
+            wrote(&undone),
+            Some(Wrote::Nothing),
             "a commit reset off the branch was read as one the base carries"
         );
 
@@ -2495,11 +2571,11 @@ mod tests {
         let (_, resumed) = a_cut_worktree("resumed");
         std::fs::write(resumed.join("earlier.md"), "earlier\n").expect("the file");
         git_in(&resumed, &["add", "-A"]);
-        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let earlier = SystemTime::now() - Duration::from_secs(86_400);
         let stamp = format!(
             "@{} +0000",
             earlier
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
                 .expect("after the epoch")
                 .as_secs()
         );
@@ -2515,17 +2591,16 @@ mod tests {
             .status()
             .expect("git runs");
         assert!(dated.success());
-        git_in(&resumed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
-        git_in(&resumed, &["fetch", "-q", "origin"]);
+        land(&resumed);
         assert_eq!(
-            level(&resumed).map(|read| read.committed),
-            Some(true),
+            wrote(&resumed),
+            Some(Wrote::ACommitTheBaseCarries),
             "read as the dispatch that wrote it, the commit counts"
         );
-        let later = earlier + std::time::Duration::from_secs(3_600);
+        let later = earlier + Duration::from_secs(3_600);
         assert_eq!(
-            super::level_with_base(&resumed, "main", later).map(|read| read.committed),
-            Some(false),
+            super::level_with_base(&resumed, "main", later).map(|read| read.wrote),
+            Some(Wrote::Nothing),
             "a commit an earlier dispatch wrote in this worktree was read as this one's"
         );
 
@@ -2543,7 +2618,8 @@ mod tests {
         assert_eq!(level(&dirty), None, "a dirty worktree read as level");
 
         for name in [
-            "fresh", "ff", "reset", "landed", "undone", "resumed", "ahead", "dirty",
+            "fresh", "ff", "reset", "landed", "picked", "merged", "rebased", "applied", "undone",
+            "resumed", "ahead", "dirty",
         ] {
             let _ = std::fs::remove_dir_all(
                 std::env::temp_dir()

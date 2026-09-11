@@ -90,6 +90,13 @@ use crate::projection::{self, RunState};
 /// 2 has version 1's fields; it was cut when a settlement started ending a
 /// node's park (`projection::settlement_ends_the_park`), so a cached fold that
 /// still holds the park is refolded rather than resumed from.
+// llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
+// this one wrote, which no invocation of this build can produce: what a user can reach —
+// a checkpoint at this version being resumed from, and one at a version this build does
+// not write being refolded — is driven end to end in `tests/e2e/checkpoint.rs`. The
+// refusal of the checked-in version-1 document itself is held by
+// `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
+// the real reader and the real file.
 pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 
 /// Read the version, refusing a document this build cannot honestly read.

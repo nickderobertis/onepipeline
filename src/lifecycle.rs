@@ -623,8 +623,9 @@ fn level_branch_settlement(
         "compared against {}: {branch} carries nothing it does not",
         level.base
     );
-    if node.expects_no_diff || level.committed {
-        let detail = if level.committed {
+    let carried = level.wrote == crate::vcs::Wrote::ACommitTheBaseCarries;
+    if node.expects_no_diff || carried {
+        let detail = if carried {
             format!(
                 "{compared}; the base already carries what this dispatch committed to it, so \
                  there was nothing to draft or publish"
@@ -1714,11 +1715,15 @@ mod tests {
     /// `execute` can put one in front of this arm.
     #[test]
     fn a_level_branch_settles_on_the_commit_and_the_declaration_rather_than_the_count() {
-        let level = |committed: bool| crate::vcs::LevelBranch {
+        let level = |wrote: crate::vcs::Wrote| crate::vcs::LevelBranch {
             branch: "work/service".into(),
             base: "origin/main".into(),
-            committed,
+            wrote,
         };
+        let (nothing, a_commit) = (
+            crate::vcs::Wrote::Nothing,
+            crate::vcs::Wrote::ACommitTheBaseCarries,
+        );
         let settled = |node: &Node, level: &crate::vcs::LevelBranch| match level_branch_settlement(
             node, level, None,
         ) {
@@ -1728,7 +1733,7 @@ mod tests {
         let node = lifecycle(None);
 
         // Nothing declared and nothing committed: the modelling error, named.
-        let empty = settled(&node, &level(false));
+        let empty = settled(&node, &level(nothing));
         assert_eq!(empty.status, NodeStatus::Failed);
         assert_eq!(empty.outcome.as_deref(), Some(engine::EMPTY_BRANCH));
         assert_eq!(empty.branch.as_deref(), Some("work/service"));
@@ -1750,7 +1755,7 @@ mod tests {
                 expects_no_diff: declared,
                 ..node.clone()
             };
-            let carried = settled(&node, &level(true));
+            let carried = settled(&node, &level(a_commit));
             assert_eq!(carried.status, NodeStatus::Done, "declared: {declared}");
             assert_eq!(carried.outcome.as_deref(), Some(engine::NO_CHANGES));
             let detail = carried
@@ -1769,7 +1774,7 @@ mod tests {
                 expects_no_diff: true,
                 ..node
             },
-            &level(false),
+            &level(nothing),
         );
         assert_eq!(declared.status, NodeStatus::Done);
         assert_eq!(declared.outcome.as_deref(), Some(engine::NO_CHANGES));
@@ -1779,7 +1784,7 @@ mod tests {
         );
         // The branch the caller knew wins over the one the read named.
         let named =
-            match level_branch_settlement(&lifecycle(None), &level(false), Some("kept".into())) {
+            match level_branch_settlement(&lifecycle(None), &level(nothing), Some("kept".into())) {
                 Attempt::Settled(settlement) => settlement.branch,
                 Attempt::Preserving(_) => unreachable!(),
             };

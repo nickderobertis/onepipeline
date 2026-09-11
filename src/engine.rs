@@ -6103,6 +6103,60 @@ mod tests {
         }
     }
 
+    /// The fields this crate reads off a `member-died` are the ones the linked
+    /// producer writes, and read back as it wrote them.
+    ///
+    /// The drift gate for [`MemberDeath::of`], which reads the payload by field
+    /// name rather than through the producer's own type — deliberately, because
+    /// that type is `deny_unknown_fields` and the producer on the `PATH` may be
+    /// newer than the one linked. What that costs is that a field renamed there
+    /// would silently read as absent; so a death is written **through** the
+    /// producer's type here and read back through this crate's, and every field
+    /// this crate carries — the cause, the rule, and the detail a stopped chain is
+    /// raised with — has to come back as written.
+    #[test]
+    fn the_death_fields_this_crate_reads_are_the_ones_the_producer_writes() {
+        let (detail, truncated) =
+            oneagentgraph::event::bound_text("no usable result; see `raw_response`");
+        let written = serde_json::to_value(oneagentgraph::event::MemberDied {
+            rule: oneagentgraph::member::Rule::ProviderFailure
+                .as_str()
+                .to_owned(),
+            cause: oneagentgraph::event::Cause::Unclassified,
+            detail,
+            truncated,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+        })
+        .expect("the sibling's death serializes");
+        let published = Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-09-10T00:00:00.000Z".into(),
+            stream: "oneagentgraph-1".into(),
+            seq: 0,
+            source: crate::event::Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::MemberDied.as_str().into(),
+            ),
+            phase: None,
+            labels: Labels::default(),
+            payload: written.as_object().cloned().expect("an object"),
+            artifacts: Vec::new(),
+        };
+        let read = MemberDeath::of(&published).expect("a death this build reads");
+        assert_eq!(
+            read.cause,
+            oneagentgraph::event::Cause::Unclassified.as_str()
+        );
+        assert!(read.from_provider);
+        assert_eq!(
+            read.detail, "no usable result; see `raw_response`",
+            "the detail the producer wrote did not come back as the one a finding carries"
+        );
+        assert!(read.stopped_a_chain());
+    }
+
     /// A death is reconciled against the record of the turn it names, and only a
     /// `provider-failure` is.
     ///
