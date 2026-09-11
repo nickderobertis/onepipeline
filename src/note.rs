@@ -607,7 +607,22 @@ fn unreadable_record(envelope: &Envelope, field: &str, error: &serde_json::Error
 ///
 /// [`standing`]'s.
 pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
+    // llmlint: ignore-block[boundary_inputs_validated] `journal::read` is the crate's
+    // one reader of its own journal, the same one the projection that decides the run's
+    // whole state reads through, and a line it drops — blank, truncated, unparseable —
+    // is a line that state was decided without too; a stricter reader here would
+    // decide a node's notes from a record the engine itself never saw. What this fold
+    // validates is the layer above that: a record of this crate's own kind, parsed
+    // whole, whose payload cannot be read as what its kind says, which `standing`
+    // refuses by name.
+    // llmlint: ignore-block[changed_behavior_has_e2e] this is the reader the engine's
+    // continuation calls (`lifecycle::execute`), and `tests/note/main.rs`'s
+    // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives
+    // it through that path over a real run's journal; the refusal is held by
+    // `note::tests` over the fold, for the reason the caller's arm records.
     standing(&crate::journal::read(&paths.journal()), node)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // llmlint: ignore-end[boundary_inputs_validated]
 }
 
 /// Where a note stands on the way from the worker to the judge, for a route on
@@ -672,6 +687,19 @@ pub(crate) enum Evidence {
     InstructionText,
     /// The supervisor's turn answered a worker turn that had been shown it.
     AnsweringTurn,
+}
+
+impl Evidence {
+    /// Who this evidence is a presentation to: the first three are things only
+    /// a worker's turn can be, and the last is the supervisor's alone, so the
+    /// party a `note-shown` names is read off its evidence rather than kept
+    /// beside it.
+    fn party(self) -> Party {
+        match self {
+            Self::DeliveredOrigin | Self::OpeningTask | Self::InstructionText => Party::Worker,
+            Self::AnsweringTurn => Party::Supervisor,
+        }
+    }
 }
 
 impl Routing {
@@ -801,8 +829,21 @@ impl Routing {
 /// One note a conversation has been told to present, and where that stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Routed {
+    // llmlint: ignore-block[invalid_states_unrepresentable] `routing` is not a second
+    // spelling of `note.reached`, so the two cannot contradict each other. `reached` is
+    // what the conversation the note was *first* delivered into did with it, and stays on
+    // the note because every `note-shown` carries the note as the record delivered it;
+    // `routing` is where *this* dispatch's presentation of it stands, and moves as the
+    // stream shows each party the note. It opens from `reached` for a note the
+    // conversation routed (`Routing::of`) and as `ComposedIntoTheTask` whatever `reached`
+    // says for a note a later dispatch's task carries — so `reached: worker` beside
+    // `ComposedIntoTheTask` is the meaningful state "the last conversation's worker read
+    // it, and this one is handed it as its task", not an impossible one. Folding the two
+    // into one enum would have to drop `reached` from the record or freeze `routing` at
+    // its opening value, and the record needs both. The struct is private and
+    // `Presentations`' two constructors are the only way to build one.
     note: RecordedNote,
-    routing: Routing,
+    routing: Routing, // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The instant this routing was recorded, against which a relayed turn is
     /// read: a turn that opened before it cannot be the presentation of it.
     routed_at: u64,
@@ -811,11 +852,10 @@ struct Routed {
 /// One presentation the stream showed happening.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Shown {
-    /// Who was shown the note.
-    pub party: Party,
-    /// The turn of theirs that opened carrying it.
+    /// The turn that opened carrying it.
     pub turn: u64,
-    /// What the presentation was decided from.
+    /// What the presentation was decided from, which says who was shown it:
+    /// [`Evidence::party`].
     pub evidence: Evidence,
     /// The note.
     pub note: RecordedNote,
@@ -830,7 +870,7 @@ impl Shown {
         };
         payload.insert(
             "party".into(),
-            serde_json::to_value(self.party).unwrap_or(Value::Null),
+            serde_json::to_value(self.evidence.party()).unwrap_or(Value::Null),
         );
         payload.insert("turn".into(), Value::from(self.turn));
         payload.insert(
@@ -933,7 +973,6 @@ impl Presentations {
                 continue;
             };
             shown.push(Shown {
-                party,
                 turn: opened.turn,
                 evidence,
                 note: routed.note.clone(),
@@ -1266,7 +1305,7 @@ mod tests {
             "## Notes delivered to you during this run\n\n- stop",
         ));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
         assert_eq!(shown[0].turn, 3);
         assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
         assert_eq!(shown[0].payload()["party"], json!("worker"));
@@ -1279,7 +1318,7 @@ mod tests {
         // twice.
         let shown = watch.observe(&turn(6, 1_400, "user", 3, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
         assert!(watch.observe(&turn(7, 1_500, "user", 4, None)).is_empty());
 
         // A note the judge re-took its decision with is confirmed to the judge at
@@ -1297,7 +1336,7 @@ mod tests {
             "the supervisor was told: ruling",
         ));
         assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
 
         // One composed into the task is carried by the opening turn as the
         // task, and read by the supervisor that answers it.
@@ -1305,11 +1344,11 @@ mod tests {
         watch.composed_into_the_task(recorded("carried in", Reached::Carried), 3_000);
         let shown = watch.observe(&turn(10, 3_100, "assistant", 1, Some("task")));
         assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
         assert_eq!(shown[0].evidence, Evidence::OpeningTask);
         let shown = watch.observe(&turn(11, 3_200, "user", 1, None));
         assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
 
         // A note recorded `carried` is owed nothing by the conversation, and is
         // watched all the same: a worker turn that opens on its whole text —
@@ -1349,12 +1388,12 @@ mod tests {
         );
         let shown = watch.observe(&read_aloud);
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
         assert_eq!(shown[0].evidence, Evidence::InstructionText);
         assert_eq!(shown[0].payload()["evidence"], json!("instruction-text"));
         let shown = watch.observe(&turn(16, 5_400, "user", 4, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
         assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
 
         // Two notes routed at one instant — one envelope, acknowledged a turn
@@ -1424,12 +1463,12 @@ mod tests {
             "## Notes delivered to you during this run\n\n- queued ruling",
         ));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
         assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
         assert_eq!(shown[0].payload()["reached"], json!("queued"));
         let shown = watch.observe(&turn(23, 7_200, "user", 3, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
         assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
         assert!(watch.observe(&turn(24, 7_300, "user", 4, None)).is_empty());
 
@@ -1438,7 +1477,7 @@ mod tests {
         watch.routed_by_the_conversation(recorded("queued ruling", Reached::Queued), 8_000);
         let shown = watch.observe(&turn(25, 8_100, "user", 5, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
         let shown = watch.observe(&turn_on(
             26,
             8_200,
@@ -1448,7 +1487,7 @@ mod tests {
             "## Notes delivered to you during this run\n\n- queued ruling",
         ));
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
         assert!(watch
             .observe(&turn_on(
                 27,
