@@ -707,8 +707,8 @@ const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"
 /// answer nobody could take must never *silence* a run: a run still being driven by
 /// the previous release's binary carries the same document, and it is reported here
 /// from what its store really says rather than passed over. The only cost is the
-/// one fold, paid once per run per schema bump, which is why the third half below
-/// asks twice and reads the second answer off a document nothing had to fold.
+/// one fold, paid once per run per schema bump, which is why each half reads the
+/// document the verb left back and holds it current for the journal.
 ///
 /// The settled fixture is chosen so that the two readings **agree** only after the
 /// fold: the document says the run settled, and at the superseded version this
