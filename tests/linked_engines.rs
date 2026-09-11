@@ -496,13 +496,17 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
 }
 
 /// The qualified spec the refusal prints is one `cargo` accepts — in both
-/// spellings it prints.
+/// spellings it prints — and the pinned spelling, performed, leaves the engine
+/// resolving at exactly the release it names.
 ///
 /// Driven against the real workspace and the real `cargo`, because the claim is
-/// about that program's package-id grammar rather than about this repository's
-/// output. Advice nobody can run is advice this check does not give. The
-/// `--precise` spelling is pinned to the copy already linked, which is the one
-/// release an offline run can resolve to.
+/// about that program's package-id grammar and its `--precise` semantics rather
+/// than about this repository's output. Advice nobody can run is advice this
+/// check does not give. The `--precise` spelling is pinned to the copy already
+/// linked, which is the one release an offline run can resolve to; what is held
+/// is that cargo, given that spelling, moves the engine to the named release and
+/// nothing else — which is what makes the remedy in the mixed case do what its
+/// line says, where the bare spec would take the held-back release above it.
 #[test]
 fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
     let copies = linked("oneharness-core");
@@ -539,6 +543,18 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
         precise.status.success(),
         "cargo refused the `--precise` spelling this check prints for an engine behind an \
          admissible release under a held-back one, so that advice does not run:\n{}",
+        said(&precise)
+    );
+    // Performed as printed, the remedy leaves the engine at the release named:
+    // cargo reports every package it would move, and the one this pinned is
+    // not among them, nor is any sibling added beside it.
+    let performed = String::from_utf8_lossy(&precise.stderr);
+    assert!(
+        !performed.contains("Updating oneharness-core")
+            && !performed.contains("Downgrading oneharness-core")
+            && !performed.contains("Adding "),
+        "pinned to a release by `--precise`, cargo would still have moved the engine or \
+         added a package, so the remedy does not leave the lock where its line says:\n{}",
         said(&precise)
     );
 }
