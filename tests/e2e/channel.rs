@@ -1809,6 +1809,159 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
     ended(serving);
 }
 
+/// A push whose read of the surface log fails is refused, and records nothing.
+///
+/// Every mutation of the queue reads the log's tail under the log's lock and
+/// then stamps the log's whole length as accounted for. A read that failed and
+/// went on would append its record beside the ones it never folded and stamp
+/// them accounted for — a question hidden for good by the write meant to record
+/// one. So the push is refused where the log cannot be read: nothing is
+/// appended, nothing is stamped, the journal does not say a surface was queued,
+/// and the next push — with the log readable again — allocates the id the
+/// refused one would have taken and folds every surface the log holds.
+///
+/// The failure is the one a disk gives, at the one read it has to fail at: the
+/// binary is run under `strace`, with the surface log's second `read(2)` — the
+/// first is the appender looking at the file's own tail — answered `EIO`. Only
+/// reads of that file are touched; everything else the process does is real.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
+    let world = World::new("channel-unreadable-log");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unreadablelog", vec![agent("build", &[])]);
+    world
+        .run(&["surface", &run, "--kind", "finding", "--message", "first"])
+        .exited(0);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the projection is removed
+    // because a push reads the log's tail only where the projection is behind
+    // it, and nothing user-facing leaves it behind on purpose: a lost write to
+    // the projection is the very state the log-derived queue exists to survive,
+    // and the one shape of it a journey can place is the write never landing.
+    // Everything under test is driven through the CLI.
+    let queue = world.run_file(&run, "channel/queue.json");
+    std::fs::remove_file(&queue).expect("the projection's write is lost");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let log = world.run_file(&run, "channel/surfaces.jsonl");
+    let logged = std::fs::read(&log).expect("the log");
+    let journalled = world.events_of(&run, "planner-surface-queued").len();
+
+    let trace = world.root.join("unreadable-log.strace");
+    let refused = under_strace(
+        &world,
+        &[
+            "-P",
+            &std::fs::canonicalize(&log)
+                .expect("the log's real path")
+                .to_string_lossy(),
+            "-e",
+            "inject=read:error=EIO:when=2",
+        ],
+        &trace,
+        &["surface", &run, "--kind", "finding", "--message", "second"],
+    );
+    // The failure the command reports is the one that was induced: exactly one
+    // read of the log was answered `EIO`, and the command named that file.
+    let traced = std::fs::read_to_string(&trace).expect("the trace the tracer wrote");
+    let injected: Vec<&str> = traced
+        .lines()
+        .filter(|l| l.contains("(INJECTED)"))
+        .collect();
+    assert_eq!(injected.len(), 1, "{traced}");
+    assert!(injected[0].contains("read("), "{traced}");
+    assert_eq!(
+        refused.status.code(),
+        Some(REFUSED),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("surfaces.jsonl") && stderr.contains("Input/output error"),
+        "the refusal does not name the log and what the disk said: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&log).expect("the log"),
+        logged,
+        "a push that could not read the log still appended to it"
+    );
+    assert!(
+        !queue.exists(),
+        "a push that could not read the log still stamped a projection: {}",
+        std::fs::read_to_string(&queue).unwrap_or_default()
+    );
+    assert_eq!(
+        world.events_of(&run, "planner-surface-queued").len(),
+        journalled,
+        "the journal says a surface was queued that the log does not hold"
+    );
+
+    // Readable again, the next push takes the id the refused one would have,
+    // and every surface the log holds is handed over under its own id.
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "second"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("2 planner update(s) waiting");
+    let first = world.run(&["next", &run]);
+    first.exited(0).out_has("first");
+    assert_eq!(first.json()["surface"]["id"], json!(0));
+    let second = world.run(&["next", &run]);
+    second.exited(0).out_has("second");
+    assert_eq!(second.json()["surface"]["id"], json!(1));
+
+    world.release("build.go");
+}
+
+/// The binary under `strace`, with the tracer's own options in front of it.
+///
+/// The command is the one `World` composes — same binary, same environment —
+/// with the tracer wrapped around it, so what is observed is the invocation a
+/// user makes rather than a second one assembled here. Children are followed
+/// and the trace goes to `into`.
+///
+/// It **refuses** rather than passes where the tracer will not run: a failure
+/// nobody induced is not evidence of how the binary meets one, and this is the
+/// one journey whose whole claim is about what the process did when the disk
+/// failed under it.
+#[cfg(target_os = "linux")]
+fn under_strace(
+    world: &World,
+    tracing: &[&str],
+    into: &std::path::Path,
+    argv: &[&str],
+) -> std::process::Output {
+    let inner = world.cmd(argv);
+    let mut traced = std::process::Command::new("strace");
+    traced
+        .arg("-f")
+        .arg("-qq")
+        .args(tracing)
+        .arg("-o")
+        .arg(into)
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .stdin(std::process::Stdio::null());
+    for (key, value) in inner.get_envs() {
+        match value {
+            Some(value) => traced.env(key, value),
+            None => traced.env_remove(key),
+        };
+    }
+    traced.output().unwrap_or_else(|error| {
+        panic!(
+            "this journey's whole claim is what the process did when its log could not be \
+             read, and the tracer that makes it unreadable would not run: strace: {error}. \
+             Install strace, or run the suite where ptrace is permitted — a journey that \
+             cannot induce the failure is not a journey that observed the binary survive it."
+        )
+    })
+}
+
 /// A log line carrying an id nothing can follow does not make the next surface
 /// take an id already in use.
 ///
