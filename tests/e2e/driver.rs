@@ -2754,27 +2754,37 @@ fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
 
     // The stranger the host handed the pid to: a real process, started by this
     // test after the driver exited, so it is one this host describes
-    // differently from the stamp the driver recorded.
-    let record = world.run_file(&run, "launch.json");
-    let mut named = world.run_json(&run, "launch.json");
-    let recorded = named["started"]
-        .as_str()
-        .expect("a driver records the stamp that proves its pid")
-        .to_string();
-    let mut stranger = stranger_started_after(std::slice::from_ref(&recorded));
+    // differently from the stamp the driver recorded. The pid is handed on in
+    // both documents the driver wrote it to — the launch record the run's own
+    // view reads, and the summary the bounded listing reads instead of it —
+    // because a reissue changes nothing on disk: the same pid stays written in
+    // both, and it is the host that changes what answers to it.
+    let mut stranger = None;
+    for document in ["launch.json", "summary.json"] {
+        let path = world.run_file(&run, document);
+        let mut named = world.run_json(&run, document);
+        let recorded = named["started"]
+            .as_str()
+            .expect("a driver records the stamp that proves its pid")
+            .to_string();
+        let taken = stranger
+            .get_or_insert_with(|| stranger_started_after(std::slice::from_ref(&recorded)))
+            .id();
+        named["pid"] = json!(taken);
+        std::fs::write(&path, named.to_string()).expect("the document is rewritten");
+    }
+    let mut stranger = stranger.expect("the stranger was started");
     let taken = stranger.id();
-    named["pid"] = json!(taken);
-    std::fs::write(&record, named.to_string()).expect("the launch record is rewritten");
 
     // Both views read the stamp: the driver that exited is dead, whoever holds
     // its pid now — where the pid alone said a live driver was waiting on the
     // person.
+    world.run(&["runs"]).exited(0).out_has("DRIVER DEAD");
     world
         .run(&["status", &run])
         .exited(0)
         .out_has("DRIVER DEAD")
         .out_lacks("ACTIVE");
-    world.run(&["runs"]).exited(0).out_has("DRIVER DEAD");
 
     // And the way back a dead driver offers is open: the run is adopted rather
     // than refused, and nothing was signalled to make it so.
