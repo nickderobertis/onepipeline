@@ -143,27 +143,43 @@ impl Reached {
         }
     }
 
-    /// The parties this disposition puts the note in front of.
+    /// The parties the conversation had **already shown** the note to when it
+    /// acknowledged it.
     ///
-    /// The conversation's own routing, written down where the run records the
-    /// delivery rather than left for a reader to infer from the disposition's
-    /// documentation: a note is delivered to whichever party is live and the
-    /// other party receives it with that party's response, so a turn that took
-    /// it means **both** were shown it — the one whose turn was reopened or
-    /// re-taken now, and the other with what that turn answered. The one
-    /// exception is a judge whose re-taken decision was completion, which left
-    /// no worker turn for the note to ride to.
-    ///
-    /// Empty for the two dispositions no party has read *yet*: a queued note is
-    /// taken by the next turn of the conversation to open, and that turn's own
-    /// `turn-started` says who it was; a carried note is composed into the
-    /// node's next dispatch, whose `node-dispatched` names it.
+    /// Only what is confirmed at that instant, never what the conversation
+    /// intends to do next. The judge's re-taken decision and its completion
+    /// with the note in hand are both settled *after* the decision was taken,
+    /// so the supervisor has been presented the note by the time either is
+    /// answered. A worker turn reopened to carry it is acknowledged *before*
+    /// that turn opens, so nothing is confirmed: the receipt would otherwise be
+    /// written at submission and read afterwards as a receipt for arrival, and a
+    /// dispatch cancelled between the two would leave a record asserting a
+    /// presentation that never happened. What the conversation routes onward is
+    /// [`routed_to`](Self::routed_to), and each presentation that then happens
+    /// is recorded as its own `note-shown` when the stream shows it.
     #[must_use]
-    pub fn shown_to(&self) -> &'static [Party] {
+    pub fn shown_at_delivery(&self) -> &'static [Party] {
         match self {
-            Self::Worker | Self::Supervisor => &[Party::Worker, Party::Supervisor],
-            Self::JudgedWith { .. } => &[Party::Supervisor],
-            Self::Queued | Self::Carried => &[],
+            Self::Supervisor | Self::JudgedWith { .. } => &[Party::Supervisor],
+            Self::Queued | Self::Worker | Self::Carried => &[],
+        }
+    }
+
+    /// The parties the conversation said it **will** present the note to,
+    /// which the acknowledgement does not confirm.
+    ///
+    /// A worker's reopened turn presents it to the worker and, with the worker's
+    /// response, to the judge; a judge's re-taken decision rides to the worker
+    /// with that decision; a queued note reaches whichever turn opens next and
+    /// the other party after. A completion leaves no turn to route to, and a
+    /// carried note is routed by the dispatch that composes it rather than by a
+    /// conversation.
+    #[must_use]
+    pub fn routed_to(&self) -> &'static [Party] {
+        match self {
+            Self::Worker | Self::Queued => &[Party::Worker, Party::Supervisor],
+            Self::Supervisor => &[Party::Worker],
+            Self::JudgedWith { .. } | Self::Carried => &[],
         }
     }
 }
@@ -365,8 +381,8 @@ pub(crate) fn of(
 /// than referenced, because a note has no id of its own: the record that says a
 /// dispatch was given a note has to be able to say *which*, and a reader
 /// verifying that a ruling reached the party it was for reads it off this without
-/// joining another record. Who was shown it is not a field here: it is decided by
-/// the disposition and by where the note is being written — see [`Composition`].
+/// joining another record. Who was shown it is not here: that is what each
+/// `note-shown` records, as the stream shows it happening.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Consumed {
     /// Whose task it said it was updating.
@@ -397,55 +413,9 @@ pub(crate) const CARRIED_KEY: &str = "notes_carried";
 /// than believe the receipt.
 pub(crate) const SPENT_KEY: &str = "notes_spent";
 
-/// Where a list of notes is being written, which decides who each was shown to.
-///
-/// A note composed into a dispatch's task is read by both parties — the task is
-/// the first message of the transcript the judge is handed — whatever the
-/// conversation it was first delivered into did with it. One written down as
-/// spent was shown to whoever its own disposition says, and nobody since.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Composition {
-    /// Into a dispatch's task, under [`CARRIED_KEY`].
-    IntoATask,
-    /// Into no dispatch, under [`SPENT_KEY`].
-    Nowhere,
-}
-
-impl Consumed {
-    /// The parties this note was shown to, written where it is being written.
-    pub(crate) fn shown_to(&self, composition: Composition) -> &'static [Party] {
-        match composition {
-            Composition::IntoATask => &[Party::Worker, Party::Supervisor],
-            Composition::Nowhere => self.reached.shown_to(),
-        }
-    }
-}
-
-/// One note as a `node-dispatched` writes it: the note, and who it was shown to
-/// under the key it is written under.
-///
-/// A view for writing rather than a second shape: `shown_to` is derived at the
-/// moment of writing from the disposition and the [`Composition`], so a record
-/// cannot carry a `shown_to` that contradicts its own `reached`.
-#[derive(Serialize)]
-struct Written<'a> {
-    #[serde(flatten)]
-    note: &'a Consumed,
-    #[serde(skip_serializing_if = "<[Party]>::is_empty")]
-    shown_to: &'a [Party],
-}
-
-/// The value a `node-dispatched` carries a list of notes as, under the key the
-/// composition names.
-pub(crate) fn payload_of(notes: &[Consumed], composition: Composition) -> Value {
-    let written: Vec<Written<'_>> = notes
-        .iter()
-        .map(|note| Written {
-            note,
-            shown_to: note.shown_to(composition),
-        })
-        .collect();
-    serde_json::to_value(written).unwrap_or_else(|_| Value::Array(Vec::new()))
+/// The value a `node-dispatched` carries a list of notes as.
+pub(crate) fn payload_of(notes: &[Consumed]) -> Value {
+    serde_json::to_value(notes).unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 /// Where one standing note sits relative to the node's current dispatch, which
@@ -610,6 +580,171 @@ pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     standing(&crate::journal::read(&paths.journal()), node)
 }
 
+/// One note a conversation has been told to present, and to whom it has not yet
+/// been shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Routed {
+    note: Consumed,
+    /// The parties still owed a presentation.
+    awaiting: Vec<Party>,
+    /// Whether the worker has to be shown it before the supervisor can be: true
+    /// for a note that rides a reopened worker turn — the judge receives it with
+    /// the worker's response, so a supervisor turn opening *before* that worker
+    /// turn was not shown it — and for one composed into a dispatch's task; false
+    /// for a queued note, which whichever turn opens next takes.
+    worker_first: bool,
+    /// Whether only a worker turn the producer stamps as **delivered** counts as
+    /// the worker's presentation. True for every note a conversation routed;
+    /// false for one composed into the dispatch's task, which the opening turn
+    /// carries as the task itself.
+    delivered_turn_only: bool,
+    /// The instant this routing was recorded, against which a relayed turn is
+    /// read: a turn that opened before it cannot be the presentation of it.
+    routed_at: u64,
+    /// The worker turn that presented it, once one has.
+    worker_turn: Option<u64>,
+}
+
+/// One presentation the stream showed happening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Shown {
+    /// Who was shown the note.
+    pub party: Party,
+    /// The turn of theirs that opened carrying it.
+    pub turn: u64,
+    /// The note.
+    pub note: Consumed,
+}
+
+impl Shown {
+    /// The payload a `note-shown` carries.
+    pub(crate) fn payload(&self) -> serde_json::Map<String, Value> {
+        let mut payload = match serde_json::to_value(&self.note) {
+            Ok(Value::Object(note)) => note,
+            _ => serde_json::Map::new(),
+        };
+        payload.insert("party".into(), json_party(self.party));
+        payload.insert("turn".into(), Value::from(self.turn));
+        payload
+    }
+}
+
+fn json_party(party: Party) -> Value {
+    serde_json::to_value(party).unwrap_or(Value::Null)
+}
+
+/// What one dispatch's conversation has been told to present and has not yet
+/// been seen presenting.
+///
+/// Kept by the writer that relays the conversation's stream, per in-flight
+/// dispatch, so a presentation is recorded when the stream shows it and never
+/// when it is merely intended. The stream is the producer's own account: a
+/// worker turn the producer stamps `delivered` is the turn that opened on a
+/// note, and a supervisor turn that opens after it is one the judge takes with
+/// every delivered note in hand. A dispatch that ends between the two — cancelled,
+/// or a worker turn that fails — drops this with it, and the record keeps only
+/// the presentations that happened.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Presentations {
+    routed: Vec<Routed>,
+}
+
+impl Presentations {
+    /// A note a conversation acknowledged and routed onward, as
+    /// [`Reached::routed_to`] says.
+    pub(crate) fn routed_by_the_conversation(&mut self, note: Consumed, at: u64) {
+        let awaiting = note.reached.routed_to().to_vec();
+        if awaiting.is_empty() {
+            return;
+        }
+        let worker_first = !matches!(note.reached, Reached::Queued);
+        self.routed.push(Routed {
+            note,
+            awaiting,
+            worker_first,
+            delivered_turn_only: true,
+            routed_at: at,
+            worker_turn: None,
+        });
+    }
+
+    /// A note composed into the dispatch's own task, which its opening worker
+    /// turn carries and every supervisor turn after that reads.
+    pub(crate) fn composed_into_the_task(&mut self, note: Consumed, at: u64) {
+        self.routed.push(Routed {
+            note,
+            awaiting: vec![Party::Worker, Party::Supervisor],
+            worker_first: true,
+            delivered_turn_only: false,
+            routed_at: at,
+            worker_turn: None,
+        });
+    }
+
+    /// Read one relayed envelope of the conversation, and answer every
+    /// presentation it shows happening.
+    ///
+    /// Only a `turn-started` the producer published, opened no earlier than the
+    /// routing it would confirm, on the member the notes were addressed to. The
+    /// caller decides the member; this reads the role, the origin and the turn
+    /// off the payload the producer wrote — by name, because this crate relays
+    /// that payload as an opaque map and reads no variant of it otherwise.
+    pub(crate) fn observe(&mut self, envelope: &Envelope) -> Vec<Shown> {
+        if self.routed.is_empty()
+            || envelope.source != crate::event::Source::Agentgraph
+            || envelope.kind.0 != oneagentgraph::event::EventKind::TurnStarted.as_str()
+        {
+            return Vec::new();
+        }
+        let (Some(role), Some(turn), Some(opened_at)) = (
+            envelope.payload.get("role").and_then(Value::as_str),
+            envelope.payload.get("turn").and_then(Value::as_u64),
+            crate::projection::millis_of(&envelope.ts),
+        ) else {
+            return Vec::new();
+        };
+        let delivered = envelope.payload.get("origin").and_then(Value::as_str)
+            == Some(oneagentgraph::event::Origin::Delivered.as_str());
+        let party = if role == oneagentgraph::event::Party::Assistant.as_str() {
+            Party::Worker
+        } else if role == oneagentgraph::event::Party::User.as_str() {
+            Party::Supervisor
+        } else {
+            return Vec::new();
+        };
+        let mut shown = Vec::new();
+        for routed in &mut self.routed {
+            if opened_at < routed.routed_at || !routed.awaiting.contains(&party) {
+                continue;
+            }
+            let presents = match party {
+                Party::Worker => delivered || !routed.delivered_turn_only,
+                // The supervisor answers the worker's reply under that reply's
+                // own turn number, so the turn that reads a note the worker's
+                // turn carried is numbered as that turn, not after it.
+                Party::Supervisor => match routed.worker_turn {
+                    Some(worker_turn) => turn >= worker_turn,
+                    None => !routed.worker_first || !routed.awaiting.contains(&Party::Worker),
+                },
+            };
+            if !presents {
+                continue;
+            }
+            routed.awaiting.retain(|owed| *owed != party);
+            if party == Party::Worker {
+                routed.worker_turn = Some(turn);
+            }
+            shown.push(Shown {
+                party,
+                turn,
+                note: routed.note.clone(),
+            });
+        }
+        self.routed.retain(|routed| !routed.awaiting.is_empty());
+        shown
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,7 +790,8 @@ mod tests {
                     addressee: Addressee::Worker,
                     text: text.parse().expect("a usable note"),
                     criterion: None,
-                    shown_to: reached.shown_to().to_vec(),
+                    shown_to: reached.shown_at_delivery().to_vec(),
+                    routed_to: reached.routed_to().to_vec(),
                     reached,
                 }]),
             )],
@@ -690,17 +826,12 @@ mod tests {
         // that landed nowhere is owed forward and not yet read by anybody.
         assert_eq!(texts(&before.read()), ["first ruling"]);
 
-        // Composed into the next dispatch, both are written as shown to both
-        // parties — a task is the first message of the transcript the judge
-        // reads — whatever the conversation they were first delivered into did;
-        // written as spent, each says what its own disposition says.
-        let composed = payload_of(&before.notes(), Composition::IntoATask);
-        assert_eq!(composed[0]["shown_to"], json!(["worker", "supervisor"]));
-        assert_eq!(composed[1]["shown_to"], json!(["worker", "supervisor"]));
+        let composed = payload_of(&before.notes());
         assert_eq!(composed[1]["reached"], json!("carried"));
-        let spent = payload_of(&before.notes(), Composition::Nowhere);
-        assert_eq!(spent[0]["shown_to"], json!(["worker", "supervisor"]));
-        assert!(spent[1].get("shown_to").is_none(), "{spent}");
+        assert!(
+            composed[0].get("shown_to").is_none(),
+            "a dispatch's record claimed a presentation it has not made: {composed}"
+        );
 
         // A continuation composed with them resets the fold to exactly them, and
         // a dispatch composed with none resets it to nothing: what an earlier
@@ -786,15 +917,185 @@ mod tests {
         );
     }
 
+    /// What each disposition confirms at the acknowledgement and what it only
+    /// routes onward, written on the record as two facts rather than one.
+    #[test]
+    fn each_disposition_tells_a_confirmed_presentation_from_a_routed_one() {
+        assert!(Reached::Worker.shown_at_delivery().is_empty());
+        assert_eq!(
+            Reached::Worker.routed_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert_eq!(Reached::Supervisor.shown_at_delivery(), [Party::Supervisor]);
+        assert_eq!(Reached::Supervisor.routed_to(), [Party::Worker]);
+        let judged = Reached::JudgedWith {
+            completion_reason: "done".into(),
+        };
+        assert_eq!(judged.shown_at_delivery(), [Party::Supervisor]);
+        assert!(judged.routed_to().is_empty());
+        assert!(Reached::Queued.shown_at_delivery().is_empty());
+        assert_eq!(
+            Reached::Queued.routed_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert!(Reached::Carried.shown_at_delivery().is_empty());
+        assert!(Reached::Carried.routed_to().is_empty());
+
+        // And on the wire each field is omitted where it is empty, so a record
+        // of a carried note reads exactly as it did before either field.
+        let record = |reached: Reached| Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: reached.shown_at_delivery().to_vec(),
+            routed_to: reached.routed_to().to_vec(),
+            reached,
+        };
+        let wire = serde_json::to_value(record(Reached::Carried)).expect("it serializes");
+        assert!(
+            wire.get("shown_to").is_none() && wire.get("routed_to").is_none(),
+            "{wire}"
+        );
+        let wire = serde_json::to_value(record(Reached::Worker)).expect("it serializes");
+        assert!(wire.get("shown_to").is_none(), "{wire}");
+        assert_eq!(wire["routed_to"], json!(["worker", "supervisor"]), "{wire}");
+        let wire = serde_json::to_value(record(Reached::Supervisor)).expect("it serializes");
+        assert_eq!(wire["shown_to"], json!(["supervisor"]), "{wire}");
+        assert_eq!(wire["routed_to"], json!(["worker"]), "{wire}");
+        assert_eq!(
+            serde_json::from_value::<Operation>(wire).expect("it reads back"),
+            record(Reached::Supervisor)
+        );
+    }
+
+    /// A relayed turn, as the producer publishes it.
+    fn turn(seq: u64, at: u64, role: &str, turn: u64, origin: Option<&str>) -> Envelope {
+        let mut payload = payload(&[
+            ("turn", json!(turn)),
+            ("role", json!(role)),
+            ("instruction", json!("do it")),
+            ("started_at", json!(crate::sys::rfc3339_from_millis(at))),
+        ]);
+        if let Some(origin) = origin {
+            payload.insert("origin".into(), json!(origin));
+        }
+        Envelope {
+            v: 1,
+            ts: crate::sys::rfc3339_from_millis(at),
+            stream: "node-scope-1".into(),
+            seq,
+            source: Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
+            ),
+            phase: None,
+            labels: labels("demo", Some("build")),
+            payload,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn consumed(text: &str, reached: Reached) -> Consumed {
+        Consumed {
+            addressee: Addressee::Both,
+            text: text.parse().expect("a usable note"),
+            criterion: None,
+            reached,
+        }
+    }
+
+    /// A presentation is recorded when the stream shows it and not before: a
+    /// note the worker's reopened turn carries is shown to the worker by the
+    /// turn the producer stamps `delivered`, and to the supervisor by the turn
+    /// that answers it — never by a turn that opened before the note was
+    /// offered, and never to the supervisor ahead of the worker.
+    ///
+    /// The shape an interrupted conversation leaves is the unit half of what
+    /// `tests/note` drives against a real one: the worker's turn shown and the
+    /// supervisor's never confirmed, because nothing here invents it.
+    #[test]
+    fn a_presentation_is_recorded_when_the_stream_shows_it_and_in_the_producers_order() {
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(consumed("stop", Reached::Worker), 1_000);
+
+        // A supervisor turn that opened before the note was offered, and a
+        // worker turn that opened before it too, confirm nothing — whatever
+        // order the writer meets them in.
+        assert!(watch.observe(&turn(1, 900, "user", 1, None)).is_empty());
+        assert!(watch
+            .observe(&turn(2, 950, "assistant", 1, Some("task")))
+            .is_empty());
+        // Nor does a worker turn after it that the producer does not stamp as a
+        // delivery: that turn opened on something else.
+        assert!(watch
+            .observe(&turn(3, 1_100, "assistant", 2, Some("supervisor")))
+            .is_empty());
+        // Nor a supervisor turn ahead of the worker's delivered one.
+        assert!(watch.observe(&turn(4, 1_200, "user", 2, None)).is_empty());
+
+        let shown = watch.observe(&turn(5, 1_300, "assistant", 3, Some("delivered")));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].turn, 3);
+        assert_eq!(shown[0].payload()["party"], json!("worker"));
+        assert_eq!(shown[0].payload()["text"], json!("stop"));
+        assert_eq!(shown[0].payload()["reached"], json!("worker"));
+
+        // The supervisor answers that reply under the same turn number, and
+        // that is the presentation; a second supervisor turn confirms nothing
+        // twice.
+        let shown = watch.observe(&turn(6, 1_400, "user", 3, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Supervisor);
+        assert!(watch.observe(&turn(7, 1_500, "user", 4, None)).is_empty());
+
+        // A note the judge re-took its decision with is confirmed to the judge at
+        // delivery and owed only to the worker, by the delivered turn that rides
+        // the decision.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(consumed("ruling", Reached::Supervisor), 2_000);
+        assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
+        let shown = watch.observe(&turn(9, 2_200, "assistant", 6, Some("delivered")));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].party, Party::Worker);
+
+        // One composed into the task is carried by the opening turn as the
+        // task, and read by the supervisor that answers it.
+        let mut watch = Presentations::default();
+        watch.composed_into_the_task(consumed("carried in", Reached::Carried), 3_000);
+        let shown = watch.observe(&turn(10, 3_100, "assistant", 1, Some("task")));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].party, Party::Worker);
+        let shown = watch.observe(&turn(11, 3_200, "user", 1, None));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].party, Party::Supervisor);
+
+        // Nothing the conversation routes nowhere is watched at all.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(
+            consumed(
+                "passed",
+                Reached::JudgedWith {
+                    completion_reason: "done".into(),
+                },
+            ),
+            4_000,
+        );
+        assert!(watch
+            .observe(&turn(12, 4_100, "assistant", 7, Some("delivered")))
+            .is_empty());
+    }
+
     /// The names this module writes are the ones divergence entry 69 states, so
     /// the record and the document cannot drift apart: the two payload keys, the
     /// field a delivery is stamped with, and the heading a re-dispatch renders
     /// the notes under.
     ///
     /// Read here rather than in `tests/contract.rs` because the constants are
-    /// the crate's own and not part of its published surface; the table of who
-    /// each disposition shows a note to is held there, through the public
-    /// [`Reached::shown_to`].
+    /// the crate's own and not part of its published surface; the table of what
+    /// each disposition confirms and routes is held there, through the public
+    /// [`Reached::shown_at_delivery`] and [`Reached::routed_to`].
     #[test]
     fn the_names_this_module_writes_are_the_ones_the_divergence_record_states() {
         let record = std::fs::read_to_string(
@@ -828,66 +1129,23 @@ mod tests {
             addressee: Addressee::Worker,
             text: "ship it".parse().expect("a usable note"),
             criterion: None,
-            shown_to: Reached::Worker.shown_to().to_vec(),
-            reached: Reached::Worker,
+            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
+            routed_to: Reached::Supervisor.routed_to().to_vec(),
+            reached: Reached::Supervisor,
         })
         .expect("it serializes");
-        let field = block["note_delivered_field"]
-            .as_str()
-            .expect("entry 69 names the field");
-        assert!(
-            written.get(field).is_some(),
-            "a delivery is not stamped under the field entry 69 names (`{field}`): {written}"
-        );
-    }
-
-    /// The parties each disposition puts a note in front of, written on the
-    /// record so a note addressed to both is verifiable from it alone.
-    #[test]
-    fn each_disposition_names_the_parties_it_showed_the_note_to() {
+        let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
+            .expect("entry 69 names the fields");
+        for field in &fields {
+            assert!(
+                written.get(field).is_some(),
+                "a delivery is not stamped under the field entry 69 names (`{field}`): {written}"
+            );
+        }
         assert_eq!(
-            Reached::Worker.shown_to(),
-            [Party::Worker, Party::Supervisor]
-        );
-        assert_eq!(
-            Reached::Supervisor.shown_to(),
-            [Party::Worker, Party::Supervisor]
-        );
-        assert_eq!(
-            Reached::JudgedWith {
-                completion_reason: "done".into()
-            }
-            .shown_to(),
-            [Party::Supervisor]
-        );
-        assert!(Reached::Queued.shown_to().is_empty());
-        assert!(Reached::Carried.shown_to().is_empty());
-
-        // And on the wire the field is omitted where it is empty, so a record of
-        // a queued or carried note reads exactly as it did before the field.
-        let queued = Operation::NoteDelivered {
-            node: "build".into(),
-            addressee: Addressee::Both,
-            text: "ship it".parse().expect("a usable note"),
-            criterion: None,
-            shown_to: Reached::Queued.shown_to().to_vec(),
-            reached: Reached::Queued,
-        };
-        let wire = serde_json::to_value(&queued).expect("it serializes");
-        assert!(wire.get("shown_to").is_none(), "{wire}");
-        let read = Operation::NoteDelivered {
-            node: "build".into(),
-            addressee: Addressee::Both,
-            text: "ship it".parse().expect("a usable note"),
-            criterion: None,
-            shown_to: Reached::Worker.shown_to().to_vec(),
-            reached: Reached::Worker,
-        };
-        let wire = serde_json::to_value(&read).expect("it serializes");
-        assert_eq!(wire["shown_to"], json!(["worker", "supervisor"]), "{wire}");
-        assert_eq!(
-            serde_json::from_value::<Operation>(wire.clone()).expect("it reads back"),
-            read
+            block["event_kinds"],
+            json!([crate::event::PipelineKind::NoteShown.as_str()]),
+            "the kind a presentation is recorded under is not the one entry 69 names"
         );
     }
 }

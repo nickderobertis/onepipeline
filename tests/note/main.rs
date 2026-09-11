@@ -147,6 +147,16 @@ fn words_of(world: &World, run: &str, node: &str) -> Vec<TurnMessage> {
         .collect()
 }
 
+/// The `note-shown` records of one node, in order: one per presentation the
+/// run saw happen.
+fn shown_to(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "note-shown")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
+}
+
 /// The `node-dispatched` records of one node, in order: one per dispatch.
 fn dispatch_records_of(world: &World, run: &str, node: &str) -> Vec<Value> {
     world
@@ -380,11 +390,40 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
         json!("worker"),
         "the note reached a party the note was not delivered to first: {operation}"
     );
-    assert_eq!(
-        operation["shown_to"],
-        json!(["worker", "supervisor"]),
-        "the record does not say which parties were shown the note: {operation}"
+    // The acknowledgement confirms nothing: the conversation acknowledges a
+    // reopened worker turn before that turn opens, so the record says where it
+    // is routed and claims no presentation yet.
+    assert!(
+        operation.get("shown_to").is_none(),
+        "the delivery record claims a presentation the conversation had not made: {operation}"
     );
+    assert_eq!(
+        operation["routed_to"],
+        json!(["worker", "supervisor"]),
+        "{operation}"
+    );
+    // Each presentation is then recorded as the stream showed it happening:
+    // the worker's turn that opened on the note, and then the judge's turn
+    // that answered it — in that order, and each once.
+    let shown = shown_to(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker"), json!("supervisor")],
+        "the presentations the run recorded are not the worker's and then the judge's:\n{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("worker")),
+        "{shown:#?}"
+    );
+    let worker_turn = shown[0]["payload"]["turn"].as_u64().expect("a turn");
+    let judge_turn = shown[1]["payload"]["turn"].as_u64().expect("a turn");
+    assert!(judge_turn >= worker_turn, "{shown:#?}");
 
     // And a reader of the run's own stream can tell the turn that carried the
     // manager's note from the one the simulated supervisor improvised, without
@@ -404,6 +443,11 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     assert!(
         delivered.len() == 1 && delivered[0].instruction.contains(NOTE),
         "the turn that carried the manager's note is not stamped as a delivery:\n{openings:#?}"
+    );
+    assert_eq!(
+        delivered[0].turn, worker_turn,
+        "the worker's recorded presentation is not the turn the producer stamped as the \
+         delivery"
     );
     let task = by_origin(Origin::Task);
     assert!(
@@ -893,8 +937,8 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
     // Nobody has been shown it yet, and the record says nobody rather than
     // guessing at the dispatch that will.
     assert!(
-        operation.get("shown_to").is_none(),
-        "a note nobody has read yet is recorded as shown to somebody: {operation}"
+        operation.get("shown_to").is_none() && operation.get("routed_to").is_none(),
+        "a note nobody has read yet is recorded as shown or routed to somebody: {operation}"
     );
 
     world.until("the run to settle", |world| {
@@ -1169,10 +1213,29 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
     assert_eq!(spent[0]["text"], json!(NOTE), "{spent:#?}");
     assert_eq!(spent[0]["reached"], json!("worker"), "{spent:#?}");
     assert_eq!(spent[0]["addressee"], json!("worker"), "{spent:#?}");
+
+    // This is a conversation **interrupted between the two presentations**: the
+    // worker's turn reopened on the note and was reaped before the judge was
+    // ever consulted. The record says exactly that — the worker was shown it,
+    // the judge was not — and nothing in it claims otherwise: not the delivery,
+    // which routed the note and confirmed nobody, and not a presentation the
+    // stream never showed.
+    let delivery = recorded(&world, run);
+    assert!(
+        delivery.get("shown_to").is_none(),
+        "the delivery record asserted a presentation the cancelled conversation never \
+         made: {delivery}"
+    );
+    assert_eq!(delivery["routed_to"], json!(["worker", "supervisor"]));
+    let shown = shown_to(&world, run, "build");
     assert_eq!(
-        spent[0]["shown_to"],
-        json!(["worker", "supervisor"]),
-        "{spent:#?}"
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker")],
+        "a conversation reaped before its judge was consulted recorded a presentation to \
+         the judge, or none to the worker whose turn opened on the note:\n{shown:#?}"
     );
 
     // Released so the held turns end with the journey rather than waiting out the
@@ -1256,14 +1319,40 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
     assert_eq!(carried[0]["criterion"], json!(CRITERION), "{carried:#?}");
     assert_eq!(carried[0]["addressee"], json!("both"), "{carried:#?}");
     assert_eq!(carried[0]["reached"], json!("worker"), "{carried:#?}");
-    assert_eq!(
-        carried[0]["shown_to"],
-        json!(["worker", "supervisor"]),
-        "{carried:#?}"
-    );
     assert!(
         again["payload"].get("notes_spent").is_none(),
         "a dispatch composed with the note reported it spent: {again}"
+    );
+    // The second conversation's presentations are recorded as its stream
+    // showed them — the opening worker turn that carried the note as the task,
+    // and the judge's turn that answered it — after the ones the first
+    // conversation made, and never assumed from the composition alone.
+    let journal = world.journal(run);
+    let redispatched_at = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "node-dispatched"
+                && event["labels"]["node"] == "service"
+                && event["payload"]["attempt"] == json!(2)
+        })
+        .expect("the re-dispatch is in the store");
+    let after: Vec<Value> = journal[redispatched_at..]
+        .iter()
+        .filter(|event| event["kind"] == "note-shown" && event["labels"]["node"] == "service")
+        .map(|event| event["payload"]["party"].clone())
+        .collect();
+    assert_eq!(
+        after,
+        vec![json!("worker"), json!("supervisor")],
+        "the second conversation's presentations are not the worker's and then the \
+         judge's:\n{:#?}",
+        shown_to(&world, run, "service")
+    );
+    assert_eq!(
+        shown_to(&world, run, "service").len(),
+        4,
+        "each conversation shows the note to each party once:\n{:#?}",
+        shown_to(&world, run, "service")
     );
 
     // The worker of the second conversation was handed it, in the task it opened
@@ -1414,12 +1503,20 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
         json!("supervisor"),
         "the note did not reach the party whose turn was live: {operation}"
     );
-    // Both parties, from this record alone: the judge now, and the worker with
-    // the decision it re-took — which the two assertions below then observe.
+    // The judge is confirmed at delivery — its decision was re-taken with the
+    // note in hand before the acknowledgement was given — and the worker is
+    // only routed to, until the stream shows the turn that rode the decision.
+    assert_eq!(operation["shown_to"], json!(["supervisor"]), "{operation}");
+    assert_eq!(operation["routed_to"], json!(["worker"]), "{operation}");
+    let shown = shown_to(&world, run, "build");
     assert_eq!(
-        operation["shown_to"],
-        json!(["worker", "supervisor"]),
-        "{operation}"
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker")],
+        "the worker's presentation of a note that rode the judge's decision was not \
+         recorded once and alone:\n{shown:#?}"
     );
 
     // The judge read it as its own, addressed to it...
@@ -1487,6 +1584,14 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
         operation["shown_to"],
         json!(["supervisor"]),
         "a note only the judge read is recorded as shown to the worker too: {operation}"
+    );
+    assert!(
+        operation.get("routed_to").is_none(),
+        "a note the judge completed with was routed onward: {operation}"
+    );
+    assert!(
+        shown_to(&world, run, "build").is_empty(),
+        "a presentation was recorded for a note that reached no turn after the decision"
     );
 
     // And the judge really was told it, under the addressing it was sent with.

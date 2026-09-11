@@ -37,7 +37,7 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
     LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
-use onepipeline::note::{Addressee, Delivered, Note, Reached};
+use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, Resume, Step,
     ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
@@ -2972,7 +2972,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 27, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 28, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2981,7 +2981,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "69."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -5092,35 +5092,49 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         assert_eq!(&read, one, "{written} did not round-trip");
     }
 
-    // And who each disposition puts the note in front of, as entry 69 states it
-    // — the table a reader of the record no longer has to infer. Keyed by the
-    // disposition's own word, and exhaustive both ways: a disposition the table
+    // And what each disposition confirms at the acknowledgement and what it
+    // only routes onward, as entry 69 tabulates them — the two facts a reader
+    // of the record no longer has to tell apart by inference. Keyed by the
+    // disposition's own word, and exhaustive both ways: a disposition a table
     // does not name, or a row naming no disposition, fails here.
-    let shown_to: std::collections::BTreeMap<String, Vec<String>> =
-        serde_json::from_value(divergence_block("69.")["shown_to"].clone())
-            .expect("entry 69 tabulates who is shown a note under each disposition");
-    assert_eq!(
-        shown_to.keys().cloned().collect::<Vec<_>>(),
-        {
-            let mut named = reached.clone();
-            named.sort();
-            named
-        },
-        "entry 69's table and entry 60's dispositions are not one set"
-    );
-    for one in &carried {
-        let parties: Vec<String> = one
-            .shown_to()
-            .iter()
-            .map(|party| serde_json::to_value(party).expect("a party serializes"))
-            .map(|party| party.as_str().expect("a party is a word").to_string())
-            .collect();
+    let tabulated_by = divergence_block("69.");
+    let words = |party: &Party| -> String {
+        serde_json::to_value(party)
+            .expect("a party serializes")
+            .as_str()
+            .expect("a party is a word")
+            .to_string()
+    };
+    for (table, answer) in [
+        (
+            "shown_at_delivery",
+            Reached::shown_at_delivery as fn(&Reached) -> &'static [Party],
+        ),
+        (
+            "routed_to",
+            Reached::routed_to as fn(&Reached) -> &'static [Party],
+        ),
+    ] {
+        let tabulated: std::collections::BTreeMap<String, Vec<String>> =
+            serde_json::from_value(tabulated_by[table].clone())
+                .unwrap_or_else(|e| panic!("entry 69 tabulates `{table}` per disposition: {e}"));
         assert_eq!(
-            &parties,
-            &shown_to[one.as_str()],
-            "`{}` shows the note to parties entry 69 does not say it does",
-            one.as_str()
+            tabulated.keys().cloned().collect::<Vec<_>>(),
+            {
+                let mut named = reached.clone();
+                named.sort();
+                named
+            },
+            "entry 69's `{table}` table and entry 60's dispositions are not one set"
         );
+        for one in &carried {
+            assert_eq!(
+                &answer(one).iter().map(words).collect::<Vec<_>>(),
+                &tabulated[one.as_str()],
+                "`{}`'s `{table}` is not what entry 69 says",
+                one.as_str()
+            );
+        }
     }
 
     // The boundary: an envelope this seam cannot act on is refused where it

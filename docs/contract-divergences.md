@@ -4623,9 +4623,12 @@ sentence; let the planner's own carried note survive that same continuation,
 above the diagnosis, amending the sentence *"The planner's own note is not
 carried again: a note carries exactly one dispatch and the attempt that just ran
 was it"*; have `node-dispatched` carry two optional payload keys,
-`notes_carried` and `notes_spent`, each omitted when empty; and have the
-`note-delivered` operation carry an optional `shown_to`, the parties the
-conversation put the note in front of, omitted where that is nobody yet.**
+`notes_carried` and `notes_spent`, each omitted when empty; have the
+`note-delivered` operation carry two optional fields, `shown_to` — the parties
+the conversation had **already** shown the note to when it acknowledged it — and
+`routed_to` — the parties it said it **will** present it to — each omitted where
+empty; and add one kind to the closed set, `note-shown`, written for each routed
+presentation when the relayed stream shows it happening.**
 
 Entry 60 made the manager's note one op and ruled that reaching the running turn
 and being composed into the node's next dispatch are mutually exclusive: `persist`
@@ -4711,16 +4714,34 @@ release stamps as `delivered`, and holds the field against the linked library in
    `a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so`
    holds them for a `retry`.
 
-4. **`note-delivered` says who was shown the note.** `shown_to` is the
-   conversation's own routing written down where the run records the delivery,
-   rather than left for a reader to infer from each disposition's
-   documentation: a note is delivered to whichever party is live and the other
-   receives it with that party's response, so `worker` and `supervisor` both
-   put it in front of both parties, `judged-with` in front of the supervisor
-   alone — the re-taken decision was completion and no worker turn followed —
-   and `queued` and `carried` in front of nobody yet, which the record of the
-   turn or the dispatch that takes it then says. The block below is what
-   `tests/contract.rs` holds `note::Reached::shown_to` to.
+4. **The record tells a presentation that happened from a routing that is
+   intended.** A `note-delivered` is written when the conversation acknowledges
+   the note, and the linked `onejudge` acknowledges a worker's reopened turn
+   *before* that turn opens — so a record that said the worker, let alone the
+   judge, had been shown the note would be a receipt written at submission and
+   read afterwards as a receipt for arrival, which is the defect class this
+   whole entry exists to end. `shown_to` therefore carries only what is confirmed
+   at that instant: the supervisor, for a decision re-taken or completed with the
+   note in hand, both of which the engine settles after the decision was taken;
+   nobody, for a worker turn reopened to carry it, a queued note, or a carried
+   one. `routed_to` carries what the conversation said it will do next — the
+   worker and then the judge for a reopened worker turn, the worker for a
+   re-taken decision, whichever opens next and then the other for a queued note.
+   Each routed presentation is then its own **`note-shown`**, labelled with the
+   node and carrying `party`, the `turn` that opened, and the note, written by
+   the reconcile loop when the relayed stream shows it: a worker turn the
+   producer stamps `origin: delivered` — the release adopted above stamps
+   exactly the turn that opened on a note — and a supervisor turn opening under
+   that reply's number or after it, which the judge takes with every delivered
+   note in hand. A note composed into a dispatch's task is watched the same way,
+   presented by the opening turn as the task and by the first supervisor turn.
+   The watch is per in-flight dispatch and dies with it, so a conversation
+   cancelled or failed between the two presentations leaves the first recorded,
+   the second unrecorded, and no claim anywhere that the second party saw
+   anything. A turn that opened before the note was offered is never read as its
+   presentation, whatever order the loop meets the records in. The block below
+   is what `tests/contract.rs` holds `note::Reached::shown_at_delivery` and
+   `routed_to` to.
 
 The window this leaves is stated rather than hidden: a lifecycle node's **steps**
 within one attempt are composed together, so a note delivered into step one's
@@ -4736,21 +4757,34 @@ turns and the opening `task`; a lifecycle node whose publication the host reject
 dispatched again by the engine with that note in its second conversation's
 opening task and in its judge's hands, and the record naming it carried; the
 requeue and the retry above, spending it by name; a dispatch a note was carried
-to composing it as context and spending nothing; and `shown_to` under every
-disposition a journey can reach — `worker`, `supervisor`, `judged-with`, and
-`carried` — with `queued` held by the unit table alone, for the reason
-`note::Reached` states over that variant.
+to composing it as context and spending nothing; `shown_to` and `routed_to`
+under every disposition a journey can reach — `worker`, `supervisor`,
+`judged-with`, and `carried` — with `queued` held by the unit table alone, for
+the reason `note::Reached` states over that variant; a note delivered into a
+live worker turn recorded as shown to the worker by that turn and to the judge
+by the turn that answered it, in that order; and a conversation **interrupted
+between the two** — the worker's reopened turn held and the dispatch cancelled
+and reaped — leaving the worker's presentation recorded and the judge's
+unrecorded, with no `note-shown` and no `shown_to` claiming otherwise.
 
 ```json
 {
   "node_dispatched_keys": ["notes_carried", "notes_spent"],
-  "note_delivered_field": "shown_to",
+  "note_delivered_fields": ["shown_to", "routed_to"],
+  "event_kinds": ["note-shown"],
   "heading": "## Manager notes",
-  "shown_to": {
+  "shown_at_delivery": {
     "queued": [],
-    "worker": ["worker", "supervisor"],
-    "supervisor": ["worker", "supervisor"],
+    "worker": [],
+    "supervisor": ["supervisor"],
     "judged-with": ["supervisor"],
+    "carried": []
+  },
+  "routed_to": {
+    "queued": ["worker", "supervisor"],
+    "worker": ["worker", "supervisor"],
+    "supervisor": ["worker"],
+    "judged-with": [],
     "carried": []
   }
 }

@@ -635,6 +635,11 @@ struct Dispatch {
     /// said. `None` until then, which is the same answer as a turn there is no
     /// lever for: a `context` note has nothing to be delivered into.
     control: Option<TurnAddress>,
+    /// The manager's notes this dispatch's conversation has been told to present
+    /// and has not yet been seen presenting — see [`crate::note::Presentations`].
+    /// Dropped with the dispatch, so a conversation that ends first leaves the
+    /// presentations it never made unrecorded rather than assumed.
+    presentations: crate::note::Presentations,
 }
 
 impl Dispatch {
@@ -1272,10 +1277,40 @@ fn converge(
                         }
                     }
                     journal.relay(&envelope)?;
+                    // Once the turn itself is in the store: a presentation the
+                    // stream shows is recorded after the turn that made it, on
+                    // the member the notes were addressed to.
+                    if let Some(node) = envelope.labels.node.clone() {
+                        if let Some(dispatch) = in_flight.get_mut(&node) {
+                            let addressed = dispatch.control.as_ref().is_some_and(|address| {
+                                member_of(&envelope) == Some(address.member())
+                            });
+                            if addressed {
+                                for shown in dispatch.presentations.observe(&envelope) {
+                                    journal.emit(
+                                        journal::PipelineKind::NoteShown,
+                                        journal::labels(&paths.run, Some(&node)),
+                                        shown.payload(),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
                 }
                 // A dispatch asked again is a dispatch started again, and it reaches
                 // the run's own record as one rather than only a log.
                 Message::Redispatched(again) => {
+                    // The notes the new attempt's task carries are presented by
+                    // its opening worker turn and by every supervisor turn after,
+                    // and the stream says when each happens.
+                    if let Some(dispatch) = in_flight.get_mut(&again.node) {
+                        let at = sys::now_millis();
+                        for note in &again.carried {
+                            dispatch
+                                .presentations
+                                .composed_into_the_task(note.clone(), at);
+                        }
+                    }
                     let mut payload = journal::payload(&[
                         ("attempt", json!(again.attempt)),
                         ("attempts", json!(again.attempts)),
@@ -1287,10 +1322,7 @@ fn converge(
                     if !again.carried.is_empty() {
                         payload.insert(
                             crate::note::CARRIED_KEY.to_string(),
-                            crate::note::payload_of(
-                                &again.carried,
-                                crate::note::Composition::IntoATask,
-                            ),
+                            crate::note::payload_of(&again.carried),
                         );
                     }
                     journal.emit(
@@ -2121,6 +2153,10 @@ fn reconcile_edits(
             }
         };
 
+        // The instant before any note of the envelope is offered, against which
+        // the stream is read afterwards: a turn that opened before it cannot be
+        // the presentation of a note offered after it.
+        let offered_at = sys::now_millis();
         let delivered = match all_or_each_ruling(deliver_envelope(staged)) {
             Ok(delivered) => delivered,
             Err(evaluated) => {
@@ -2143,6 +2179,7 @@ fn reconcile_edits(
                 command,
                 delivery.committed(),
                 in_flight,
+                offered_at,
             )?;
             changed = true;
         }
@@ -2533,6 +2570,12 @@ fn validate_command(
 /// Called only once the whole envelope has compiled, so everything here either
 /// succeeds or is a failure of the run's own journal — which ends the pass
 /// rather than half-applying an envelope.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one command's commit: the run, its journal and state, who sent it, the command, \
+              what it committed, the dispatches it may stop or route a note through, and \
+              the instant its notes were offered"
+)]
 fn commit_command(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -2540,7 +2583,8 @@ fn commit_command(
     author: crate::channel::Author,
     command: &Command,
     operations: &[edits::Operation],
-    in_flight: &BTreeMap<String, Dispatch>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    offered_at: u64,
 ) -> Result<()> {
     // Dropping or retrying a running node raises its cooperative cancellation
     // signal: the dispatch stops and, for a lifecycle node, preserves what it
@@ -2548,6 +2592,32 @@ fn commit_command(
     for target in cancelled_by(command) {
         if let Some(dispatch) = in_flight.get(&target) {
             dispatch.cancel.cancel();
+        }
+    }
+    // A note the conversation acknowledged and routed onward is now owed a
+    // presentation the stream has to show: handed to the dispatch's own watch,
+    // which records each as it happens and nothing before.
+    for operation in operations {
+        if let edits::Operation::NoteDelivered {
+            node,
+            addressee,
+            text,
+            criterion,
+            reached,
+            ..
+        } = operation
+        {
+            if let Some(dispatch) = in_flight.get_mut(node) {
+                dispatch.presentations.routed_by_the_conversation(
+                    crate::note::Consumed {
+                        addressee: *addressee,
+                        text: text.clone(),
+                        criterion: criterion.clone(),
+                        reached: reached.clone(),
+                    },
+                    offered_at,
+                );
+            }
         }
     }
     journal.emit(
@@ -2830,7 +2900,8 @@ fn note_record(
         addressee,
         text: text.clone(),
         criterion: criterion.cloned(),
-        shown_to: reached.shown_to().to_vec(),
+        shown_to: reached.shown_at_delivery().to_vec(),
+        routed_to: reached.routed_to().to_vec(),
         reached,
     }]
 }
@@ -3196,7 +3267,7 @@ fn start_ready(
         if !spent.is_empty() {
             payload.insert(
                 crate::note::SPENT_KEY.to_string(),
-                crate::note::payload_of(&spent, crate::note::Composition::Nowhere),
+                crate::note::payload_of(&spent),
             );
         }
         journal.emit(
@@ -3228,6 +3299,7 @@ fn start_ready(
                 last_progress: now,
                 reported_quiet: false,
                 control: None,
+                presentations: crate::note::Presentations::default(),
             },
         );
         settled_here = true;
@@ -6554,6 +6626,7 @@ mod tests {
                 criterion: None,
                 reached: crate::note::Reached::Carried,
                 shown_to: Vec::new(),
+                routed_to: Vec::new(),
             },
         ];
         assert_eq!(
@@ -6881,6 +6954,7 @@ mod tests {
                 last_progress: Instant::now(),
                 reported_quiet: false,
                 control: None,
+                presentations: crate::note::Presentations::default(),
             },
         )]
         .into();
@@ -7009,6 +7083,7 @@ mod tests {
                 last_progress: now,
                 reported_quiet: false,
                 control: None,
+                presentations: crate::note::Presentations::default(),
             },
         )]
         .into();
