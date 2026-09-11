@@ -915,6 +915,10 @@ enum Output {
         /// The file's length when this launch was started: everything before it
         /// belongs to somebody else.
         from: u64,
+        /// How far [`logged_envelopes`](GraphRun::logged_envelopes) has read,
+        /// so a caller polling it is handed each envelope once. Starts at
+        /// `from`, and never moves into a line the writer has not terminated.
+        read_to: u64,
     },
 }
 
@@ -1122,6 +1126,7 @@ impl ProcessGraphRun {
             GraphOutput::Logged(path) => Output::Logged {
                 path: path.to_path_buf(),
                 from: logged_from,
+                read_to: logged_from,
             },
         };
         Ok(Self {
@@ -1280,13 +1285,44 @@ impl ProcessGraphRun {
     /// the graph said on stderr, and past a line from a build whose shape this
     /// one cannot read, rather than taking either for an announcement.
     fn logged_envelope(&self) -> Option<Envelope> {
-        let Output::Logged { path, from } = &self.output else {
+        let Output::Logged { path, from, .. } = &self.output else {
             return None;
         };
         let text = logged_since(path, *from);
         text.split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
             .find_map(envelope_of)
+    }
+
+    /// The envelopes a **logged** launch has written since this was last asked,
+    /// each handed out once.
+    ///
+    /// The reader a driver that retained a run's observer has of what that
+    /// observer says: a logged launch's stream is its file, and
+    /// [`events`](Self::events) — which is the pipe — has nothing for it. Read on
+    /// [`logged_envelope`](Self::logged_envelope)'s terms — whole lines the
+    /// writer has terminated, past whatever the graph said on stderr and past a
+    /// line this build cannot read — from where the last read stopped, so a
+    /// caller polling it sees each envelope once and a line still being written
+    /// is left for the next poll. Empty for a relayed launch, whose envelopes
+    /// are on its pipe.
+    fn logged_envelopes(&mut self) -> Vec<Envelope> {
+        let Output::Logged { path, read_to, .. } = &mut self.output else {
+            return Vec::new();
+        };
+        let text = logged_since(path, *read_to);
+        let mut envelopes = Vec::new();
+        for line in text.split_inclusive('\n') {
+            if !line.ends_with('\n') {
+                break;
+            }
+            *read_to += line.len() as u64;
+            if let Some(mut envelope) = envelope_of(line) {
+                adopt_labels(&mut envelope.labels);
+                envelopes.push(envelope);
+            }
+        }
+        envelopes
     }
 
     /// The graph closed its stream without announcing itself: report whatever it
@@ -1343,7 +1379,7 @@ impl ProcessGraphRun {
     /// first.
     fn evidence(&mut self) -> String {
         let text = match &self.output {
-            Output::Logged { path, from } => logged_since(path, *from),
+            Output::Logged { path, from, .. } => logged_since(path, *from),
             Output::Relayed { .. } => self.said(),
         };
         let trimmed = text.trim();
@@ -1708,6 +1744,18 @@ impl GraphRun {
         match &mut self.backend {
             GraphBackend::Library(run) => run.exited.load(Ordering::Acquire),
             GraphBackend::Process(run) => run.has_exited(),
+        }
+    }
+
+    /// The envelopes a **logged** process launch has written since this was last
+    /// asked, each handed out once — see [`ProcessGraphRun::logged_envelopes`].
+    ///
+    /// Empty for the library backend, whose envelopes are on its relay, and for
+    /// a relayed process launch, whose envelopes are on its pipe.
+    pub fn logged_envelopes(&mut self) -> Vec<Envelope> {
+        match &mut self.backend {
+            GraphBackend::Library(_) => Vec::new(),
+            GraphBackend::Process(run) => run.logged_envelopes(),
         }
     }
 
