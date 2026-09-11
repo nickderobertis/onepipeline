@@ -143,6 +143,16 @@ fn index_path(name: &str) -> String {
     format!("{}/{}/{name}", &name[0..2], &name[2..4])
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the records
+// written below restate cargo's sparse-index format because that is what a
+// fixture standing in for the registry is; the one source is the registry-index
+// reference cargo publishes, and the drift gate is the registry itself —
+// `.github/workflows/engine-currency.yml` runs the same script over the live index
+// on every pull request and a member renamed there is refused by name. The
+// sibling relationships in `requires_today` are the real graph's shape at the
+// requirements this manifest states, so the fixture admits what the lock links
+// whatever the pins say; the registry's actual entries are read by that live run,
+// not reconciled against this copy.
 /// What one release requires of one crate, as its index record states it:
 /// `(name, req, kind)`, the three members of a `deps` entry the check reads.
 type Requirement<'a> = (&'a str, &'a str, &'a str);
@@ -208,6 +218,8 @@ fn requires_today(name: &str) -> Vec<(String, String, &'static str)> {
         _ => Vec::new(),
     }
 }
+
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// A release a fixture index serves beyond what the lock links.
 struct Served {
@@ -1480,7 +1492,24 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
         ),
         // A requirement the check does not model is refused as the manifest's
         // own would be, rather than read as admitting — or as holding back —
-        // anything.
+        // anything. So is one whose presence in the graph is decided by
+        // something this check does not read: a feature, or a platform.
+        (
+            "dep-that-is-optional",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"kind\":\"normal\",\"optional\":true,\"target\":null}],\
+             \"yanked\":false}",
+            "serves 'oneagentgraph' 2.9.9 requiring 'onejudge' as '^0.0.7' only where optional \
+             allows, which is a dependency shape this check does not model",
+        ),
+        (
+            "dep-for-one-target",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"kind\":\"normal\",\"optional\":false,\
+             \"target\":\"cfg(windows)\"}],\"yanked\":false}",
+            "serves 'oneagentgraph' 2.9.9 requiring 'onejudge' as '^0.0.7' only where target \
+             allows, which is a dependency shape this check does not model",
+        ),
         (
             "dep-with-unmodelled-req",
             "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\

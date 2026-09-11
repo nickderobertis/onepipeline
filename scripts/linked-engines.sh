@@ -235,13 +235,13 @@ index_path() {
 # it answering "the newest release" for a file that had more.
 #
 # What a release requires of the other siblings comes out *before* its own
-# line, one `requires <name> <kind> <req>` per entry of its `deps` that names an
-# engine in SIBLINGS, so the caller has the whole record in hand when the
-# `release` line arrives. Only those three members are read, and only off a
-# sibling's entry: `name` because it is what says whose requirement this is,
-# `req` because it is the requirement, and `kind` because a `dev` requirement
-# of a dependency is one cargo never resolves — `oneagentgraph` requires `onevcs`
-# as a dev-dependency at a window this manifest does not admit, and that holds
+# line, one `requires <name> <kind> <active> <req>` per entry of its `deps` that
+# names an engine in SIBLINGS, so the caller has the whole record in hand when
+# the `release` line arrives. Three members decide, and only off a sibling's
+# entry: `name` because it is what says whose requirement this is, `req`
+# because it is the requirement, and `kind` because a `dev` requirement of a
+# dependency is one cargo never resolves — `oneagentgraph` requires `onevcs` as
+# a dev-dependency at a window this manifest does not admit, and that holds
 # nothing back. A sibling entry whose `name`, `req` or `kind` is missing,
 # repeated or not a string, or whose `kind` is not one cargo writes, is refused
 # rather than read as "not held back", which is the answer that would send a
@@ -249,6 +249,13 @@ index_path() {
 # says nothing about what it requires and holds nothing back — and the worst a
 # mirror that dropped the member could then do is report a lock as behind, which
 # is the answer this check gave before it could read one.
+#
+# `<active>` is `always`, or `optional` where the entry says so, or `target`
+# where it names a platform: either is a requirement whose presence in the
+# resolved graph turns on something this check does not read — a feature some
+# crate enables, a cfg this build satisfies — so the caller refuses it as a
+# shape not modelled rather than deciding either way. No sibling states one
+# today; the day one does, the refusal names what to extend.
 #
 # Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4, and
 # crates.io serves versions spelled that way — so it is stripped rather than
@@ -367,8 +374,9 @@ index_versions() {
     # closing brace, or 0 where it never closes. What it decides lands in
     # DEP_BAD and DEPS rather than in a return value, because the walk has to
     # go on past an entry this cannot read to find the end of the record.
-    function read_dep(s, i,   n, c, key, name, req, kind, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, name_twice, twice) {
+    function read_dep(s, i,   n, c, key, name, req, kind, active, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, name_twice, twice) {
       n = length(s)
+      active = "always"
       i = skip_ws(s, i + 1)
       if (substr(s, i, 1) == "}") { DEP_BAD = 1; return i + 1 }
       while (1) {
@@ -384,10 +392,18 @@ index_versions() {
           if (key == "name")      { ok_name = 1; name = STR }
           else if (key == "req")  { ok_req = 1; req = STR }
           else if (key == "kind") { ok_kind = 1; kind = STR }
+          # A requirement stated for one platform only. Whether this build is
+          # that platform is a cfg question this cannot answer, so the caller
+          # refuses it rather than counting it in or out.
+          else if (key == "target") active = "target"
         } else if (c == "{" || c == "[") {
           i = scan_nested(s, i); if (i == 0) return 0
         } else {
           i = scan_literal(s, i); if (i == 0) return 0
+          # An optional requirement is in the graph only where a feature
+          # enables it, which is a question about every crate that requires
+          # this one; refused by the caller for the same reason.
+          if (key == "optional" && LIT == "true") active = "optional"
         }
         if (key == "name")      { if (saw_name) name_twice = 1; saw_name = 1 }
         else if (key == "req")  { if (saw_req)  twice = 1; saw_req  = 1 }
@@ -405,7 +421,7 @@ index_versions() {
       if (!(name in SIBLING)) return i + 1
       if (!ok_req || !ok_kind || twice) { DEP_BAD = 1; return i + 1 }
       if (kind != "normal" && kind != "build" && kind != "dev") { DEP_BAD = 1; return i + 1 }
-      DEPS[++NDEPS] = name " " kind " " req
+      DEPS[++NDEPS] = name " " kind " " active " " req
       return i + 1
     }
     function read_deps(s, i,   n, c) {
@@ -666,8 +682,10 @@ for name in "${SIBLINGS[@]}"; do
       # never resolves a dependency's own dev-dependencies.
       holder=""
       for entry in ${pending[@]+"${pending[@]}"}; do
-        read -r dep kind dep_req <<<"$entry"
+        read -r dep kind active dep_req <<<"$entry"
         [ "$kind" != dev ] || continue
+        [ "$active" = always ] || die "the index serves '$name' $version requiring '$dep' as '$dep_req' only where ${active} allows, which is a dependency shape this check does not model" \
+          "extend read_dep() and this loop in scripts/linked-engines.sh to decide whether that requirement is in this build's graph, or pass '--index' naming a registry whose records do not state one"
         manifest_req="$(requirement "$dep")"
         [ -n "$manifest_req" ] || die "'$dep' has no requirement in [workspace.dependencies] of '$manifest'" \
           "add the pin there, or drop '$dep' from SIBLINGS in this script if this repository no longer links it"
