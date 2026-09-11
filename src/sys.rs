@@ -1123,6 +1123,64 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
     platform_process_start_token(pid)
 }
 
+/// What one record says about one pid on this host.
+///
+/// Shared by everything that acts on a recorded pid — a stop aiming a teardown,
+/// an adoption deciding whether anything is still driving, a view saying
+/// `DRIVER DEAD` — because a pid alone is one reading and each of those
+/// deciding it separately is a second liveness to keep true. Windows in
+/// particular hands a freed pid on within moments, and a suite spawning
+/// processes at the rate this one does *observes* that: a driver that has
+/// exited leaves its pid in the launch record, and by the time anything reads
+/// it the host has given it to a stranger.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// Still the process the record was written for: its stamp says so.
+    Proved,
+    /// Not a process at all — the pid is gone.
+    Gone,
+    /// A live process this host says is **not** the one the record named. The
+    /// recorded process is over and its pid has been handed on, so there is
+    /// nothing here to stop, nothing driving, and nothing unresolved either.
+    Reissued,
+    /// A live process whose record carries no stamp to compare — every record a
+    /// build before the field existed wrote.
+    Unstamped,
+    /// A live process this host would not describe, so there was nothing to
+    /// compare its record against.
+    HostSilent,
+}
+
+impl Claim {
+    /// Whether the record's process is proved over: gone outright, or a pid
+    /// the host has since given to somebody else. Neither of the two open
+    /// answers is that — an unstamped or undescribed live pid resolves toward
+    /// "still working", for the reason on [`process_may_be_live`].
+    pub(crate) fn is_over(&self) -> bool {
+        matches!(self, Self::Gone | Self::Reissued)
+    }
+}
+
+/// Whether `pid` is still the process a record stamped `started` was written
+/// for.
+///
+/// The order of the answers is the point. A stamp that matches is the only
+/// proof, and everything else is read against whether the pid is a process at
+/// all: one that is gone ends the question, and one that is live is either
+/// somebody else's — the host answered with a different stamp — or a pid this
+/// build has nothing to compare, which is *cannot say* rather than *nothing is
+/// running there*.
+pub(crate) fn claim_on(pid: u32, started: &str) -> Claim {
+    let reading = process_start_token(pid);
+    match reading {
+        Some(ref token) if token.matches(started) => Claim::Proved,
+        _ if !process_may_be_live(pid) => Claim::Gone,
+        Some(_) if !started.is_empty() => Claim::Reissued,
+        Some(_) => Claim::Unstamped,
+        None => Claim::HostSilent,
+    }
+}
+
 /// Directly from Linux's process record. Field 22 of `/proc/<pid>/stat` is the
 /// process's start time in clock ticks after boot, so it is fixed at creation
 /// and does not move when wall-clock discipline changes the relationship
