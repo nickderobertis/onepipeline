@@ -341,12 +341,10 @@ fn opened_worktrees() -> std::sync::MutexGuard<'static, std::collections::BTreeM
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Record the session a dispatch just opened, against the worktree it works in.
 fn remember_worktree(session: &onevcs::Session) {
     opened_worktrees().insert(session.worktree.clone(), session.token.0.clone());
 }
 
-/// The session this executor opened at a worktree, if it opened one there.
 fn session_of_worktree(worktree: &Path) -> Option<String> {
     opened_worktrees().get(worktree).cloned()
 }

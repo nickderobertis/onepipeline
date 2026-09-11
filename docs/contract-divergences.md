@@ -4665,10 +4665,13 @@ takes this path, and a session with none takes the path it always took.
    node settles on the publication's own words — `merged`, `queued`,
    `change-open`, or a named failure — with the same routing and retry budget
    every publication has. Its settlement detail says, in one sentence, that the
-   worker opened the change request as a draft, that the closeout wrote the
-   drafted description onto it, and that it was marked ready for review — or
-   left as a draft — which is what tells such a node from one that published
-   afresh in `results` and `status`; the outcome word is deliberately the same.
+   worker opened the change request as a draft — or that an earlier publication
+   of the branch left it as one, or open, which the session's own stream tells
+   apart: a worker's draft records `change-drafted` there before the closeout —
+   that the closeout wrote the drafted description onto it, and that it was
+   marked ready for review — or left as a draft — which is what tells such a
+   node from one that published afresh in `results` and `status`; the outcome
+   word is deliberately the same.
 
 **The composed drafting task.** One composition, sections in this order, every
 heading a `##` so it sits beside the headings the rendered task already carries:
@@ -4747,6 +4750,10 @@ both ways a draft comes to be left, with a dependent that runs; by
 where the release reason wins over the field; by
 `lifecycle::a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description`,
 the stated consequence; by
+`lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement`,
+the one refusal between the draft and the publication; by
+`adoption::a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_draft`,
+a draft an earlier publication left, named as such; by
 `lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change`
 and
 `lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change`,

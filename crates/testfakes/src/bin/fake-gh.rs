@@ -1053,6 +1053,16 @@ fn edit(args: &[String], dir: &Path) -> ExitCode {
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
+    // `gh.edit-refused` is a host that takes every other call and will not take
+    // this one — a description a permission or a lock keeps from being written —
+    // which is the one refusal a closeout meets after the body is drafted and
+    // before the publication. Scripted apart from `gh.outage`, because an outage
+    // refuses the publication too and this is about a host that lands the change
+    // and keeps the description the worker left.
+    if let Some(reason) = fake::node_script(dir, "gh", "edit-refused") {
+        eprintln!("{}", reason.trim());
+        return ExitCode::from(1);
+    }
     let file = PathBuf::from(fake::flag(args, "--body-file").unwrap_or_default());
     let body = std::fs::read_to_string(&file).unwrap_or_else(|error| {
         fake::fail(&format!("{} could not be read: {error}", file.display()))

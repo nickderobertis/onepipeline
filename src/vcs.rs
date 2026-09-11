@@ -940,6 +940,26 @@ pub fn change_opened_in(token: &SessionToken) -> Option<String> {
         .map(|url| url.to_string())
 }
 
+/// Whether **this session** recorded opening its change request as a draft —
+/// which is a worker that ran `onevcs publish --draft` in its worktree.
+///
+/// Read off the session's own stream, for [`change_opened_in`]'s reason: the
+/// `change-drafted` a draft publication records is the one fact that says who
+/// held the change request. A change request the host holds as a draft with no
+/// such record on this session's stream was drafted by an earlier session of the
+/// same branch — an attempt this one continues — and its worker did nothing of
+/// the kind. Asked before this crate's own publication, so the record that
+/// publication may go on to write is never mistaken for the worker's.
+///
+/// `false` when nothing recorded one, and equally when the stream cannot be
+/// read: an unreadable record is not evidence of a worker's draft.
+pub fn change_drafted_in(token: &SessionToken) -> bool {
+    let drafted = kind_of(onevcs::EventKind::ChangeDrafted);
+    events(token, None)
+        .iter()
+        .any(|envelope| envelope.kind == drafted)
+}
+
 /// The sessions holding one repository's workspaces, as `onevcs` reports them.
 ///
 /// The same enumeration the launch interlock reads, asked of one repository:

@@ -5100,7 +5100,6 @@ fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_b
         .out_has("is also this session's base");
 }
 
-/// The `gh` invocations a run made, each as its argv, in order.
 fn gh_calls(world: &World) -> Vec<Vec<String>> {
     world
         .invocations()
@@ -5110,7 +5109,6 @@ fn gh_calls(world: &World) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The `gh pr <verb>` invocations a run made, by verb.
 fn gh_pr_calls(world: &World, verb: &str) -> Vec<Vec<String>> {
     gh_calls(world)
         .into_iter()
@@ -5134,7 +5132,6 @@ fn turns_of(world: &World, run: &str, node: &str, persona: &str) -> Vec<serde_js
         .collect()
 }
 
-/// The task the drafting dispatch of one node was handed.
 fn drafting_task_of(world: &World, run: &str, node: &str) -> String {
     let turns = turns_of(world, run, node, "pr-author");
     assert_eq!(
@@ -5760,4 +5757,76 @@ fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_c
     assert!(url.contains("/pull/1"), "{url}");
     assert!(world.events_of(&run, "published").is_empty());
     world.run(&["results", &run]).exited(0).out_has(url);
+}
+
+/// A description the host will not take leaves the change request as the worker
+/// left it, said on the settlement — and the publication is untouched.
+///
+/// The one refusal a closeout can meet between the body being drafted and the
+/// publication: the body exists, the host would not write it. Drafting is never
+/// on the publication path, so the draft is lifted and the change lands exactly
+/// as it would have; what the reader is owed is the reason the drafted
+/// description is not on the change request, beside the publication's own words.
+#[test]
+fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement() {
+    let world = World::new("lifecycle-undescribed");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.drafts", "wip: what the worker called it");
+    world.script(
+        "service.drafts-body",
+        "## What\nHalf written by the worker.\n",
+    );
+    world.script("pr-author.body", "## What\nFinished, and never written.\n");
+    world.script(
+        "gh.edit-refused",
+        "GraphQL: Resource not accessible by integration",
+    );
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land what the worker made");
+    let path = world.plan("undescribed", &plan_of("undescribed", vec![node]));
+    let launched = world.run(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
+    launched.settled();
+    let run = "undescribed";
+
+    // The publication went on as it always does: lifted, and landed under the
+    // policy — with the description the worker left, under the worker's title.
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
+    assert_eq!(node["outcome"], "change-open", "{node}");
+    assert_eq!(
+        gh_pr_calls(&world, "ready").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["body"], "## What\nHalf written by the worker.");
+    assert_eq!(opened[0]["title"], "wip: what the worker called it");
+    assert!(
+        world.events_of(run, "change-described").is_empty(),
+        "a description the host refused was recorded as written"
+    );
+
+    // Said on the settlement, after what the closeout did, and on stderr.
+    let settled = world.events_of(run, "node-settled");
+    let detail = settled[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement says nothing: {}", settled[0]));
+    let url = node["change_url"]
+        .as_str()
+        .expect("the node names its change request");
+    assert!(
+        detail.starts_with(
+            "the worker opened the change request as a draft; the closeout left the description \
+             as the worker left it and marked it ready for review. the drafted description was \
+             not written onto "
+        ) && detail.contains(url)
+            && detail.contains("Resource not accessible by integration"),
+        "the settlement does not say why the description is the worker's: {detail}"
+    );
+    launched.err_has("the drafted description was not written onto");
+    // A body that was drafted is not a body that was not.
+    assert!(world.events_of(run, "body-not-drafted").is_empty());
 }

@@ -495,6 +495,12 @@ fn check_declared_version(plan: &Plan) -> std::result::Result<(), Refusal> {
         if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::body_is_newer(plan.schema_version)).field("body"));
         }
+        // llmlint: ignore[boundary_inputs_validated] the value and not the key, deliberately:
+        // what a version refusal protects is a planner who asked for a draft and had the
+        // ask dropped, and `draft: false` at an older version asks for nothing — it is the
+        // default that version already had, exactly as `body: null` is above. A `bool`
+        // cannot say whether the document spelled the default out, and refusing the
+        // spelling would refuse a plan that means what it meant.
         if node.draft && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::draft_is_newer(plan.schema_version)).field("draft"));
         }

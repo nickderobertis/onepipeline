@@ -432,6 +432,9 @@ fn publish(
             None
         }
     };
+    // Whether it was this session's worker that drafted it, read before this
+    // closeout writes anything of its own onto the same stream.
+    let worker_drafted = held.is_some() && crate::vcs::change_drafted_in(token);
     // The plan's own body wins outright and spends no dispatch: a planner who
     // wrote the change request has already done the drafting.
     let (body, undrafted) = match node.body.clone() {
@@ -622,7 +625,7 @@ fn publish(
             // the same.
             let finished = held
                 .as_ref()
-                .map(|change| finished_detail(change, described, left_as_draft));
+                .map(|change| finished_detail(change, worker_drafted, described, left_as_draft));
             let detail: Vec<String> = [drafted, finished, compared]
                 .into_iter()
                 .flatten()
@@ -703,15 +706,23 @@ fn drafted_status(
 /// one sentence a settlement carries about it.
 ///
 /// Three facts and no more, each read off what happened rather than off what was
-/// asked: who opened it — the worker, as a draft, or an earlier publication of
-/// this same branch — whether the drafted description reached it, and whether it
-/// was marked ready for review or left as the draft the plan asked for. Written
-/// once so `results` and `status` read the same words.
-fn finished_detail(change: &onevcs::SessionChange, described: bool, left_as_draft: bool) -> String {
-    let opened = if change.draft {
-        "the worker opened the change request as a draft"
-    } else {
-        "the change request was already open from an earlier publication of this branch"
+/// asked: who opened it — this session's worker, as a draft; an earlier
+/// publication of this same branch that left it as one; or one that left it
+/// open — whether the drafted description reached it, and whether it was marked
+/// ready for review or left as the draft the plan asked for. Written once so
+/// `results` and `status` read the same words.
+fn finished_detail(
+    change: &onevcs::SessionChange,
+    worker_drafted: bool,
+    described: bool,
+    left_as_draft: bool,
+) -> String {
+    let opened = match (change.draft, worker_drafted) {
+        (true, true) => "the worker opened the change request as a draft",
+        (true, false) => "an earlier publication of this branch left the change request as a draft",
+        (false, _) => {
+            "the change request was already open from an earlier publication of this branch"
+        }
     };
     let description = if described {
         "the closeout wrote the drafted description onto it"

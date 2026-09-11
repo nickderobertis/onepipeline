@@ -3339,6 +3339,19 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
     let settled = settlement_of(&world, &run, "consumer");
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
+    // And its detail says whose draft the closeout lifted: the first
+    // publication's, not the second worker's — that worker drafted nothing, and
+    // a settlement that said it had would send a reader to a transcript for a
+    // decision nobody in it made. No drafting graph was named, so the
+    // description stands as it was.
+    assert_eq!(
+        settled["payload"]["detail"],
+        json!(
+            "an earlier publication of this branch left the change request as a draft; the \
+             closeout left the description as the worker left it and marked it ready for review"
+        ),
+        "{settled}"
+    );
     assert_eq!(
         world.events_of(&run, "node-settled").len(),
         3,
