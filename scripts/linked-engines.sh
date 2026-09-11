@@ -13,10 +13,21 @@
 # is about whether "the release this build links" is a question with one answer
 # at all.
 #
-# Exits 0 with one current copy of each engine, 1 naming every engine the lock
-# splits or holds behind, 2 for an argument it cannot use, and 3 for a manifest,
-# lock, or index it could not read — which says nothing about currency either
-# way. `--index` also takes a directory in the sparse index's own layout.
+# And it tells a lock that is *behind* from one that is *held back*. A newer
+# release of one engine can require a second engine outside the window this
+# manifest states for it — `onevcs-testing` 0.5.7 requiring `onevcs ^0.20.0`
+# under `onevcs = "0.19.2"` — and the `cargo update` that would take it puts that
+# second engine in the graph twice, which is the very state the count above
+# refuses. So "the newest release the requirement permits" is read among the
+# releases this manifest's own sibling requirements admit: a release held back is
+# reported on its own line and fails nothing, because nothing but a requirement
+# move lifts it, and the lock is behind only what it could actually take.
+#
+# Exits 0 with one copy of each engine, each the newest its requirement permits
+# that this manifest admits; 1 naming every engine the lock splits or holds
+# behind; 2 for an argument it cannot use; and 3 for a manifest, lock, or index it
+# could not read — which says nothing about currency either way. `--index` also
+# takes a directory in the sparse index's own layout.
 #
 # Usage:
 #   linked-engines.sh [--format check|notes] [--manifest PATH] [--lock PATH]
@@ -214,13 +225,30 @@ index_path() {
 # What comes back is still a third party's, so this answers in tagged lines and
 # each way a record can be unreadable gets its own tag, which the caller refuses
 # by name: `not-json` for a line that is not one JSON object, `twice` for one
-# carrying `name`, `vers` or `yanked` more than once, `unreadable` for one where
-# any of the three is missing or is not the shape it should be, and
-# `foreign <name>` for one filed under another crate. A readable release is
-# `release <version>`, tagged like the rest because a bare version and a bare
-# marker are the same shape and the index chooses the version. Any of these
-# dropped silently would leave the lines around it answering "the newest release"
-# for a file that had more.
+# carrying `name`, `vers`, `deps` or `yanked` more than once, `unreadable` for
+# one where any of `name`, `vers` or `yanked` is missing or is not the shape it
+# should be, `foreign <name>` for one filed under another crate, and
+# `unreadable-dep <version>` for a release whose `deps` entry for a sibling this
+# cannot read. A readable release is `release <version>`, tagged like the rest
+# because a bare version and a bare marker are the same shape and the index
+# chooses the version. Any of these dropped silently would leave the lines around
+# it answering "the newest release" for a file that had more.
+#
+# What a release requires of the other siblings comes out *before* its own
+# line, one `requires <name> <kind> <req>` per entry of its `deps` that names an
+# engine in SIBLINGS, so the caller has the whole record in hand when the
+# `release` line arrives. Only those three members are read, and only off a
+# sibling's entry: `name` because it is what says whose requirement this is,
+# `req` because it is the requirement, and `kind` because a `dev` requirement
+# of a dependency is one cargo never resolves — `oneagentgraph` requires `onevcs`
+# as a dev-dependency at a window this manifest does not admit, and that holds
+# nothing back. A sibling entry whose `name`, `req` or `kind` is missing,
+# repeated or not a string, or whose `kind` is not one cargo writes, is refused
+# rather than read as "not held back", which is the answer that would send a
+# reader to run an update that splits the graph. A record with no `deps` at all
+# says nothing about what it requires and holds nothing back — and the worst a
+# mirror that dropped the member could then do is report a lock as behind, which
+# is the answer this check gave before it could read one.
 #
 # Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4, and
 # crates.io serves versions spelled that way — so it is stripped rather than
@@ -229,7 +257,7 @@ index_path() {
 # third-party input parsed in awk rather than by a library, and asks for a real
 # parser. `read_record` is one, for the object level this consults: it walks the
 # record token by token, tracks nesting so a `deps` entry's fields are never
-# mistaken for the record's own, requires each of the three members it reads to
+# mistaken for the record's own, requires each of the members it reads to
 # appear exactly once and to hold the type it should, and refuses the record
 # otherwise. It is checked against `json.loads` over all five engines' real index
 # files, and the shapes it refuses are driven in `tests/linked_engines.rs`. The
@@ -267,7 +295,8 @@ index_versions() {
       body="$(cat "$index/$path")"
       ;;
   esac
-  printf '%s\n' "$body" | awk -v want="$name" '
+  printf '%s\n' "$body" | awk -v want="$name" -v siblings="${SIBLINGS[*]}" '
+    BEGIN { n_sib = split(siblings, sib_list, " "); for (k = 1; k <= n_sib; k++) SIBLING[sib_list[k]] = 1 }
     function skip_ws(s, i,   c) {
       while (i <= length(s)) {
         c = substr(s, i, 1)
@@ -321,16 +350,80 @@ index_versions() {
       if (key == "name")   { if (SAW_NAME)   TWICE = 1; SAW_NAME   = 1; return 1 }
       if (key == "vers")   { if (SAW_VERS)   TWICE = 1; SAW_VERS   = 1; return 1 }
       if (key == "yanked") { if (SAW_YANKED) TWICE = 1; SAW_YANKED = 1; return 1 }
+      if (key == "deps")   { if (SAW_DEPS)   TWICE = 1; SAW_DEPS   = 1; return 1 }
       return 0
+    }
+    # One entry of `deps`, read the way `read_record` reads the record: member
+    # by member, nested values skipped whole. Returns the index past its
+    # closing brace, or 0 where it never closes. What it decides lands in
+    # DEP_BAD and DEPS rather than in a return value, because the walk has to
+    # go on past an entry this cannot read to find the end of the record.
+    function read_dep(s, i,   n, c, key, name, req, kind, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, twice) {
+      n = length(s)
+      i = skip_ws(s, i + 1)
+      if (substr(s, i, 1) == "}") { DEP_BAD = 1; return i + 1 }
+      while (1) {
+        if (substr(s, i, 1) != "\"") return 0
+        i = scan_string(s, i, 1); if (i == 0) return 0
+        key = STR
+        i = skip_ws(s, i)
+        if (substr(s, i, 1) != ":") return 0
+        i = skip_ws(s, i + 1)
+        c = substr(s, i, 1)
+        if (c == "\"") {
+          i = scan_string(s, i, 1); if (i == 0) return 0
+          if (key == "name")      { ok_name = 1; name = STR }
+          else if (key == "req")  { ok_req = 1; req = STR }
+          else if (key == "kind") { ok_kind = 1; kind = STR }
+        } else if (c == "{" || c == "[") {
+          i = scan_nested(s, i); if (i == 0) return 0
+        } else {
+          i = scan_literal(s, i); if (i == 0) return 0
+        }
+        if (key == "name")      { if (saw_name) twice = 1; saw_name = 1 }
+        else if (key == "req")  { if (saw_req)  twice = 1; saw_req  = 1 }
+        else if (key == "kind") { if (saw_kind) twice = 1; saw_kind = 1 }
+        i = skip_ws(s, i)
+        c = substr(s, i, 1)
+        if (c == ",") { i = skip_ws(s, i + 1); continue }
+        if (c == "}") break
+        return 0
+      }
+      # An entry whose name cannot be read is one this cannot tell from a
+      # sibling, so it is refused; one that names some other crate is skipped
+      # whole, whatever else is on it.
+      if (!ok_name || twice) { DEP_BAD = 1; return i + 1 }
+      if (!(name in SIBLING)) return i + 1
+      if (!ok_req || !ok_kind) { DEP_BAD = 1; return i + 1 }
+      if (kind != "normal" && kind != "build" && kind != "dev") { DEP_BAD = 1; return i + 1 }
+      DEPS[++NDEPS] = name " " kind " " req
+      return i + 1
+    }
+    # The `deps` array: every entry an object, or the record is not one the
+    # registry wrote.
+    function read_deps(s, i,   n, c) {
+      n = length(s)
+      i = skip_ws(s, i + 1)
+      if (substr(s, i, 1) == "]") return i + 1
+      while (1) {
+        if (substr(s, i, 1) != "{") return 0
+        i = read_dep(s, i); if (i == 0) return 0
+        i = skip_ws(s, i)
+        c = substr(s, i, 1)
+        if (c == ",") { i = skip_ws(s, i + 1); continue }
+        if (c == "]") return i + 1
+        return 0
+      }
     }
     # A member is read only where it holds the shape it should: a `yanked`
     # spelled as a string is not a flag that happens to say `false`, so its OK_
     # stays unset and the caller refuses the record.
     function read_record(s,   i, n, c, key) {
       NAME = ""; VERS = ""; YANKED = ""
-      SAW_NAME = 0; SAW_VERS = 0; SAW_YANKED = 0
+      SAW_NAME = 0; SAW_VERS = 0; SAW_YANKED = 0; SAW_DEPS = 0
       OK_NAME = 0; OK_VERS = 0; OK_YANKED = 0
-      TWICE = 0; BAD = 0
+      TWICE = 0; BAD = 0; DEP_BAD = 0
+      split("", DEPS); NDEPS = 0
       n = length(s)
       i = skip_ws(s, 1)
       if (substr(s, i, 1) != "{") { BAD = 1; return }
@@ -350,15 +443,22 @@ index_versions() {
           note(key)
           if (key == "name") { OK_NAME = 1; NAME = STR }
           else if (key == "vers") { OK_VERS = 1; VERS = STR }
+          else if (key == "deps") DEP_BAD = 1
+        } else if (key == "deps" && c == "[") {
+          i = read_deps(s, i); if (i == 0) { BAD = 1; return }
+          note(key)
         } else if (c == "{" || c == "[") {
           i = scan_nested(s, i); if (i == 0) { BAD = 1; return }
           note(key)
+          # A `deps` that is not an array is not a list this can read.
+          if (key == "deps") DEP_BAD = 1
         } else {
           i = scan_literal(s, i); if (i == 0) { BAD = 1; return }
           note(key)
           if (key == "yanked" && (LIT == "true" || LIT == "false")) {
             OK_YANKED = 1; YANKED = LIT
           }
+          if (key == "deps") DEP_BAD = 1
         }
         i = skip_ws(s, i)
         c = substr(s, i, 1)
@@ -382,6 +482,12 @@ index_versions() {
       core = VERS
       sub(/\+.*$/, "", core)
       if (core ~ /-/) next
+      # Decided after the two skips above: a release no requirement can resolve
+      # to is one whose requirements are never consulted, so an entry on it this
+      # cannot read is not refused over — as an unorderable `vers` on a yanked
+      # record is not.
+      if (DEP_BAD) { print "unreadable-dep " core; next }
+      for (k = 1; k <= NDEPS; k++) print "requires " DEPS[k]
       print "release " core
     }
   '
@@ -392,6 +498,13 @@ index_versions() {
 rows=()
 # The subset that are behind, as `name resolved permitted`.
 behind=()
+# One entry per engine a newer release of which this manifest holds back, as
+# `name linked held dep dep_req manifest_req state`: the copy the lock links,
+# the newest release held back, the sibling whose requirement holds it, what the
+# release requires of that sibling, what this manifest states for it, and
+# whether the linked copy is `current` or `behind` the newest release admitted —
+# because "links the newest this manifest admits" is only true of the first.
+heldback=()
 
 # Every array this file fills is expanded below as `${a[@]+"${a[@]}"}` rather
 # than as `"${a[@]}"`. macOS ships bash 3.2 — the last GPLv2 release, and what
@@ -494,7 +607,16 @@ for name in "${SIBLINGS[@]}"; do
   # this only has to stop rather than write a second diagnosis over the first.
   served="$(index_versions "$name")" || exit 3
 
+  # The newest release in the window that this manifest's own sibling
+  # requirements admit — which is the only release the lock can be *behind*.
   permitted=""
+  # Every release in the window they do not, as `version dep req dep_req`; and
+  # the newest of them, which is the one worth a line.
+  held=()
+  held_newest=""
+  # What the record about to be answered requires of the siblings, as
+  # `dep kind req`, gathered off the `requires` lines that precede its own.
+  pending=()
   # Each tag `index_versions` emits names a different way the record was
   # unreadable, so the refusal says what it saw rather than that something was
   # wrong with it. A tag this does not know is a reader and a caller that have
@@ -505,9 +627,11 @@ for name in "${SIBLINGS[@]}"; do
     [ -n "$verdict" ] || continue
     case "$verdict" in
       release) ;;
+      requires) pending+=("$version"); continue ;;
       not-json) die "the index served a '$name' line that is not one JSON object" "$not_sparse" ;;
-      twice) die "the index served a '$name' record carrying name, vers or yanked more than once" "$not_sparse" ;;
+      twice) die "the index served a '$name' record carrying name, vers, deps or yanked more than once" "$not_sparse" ;;
       unreadable) die "the index served a '$name' record with no readable name, vers or yanked on it" "$not_sparse" ;;
+      unreadable-dep) die "the index served a '$name' $version record whose deps entry for a sibling engine this check cannot read: a name, req or kind missing, repeated or not a string, or a kind cargo does not write" "$not_sparse" ;;
       foreign) die "the index served a record for '$version' under '$name'" \
         "'$index' files a crate's releases under another crate's name — pass '--index' naming a sparse-index tree that does not" ;;
       *) die "the reader of '$index' answered '$verdict', which this check has no rule for" \
@@ -516,22 +640,77 @@ for name in "${SIBLINGS[@]}"; do
     orderable "$version" || die "the index serves '$name' at '$version', which is not a version this check can order" \
       "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
     if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then
-      if [ -z "$permitted" ] || ver_lt "$permitted" "$version"; then
+      # Held back by this manifest's own requirement on a sibling: what the
+      # release requires of that sibling and what this manifest states for it
+      # share no version, so taking the release means a second copy of the
+      # sibling — the state the count above refuses — and no `cargo update`
+      # resolves it. A dev requirement never holds anything back, because cargo
+      # never resolves a dependency's own dev-dependencies.
+      holder=""
+      for entry in ${pending[@]+"${pending[@]}"}; do
+        read -r dep kind dep_req <<<"$entry"
+        [ "$kind" != dev ] || continue
+        manifest_req="$(requirement "$dep")"
+        [ -n "$manifest_req" ] || die "'$dep' has no requirement in [workspace.dependencies] of '$manifest'" \
+          "add the pin there, or drop '$dep' from SIBLINGS in this script if this repository no longer links it"
+        manifest_window="$(req_window "$manifest_req")" || die "'$dep = \"$manifest_req\"' is a requirement shape this check does not model" \
+          "state the pin as a plain caret version (\"0.3.0\", \"0.12\"), or extend req_window() in this script to model the operator"
+        read -r manifest_lower manifest_upper <<<"$manifest_window"
+        stated_window="$(req_window "$dep_req")" || die "the index serves '$name' $version requiring '$dep' as '$dep_req', which is a requirement shape this check does not model" \
+          "extend req_window() in this script to model the operator, or pass '--index' naming a registry whose records state plain caret requirements"
+        read -r stated_lower stated_upper <<<"$stated_window"
+        if ver_ge "$stated_lower" "$manifest_upper" || ver_ge "$manifest_lower" "$stated_upper"; then
+          holder="$dep $dep_req $manifest_req"
+          break
+        fi
+      done
+      if [ -n "$holder" ]; then
+        held+=("$version $holder")
+        if [ -z "$held_newest" ] || ver_lt "$held_newest" "$version"; then
+          held_newest="$version"
+        fi
+      elif [ -z "$permitted" ] || ver_lt "$permitted" "$version"; then
         permitted="$version"
       fi
     fi
+    pending=()
   done <<<"$served"
+
+  # A linked copy this manifest's own requirements hold back is a lock and a
+  # manifest that disagree — cargo would not have resolved it — which is neither
+  # current nor behind, and the answer is the one every other disagreement gets.
+  for version in ${governed[@]+"${governed[@]}"}; do
+    for entry in ${held[@]+"${held[@]}"}; do
+      read -r held_version dep dep_req manifest_req <<<"$entry"
+      [ "$held_version" = "${version%%+*}" ] || continue
+      die "'$lock' links '$name' at $version, which requires $dep $dep_req, and '$dep = \"$manifest_req\"' in '$manifest' admits no version of that" \
+        "the lock and the manifest disagree about '$dep' — run 'cargo update --workspace' and commit the lock"
+    done
+  done
+
   [ -n "$permitted" ] || die "the index serves no '$name' version that '$req' permits" \
     "the requirement names a window the registry has nothing in — correct the pin in '$manifest'"
 
+  # Worth a line only where it is newer than what the lock could take: a release
+  # below that is one the manifest moved past, and nothing about it is news.
+  state=current
   for version in ${governed[@]+"${governed[@]}"}; do
     if ver_lt "${version%%+*}" "$permitted"; then
       rows+=("$name|$version|$req|$permitted|behind")
       behind+=("$name $version $permitted")
+      state=behind
     else
       rows+=("$name|$version|$req|$permitted|current")
     fi
   done
+  if [ -n "$held_newest" ] && ver_lt "$permitted" "$held_newest"; then
+    for entry in ${held[@]+"${held[@]}"}; do
+      read -r held_version dep dep_req manifest_req <<<"$entry"
+      [ "$held_version" = "$held_newest" ] || continue
+      heldback+=("$name ${governed[0]} $held_newest $dep $dep_req $manifest_req $state")
+      break
+    done
+  fi
   # A copy outside the window is in the build because another crate in the graph
   # requires it, so no requirement of this repository's is a claim about it.
   # Reported anyway: it is linked, and this is the answer to what is linked.
@@ -579,8 +758,34 @@ if [ "$format" = notes ]; then
     done
     echo
   fi
+  # The held-back note is about the engines that are otherwise current; one
+  # that is behind as well carries the same fact on its own warning line below,
+  # where "links the newest this manifest admits" would be untrue of it.
+  held_current=()
+  for entry in ${heldback[@]+"${heldback[@]}"}; do
+    read -r name version held dep dep_req manifest_req state <<<"$entry"
+    [ "$state" = current ] || continue
+    held_current+=("$entry")
+  done
+  if [ "${#held_current[@]}" -gt 0 ]; then
+    echo "> [!NOTE]"
+    echo "> A newer release of an engine below exists that this build's own requirements"
+    echo "> **hold back**: it requires a sibling engine outside the window \`Cargo.toml\` states,"
+    echo "> so no \`cargo update\` takes it without a second copy of that sibling, and only a"
+    echo "> requirement move lifts it:"
+    echo ">"
+    for entry in ${held_current[@]+"${held_current[@]}"}; do
+      read -r name version held dep dep_req manifest_req state <<<"$entry"
+      echo "> - \`$name\` links $version, the newest its requirement permits that this manifest admits; $held is held back by \`$dep = \"$manifest_req\"\` ($held requires $dep $dep_req)."
+    done
+    echo
+  fi
   if [ "${#behind[@]}" -eq 0 ]; then
-    echo "Every linked engine is the newest its own requirement permits."
+    if [ "${#heldback[@]}" -eq 0 ]; then
+      echo "Every linked engine is the newest its own requirement permits."
+    else
+      echo "Every linked engine is the newest its own requirement permits among the releases this manifest admits."
+    fi
   else
     echo "> [!WARNING]"
     echo "> This release links an engine **older than its own requirement permits**, so reading"
@@ -588,12 +793,29 @@ if [ "$format" = notes ]; then
     echo ">"
     for entry in ${behind[@]+"${behind[@]}"}; do
       read -r name version permitted <<<"$entry"
-      echo "> - \`$name\` links $version; the requirement already permitted $permitted."
+      clause=""
+      for held_entry in ${heldback[@]+"${heldback[@]}"}; do
+        read -r held_name _ held dep dep_req manifest_req _ <<<"$held_entry"
+        [ "$held_name" = "$name" ] || continue
+        clause=" ($held is held back by \`$dep = \"$manifest_req\"\`: $held requires $dep $dep_req)"
+      done
+      echo "> - \`$name\` links $version; the requirement already permitted $permitted$clause."
     done
   fi
   exit 0
 fi
 # llmlint: ignore-end[tool_output_is_signal]
+
+# A held-back release is news rather than a finding, and it goes on stdout in
+# both verdicts: what it says is true of the lock whichever way the check goes,
+# and it carries no fix because there is none — the update that would take the
+# release is the one the unification refusal above exists to end. What lifts it
+# is the requirement it names moving.
+for entry in ${heldback[@]+"${heldback[@]}"}; do
+  read -r name version held dep dep_req manifest_req state <<<"$entry"
+  [ "$state" = current ] || continue
+  echo "$name: links $version, the newest its requirement permits that this manifest admits; $held is held back by $dep = \"$manifest_req\" ($held requires $dep $dep_req)"
+done
 
 if [ "${#behind[@]}" -eq 0 ]; then
   summary=""
@@ -602,7 +824,11 @@ if [ "${#behind[@]}" -eq 0 ]; then
     [ "$state" = current ] || continue
     summary="${summary:+$summary, }$name $version"
   done
-  echo "linked engines are current: $summary — each the newest its own requirement permits"
+  if [ "${#heldback[@]}" -eq 0 ]; then
+    echo "linked engines are current: $summary — each the newest its own requirement permits"
+  else
+    echo "linked engines are current: $summary — each the newest its own requirement permits among the releases this manifest admits"
+  fi
   exit 0
 fi
 
@@ -612,7 +838,19 @@ fi
   for entry in ${behind[@]+"${behind[@]}"}; do
     read -r name version permitted <<<"$entry"
     echo "  $name: links $version, but its requirement already permits $permitted"
-    echo "    fix: cargo update -p $name@$version"
+    # Where a held-back release sits above the one the lock could take, a bare
+    # `cargo update -p` takes *that* one — cargo resolves the newest release the
+    # requirement permits and adds the second sibling copy it needs, which the
+    # `onevcs-testing` 0.5.7 dry run answers with `Adding onevcs v0.20.0` — so
+    # the fix names the release the lock is actually behind.
+    precise=""
+    for held_entry in ${heldback[@]+"${heldback[@]}"}; do
+      read -r held_name _ held dep dep_req manifest_req _ <<<"$held_entry"
+      [ "$held_name" = "$name" ] || continue
+      precise=" --precise $permitted"
+      echo "    ($held is held back by $dep = \"$manifest_req\": $held requires $dep $dep_req)"
+    done
+    echo "    fix: cargo update -p $name@$version$precise"
   done
   echo
   echo "ACTION: run the update(s) above and commit the lock. The spec is version-qualified"

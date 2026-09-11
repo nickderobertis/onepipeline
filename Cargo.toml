@@ -396,7 +396,11 @@ resolver = "2"
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
-# second with no registry at all.
+# second with no registry at all. A newer release one of these pins **holds back**
+# — `onevcs-testing` 0.5.7 requires `onevcs ^0.20.0`, which the `onevcs` pin
+# admits no version of — is neither: the check names it and the pin holding it,
+# prints no update (the one that takes it resolves `onevcs` twice), and passes.
+# Only moving the pin lifts it, and that is a host-wide move another plan owns.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
 onevcs = "0.19.2"

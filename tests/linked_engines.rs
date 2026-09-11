@@ -28,6 +28,18 @@
 //! check reads each copy of a split engine separately and finds every one of
 //! them current, so nothing else here can see a graph carrying two.
 //!
+//! # The third answer
+//!
+//! *Held back* is neither current nor behind. A newer release can require a
+//! sibling engine outside the window this manifest states for it — the real
+//! `onevcs-testing` 0.5.7 requires `onevcs ^0.20.0` under `onevcs = "0.19.2"` —
+//! and the `cargo update` that takes it puts that sibling in the graph twice,
+//! which is what the second question refuses. A check that printed that update
+//! as the fix would print one its own next run rejects, and a check red on
+//! every branch is one nobody reads. So the index records here carry each
+//! release's `deps`, as the real ones do, and the held-back case is driven
+//! beside the behind and the twice ones.
+//!
 //! # What this cannot say
 //!
 //! Only that the lock is behind, never what is in the gap. A floor that matters
@@ -131,6 +143,10 @@ fn index_path(name: &str) -> String {
     format!("{}/{}/{name}", &name[0..2], &name[2..4])
 }
 
+/// What one release requires of one crate, as its index record states it:
+/// `(name, req, kind)`, the three members of a `deps` entry the check reads.
+type Requirement<'a> = (&'a str, &'a str, &'a str);
+
 /// One sparse-index record, shaped the way crates.io actually shapes one.
 ///
 /// The populated `deps` array is the fixture, not decoration around it: a real
@@ -142,54 +158,126 @@ fn index_path(name: &str) -> String {
 ///
 /// The nesting is the real one too — an array of objects, an object of arrays,
 /// a `null`, and a string carrying a crate name — because each is a place the
-/// record's own members could be read out of.
-fn index_record(name: &str, version: &str, yanked: bool) -> String {
+/// record's own members could be read out of. The first entry is a crate
+/// outside `SIBLINGS`, at a requirement no manifest here states, because a
+/// reader that took every entry for a sibling's would hold every release back
+/// on it. `requires` are the sibling entries: what the release states it needs
+/// of the other engines, which is what decides whether this manifest admits it.
+fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement]) -> String {
+    let siblings: String = requires
+        .iter()
+        .map(|(dep, req, kind)| {
+            format!(
+                ",{{\"name\":\"{dep}\",\"req\":\"{req}\",\"features\":[],\"optional\":false,\
+                 \"default_features\":true,\"target\":null,\"kind\":\"{kind}\"}}"
+            )
+        })
+        .collect();
     format!(
         "{{\"name\":\"{name}\",\"vers\":\"{version}\",\"deps\":[\
-         {{\"name\":\"onevcs\",\"req\":\"^0.13\",\"features\":[],\"optional\":false,\
-         \"default_features\":true,\"target\":null,\"kind\":\"normal\"}},\
-         {{\"name\":\"oneagentgraph\",\"req\":\"^0.3.0\",\"features\":[\"test-doubles\"],\
-         \"optional\":true,\"default_features\":true,\"target\":\"cfg(windows)\",\
-         \"kind\":\"dev\"}}],\"cksum\":\"0\",\
+         {{\"name\":\"serde\",\"req\":\"^1.0.219\",\"features\":[\"derive\"],\"optional\":true,\
+         \"default_features\":true,\"target\":\"cfg(windows)\",\"kind\":\"normal\"}}{siblings}],\
+         \"cksum\":\"0\",\
          \"features\":{{\"test-doubles\":[\"dep:onevcs-testing\"]}},\"yanked\":{yanked},\
          \"rust_version\":\"1.88\",\"pubtime\":\"2026-08-23T05:22:32Z\"}}\n"
     )
 }
 
+/// What each engine requires of the others, in the shape the registry records
+/// for the real graph today: the turn engine requires the harness core and the
+/// verdict vocabulary, the verdict vocabulary requires the harness core, and the
+/// test-support crate requires the exact engine it doubles. Each at the
+/// requirement this manifest itself states for that engine, so a fixture record
+/// is admitted by construction whatever the pins say when this runs.
+///
+/// The one `dev` entry is the real graph's too — `oneagentgraph` requires
+/// `onevcs` as a dev-dependency, at a window this manifest does not admit — and
+/// it is here because it is the entry a reader gets wrong first: cargo never
+/// resolves a dependency's dev-dependencies, so counting it would hold every
+/// `oneagentgraph` release back on a requirement no build ever meets.
+fn requires_today(name: &str) -> Vec<(String, String, &'static str)> {
+    let caret = |dep: &str| (dep.to_string(), format!("^{}", required(dep)), "normal");
+    match name {
+        "oneagentgraph" => vec![
+            caret("oneharness-core"),
+            caret("onejudge"),
+            ("onevcs".to_string(), "^0.1.0".to_string(), "dev"),
+        ],
+        "onejudge" => vec![caret("oneharness-core")],
+        "onevcs-testing" => vec![caret("onevcs")],
+        _ => Vec::new(),
+    }
+}
+
+/// A release a fixture index serves beyond what the lock links.
+struct Served {
+    name: &'static str,
+    version: &'static str,
+    yanked: bool,
+    /// What it requires of the other engines; `None` for what the real graph
+    /// requires today, which this manifest admits.
+    requires: Option<&'static [Requirement<'static>]>,
+}
+
+/// A release of `name` at `version`, requiring what the real graph requires.
+fn served(name: &'static str, version: &'static str) -> Served {
+    Served {
+        name,
+        version,
+        yanked: false,
+        requires: None,
+    }
+}
+
+impl Served {
+    fn yanked(self) -> Self {
+        Self {
+            yanked: true,
+            ..self
+        }
+    }
+
+    /// The same release, stating its own requirements on the siblings.
+    fn requiring(self, requires: &'static [Requirement<'static>]) -> Self {
+        Self {
+            requires: Some(requires),
+            ..self
+        }
+    }
+}
+
 /// A sparse-index tree that serves every version this build links, plus
-/// `extra`, as `(crate, version, yanked)`.
+/// `extra`.
 ///
 /// Returned as a path **relative** to the repository root: the script is run
 /// from there, and a relative path is one no shell has to translate on the
 /// Windows leg of the gate.
-fn index_serving(case: &str, extra: &[(&str, &str, bool)]) -> String {
+fn index_serving(case: &str, extra: &[Served]) -> String {
     let relative = format!("target/linked-engines/{case}");
     let root = repo_root().join(&relative);
     let _ = fs::remove_dir_all(&root);
 
-    let mut entries: Vec<(String, String, bool)> = SIBLINGS
-        .iter()
-        .flat_map(|name| {
-            linked(name)
-                .into_iter()
-                .map(move |version| (name.to_string(), version, false))
-        })
-        .collect();
-    entries.extend(
-        extra
-            .iter()
-            .map(|(name, version, yanked)| (name.to_string(), version.to_string(), *yanked)),
-    );
-
     for name in SIBLINGS {
+        let today = requires_today(name);
+        let today: Vec<Requirement> = today
+            .iter()
+            .map(|(dep, req, kind)| (dep.as_str(), req.as_str(), *kind))
+            .collect();
         let file = root.join(index_path(name));
         fs::create_dir_all(file.parent().expect("an index entry has a directory"))
             .expect("a fixture index directory");
-        let body: String = entries
+        let mut body: String = linked(name)
             .iter()
-            .filter(|(crate_name, _, _)| crate_name == name)
-            .map(|(_, version, yanked)| index_record(name, version, *yanked))
+            .map(|version| index_record(name, version, false, &today))
             .collect();
+        for release in extra.iter().filter(|release| release.name == name) {
+            body.push_str(&index_record(
+                name,
+                release.version,
+                release.yanked,
+                release.requires.unwrap_or(&today),
+            ));
+        }
         fs::write(&file, body).expect("a fixture index entry");
     }
     relative
@@ -310,9 +398,9 @@ fn the_currency_check_passes_when_every_engine_is_the_newest_its_requirement_per
     let index = index_serving(
         "current",
         &[
-            ("oneagentgraph", "0.3.99", true),
-            ("oneagentgraph", "0.4.0", false),
-            ("oneagentgraph", "0.3.98-rc.1", false),
+            served("oneagentgraph", "0.3.99").yanked(),
+            served("oneagentgraph", "0.4.0"),
+            served("oneagentgraph", "0.3.98-rc.1"),
         ],
     );
     let run = linked_engines(&["--index", &index]);
@@ -343,8 +431,8 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     let index = index_serving(
         "stale",
         &[
-            ("oneagentgraph", "0.3.100", false),
-            ("oneharness-core", "0.12.100", false),
+            served("oneagentgraph", "0.3.100"),
+            served("oneharness-core", "0.12.100"),
         ],
     );
 
@@ -420,6 +508,147 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
     );
 }
 
+/// A newer release this manifest's own requirement holds back is reported, and
+/// is not a finding.
+///
+/// The tree here is the real one's shape: the newest `onevcs-testing` requires
+/// an `onevcs` the pin beside it admits no version of. Taking it would resolve
+/// `onevcs` twice — the state
+/// [`the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions`] refuses
+/// — so there is no `cargo update` to print, and the check says so on its own
+/// line rather than failing on a fix its next run rejects.
+#[test]
+fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_a_finding() {
+    let linked_testing = &linked("onevcs-testing")[0];
+    let pinned_vcs = required("onevcs");
+    let index = index_serving(
+        "held-back",
+        &[served("onevcs-testing", "0.5.100").requiring(&[("onevcs", "^0.99.0", "normal")])],
+    );
+
+    let run = linked_engines(&["--index", &index]);
+    assert!(
+        run.status.success(),
+        "a release only a requirement move can take is not one the lock is behind, but the \
+         check failed on it — and the fix it would print splits the graph:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        report.contains(&format!(
+            "onevcs-testing: links {linked_testing}, the newest its requirement permits that \
+             this manifest admits; 0.5.100 is held back by onevcs = \"{pinned_vcs}\" (0.5.100 \
+             requires onevcs ^0.99.0)"
+        )),
+        "the check passed without naming the release held back, the requirement of this \
+         manifest holding it, and what the release itself requires — which is the whole of \
+         what a reader needs to decide whether to move the pin:\n{}",
+        said(&run)
+    );
+    assert!(
+        !report.contains("fix:") && !String::from_utf8_lossy(&run.stderr).contains("fix:"),
+        "the check printed a fix for a release nothing but a requirement move can take, so a \
+         reader who runs it resolves a sibling twice:\n{}",
+        said(&run)
+    );
+    assert!(
+        report.contains("linked engines are current"),
+        "the check passed without saying the lock is current, so a green run is not evidence \
+         about it:\n{}",
+        said(&run)
+    );
+}
+
+/// A `dev` requirement holds nothing back.
+///
+/// Cargo never resolves a dependency's own dev-dependencies, and the real
+/// `oneagentgraph` requires `onevcs` as one at a window this manifest does not
+/// admit. Read as a requirement, it would hold every `oneagentgraph` release
+/// back on a version no build ever needs — and the lock could never be behind
+/// that engine again. So a release whose only inadmissible requirement is `dev`
+/// is one the lock is plainly behind.
+#[test]
+fn a_dev_requirement_of_a_newer_release_holds_nothing_back() {
+    let stale_graph = &linked("oneagentgraph")[0];
+    let index = index_serving(
+        "dev-requirement",
+        &[served("oneagentgraph", "0.3.100").requiring(&[("onevcs", "^0.1.0", "dev")])],
+    );
+    let run = linked_engines(&["--index", &index]);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "a release whose only requirement outside this manifest's windows is a \
+         dev-dependency is one the lock can take, so a lock behind it has to fail:\n{}",
+        said(&run)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr)
+            .contains(&format!("cargo update -p oneagentgraph@{stale_graph}")),
+        "the refusal does not carry the update, so the dev requirement was read as holding \
+         the release back:\n{}",
+        said(&run)
+    );
+}
+
+/// Where a lock is behind an admissible release **and** a held-back one sits
+/// above it, the fix names the admissible release exactly.
+///
+/// A bare `cargo update -p` resolves the newest release the requirement
+/// permits — the held-back one — and adds the second sibling copy it needs;
+/// the real `onevcs-testing` dry run answers exactly that with `Adding onevcs
+/// v0.20.0`. So the spec the refusal prints carries `--precise`, and the
+/// refusal says why.
+#[test]
+fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_one() {
+    let stale_testing = &linked("onevcs-testing")[0];
+    let pinned_vcs = required("onevcs");
+    let index = index_serving(
+        "behind-under-held-back",
+        &[
+            served("onevcs-testing", "0.5.100"),
+            served("onevcs-testing", "0.5.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+        ],
+    );
+    let run = linked_engines(&["--index", &index]);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "the lock is behind a release this manifest admits, whatever sits above it:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        report.contains(&format!(
+            "onevcs-testing: links {stale_testing}, but its requirement already permits 0.5.100"
+        )),
+        "the refusal names a release other than the newest one this manifest admits:\n{}",
+        said(&run)
+    );
+    assert!(
+        report.contains(&format!(
+            "fix: cargo update -p onevcs-testing@{stale_testing} --precise 0.5.100"
+        )),
+        "the fix is not pinned to the admissible release, so running it takes the held-back \
+         one and resolves `onevcs` twice:\n{}",
+        said(&run)
+    );
+    assert!(
+        report.contains(&format!(
+            "(0.5.101 is held back by onevcs = \"{pinned_vcs}\": 0.5.101 requires onevcs ^0.99.0)"
+        )),
+        "the refusal does not say why the fix stops short of the newest release:\n{}",
+        said(&run)
+    );
+    // The stdout line is for an engine that is otherwise current, which this
+    // one is not: it would say the lock links the newest release admitted.
+    assert!(
+        !String::from_utf8_lossy(&run.stdout).contains("the newest its requirement permits"),
+        "the check called a behind engine the newest this manifest admits:\n{}",
+        said(&run)
+    );
+}
+
 /// This build resolves exactly one copy of every engine it links.
 ///
 /// The claim the refusal below exists to keep true, made about *this* tree and
@@ -463,6 +692,7 @@ fn the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions() {
         requirement: "1",
         locked: &["1.2.3", "2.4.0"],
         served: &["1.2.3", "2.0.0", "2.4.0"],
+        requires: &[],
     });
     let tree = tree("split-graph", &split);
 
@@ -542,7 +772,7 @@ fn the_release_note_records_the_version_of_every_engine_the_build_links() {
 fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
     let pinned = required("oneagentgraph");
-    let index = index_serving("notes-stale", &[("oneagentgraph", "0.3.100", false)]);
+    let index = index_serving("notes-stale", &[served("oneagentgraph", "0.3.100")]);
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
     assert!(
         run.status.success(),
@@ -575,6 +805,47 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     );
 }
 
+/// Where a newer release is held back, the notes say so in the check's own
+/// words — the reader who met the requirement and concluded the newer release
+/// was adopted is the one these notes are for.
+#[test]
+fn the_release_note_says_so_where_a_newer_release_is_held_back() {
+    let linked_testing = &linked("onevcs-testing")[0];
+    let pinned_vcs = required("onevcs");
+    let index = index_serving(
+        "notes-held-back",
+        &[served("onevcs-testing", "0.5.100").requiring(&[("onevcs", "^0.99.0", "normal")])],
+    );
+    let run = linked_engines(&["--index", &index, "--format", "notes"]);
+    assert!(
+        run.status.success(),
+        "composing the release note failed over a held-back release:\n{}",
+        said(&run)
+    );
+    let notes = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        notes.contains(&format!(
+            "- `onevcs-testing` links {linked_testing}, the newest its requirement permits that \
+             this manifest admits; 0.5.100 is held back by `onevcs = \"{pinned_vcs}\"` \
+             (0.5.100 requires onevcs ^0.99.0)."
+        )),
+        "the note does not say the newer release exists and why it was not taken, so a \
+         reader still has to diff the registry against the lock to learn it:\n{}",
+        said(&run)
+    );
+    assert!(
+        notes.contains(&format!("| `onevcs-testing` | {linked_testing} |")),
+        "the note dropped the ordinary row for an engine with a held-back release:\n{}",
+        said(&run)
+    );
+    assert!(
+        !notes.contains("Every linked engine is the newest its own requirement permits."),
+        "the note claims every engine is the newest its requirement permits while recording \
+         a newer release it could not take:\n{}",
+        said(&run)
+    );
+}
+
 /// Where the graph carries an engine twice, the notes say so rather than
 /// refusing to compose at all.
 ///
@@ -592,6 +863,7 @@ fn the_release_note_says_so_where_the_graph_carries_an_engine_twice() {
             requirement: "1",
             locked: &["1.2.3", "2.4.0"],
             served: &["1.2.3", "2.0.0", "2.4.0"],
+            requires: &[],
         }),
     );
     let mut args = tree.args();
@@ -638,12 +910,14 @@ fn the_engines_this_suite_expects_are_the_engines_the_check_reports_on() {
 }
 
 /// One engine's whole story in a tree of a test's own making: what the manifest
-/// requires, what the lock resolved, and what the registry serves.
+/// requires, what the lock resolved, what the registry serves, and what every
+/// served release states it requires of the other engines.
 struct Engine {
     name: &'static str,
     requirement: &'static str,
     locked: &'static [&'static str],
     served: &'static [&'static str],
+    requires: &'static [Requirement<'static>],
 }
 
 /// The paths a made-up tree is driven through, relative to the repository root
@@ -709,7 +983,7 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
         let body: String = engine
             .served
             .iter()
-            .map(|version| index_record(engine.name, version, false))
+            .map(|version| index_record(engine.name, version, false, engine.requires))
             .collect();
         fs::write(&file, body).expect("a fixture index entry");
     }
@@ -736,30 +1010,35 @@ const CARET_SHAPES: [Engine; 5] = [
         requirement: "2.1",
         locked: &["2.4.0"],
         served: &["2.4.0", "3.0.0"],
+        requires: &[],
     },
     Engine {
         name: "onevcs",
         requirement: "0",
         locked: &["0.9.9"],
         served: &["0.9.9", "1.0.0"],
+        requires: &[],
     },
     Engine {
         name: "onevcs-testing",
         requirement: "0.0.3",
         locked: &["0.0.3"],
         served: &["0.0.3", "0.0.4"],
+        requires: &[],
     },
     Engine {
         name: "onejudge",
         requirement: "0.0",
         locked: &["0.0.7"],
         served: &["0.0.7", "0.1.0"],
+        requires: &[],
     },
     Engine {
         name: "oneharness-core",
         requirement: "1",
         locked: &["1.2.3"],
         served: &["1.2.3", "2.0.0"],
+        requires: &[],
     },
 ];
 
@@ -812,7 +1091,21 @@ fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
 /// currency nothing established, which is the failure it exists to prevent.
 #[test]
 fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
-    let cases: [(&str, Engine, &str); 8] = [
+    let cases: [(&str, Engine, &str); 9] = [
+        // A linked copy this manifest's own requirements hold back: cargo would
+        // not have resolved it, so the lock and the manifest disagree, which is
+        // the answer every other disagreement between the two gets.
+        (
+            "linked-copy-held-back",
+            Engine {
+                name: "onevcs-testing",
+                requirement: "0.0.3",
+                locked: &["0.0.3"],
+                served: &["0.0.3", "0.0.4"],
+                requires: &[("onevcs", "^5.0.0", "normal")],
+            },
+            "the lock and the manifest disagree about 'onevcs'",
+        ),
         (
             "no-pin",
             Engine {
@@ -820,6 +1113,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "",
                 locked: &["0.0.7"],
                 served: &["0.0.7"],
+                requires: &[],
             },
             "has no requirement in [workspace.dependencies]",
         ),
@@ -830,6 +1124,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "{ version = \"0.0.7\", path = \"vendor/onejudge\" }",
                 locked: &["0.0.7"],
                 served: &["0.0.7"],
+                requires: &[],
             },
             "has no requirement in [workspace.dependencies]",
         ),
@@ -840,6 +1135,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: ">=0.9",
                 locked: &["0.9.9"],
                 served: &["0.9.9"],
+                requires: &[],
             },
             "is a requirement shape this check does not model",
         ),
@@ -850,6 +1146,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "0",
                 locked: &["1.5.0"],
                 served: &["0.9.9"],
+                requires: &[],
             },
             "resolves no 'onevcs' that '0' permits",
         ),
@@ -860,6 +1157,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "2.1",
                 locked: &["2.4.0"],
                 served: &["3.0.0"],
+                requires: &[],
             },
             "serves no 'oneagentgraph' version that '2.1' permits",
         ),
@@ -870,6 +1168,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "2.1",
                 locked: &["2.4.0"],
                 served: &[],
+                requires: &[],
             },
             "no index entry for 'oneagentgraph'",
         ),
@@ -880,6 +1179,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "0.0",
                 locked: &["0.0"],
                 served: &["0.0.7"],
+                requires: &[],
             },
             "resolves 'onejudge' at '0.0', which is not a version this check can order",
         ),
@@ -890,6 +1190,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
                 requirement: "0.0",
                 locked: &["0.0.7"],
                 served: &["0.0.7", "0.0"],
+                requires: &[],
             },
             "serves 'onejudge' at '0.0', which is not a version this check can order",
         ),
@@ -917,7 +1218,7 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
         (
             "twice-versioned-index-record",
             "{\"name\":\"oneagentgraph\",\"vers\":\"0.0.1\",\"vers\":\"9.9.9\",\"yanked\":false}",
-            "served a 'oneagentgraph' record carrying name, vers or yanked more than once",
+            "served a 'oneagentgraph' record carrying name, vers, deps or yanked more than once",
         ),
         // Not JSON at all, which is what a proxy, an error page or a mirror
         // serving its own format looks like from here.
@@ -952,6 +1253,56 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "unorderable-index-version",
             "{\"name\":\"oneagentgraph\",\"vers\":\"99999999999999999999.0.0\",\"yanked\":false}",
             "at '99999999999999999999.0.0', which is not a version this check can order",
+        ),
+        // A sibling's `deps` entry this cannot read is refused rather than read
+        // as "not held back" — that answer prints an update that splits the
+        // graph. Each of these is a release inside `^2.1`, so it would otherwise
+        // be the newest release the lock is behind. A `kind` missing, a `req`
+        // that is not a string, an entry with no `name` to tell a sibling by, a
+        // `deps` that is not a list at all, and a `deps` the record carries
+        // twice.
+        (
+            "dep-without-kind",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-restyped-req",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":7,\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-without-name",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"req\":\"^0.0.7\",\
+             \"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "deps-not-a-list",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":\"none\",\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "deps-twice",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[],\"deps\":[],\
+             \"yanked\":false}",
+            "served a 'oneagentgraph' record carrying name, vers, deps or yanked more than once",
+        ),
+        // A requirement the check does not model is refused as the manifest's
+        // own would be, rather than read as admitting — or as holding back —
+        // anything.
+        (
+            "dep-with-unmodelled-req",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\">=0.0.7, <0.1\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "serves 'oneagentgraph' 2.9.9 requiring 'onejudge' as '>=0.0.7, <0.1', which is a \
+             requirement shape this check does not model",
         ),
     ] {
         let fixture = tree(case, &CARET_SHAPES);
@@ -1348,6 +1699,7 @@ fn a_lock_carrying_build_metadata_is_ordered_by_the_release_under_it() {
         requirement: "2.1",
         locked: &["2.4.0+20260823"],
         served: &["2.4.0", "2.5.0"],
+        requires: &[],
     });
     let run = linked_engines(&tree("locked-build-metadata", &engines).args());
     assert_eq!(
@@ -1387,6 +1739,7 @@ fn a_release_carrying_build_metadata_is_one_the_lock_can_be_behind() {
         requirement: "^2.1",
         locked: &["2.4.0"],
         served: &["2.4.0", "2.5.0+20260823"],
+        requires: &[],
     });
     let run = linked_engines(&tree("build-metadata", &engines).args());
     assert_eq!(
