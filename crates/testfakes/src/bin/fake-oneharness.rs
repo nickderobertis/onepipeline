@@ -77,7 +77,7 @@ enum Occurs {
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 13] = [
+const FLAGS: [(&str, Takes, Occurs); 14] = [
     ("--compact", Takes::Nothing, Occurs::Once),
     ("--events", Takes::Nothing, Occurs::Once),
     ("--history", Takes::Nothing, Occurs::Once),
@@ -93,6 +93,9 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
     ("--prompt-file", Takes::AValue, Occurs::Once),
     ("--history-name", Takes::AValue, Occurs::Once),
     ("--session", Takes::AValue, Occurs::Once),
+    // onejudge 0.8.1 pins the evaluator's worktree read-only through it; the
+    // value is read through oneharness's own parser below.
+    ("--mode", Takes::AValue, Occurs::Once),
 ];
 
 /// Refuses an argv the real `oneharness run` would not take.
@@ -211,13 +214,24 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         .iter()
         .any(|arg| arg == "--history")
         .then(|| fake::flag(args, "--history-name").unwrap_or_else(|| "turn".to_string()));
+    // The permission mode the turn was asked to run under, held to oneharness's
+    // own spectrum by that library's parser: a word it does not spell is a launch
+    // the real CLI refuses, and a double that ran anyway would settle a member on
+    // it. Absent, the turn runs as this suite's configs select — unattended.
+    let mode = match fake::flag(args, "--mode") {
+        Some(word) => match PermissionMode::parse(&word) {
+            Ok(mode) => mode,
+            Err(refusal) => return fake::refuse(&format!("--mode {refusal}")),
+        },
+        None => PermissionMode::Bypass,
+    };
 
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_deref()),
+            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_deref(), mode),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
-        Side::Judge => judge_turn(&prompt, dir, selection.first()),
+        Side::Judge => judge_turn(&prompt, dir, selection.first(), mode),
     }
 }
 
@@ -388,8 +402,9 @@ fn agent_turn(
     dir: &std::path::Path,
     selection: &Selection,
     history: Option<&str>,
+    mode: PermissionMode,
 ) -> ExitCode {
-    match work(prompt, cwd, dir, selection, history) {
+    match work(prompt, cwd, dir, selection, history, mode) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -405,6 +420,7 @@ fn work(
     dir: &std::path::Path,
     selection: &Selection,
     history: Option<&str>,
+    mode: PermissionMode,
 ) -> Result<Outcome, String> {
     let ran = chain_step(dir, selection)?;
     // A worker turn that leaves something behind in the worktree it was given.
@@ -492,7 +508,7 @@ fn work(
         }
     }
 
-    let mut report = report(outcome.text(), Some(events), outcome, &ran.identity);
+    let mut report = report(outcome.text(), Some(events), outcome, &ran.identity, mode);
     report.results[0].observed_model = ran.observed_model.clone();
     if let Some(refused) = ran.refused {
         // The candidate stepped past goes first, as oneharness orders a chain's
@@ -522,7 +538,14 @@ fn work(
         report.results.insert(0, refused);
     }
     if let Some(name) = history {
-        report.history_file = Some(write_history(dir, cwd, name, prompt, &report.results)?);
+        report.history_file = Some(write_history(
+            dir,
+            cwd,
+            name,
+            prompt,
+            mode,
+            &report.results,
+        )?);
     }
     stream(&RunStreamEnvelope::Result { report })?;
     Ok(outcome)
@@ -664,6 +687,7 @@ fn write_history(
     cwd: &str,
     name: &str,
     prompt: &str,
+    mode: PermissionMode,
     results: &[RunResult],
 ) -> Result<String, String> {
     let store = dir.join("oneharness-history");
@@ -681,12 +705,7 @@ fn write_history(
     })?;
     for result in results {
         writer
-            .append(
-                PermissionMode::Bypass,
-                result.model.as_deref(),
-                prompt,
-                result,
-            )
+            .append(mode, result.model.as_deref(), prompt, result)
             .map_err(|error| {
                 format!(
                     "cannot write the history record for '{}': {error}",
@@ -703,11 +722,16 @@ fn write_history(
 /// so the prompt is the only thing that tells them apart. A third is refused
 /// rather than guessed at: onejudge reads each answer strictly, and one given to
 /// the wrong question is a protocol failure it reports as the *member* dying.
-fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
+fn judge_turn(
+    prompt: &str,
+    dir: &std::path::Path,
+    identity: &Identity,
+    mode: PermissionMode,
+) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
     } else if prompt.contains(EVALUATOR_OPENING) {
-        Ok(CRITERION_MET.to_string())
+        verdict(dir)
     } else {
         Err(format!(
             "the judge side was asked something this double does not answer; it speaks the \
@@ -718,7 +742,9 @@ fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitC
     // A judgement is `Answered` whatever it decided: the turn that reached the
     // decision succeeded, and a supervisor saying the work is not done is not a
     // harness that failed to run.
-    match answer.and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity))) {
+    match answer
+        .and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity, mode)))
+    {
         Ok(document) => {
             print!("{document}");
             ExitCode::SUCCESS
@@ -842,6 +868,23 @@ const SUPERVISED_COMPLETE: &str =
 // `SUPERVISOR_OPENING` above, gated the same way.
 const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 
+/// The evaluator's verdict over the finished conversation: the criterion holds,
+/// unless a journey scripted `judge.unmet` with the reason it does not.
+///
+/// The one way a member fails its **own** bar through the real supervisor: a
+/// conversation the supervisor called complete and the evaluator then refused
+/// settles `completed: false` on its verdict, where every other failure this
+/// double can act out is a harness that refused, died, or contradicted itself.
+fn verdict(dir: &std::path::Path) -> Result<String, String> {
+    match fake::node_script(dir, "judge", "unmet") {
+        Some(reason) if !reason.trim().is_empty() => {
+            document(&serde_json::json!({"value": false, "reason": reason.trim()}))
+        }
+        Some(_) => Err("judge.unmet names no reason the criterion is unmet".to_string()),
+        None => Ok(CRITERION_MET.to_string()),
+    }
+}
+
 /// What the evaluator answers: the criterion is satisfied.
 ///
 /// onejudge's own verdict shape — a `value` of the type the query asked for, and
@@ -914,11 +957,15 @@ impl Outcome {
     }
 
     /// The problem the result names, which is `null` on a turn that had none.
+    ///
+    /// `null` on the rejection as well: oneharness's record holds a failure text
+    /// only where the status reported a failure, and this one says `ok` — so a
+    /// text beside it is a record that library's own writer refuses, not the
+    /// contradiction it writes. The classification alone is the contradiction.
     fn error(self) -> Option<String> {
         match self {
-            Self::Answered => None,
+            Self::Answered | Self::ProviderRejected => None,
             Self::TurnFailed => Some(self.text().to_string()),
-            Self::ProviderRejected => Some("API Error: 429 rate limit exceeded".to_string()),
         }
     }
 
@@ -1055,6 +1102,7 @@ fn report(
     events: Option<Vec<ActionEvent>>,
     outcome: Outcome,
     identity: &Identity,
+    mode: PermissionMode,
 ) -> RunReport {
     RunReport {
         schema_version: SCHEMA_VERSION.into(),
@@ -1065,8 +1113,8 @@ fn report(
         resume: None,
         fork: false,
         session: None,
-        permission_mode: PermissionMode::Bypass,
-        bypass_permissions: true,
+        permission_mode: mode,
+        bypass_permissions: mode == PermissionMode::Bypass,
         dry_run: false,
         schema: None,
         schema_max_retries: None,

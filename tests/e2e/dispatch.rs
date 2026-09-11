@@ -2811,7 +2811,8 @@ fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
 
 /// A candidate whose server would run the turn under a model other than the one
 /// its config names is refused before a token is spent, stepped past, and named
-/// — on the record the settled node points at and on the line a reader is shown.
+/// — on the record the settled node points at and under the node's own failure
+/// line, as the recovery it was.
 ///
 /// The loss this is named for. A `--control` codex turn let the server pick the
 /// thread's model, so a config that said Sol silently spent Astra at ten times
@@ -2828,12 +2829,17 @@ fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
 /// Driven through the real supervisor and the real graph. The chain is the agent
 /// side's own config — `codex` asked for one model, then `claude-code` — and the
 /// one stand-in, at onejudge's spawning seam, reports the server naming another,
-/// in `oneharness_core`'s own types. Nothing is asserted at a seam: the real
-/// onejudge reads that report and attributes it, the real `oneagentgraph`
-/// publishes the advance and the session pointer, and what is read back is this
-/// crate's journal, its rendered views, the report the settlement retained, and
-/// the history record the pointer names — through oneharness's own reader, so
-/// every spelling below is that library's rather than one restated here.
+/// in `oneharness_core`'s own types. The candidate that honoured the model then
+/// runs the turn, and the evaluator refuses the node's `done_when` over it, so
+/// the node fails on its **own** bar: that is the one place this crate renders
+/// what a chain did, and the point of the line is that a chain which recovered
+/// is reported beside the failure and never as its reason. Nothing is asserted
+/// at a seam: the real onejudge reads
+/// that report and attributes it, the real `oneagentgraph` publishes the advance
+/// and the session pointer, and what is read back is this crate's journal, its
+/// rendered views, the report the settlement retained, and the history record
+/// the pointer names — through oneharness's own reader, so every spelling below
+/// is that library's rather than one restated here.
 #[test]
 fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record() {
     use oneharness_core::domain::fallback::FallThroughReason;
@@ -2856,6 +2862,10 @@ fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_rec
     .expect("the two-candidate chain is written");
     // What the first candidate's server says the thread would run under.
     world.script("harness.serves", served);
+    // The evaluator refuses the node's own criterion over the finished
+    // conversation, which is the one failure that is the node's rather than a
+    // harness's.
+    world.script("judge.unmet", "the change builds nothing");
     let path = world.plan(
         "misrouted",
         &plan_of("misrouted", vec![agent("build", &[])]),
@@ -2868,12 +2878,20 @@ fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_rec
             "--node-set",
             "members.worker.agent.oneharness_config=./chain.toml",
         ])
-        .exited(0)
         .settled();
+    world.until("the run to settle on the refused criterion", |world| {
+        world.run_file("misrouted", "result.json").is_file()
+    });
     let node = world.run_json("misrouted", "result.json")["nodes"][0].clone();
     assert_eq!(
-        node["status"], "done",
-        "the next candidate honoured the model, so the node settles on its turn: {node}"
+        node["status"], "failed",
+        "the node fails on its own criterion over the turn the honouring candidate ran, \
+         not on the chain: {node}"
+    );
+    assert_eq!(
+        node["outcome"], "task-failed",
+        "a chain that recovered was settled as something other than its own \
+         conversation's verdict: {node}"
     );
 
     // The advance, as the real graph published it and this crate relayed it:
@@ -3027,25 +3045,29 @@ fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_rec
         "the pointer names a record other than the invocation that ran: {session:?}"
     );
 
-    // And the line a reader is shown: the side, the identity, oneharness's
-    // reason, and who served the turn instead — a recovery, never the reason the
-    // node failed, because it did not.
+    // And the line a reader is shown under the node's failure: the side, the
+    // identity, oneharness's reason, and who served the turn instead — a
+    // recovery beside the failure, never the reason for it, because the chain
+    // did not run out.
     let line = format!(
         "fallback: the agent side fell through 'codex' ({}) → served by 'claude-code'",
         FallThroughReason::ModelMismatch.as_str()
     );
-    world
-        .run(&["results", "misrouted"])
-        .exited(0)
-        .out_has(&line);
+    let results = world.run(&["results", "misrouted"]);
+    results.exited(0).out_has(&line);
+    assert!(
+        !results.stdout.contains("provider:") && !results.stdout.contains("refused"),
+        "a chain that recovered was reported as a refusal:\n{}",
+        results.stdout
+    );
     let status = world.run(&["status", "misrouted"]);
     status
         .exited(0)
         .out_has("build: fallback — the agent side fell through 'codex'")
         .out_has("served by 'claude-code'");
     assert!(
-        !status.stdout.contains("refused"),
-        "a chain that recovered was reported as a refusal:\n{}",
+        !status.stdout.contains("build: failed — the agent side"),
+        "a chain that recovered was reported as the node's failure:\n{}",
         status.stdout
     );
 }
