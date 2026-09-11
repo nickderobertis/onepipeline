@@ -251,17 +251,19 @@ fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_e
 #[test]
 fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_chain_stopped() {
     let world = World::new("boundary-unclassified");
-    // Two turns of one member, each with a chain of its own. The first stepped
-    // past one candidate and ran on the next; the second stepped past *that*
-    // one, ran on the one behind it, and the member died on it with a cause the
-    // producer could not name. The chain the finding names is the second's.
+    // One turn of one two-party member, and a chain per side of it. The agent
+    // side stepped past one candidate and ran on the next; the judge side then
+    // stepped past *that* one, ran on the one behind it, and the member died on
+    // it with a cause the producer could not name. The two sides prefer
+    // different identities, so the chain the finding names has to be the judge
+    // side's and only it — a reader sent to the agent side's would fix nothing.
     world.script(
         "build.served",
-        "agent 1 fake-provider/first\nagent 2 fake-provider/claude-code\n",
+        "agent 1 fake-provider/first\njudge 1 fake-provider/claude-code\n",
     );
     world.script(
         "build.refused",
-        "agent 1 fake-provider/zero auth\nagent 2 fake-provider/first quota\n",
+        "agent 1 fake-provider/zero auth\njudge 1 fake-provider/first quota\n",
     );
     world.script(
         "build.died-as",
@@ -283,10 +285,10 @@ fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_c
         .as_str()
         .expect("a finding says something");
     for named in [
-        "node 'build'",
+        "node 'build' (member 'worker', judge side)",
         "stopped at fake-provider/claude-code",
         "no identity behind that candidate was tried",
-        // The second turn's chain, and only it.
+        // The judge side's chain, and only it.
         "stepped past: fake-provider/first [quota]\n",
         "detail: the harness answered with no usable result; see `raw_response` on the \
          transcript",
@@ -299,7 +301,7 @@ fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_c
     }
     assert!(
         !message.contains("fake-provider/zero"),
-        "the finding named a candidate an earlier turn's chain stepped past:\n{message}"
+        "the finding named a candidate the other side's chain stepped past:\n{message}"
     );
 
     // And the node settled as it always has on a provider death: the finding

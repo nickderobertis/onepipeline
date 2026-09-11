@@ -3974,22 +3974,44 @@ impl MemberDeath {
 /// What one producer's stream has said about the identity chains its members
 /// ran on, kept for the death that stops one.
 ///
-/// A chain is one member's, on one turn: the candidates a `fallback-advanced`
-/// said it stepped past, each with its reason, and the identity the
-/// `oneharness-session` said then served the turn. Both are read through the
-/// producer's own declared payloads, as [`crate::projection`] folds them, and
-/// paired the way that fold pairs them — by member and by the turn each record
-/// stamps, so a member's second turn is a second chain rather than the first
-/// one's records grown. A single-sided member stamps no turn on either record,
-/// which pairs them under the same absent key. The producer's stream is part of
-/// the member's key: a restarted observer is a new graph run on a new stream,
-/// and its members' chains owe nothing to the ones the graph before it ran.
+/// A chain is one member's, on one **side** of one turn: the candidates a
+/// `fallback-advanced` said it stepped past, each with its reason, and the
+/// identity the `oneharness-session` said then served the turn. Both are read
+/// through the producer's own declared payloads, as [`crate::projection`] folds
+/// them, and paired the way that fold pairs them — by member, and by the side
+/// and the turn each record stamps. A two-party member runs one chain per side
+/// per turn, and the two sides prefer different identities: an agent side that
+/// fell through to one candidate and a judge side that fell through to another
+/// at the same turn are two chains, and a finding that named the wrong side's
+/// candidate would send a reader to fix the chain that was not the problem. A
+/// single-sided member stamps neither side nor turn on a `fallback-advanced` and
+/// publishes no invocation, which pairs its records under the same absent key.
+/// The producer's stream is part of the member's key: a restarted observer is a
+/// new graph run on a new stream, and its members' chains owe nothing to the
+/// ones the graph before it ran.
 #[derive(Debug, Default)]
 pub(crate) struct ChainRecords {
-    chains: BTreeMap<(String, String), BTreeMap<Option<u64>, Chain>>,
+    chains: BTreeMap<(String, String), MemberChains>,
 }
 
-/// One turn's chain, as far as the stream has said.
+/// One member's chains on one stream, and which of them the stream last said
+/// something about.
+///
+/// A death names neither a side nor a turn, so the chain it stopped is the one
+/// the member was last on: the producer publishes a side's advances and then
+/// the invocation that ran that side, and the invocation that ran and produced
+/// no usable result is the last one it published before the member died.
+#[derive(Debug, Default)]
+struct MemberChains {
+    by_side_and_turn: BTreeMap<Side, Chain>,
+    latest: Option<Side>,
+}
+
+/// One side of one turn, as the producer stamps both: the side's own spelling
+/// where a record carries one, and the turn within it.
+type Side = (Option<String>, Option<u64>);
+
+/// One chain, as far as the stream has said.
 #[derive(Debug, Default, Clone)]
 struct Chain {
     stepped_past: Vec<(String, String)>,
@@ -4011,36 +4033,34 @@ impl ChainRecords {
             if let Ok(advanced) = serde_json::from_value::<oneagentgraph::event::FallbackAdvanced>(
                 Value::Object(envelope.payload.clone()),
             ) {
-                self.chain_of(member, advanced.turn).stepped_past.push((
-                    bounded(&crate::views::one_line(&advanced.identity)),
-                    bounded(&crate::views::one_line(&advanced.reason)),
-                ));
+                self.chain_of(member, (advanced.role.map(side_of), advanced.turn))
+                    .stepped_past
+                    .push((
+                        bounded(&crate::views::one_line(&advanced.identity)),
+                        bounded(&crate::views::one_line(&advanced.reason)),
+                    ));
             }
         } else if kind == oneagentgraph::event::EventKind::OneharnessSession.as_str() {
             if let Ok(session) = serde_json::from_value::<oneagentgraph::event::OneharnessSession>(
                 Value::Object(envelope.payload.clone()),
             ) {
-                self.chain_of(member, Some(session.turn)).served_by =
-                    Some(bounded(&crate::views::one_line(&session.identity)));
+                self.chain_of(member, (Some(side_of(session.role)), Some(session.turn)))
+                    .served_by = Some(bounded(&crate::views::one_line(&session.identity)));
             }
         }
     }
 
-    fn chain_of(&mut self, member: (String, String), turn: Option<u64>) -> &mut Chain {
-        self.chains
-            .entry(member)
-            .or_default()
-            .entry(turn)
-            .or_default()
+    fn chain_of(&mut self, member: (String, String), side: Side) -> &mut Chain {
+        let chains = self.chains.entry(member).or_default();
+        chains.latest = Some(side.clone());
+        chains.by_side_and_turn.entry(side).or_default()
     }
 
     /// The chain this envelope says stopped, or `None` for an envelope that is
     /// not that death.
     ///
-    /// A death names no turn, so the chain it stopped is the member's latest —
-    /// the turn it had reached, which is the one [`TurnRecords`] reconciles a
-    /// death against too. `node` is the dispatch's node where the stream is a
-    /// node's, and `None` for the run's observer, whose members belong to none.
+    /// `node` is the dispatch's node where the stream is a node's, and `None`
+    /// for the run's observer, whose members belong to none.
     pub(crate) fn stopped_by(
         &self,
         envelope: &Envelope,
@@ -4051,20 +4071,33 @@ impl ChainRecords {
             return None;
         }
         let member = member_of(envelope)?.to_owned();
-        let chain = self
+        let (side, chain) = self
             .chains
             .get(&(envelope.stream.clone(), member.clone()))
-            .and_then(|turns| turns.values().last())
-            .cloned()
+            .and_then(|chains| {
+                let latest = chains.latest.clone()?;
+                let chain = chains.by_side_and_turn.get(&latest)?.clone();
+                Some((latest.0, chain))
+            })
             .unwrap_or_default();
         Some(ChainStopped {
             node: node.map(str::to_owned),
+            side,
             candidate: chain.served_by,
             stepped_past: chain.stepped_past,
             detail: death.detail,
             member,
         })
     }
+}
+
+/// The word a side is written as, which is the producer's own spelling of its
+/// `Role` on the wire and the one every view renders.
+fn side_of(role: oneagentgraph::event::Role) -> String {
+    serde_json::to_value(role)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// An identity chain that stopped at a candidate which ran and produced no
@@ -4079,8 +4112,10 @@ pub(crate) struct ChainStopped {
     pub node: Option<String>,
     /// The member whose chain it was, as the producer labelled it.
     pub member: String,
-    /// The identity the stream last said served this member a turn — the one
-    /// the chain stopped at — where the stream named one.
+    /// Which side of the member the chain was, where the member has sides.
+    pub side: Option<String>,
+    /// The identity the stream last said served this side's turn — the one the
+    /// chain stopped at — where the stream named one.
     pub candidate: Option<String>,
     /// The candidates the chain stepped past before it, each with its reason.
     pub stepped_past: Vec<(String, String)>,
@@ -4101,6 +4136,13 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
     let whose = match &stopped.node {
         Some(node) => format!("node '{node}'"),
         None => "the run's observer graph".to_owned(),
+    };
+    // The side first, where there is one: the two sides of a member prefer
+    // different identities, and which chain to fix is the first thing a reader
+    // gets wrong.
+    let member = match &stopped.side {
+        Some(side) => format!("member '{}', {side} side", stopped.member),
+        None => format!("member '{}'", stopped.member),
     };
     let candidate = match &stopped.candidate {
         Some(identity) => format!("stopped at {identity}"),
@@ -4125,16 +4167,15 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::Finding.as_str().into(),
         message: bounded(&format!(
-            "{whose} (member '{member}'): its identity chain {candidate}, which ran and \
-             produced no usable result. The provider failure could not be classified, so \
-             the chain did not move on and no identity behind that candidate was tried.\n\
+            "{whose} ({member}): its identity chain {candidate}, which ran and produced \
+             no usable result. The provider failure could not be classified, so the chain \
+             did not move on and no identity behind that candidate was tried.\n\
              stepped past: {stepped_past}\n\
              detail: {detail}\n\
              Nothing was failed on this: a node settles on its dispatch as it always would, \
              and the observer is restarted as it always is. It is the decision the \
              classifier could not make, for you to rule on — whether that candidate is one \
-             to keep in the chain.",
-            member = stopped.member,
+             to keep in the chain."
         )),
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
@@ -5910,11 +5951,12 @@ mod tests {
     /// two observer ones. What is held here is the reading: the payloads go
     /// through the sibling's own types, the death has to be the provider rule
     /// on the one cause that names nothing, and a chain is one member's on one
-    /// turn of one stream — so another member's, an earlier turn's, and a
-    /// restarted graph's records are not this one's.
+    /// side of one turn of one stream — so another member's, an earlier turn's,
+    /// the other side's, and a restarted graph's records are not this one's.
     #[test]
     fn a_stopped_chain_is_read_off_the_producers_own_payloads_and_named_whole() {
         use crate::event::Source;
+        use oneagentgraph::event::Role;
         let relayed = |kind: oneagentgraph::event::EventKind, member: &str, payload: Value| {
             let mut labels = Labels::default();
             labels.extra.insert("member".into(), json!(member));
@@ -5931,12 +5973,12 @@ mod tests {
                 artifacts: Vec::new(),
             }
         };
-        let served = |member: &str, turn: u64, identity: &str| {
+        let served = |member: &str, role: Role, turn: u64, identity: &str| {
             relayed(
                 oneagentgraph::event::EventKind::OneharnessSession,
                 member,
                 serde_json::to_value(oneagentgraph::event::OneharnessSession {
-                    role: oneagentgraph::event::Role::Agent,
+                    role,
                     turn,
                     identity: identity.into(),
                     session_id: None,
@@ -5948,19 +5990,20 @@ mod tests {
                 .expect("it serialises"),
             )
         };
-        let stepped_past = |member: &str, turn: Option<u64>, identity: &str, reason: &str| {
-            relayed(
-                oneagentgraph::event::EventKind::FallbackAdvanced,
-                member,
-                serde_json::to_value(oneagentgraph::event::FallbackAdvanced {
-                    identity: identity.into(),
-                    reason: reason.into(),
-                    role: turn.map(|_| oneagentgraph::event::Role::Agent),
-                    turn,
-                })
-                .expect("it serialises"),
-            )
-        };
+        let stepped_past =
+            |member: &str, side: Option<(Role, u64)>, identity: &str, reason: &str| {
+                relayed(
+                    oneagentgraph::event::EventKind::FallbackAdvanced,
+                    member,
+                    serde_json::to_value(oneagentgraph::event::FallbackAdvanced {
+                        identity: identity.into(),
+                        reason: reason.into(),
+                        role: side.map(|(role, _)| role),
+                        turn: side.map(|(_, turn)| turn),
+                    })
+                    .expect("it serialises"),
+                )
+            };
         let died = |member: &str, rule: &str, cause: &str| {
             relayed(
                 oneagentgraph::event::EventKind::MemberDied,
@@ -5973,18 +6016,22 @@ mod tests {
         let mut chains = ChainRecords::default();
         // An earlier stream: the graph run before a restart, whose member of the
         // same name stepped past everything.
-        let mut earlier = stepped_past("check-in", Some(2), "old/first", "auth");
+        let mut earlier = stepped_past("check-in", Some((Role::Agent, 2)), "old/first", "auth");
         earlier.stream = "oneagentgraph-0".into();
         for envelope in [
             earlier,
-            // The member's first turn, which ran; then its second, which stopped.
-            stepped_past("check-in", Some(1), "a/zero", "auth"),
-            served("check-in", 1, "a/first"),
-            stepped_past("check-in", Some(2), "a/first", "auth"),
-            stepped_past("check-in", Some(2), "a/second", "quota"),
-            served("check-in", 2, "a/third"),
+            // The member's first turn, which ran; then its second, on which the
+            // agent side ran, the judge side stepped past its own candidate and
+            // ran on another, and the member died.
+            stepped_past("check-in", Some((Role::Agent, 1)), "a/zero", "auth"),
+            served("check-in", Role::Agent, 1, "a/first"),
+            stepped_past("check-in", Some((Role::Agent, 2)), "a/first", "auth"),
+            stepped_past("check-in", Some((Role::Agent, 2)), "a/second", "quota"),
+            served("check-in", Role::Agent, 2, "a/third"),
+            stepped_past("check-in", Some((Role::Judge, 2)), "j/first", "quota"),
+            served("check-in", Role::Judge, 2, "j/second"),
             // Another member's chain, which must not be read into this one's.
-            stepped_past("monitor", Some(2), "m/first", "spawn"),
+            stepped_past("monitor", Some((Role::Agent, 2)), "m/first", "spawn"),
         ] {
             chains.read(&envelope);
             assert!(
@@ -5998,20 +6045,42 @@ mod tests {
                 Some("build"),
             )
             .expect("an unclassified provider death is a chain that stopped");
+        // The judge side's chain, and only it: the side the member was last on
+        // is the one whose invocation ran and produced nothing usable, and the
+        // agent side's candidates at the same turn are another chain's.
         assert_eq!(
             stopped,
             ChainStopped {
                 node: Some("build".into()),
                 member: "check-in".into(),
-                candidate: Some("a/third".into()),
-                stepped_past: vec![
-                    ("a/first".into(), "auth".into()),
-                    ("a/second".into(), "quota".into()),
-                ],
+                side: Some("judge".into()),
+                candidate: Some("j/second".into()),
+                stepped_past: vec![("j/first".into(), "quota".into())],
                 // One line, as every rendered relayed value is.
                 detail: "no usable result; see `raw_response`".into(),
             }
         );
+        // Had the member died before its judge side ran, the agent side's chain
+        // is the one that stopped.
+        let mut agent_last = ChainRecords::default();
+        for envelope in [
+            stepped_past("check-in", Some((Role::Judge, 1)), "j/zero", "auth"),
+            served("check-in", Role::Judge, 1, "j/first"),
+            stepped_past("check-in", Some((Role::Agent, 2)), "a/first", "auth"),
+            served("check-in", Role::Agent, 2, "a/second"),
+        ] {
+            agent_last.read(&envelope);
+        }
+        let stopped = agent_last
+            .stopped_by(&died("check-in", "provider-failure", "unclassified"), None)
+            .expect("a stopped chain");
+        assert_eq!(stopped.side.as_deref(), Some("agent"));
+        assert_eq!(stopped.candidate.as_deref(), Some("a/second"));
+        assert_eq!(
+            stopped.stepped_past,
+            vec![("a/first".to_string(), "auth".to_string())]
+        );
+
         // A single-sided member stamps no turn and publishes no invocation: its
         // chain is what it stepped past, under the absent key.
         let mut single = ChainRecords::default();
@@ -6019,19 +6088,27 @@ mod tests {
         let single_sided = single
             .stopped_by(&died("check-in", "provider-failure", "unclassified"), None)
             .expect("a stopped chain");
+        assert_eq!(single_sided.side, None);
         assert_eq!(single_sided.candidate, None);
         assert_eq!(
             single_sided.stepped_past,
             vec![("s/first".to_string(), "auth".to_string())]
         );
-        let finding = chain_stopped_finding(&stopped);
+        let finding = chain_stopped_finding(&ChainStopped {
+            node: Some("build".into()),
+            member: "check-in".into(),
+            side: Some("judge".into()),
+            candidate: Some("j/second".into()),
+            stepped_past: vec![("j/first".into(), "quota".into())],
+            detail: "no usable result; see `raw_response`".into(),
+        });
         assert_eq!(finding.kind, crate::channel::SurfaceKind::Finding.as_str());
         assert!(!finding.blocking);
         assert_eq!(finding.workstream.as_deref(), Some("build"));
         for named in [
-            "node 'build' (member 'check-in')",
-            "stopped at a/third",
-            "stepped past: a/first [auth], a/second [quota]",
+            "node 'build' (member 'check-in', judge side)",
+            "stopped at j/second",
+            "stepped past: j/first [quota]",
             "detail: no usable result; see `raw_response`",
             "Nothing was failed on this",
         ] {
