@@ -838,7 +838,12 @@ pub fn wait_out_the_second(began: std::time::SystemTime) {
     let Ok(since) = began.duration_since(std::time::UNIX_EPOCH) else {
         return;
     };
-    let next = std::time::UNIX_EPOCH + Duration::from_secs(since.as_secs() + 1);
+    // A second the clock cannot represent is one it will never reach either.
+    let Some(next) =
+        std::time::UNIX_EPOCH.checked_add(Duration::from_secs(since.as_secs().saturating_add(1)))
+    else {
+        return;
+    };
     while let Ok(remaining) = next.duration_since(std::time::SystemTime::now()) {
         if remaining.is_zero() {
             break;
