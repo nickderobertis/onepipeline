@@ -1286,17 +1286,38 @@ impl ChannelState {
     ///
     /// `tail` reads the log from a record boundary; a caller holding the log's
     /// lock reads through the handle it holds, and one that does not reads the
-    /// file. A log shorter than the stamp is one that was replaced, and is folded
-    /// whole from an empty projection rather than from a boundary it no longer
-    /// has. A record whose writer has not finished it ends the fold: the stamp
-    /// stays at the boundary before it, so a later read resumes there and the
-    /// record is folded whole once its writer is done.
+    /// file. It is not called at all when the log is exactly as long as the
+    /// stamp, which is every read of a channel nothing has written since: that
+    /// read is the projection and one `stat`. A log shorter than the stamp is
+    /// one that was replaced, and is folded whole from an empty projection
+    /// rather than from a boundary it no longer has. A record whose writer has
+    /// not finished it ends the fold: the stamp stays at the boundary before it,
+    /// so a later read resumes there and the record is folded whole once its
+    /// writer is done.
+    ///
+    /// **A projection with no stamp is an older build's**, and is brought over
+    /// once. That build logged a surface when it queued it and never when it
+    /// claimed or answered it, so the log cannot say which of its surfaces were
+    /// read; what it can say is which were **lost**. The old build allocated an
+    /// id as the counter it then wrote back, so a logged id at or past the
+    /// counter the projection holds is a surface whose write-back was overwritten
+    /// — the exact shape of the loss this design replaces, a queue reading
+    /// `next_id: 0` beside a log carrying id 0. Those are folded in from the log,
+    /// with everything the log went on to say about them; every id below the
+    /// counter was accounted for by that build by its own means and is taken as
+    /// the projection has it. The result is stamped, so the log is read this way
+    /// once and never again.
     fn current(&self, tail: impl FnOnce(u64) -> Vec<crate::ledger::Record>) -> (Queue, bool) {
         let checkpoint: Option<Queue> = crate::ledger::read_json_opt(&self.queue_path());
+        // The id below which an older build's projection is taken at its word.
+        let mut floor: Option<u64> = None;
         let (mut queue, from) = match checkpoint {
             Some(queue) => match queue.accounted {
                 Some(accounted) => (queue, accounted),
-                None => return (queue, false),
+                None => {
+                    floor = Some(queue.next_id);
+                    (queue, 0)
+                }
             },
             None => (Queue::default(), 0),
         };
@@ -1316,8 +1337,16 @@ impl ChannelState {
         };
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let mut accounted = from;
-        let mut folded = replaced;
-        for record in tail(from) {
+        // An older build's projection is rewritten stamped even when the log
+        // restores nothing to it, so it is read this way once rather than on
+        // every read.
+        let mut folded = replaced || floor.is_some();
+        let records = if length > from {
+            tail(from)
+        } else {
+            Vec::new()
+        };
+        for record in records {
             // llmlint: ignore-block[changed_behavior_has_e2e] a record whose
             // writer has not finished it takes a writer dying mid-append, which
             // is the tear `tests/e2e/journal.rs` drives for the same primitive
@@ -1342,6 +1371,9 @@ impl ChannelState {
             // place one without editing the run's own record; the same unit test
             // places one and holds that the fold goes on past it.
             if let Ok(record) = serde_json::from_str::<SurfaceRecord>(&record.text) {
+                if floor.is_some_and(|floor| record.surface.id < floor) {
+                    continue;
+                }
                 queue.apply(&record);
             }
             // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -2648,12 +2680,83 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
-        assert_eq!(trusted.accounted, None);
+        assert_eq!(trusted.next_id, 2);
+        assert!(trusted.accounted.is_some(), "{trusted:?}");
         let claimed = channel.claim().expect("a claim").expect("a surface");
         assert_eq!(claimed.id, 1);
         let stamped = channel.queue();
         assert!(stamped.waiting.is_empty(), "{stamped:?}");
         assert!(stamped.accounted.is_some(), "{stamped:?}");
+
+        // The projection that build left after the lost update — the counter
+        // never advanced past an id the log already carries — is brought over
+        // with the lost question restored, and the id is never allocated again.
+        // What the log went on to say about each is folded too: the question
+        // was abandoned and then taken back, and the narration was claimed
+        // above, so it is not restored to the waiting ones.
+        crate::ledger::write_json(
+            &channel.queue_path(),
+            &serde_json::json!({"waiting": [], "pending": null, "next_id": 0}),
+        )
+        .expect("the older build's projection");
+        let restored = channel.queue();
+        assert_eq!(
+            restored
+                .waiting
+                .iter()
+                .map(|surface| (surface.id, surface.abandoned))
+                .collect::<Vec<_>>(),
+            vec![(0, false)],
+            "{restored:?}"
+        );
+        assert_eq!(restored.next_id, 2);
+        let fresh = channel.push(surface(0, false)).expect("queued");
+        assert_eq!(
+            fresh.id, 2,
+            "an id the log had allocated was handed out again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A read of a channel nothing has written since is one read of the
+    /// projection and no read of the log.
+    ///
+    /// The projection earns its place by being the cheap answer: the unread
+    /// count is paid per run root by the listing across every root on the host,
+    /// so this holds what the read costs in bytes rather than asserting it.
+    #[test]
+    fn an_unchanged_channel_is_answered_without_reading_the_log() {
+        let root = std::env::temp_dir().join(format!("onepipeline-oneread-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "oneread");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        channel.push(surface(0, true)).expect("queued");
+        channel.push(surface(0, false)).expect("queued");
+        channel.claim().expect("a claim").expect("a surface");
+        let projection = std::fs::metadata(channel.queue_path())
+            .expect("the projection")
+            .len();
+        let log = std::fs::metadata(paths.channel("surfaces.jsonl"))
+            .expect("the log")
+            .len();
+        assert!(log > 0);
+
+        let before = crate::ledger::bytes_read();
+        let queue = channel.queue();
+        let cost = crate::ledger::bytes_read() - before;
+        assert_eq!(
+            cost, projection,
+            "an unchanged channel cost {cost} byte(s) to read against a {projection}-byte \
+             projection and a {log}-byte log: {queue:?}"
+        );
+        // Bytes cannot see a read that opens the log and finds nothing past the
+        // stamp, so the tail reader itself is what is held to never being asked.
+        let (same, folded) = channel.current(|from| {
+            panic!("an unchanged channel read its log from byte {from}");
+        });
+        assert_eq!(same, queue);
+        assert!(!folded);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

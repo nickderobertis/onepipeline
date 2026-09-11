@@ -1645,6 +1645,68 @@ fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() 
     world.release("build.go");
 }
 
+/// A run an older build left after the lost update — its queue saying nothing
+/// was ever queued, beside a log carrying the question under id 0 — is brought
+/// over with the question restored and the id never handed out again.
+///
+/// These are the files the observed failure left: `waiting: [], pending: null,
+/// next_id: 0` while the log and the journal both carried the surface with id 0.
+/// A projection with no stamp is an older build's, and that build logged a
+/// surface only when it queued it, so the one thing its log can prove is a loss:
+/// an id at or past the counter the projection holds is a write-back that was
+/// overwritten. That question is what the supervising manager most needs back,
+/// and it comes back through the same verbs that lost it.
+#[test]
+fn a_question_an_older_build_lost_from_its_queue_is_restored_from_its_log() {
+    let world = World::new("channel-older-build");
+    world.script("build.wait", "hold");
+    let run = running(&world, "olderbuild", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the files are those of a
+    // build this binary is not: it stamps every projection it writes and marks
+    // every line it logs, so nothing it does can leave an unstamped projection
+    // beside an unmarked log. What is under test is driven through the CLI —
+    // whether the run answers for the question those files hold.
+    let stale_read = concat!(
+        r#"{"id":0,"kind":"blocker","message":"Which base should build target?","#,
+        r#""source":"proposal","blocking":true,"queued_at":0,"asker":"dispatch-build"}"#,
+    );
+    std::fs::write(
+        world.run_file(&run, "channel/surfaces.jsonl"),
+        format!("{stale_read}\n"),
+    )
+    .expect("the older build's log is placed");
+    let queue = world.run_file(&run, "channel/queue.json");
+    let staged = queue.with_extension("staged");
+    std::fs::write(&staged, r#"{"waiting":[],"pending":null,"next_id":0}"#)
+        .expect("the older build's queue is staged");
+    std::fs::rename(&staged, &queue).expect("the older build's queue is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Counted, held on, and handed over under the id the log allocated.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should build target?");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — Which base should build target?");
+
+    // And the id is not allocated a second time.
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    world
+        .run_with_stdin(&["reply", &run], r#"{"completion":false,"reason":"main"}"#)
+        .exited(0);
+    world.release("build.go");
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
