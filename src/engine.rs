@@ -3334,27 +3334,68 @@ struct AtDispatch {
 /// pass, and the same fold the continuation composes its own notes from, so the
 /// two cannot disagree about what a dispatch was owed.
 ///
+/// **Only where the projected state says a note can stand.** The fold reads the
+/// run's whole journal, and a dispatch is the one act a run performs once per
+/// node, so asking it of every dispatch made recording a hundred-node run pay a
+/// hundred reads of its own growing store — forty megabytes over one such run,
+/// every byte of which folded to nothing, because nobody had noted a node. What
+/// the fold can find is bounded by what the projection already holds: see
+/// [`may_hold_a_note`]. A node it rules out, and a replacement whose superseded
+/// nodes it rules out, is composed with nothing and spends nothing without the
+/// store being opened.
+///
 /// # Errors
 ///
 /// [`crate::note::standing`]'s: a record of this crate's own that cannot be read
 /// as what it says it carries, which ends the pass rather than announcing a
 /// dispatch as having spent nothing.
 fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<AtDispatch> {
-    let journal = journal::read(&paths.journal());
-    let standing = crate::note::standing(&journal, node)?;
-    let mut spent = standing.read();
-    for superseded in state
+    let supersedes: Vec<&str> = state
         .superseded
         .iter()
         .filter(|(_, replacement)| replacement.as_str() == node)
-        .map(|(superseded, _)| superseded)
-    {
+        .map(|(superseded, _)| superseded.as_str())
+        .collect();
+    if !may_hold_a_note(state, node) && !supersedes.iter().any(|id| may_hold_a_note(state, id)) {
+        return Ok(AtDispatch {
+            spent: Vec::new(),
+            carried_in: Vec::new(),
+        });
+    }
+    let journal = journal::read(&paths.journal());
+    let standing = crate::note::standing(&journal, node)?;
+    let mut spent = standing.read();
+    for superseded in supersedes {
         spent.extend(crate::note::standing(&journal, superseded)?.notes());
     }
     Ok(AtDispatch {
         spent,
         carried_in: standing.carried(),
     })
+}
+
+/// Whether the run's record can hold a manager's note for `node` at all, read
+/// off the projected state rather than the store.
+///
+/// Every note [`crate::note::standing`] folds enters the record as a
+/// `note-delivered`, and its disposition is one of two things. **Carried**: no
+/// conversation took it, and the projection holds exactly that as the node's
+/// pending context, from the same record, until a `node-dispatched` takes it —
+/// the same record that resets the fold. **Read by a conversation**: a party of
+/// a live dispatch took it, and a live dispatch is one the loop announced with a
+/// `node-dispatched` first, which the projection records as when the node was
+/// dispatched and never forgets. The notes a `node-dispatched` says it was
+/// composed with are those same delivered notes, carried forward by the
+/// continuation, so they add no third way in. A node the projection has neither
+/// dispatched nor holds a note for therefore folds to nothing, and the answer is
+/// known before the store is opened.
+///
+/// Conservative in the one direction that matters: a `context-deferred` also
+/// sets the pending context, and a node dispatched once may have been noted
+/// never, so this says *may*, and a `true` costs one read that finds nothing.
+/// A `false` is exact.
+fn may_hold_a_note(state: &RunState, node: &str) -> bool {
+    state.dispatched_at.contains_key(node) || state.pending_context.contains_key(node)
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.
@@ -7055,6 +7096,117 @@ mod tests {
             2,
             "a node was announced ready more than once per time it became ready"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What a dispatch is composed with is read off the store only for a node
+    /// the projected state says a note can stand for, and the answer is the
+    /// fold's own where it is.
+    ///
+    /// The bound is measured rather than inferred: a run of a hundred nodes
+    /// nobody noted was paying a whole-journal read per dispatch, and no view of
+    /// the run shows that. Driven over a real run directory, through the real
+    /// journal writer and the real fold, and read through the thread's own
+    /// account of the store's bytes.
+    #[test]
+    fn a_dispatch_reads_the_store_for_its_notes_only_where_the_state_says_one_can_stand() {
+        let root = std::env::temp_dir().join(format!("onepipeline-notes-at-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let delivered =
+            |node: &str, reached: crate::note::Reached| edits::Operation::NoteDelivered {
+                node: node.into(),
+                addressee: crate::note::Addressee::Worker,
+                text: "stop re-running the judged tier"
+                    .parse()
+                    .expect("a usable note"),
+                criterion: None,
+                shown_to: reached.shown_at_delivery().to_vec(),
+                routed_to: reached.routed_to().to_vec(),
+                reached,
+            };
+        let commit = |journal: &mut Journal, operations: &[edits::Operation]| {
+            journal
+                .emit(
+                    journalled_as(operations),
+                    journal::labels(&paths.run, None),
+                    journal::payload(&[
+                        ("author", json!(crate::channel::Author::Planner)),
+                        ("operations", json!(operations)),
+                        ("operation_kinds", json!(operation_kinds(operations))),
+                    ]),
+                )
+                .expect("the commit is recorded");
+        };
+        // `noted` was dispatched and a live turn of it took a note; `owed` was
+        // never dispatched and a note is carried to it; `fresh` is a node the run
+        // has said nothing about; and `noted-2` is the replacement a `retry` of
+        // `noted` names.
+        journal
+            .emit(
+                journal::PipelineKind::NodeDispatched,
+                journal::labels(&paths.run, Some("noted")),
+                journal::payload(&[("attempt", json!(1))]),
+            )
+            .expect("the dispatch is recorded");
+        commit(
+            &mut journal,
+            &[delivered("noted", crate::note::Reached::Worker)],
+        );
+        commit(
+            &mut journal,
+            &[delivered("owed", crate::note::Reached::Carried)],
+        );
+        commit(
+            &mut journal,
+            &[edits::Operation::RetryRequested {
+                node: "noted".into(),
+                replacement: "noted-2".into(),
+                reset: vec![],
+            }],
+        );
+        let state = projection::fold(&journal::read(&paths.journal()));
+
+        let measured = |node: &str| {
+            let before = ledger::bytes_read();
+            let at = notes_at_dispatch(&paths, &state, node).expect("the record reads");
+            let texts = |notes: &[crate::note::RecordedNote]| -> Vec<String> {
+                notes
+                    .iter()
+                    .map(|note| note.text.as_str().to_string())
+                    .collect()
+            };
+            (
+                ledger::bytes_read() - before,
+                texts(&at.spent),
+                texts(&at.carried_in),
+            )
+        };
+        let (bytes, spent, carried) = measured("fresh");
+        assert_eq!(
+            (bytes, spent, carried),
+            (0, vec![], vec![]),
+            "a node nothing was recorded about had the store read for its notes"
+        );
+        let (bytes, spent, carried) = measured("owed");
+        assert!(bytes > 0, "a carried note was answered without the record");
+        assert_eq!(spent, Vec::<String>::new());
+        assert_eq!(carried, vec!["stop re-running the judged tier".to_string()]);
+        let (bytes, spent, carried) = measured("noted");
+        assert!(bytes > 0, "a read note was answered without the record");
+        assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
+        assert_eq!(carried, Vec::<String>::new());
+        // The replacement was never dispatched and holds no note of its own; what
+        // it spends is what stood for the node it supersedes.
+        let (bytes, spent, carried) = measured("noted-2");
+        assert!(
+            bytes > 0,
+            "a replacement was composed without the superseded node's record"
+        );
+        assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
+        assert_eq!(carried, Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&root);
     }
 
