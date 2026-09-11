@@ -903,7 +903,7 @@ mod tests {
     /// opens no change request, whichever of the node and its repository says so.
     ///
     /// The end-to-end half is
-    /// `plan_check::a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch`;
+    /// `destination::a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch`;
     /// what is held here is each arm of the rule against a stated destination,
     /// including the one that cannot be answered for want of the policy.
     #[test]

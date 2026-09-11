@@ -5320,3 +5320,444 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
         .out_has(url)
         .out_has("marked it ready for review");
 }
+
+/// A node declared `draft: true` leaves its change request as a draft for a
+/// person, and settles **done** — its dependents proceed, because nothing in the
+/// run will ever lift it.
+///
+/// Both ways a draft can come to be left: a session holding none has its change
+/// request *opened* as one, carrying the drafted description; a session whose
+/// worker opened one as a draft has it *held* — the description is written, and
+/// nothing lifts it. Neither is `complete-but-draft`, which is the status for a
+/// draft a release arrives to lift and which holds the run; `status` says so by
+/// not listing either node as one the run is waiting on.
+#[test]
+fn a_node_declared_draft_leaves_its_change_request_as_a_draft_and_settles_done() {
+    let world = World::new("lifecycle-plan-draft");
+    // `change-auto` is the policy that would otherwise have armed the host's own
+    // merge on the change, so a draft left under it is the one a publication
+    // that did not stop would have landed.
+    world.repository("change-auto", &[]);
+    world.script("gh.merged", "");
+    world.script("fresh.work", "the worker wrote this\n");
+    world.script("held.work", "and this\n");
+    world.script("held.drafts", "wip: the worker's own title");
+    world.script("pr-author.body", "## What\nDrafted for a person to read.\n");
+    let drafting = world.pr_author_graph();
+    let mut fresh = titled(lifecycle("fresh", &[]), "feat: leave this for a person");
+    fresh["draft"] = json!(true);
+    let mut held = titled(lifecycle("held", &[]), "feat: hold what the worker held");
+    held["draft"] = json!(true);
+    // A node downstream of both. A draft the plan asked for holds nothing, so it
+    // runs; a draft a release will lift would have held it.
+    let follower = agent("follower", &["fresh", "held"]);
+    let path = world.plan(
+        "plandraft",
+        &plan_of("plandraft", vec![fresh, held, follower]),
+    );
+    world
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
+        .settled();
+    let run = "plandraft";
+
+    let result = world.run_json(run, "result.json");
+    let nodes: std::collections::BTreeMap<String, serde_json::Value> = result["nodes"]
+        .as_array()
+        .expect("the result names its nodes")
+        .iter()
+        .map(|node| (node["id"].as_str().expect("an id").to_owned(), node.clone()))
+        .collect();
+    for id in ["fresh", "held"] {
+        let node = &nodes[id];
+        assert_eq!(node["status"], "done", "{id}: {node}\n{}", why(&world, run));
+        assert_eq!(node["outcome"], "change-draft", "{id}: {node}");
+        assert_eq!(node["landing"], "unlanded", "{id}: {node}");
+        assert!(
+            node["change_url"]
+                .as_str()
+                .is_some_and(|url| url.contains("/pull/")),
+            "{id} names no change request: {node}"
+        );
+    }
+    assert_eq!(nodes["follower"]["status"], "done", "{result}");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        dispatches_of(&world, run, "follower").len() == 1,
+        "a node downstream of a draft the plan asked for did not run\n{}",
+        why(&world, run)
+    );
+
+    // Both change requests stand as drafts on the host, carrying the drafted
+    // description under the plan's title; nothing lifted or merged either.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    for change in &opened {
+        assert_eq!(
+            change["body"], "## What\nDrafted for a person to read.",
+            "{change}"
+        );
+    }
+    let titles: std::collections::BTreeSet<String> = opened
+        .iter()
+        .map(|change| change["title"].as_str().expect("a title").to_owned())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "feat: hold what the worker held",
+            "feat: leave this for a person"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    let calls = gh_calls(&world);
+    assert!(
+        gh_pr_calls(&world, "ready").is_empty() && gh_pr_calls(&world, "merge").is_empty(),
+        "a draft the plan asked for was lifted or merged: {calls:?}"
+    );
+    // One `pr create` each, and the fresh one carried `--draft`.
+    let created = gh_pr_calls(&world, "create");
+    assert_eq!(created.len(), 2, "{created:?}");
+    assert!(created
+        .iter()
+        .all(|call| call.iter().any(|arg| arg == "--draft")));
+
+    // The reason `onevcs` recorded is the plan's, and not a release's.
+    let drafted = world.events_of(run, "change-drafted");
+    assert!(
+        drafted
+            .iter()
+            .all(|event| event["payload"]["kind"] == "held"),
+        "{drafted:?}"
+    );
+    assert!(
+        drafted
+            .iter()
+            .any(|event| event["labels"]["node"] == "fresh"
+                && event["payload"]["because"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("`draft: true`"))),
+        "the fresh node's draft does not say whose decision it was: {drafted:?}"
+    );
+
+    // Each settlement says which draft it is, and the held one says what the
+    // closeout did to the change request the worker left.
+    let detail = |id: &str| {
+        world
+            .events_of(run, "node-settled")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == id)
+            .and_then(|event| event["payload"]["detail"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| panic!("{id} settled with no detail\n{}", why(&world, run)))
+    };
+    assert_eq!(
+        detail("fresh"),
+        "complete, and left as a draft as the plan asked, for a person to mark ready for review"
+    );
+    assert_eq!(
+        detail("held"),
+        "complete, and left as a draft as the plan asked, for a person to mark ready for \
+         review. the worker opened the change request as a draft; the closeout wrote the \
+         drafted description onto it and left it as a draft"
+    );
+
+    // And the views that list draft-complete nodes as holding the run list
+    // neither: the run is complete.
+    let status = world.run(&["status", run]);
+    status.exited(0).out_lacks("complete-but-draft");
+}
+
+/// A retry continuing a preserved branch whose earlier attempt opened a change
+/// request rewrites that change request's description from the final tree.
+///
+/// The consequence stated rather than hidden: the closeout's rule is about the
+/// branch and not about who opened the change request, so an attempt that
+/// continues a branch already published reaches the same path a worker's draft
+/// does. The drafter sees the previous description in its task and drafts from
+/// the tree as it now stands, and what the host carries afterwards is the second
+/// draft rather than the first — where before, the re-drafted body was silently
+/// ignored for an adopted change request.
+#[test]
+fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
+    let world = World::new("lifecycle-redescribed");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work-anew", "the worker wrote this\n");
+    world.script("gh.checks", RED);
+    // A body that differs on every draft, so a description left alone can be
+    // told from one rewritten.
+    world.script("pr-author.body-anew", "## What\nDrafted from the tree.");
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land it on the second try");
+    let path = world.plan("redescribed", &plan_of("redescribed", vec![node]));
+    world
+        .run(&["start", &path, "--detach", "--pr-author-graph", &drafting])
+        .exited(0);
+    let run = "redescribed";
+
+    world.until("the host to report its check red", |world| {
+        world
+            .events_of(run, "change-check")
+            .iter()
+            .any(|event| event["payload"]["conclusion"] == "failure")
+    });
+    std::fs::remove_file(world.fakes.join("gh.checks")).expect("the red check is cleared");
+    world.script("gh.merged", "");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
+    assert_eq!(node["outcome"], "merged", "{node}");
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(repo.has_branch(&world, branch));
+
+    // One change request, and its description is the last one drafted.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let drafts = turns_of(&world, run, "service", "pr-author");
+    assert!(
+        drafts.len() >= 2,
+        "the closeout ran once: {}",
+        why(&world, run)
+    );
+    let last = drafts.len();
+    assert_eq!(
+        opened[0]["body"],
+        json!(format!("## What\nDrafted from the tree.\ndraft {last}")),
+        "the change request carries a description other than the last drafted: {opened:?}"
+    );
+    assert_eq!(opened[0]["title"], "feat: land it on the second try");
+    assert_eq!(
+        gh_pr_calls(&world, "edit").len(),
+        last - 1,
+        "every closeout after the first wrote the description: {:?}",
+        gh_calls(&world)
+    );
+
+    // The second drafting dispatch was shown the change request as it stood —
+    // open, not a draft, with the first description — and the first was shown
+    // no change request at all.
+    let first = drafts[0]["payload"]["task"].as_str().expect("a task");
+    assert!(
+        !first.contains("## Change request"),
+        "the first closeout was shown a change request that did not exist:\n{first}"
+    );
+    let second = drafts[1]["payload"]["task"].as_str().expect("a task");
+    // A merged change carries its commit and not its URL, so the URL is the one
+    // the sibling recorded when the change request was opened.
+    let opened_at = world.events_of(run, "change-opened");
+    let url = opened_at[0]["payload"]["url"]
+        .as_str()
+        .expect("the publication recorded where the change request is");
+    assert!(
+        second.contains(&format!(
+            "## Change request\n{url}\nHeld as a draft by the worker: no\n\n\
+             ### Description as the worker left it\n## What\nDrafted from the tree.\ndraft 1"
+        )),
+        "the second closeout was not shown the change request as it stood:\n{second}"
+    );
+    // And its settlement says what it did to it.
+    let settled = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["payload"]["status"] == "done")
+        .expect("the node settled done");
+    assert_eq!(
+        settled["payload"]["detail"],
+        "the change request was already open from an earlier publication of this branch; \
+         the closeout wrote the drafted description onto it",
+        "{settled}"
+    );
+}
+
+/// A node that settles without publishing while its session holds a change
+/// request the worker opened carries that change request's URL, so `results`
+/// shows where the work is.
+///
+/// The worker opened its change request as a draft and then failed its task: no
+/// closeout ran, nothing was drafted or lifted, and the draft stands on the host
+/// — which is exactly what a reader of the settlement has to be pointed at.
+#[test]
+fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change() {
+    let world = World::new("lifecycle-draft-then-fail");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.drafts", "wip: opened while working");
+    world.script("service.fail", "1");
+    let run = settle(&world, "draftfail", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    let url = node["change_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement names no change request: {node}"));
+    assert!(url.contains("/pull/1"), "{url}");
+    // Nothing published: the draft stands as the worker left it.
+    assert_eq!(gh_pr_calls(&world, "create").len(), 1);
+    assert!(gh_pr_calls(&world, "ready").is_empty() && gh_pr_calls(&world, "edit").is_empty());
+    assert!(world.events_of(&run, "published").is_empty());
+    world.run(&["results", &run]).exited(0).out_has(url);
+}
+
+/// Every dispatch of a lifecycle node's agent steps, first and later, and its
+/// drafting dispatch, carries `ONEVCS_SESSION` naming the session whose worktree
+/// it runs in; a direct node's dispatch carries none; and every dispatch carries
+/// `ONEPIPELINE_RUNS_DIR`, absolute, beside `ONEPIPELINE_RUN_ID`.
+///
+/// Read out of each dispatch's own environment, as the double reports it on the
+/// run's record — never out of this crate's belief about what it composed. The
+/// pair is what `onepipeline transcript` reads, so the last half runs that verb
+/// with those two variables and nothing else, from a directory that is not the
+/// runs root's parent, and holds it to rendering the node's turns.
+#[test]
+fn every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_runs_root() {
+    let world = World::new("lifecycle-dispatch-env");
+    world.repository("change-open", &[]);
+    world.script("service.implement.work", "the first step wrote this\n");
+    world.script("service.review.work", "and the second this\n");
+    let drafting = world.pr_author_graph();
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: two steps and a draft",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it."},
+            {"id": "review", "persona": "engineer", "task": "## What\nReview it.",
+             "deps": ["implement"]},
+        ],
+    });
+    let direct = agent("direct", &[]);
+    let path = world.plan("dispatchenv", &plan_of("dispatchenv", vec![node, direct]));
+    world
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
+        .settled();
+    let run = "dispatchenv";
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "{}",
+        why(&world, run)
+    );
+
+    // The session every one of the node's dispatches ran in: the one its first
+    // step opened, which is the one `session-opened` names.
+    let opened: Vec<String> = world
+        .journal(run)
+        .iter()
+        .filter(|event| event["kind"] == "session-opened" && event["labels"]["node"] == "service")
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .collect();
+    assert!(!opened.is_empty(), "{}", why(&world, run));
+    let token = opened[0].clone();
+    assert!(
+        opened.iter().all(|each| each == &token),
+        "the node's steps ran in more than one session: {opened:?}"
+    );
+
+    let turns: Vec<serde_json::Value> = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["kind"] == "turn-activity")
+        .collect();
+    let of = |node: &str, persona: &str, step: Option<&str>| -> serde_json::Value {
+        turns
+            .iter()
+            .find(|turn| {
+                turn["labels"]["node"] == node
+                    && turn["labels"]["persona"] == persona
+                    && step.is_none_or(|step| turn["labels"]["step"] == step)
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no {node}/{persona}/{step:?} turn: {turns:?}"))
+    };
+    let first = of("service", "engineer", Some("implement"));
+    let later = of("service", "engineer", Some("review"));
+    let drafter = of("service", "pr-author", None);
+    let elsewhere = of("direct", "engineer", None);
+    for (which, turn) in [
+        ("first step", &first),
+        ("later step", &later),
+        ("drafter", &drafter),
+    ] {
+        assert_eq!(
+            turn["payload"]["session"],
+            json!(token),
+            "the {which} was not told which session it works in: {turn}"
+        );
+    }
+    assert!(
+        elsewhere["payload"]["session"].is_null(),
+        "a direct node's dispatch was told it works in a session: {elsewhere}"
+    );
+    let runs_dir = |turn: &serde_json::Value| -> PathBuf {
+        PathBuf::from(
+            turn["payload"]["runs_dir"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a dispatch was not told the runs root: {turn}")),
+        )
+    };
+    for turn in [&first, &later, &drafter, &elsewhere] {
+        let root = runs_dir(turn);
+        assert!(root.is_absolute(), "{}", root.display());
+        assert!(
+            root.join(run).join("launch.json").is_file(),
+            "{} is not the runs root this run is under",
+            root.display()
+        );
+    }
+
+    // And the verb those two variables serve: from somewhere else, with nothing
+    // else in its environment, it renders the node's turns.
+    let rendered = std::process::Command::new(crate::harness::binary())
+        .args(["transcript", run, "service"])
+        .env_clear()
+        .env("ONEPIPELINE_RUN_ID", run)
+        .env("ONEPIPELINE_RUNS_DIR", runs_dir(&drafter))
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&rendered.stdout);
+    assert!(
+        rendered.status.success(),
+        "transcript failed: {}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    assert!(
+        stdout.contains("echo the turn ran") && stdout.contains("Implement it."),
+        "the transcript does not render the node's turns:\n{stdout}"
+    );
+}
+
+/// The same, from a later step: the change request was opened by the first
+/// step's worker, and the step that failed ran in the worktree and handed no
+/// session back — so the session the node holds is what names it.
+#[test]
+fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change() {
+    let world = World::new("lifecycle-step-draft-then-fail");
+    world.repository("change-open", &[]);
+    world.script("service.implement.work", "the first step wrote this\n");
+    world.script("service.implement.drafts", "wip: opened by the first step");
+    world.script("service.review.fail", "1");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: two steps, one draft",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nImplement it."},
+            {"id": "review", "persona": "engineer", "task": "## What\nReview it.",
+             "deps": ["implement"]},
+        ],
+    });
+    let run = settle(&world, "stepdraftfail", vec![node]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    let url = node["change_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement names no change request: {node}"));
+    assert!(url.contains("/pull/1"), "{url}");
+    assert!(world.events_of(&run, "published").is_empty());
+    world.run(&["results", &run]).exited(0).out_has(url);
+}

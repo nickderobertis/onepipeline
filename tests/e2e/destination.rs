@@ -259,6 +259,50 @@ fn a_consumes_on_a_repository_that_opens_a_change_request_loads() {
     world.run(&["plan", "check", &project]).exited(0);
 }
 
+/// A `draft: true` on an identity that opens no change request is refused where
+/// the plan is read, naming the field — and nothing is dispatched.
+///
+/// The condition `consumes` is refused on, for the same reason: a draft is a
+/// state of a change request, and a `local-direct` publication opens none, so
+/// there is nothing to leave as one. A node that names a change-* policy of its
+/// own opens a change request to draft, and loads on that same repository.
+#[test]
+fn a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
+    let world = World::new("destination-draft");
+    world.repository("local-direct", &[]);
+    let mut held = lifecycle("held", &[]);
+    held["draft"] = json!(true);
+    let project = world.plan("drafting", &plan_of("drafting", vec![held.clone()]));
+
+    let refused = world.run(&["start", &project, "--detach"]);
+    refused
+        .exited(REFUSED)
+        .err_has("node 'held'")
+        .err_has("`draft: true`")
+        .err_has("github.com/owner/service")
+        .err_has("local-direct")
+        .err_has("drop `draft`");
+    assert!(
+        world.invocations().is_empty(),
+        "a plan refused at load dispatched something anyway: {:?}",
+        world.invocations()
+    );
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answered = answer(&checked);
+    let refusals = engine_refusals(&answered);
+    assert_eq!(refusals.len(), 1, "{answered}");
+    assert_eq!(refusals[0]["node"], json!("held"), "{answered}");
+    assert_eq!(refusals[0]["field"], json!("draft"), "{answered}");
+
+    // The node's own policy decides whichever way it points: one that opens a
+    // change request has one to leave as a draft.
+    held["merge_policy"] = json!("change-open");
+    let project = world.plan("drafting-open", &plan_of("drafting-open", vec![held]));
+    world.run(&["plan", "check", &project]).exited(0);
+}
+
 /// An identity this host cannot resolve is **not** a refusal — and not a silent
 /// pass either: the plan loads and the loader says the check never ran.
 ///

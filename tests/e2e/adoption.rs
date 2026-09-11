@@ -3049,6 +3049,11 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     packager["repo"] = json!("tool");
     let mut waiting = consumer(Some("fast"));
     waiting["deps"] = json!([ENGINE, "packager"]);
+    // And declared `draft: true` besides. Where a node asks for a draft *and*
+    // awaits a release, the release reason wins: the draft a release will lift
+    // holds the run, and the one the plan asked for holds nothing, so the node
+    // settles `complete-but-draft` exactly as it would without the field.
+    waiting["draft"] = json!(true);
     // A node downstream of the draft. Its dependency is complete and its work
     // cannot land, so starting it would build on a change nobody can merge.
     let follower = crate::harness::agent("follower", &["consumer"]);
@@ -3133,6 +3138,8 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     let drafted = world.events_of(&run, "change-drafted");
     assert_eq!(drafted.len(), 1, "{drafted:?}");
     assert_eq!(drafted[0]["labels"]["node"], json!("consumer"));
+    // The release's reason and not the plan's: the field above lost to it.
+    assert_eq!(drafted[0]["payload"]["kind"], json!("awaiting-release"));
     assert_eq!(
         drafted[0]["payload"]["awaiting"],
         json!("github.com/owner/engine")
