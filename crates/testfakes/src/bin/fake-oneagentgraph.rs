@@ -463,12 +463,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             });
         fake::barrier(&dir.join("concurrent.arrived"), &key, parties);
     }
+    // `<key>.rendezvous` is the other kind of hold: a two-way handshake with the
+    // test rather than a file it will write, so the test learns that this
+    // dispatch is inside its hold — and which dispatch — without a clock on
+    // either side. `fake::meet` says how.
+    if let Some(address) = fake::node_script(dir, &key, "rendezvous") {
+        fake::meet(&address);
+    }
     if dir.join(format!("{key}.wait")).exists() {
-        // Announced before the hold rather than by it: what a test waiting on
-        // `<key>.arrived` learns is that this dispatch is inside its hold now,
-        // so a stop or a takeover issued after that lands on a worker that is
-        // genuinely there — and the pid says which one.
-        fake::arrive(&fake::arrival(dir, &key));
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {
             vec![go, dir.join(format!("{key}.redirect"))]

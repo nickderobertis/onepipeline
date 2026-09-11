@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{arrival, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{rendezvous_script, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -2172,55 +2172,19 @@ impl World {
         std::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
-    /// The pid of every dispatch that has reached the hold scripted at `key`, in
-    /// the order they arrived.
+    /// Stand where the dispatches scripted at `key` will meet this test.
     ///
-    /// Read off the file `fake::arrive` appends to. A file the doubles have not
-    /// written yet is nobody having arrived; any other refusal to read it, or a
-    /// line that is not a pid, is a failure rather than an empty answer.
-    pub fn arrivals(&self, key: &str) -> Vec<u32> {
-        let path = arrival(&self.fakes, key);
-        let arrived = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => panic!("cannot read {}: {error}", path.display()),
-        };
-        arrived
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                line.trim()
-                    .parse::<u32>()
-                    .unwrap_or_else(|_| panic!("{key}.arrived holds {line:?} where a pid was due"))
-            })
-            .collect()
-    }
-
-    /// Wait until a dispatch **not among** `before` has reached the hold at
-    /// `key`, and return its pid.
-    ///
-    /// The test's half of the handshake `fake::arrive` is the double's half of:
-    /// once this returns, what the caller does next lands on a worker that is
-    /// inside its hold, which neither `node-dispatched` — the driver saying it
-    /// launched something — nor a relayed beat can promise. `before` is how a
-    /// takeover names the dispatch it already knows about, so the second arrival
-    /// at one key is the one that proves the takeover reached a worker.
-    ///
-    /// Bounded on the product's own asynchrony — launching the dispatch — so
-    /// reaching the bound means the dispatch never got there.
-    pub fn held(&self, key: &str, before: &[u32]) -> u32 {
-        let fresh = |world: &Self| {
-            world
-                .arrivals(key)
-                .into_iter()
-                .find(|pid| !before.contains(pid))
-        };
-        let mut arrived = None;
-        self.until(&format!("a dispatch to reach its hold at {key}"), |world| {
-            arrived = fresh(world);
-            arrived.is_some()
-        });
-        arrived.expect("the wait returned once a dispatch had arrived")
+    /// The test's half of the handshake `fake::meet` is the double's half of.
+    /// This listens on the loopback interface and writes the address into
+    /// `<key>.rendezvous`, which is what sends the double here instead of to a
+    /// file hold; [`Rendezvous::arrived`] then blocks until one connects. Called
+    /// before the run starts, since a dispatch reads its scripts as it begins.
+    pub fn rendezvous(&self, key: &str) -> Rendezvous {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let address = listener.local_addr().expect("the listener has an address");
+        std::fs::write(rendezvous_script(&self.fakes, key), address.to_string())
+            .expect("the rendezvous is scripted");
+        Rendezvous { listener }
     }
 
     /// Wait until a predicate holds, or fail with what was seen instead.
@@ -2569,6 +2533,95 @@ impl World {
         )
         .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
     }
+}
+
+/// Where held dispatches meet the test: one listener, any number of arrivals.
+///
+/// Nothing about it counts or polls. [`arrived`](Self::arrived) is an `accept`
+/// and returns when a dispatch connects; releasing is a write on that
+/// connection; and a test that ends releases every arrival it held, because the
+/// operating system closes what the process owned. So the only bound on a wait
+/// here is the runner's own, which is the backstop for a dispatch that never
+/// comes — and a wait on the product's asynchrony that *should* have a deadline
+/// of its own, like the registry entry landing, still goes through
+/// [`World::until`].
+pub struct Rendezvous {
+    listener: std::net::TcpListener,
+}
+
+/// One dispatch inside its hold, and the connection holding it there.
+pub struct Arrival {
+    /// The pid the dispatch announced as it arrived.
+    pub pid: u32,
+    stream: std::net::TcpStream,
+}
+
+impl Rendezvous {
+    /// Block until the next dispatch arrives, and say which one.
+    ///
+    /// Once this returns, what the caller does next lands on a worker that is
+    /// inside its hold — which neither `node-dispatched`, the driver saying it
+    /// launched something, nor a beat relayed on the double's own cadence can
+    /// promise. Called again after a takeover, it answers with the fresh
+    /// driver's dispatch, since the stopped one is already held.
+    pub fn arrived(&self) -> Arrival {
+        use std::io::BufRead;
+        let (stream, _) = self.listener.accept().expect("a dispatch connects");
+        let mut announced = String::new();
+        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
+            .read_line(&mut announced)
+            .expect("the dispatch announces itself");
+        let pid = announced
+            .trim()
+            .parse::<u32>()
+            .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
+        Arrival { pid, stream }
+    }
+}
+
+impl Arrival {
+    /// Let the dispatch go.
+    ///
+    /// One byte, then the connection: a dispatch the run has already ended is
+    /// on the other side of a closed socket, so the write is allowed to fail —
+    /// the release of a hold nobody is inside is not a finding.
+    pub fn release(mut self) {
+        use std::io::Write;
+        let _ = self.stream.write_all(b"go");
+    }
+}
+
+/// A dispatch that met the test is inside its hold until the test lets it go,
+/// and the letting-go is what settles the run.
+///
+/// The handshake's own contract, driven through the real binary and the real
+/// double: [`Rendezvous::arrived`] returns only once the dispatch has connected,
+/// so a run that had settled by then would be a dispatch that never held; and
+/// [`Arrival::release`] is the one thing that ends the hold, so a run that
+/// settles after it — on a deadline that is the product's, for the settlement —
+/// is the release reaching the worker. What is not asserted is any clock
+/// between the two.
+#[test]
+fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
+    let world = World::new("rendezvous-held");
+    let meeting = world.rendezvous("build");
+    let path = world.plan("met", &plan_of("met", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+
+    let held = meeting.arrived();
+    assert!(
+        !world.run_file("met", "result.json").is_file(),
+        "the run settled before its dispatch had been released, so the dispatch was never held"
+    );
+    assert!(
+        world.events_of("met", "node-settled").is_empty(),
+        "the node settled while its dispatch was held"
+    );
+
+    held.release();
+    world.until("the released dispatch to settle the run", |world| {
+        world.run_file("met", "result.json").is_file()
+    });
 }
 
 /// Wait for a child this journey spawned with piped streams to end, draining
