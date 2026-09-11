@@ -2574,6 +2574,107 @@ mod tests {
         });
     }
 
+    /// The linked `oneagentgraph` says **who authored** the turn this crate
+    /// relays.
+    ///
+    /// The third floor carried by `Cargo.lock`; what it holds is with the pin.
+    /// A turn payload carries an optional `origin` naming who wrote the text it
+    /// opens on — the composed task, the member's own supervising side, or text
+    /// a caller handed the graph to deliver — absent by default and read as
+    /// unknown when absent. This crate relays the payload as an opaque map, so
+    /// the field reaches a consumer untouched; what is held here is that the
+    /// linked producer *has* it, because the consumer that needs it is reading a
+    /// stream this engine composed, and a resolution without the field would
+    /// hand that consumer a manager's note and the supervisor's own improvisation
+    /// as the same bytes — which is what cancelled a live dispatch on a stop
+    /// order nobody issued.
+    ///
+    /// Written in items the older resolution also has — the two payload types,
+    /// which carry `deny_unknown_fields` and refuse the key below the floor — and
+    /// the values are asserted through a round trip rather than through the
+    /// producer's `Origin` type, which would be a compile error there. The shape
+    /// itself is *not* restated: the assertions read it back out of the
+    /// producer's own type, which is its one authoritative source.
+    ///
+    /// [`TurnStarted`]: oneagentgraph::event::TurnStarted
+    /// [`TurnMessage`]: oneagentgraph::event::TurnMessage
+    #[test]
+    fn the_linked_oneagentgraph_says_who_authored_the_turn_this_crate_relays() {
+        /// What every assertion here has to say, because it is the only thing
+        /// that fixes any of them.
+        const MOVE_THE_LOCK: &str = "`Cargo.toml` requires the newest release, which is \
+             above this floor, so a resolution that fails here is behind the manifest too and \
+             `cargo update -p oneagentgraph` is the whole of the fix; `just engines-current` \
+             names it without running the suite";
+
+        // The three values the producer states, on the opening a turn answers.
+        // `delivered` first: it is the one this crate's own note seam depends on
+        // being stamped, and the one whose absence caused the incident.
+        for origin in ["delivered", "supervisor", "task"] {
+            let opened =
+                serde_json::from_value::<oneagentgraph::event::TurnStarted>(serde_json::json!({
+                    "turn": 2,
+                    "role": "assistant",
+                    "instruction": "stop editing src/old.rs",
+                    "started_at": "2026-09-10T09:15:02.847Z",
+                    "origin": origin,
+                }))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the linked oneagentgraph does not say who authored a turn's opening \
+                     (`origin: {origin}`), so a reader of a run this engine drives cannot tell \
+                     a manager's delivered note from the supervisor's own words: {error}. \
+                     {MOVE_THE_LOCK}"
+                    )
+                });
+            let relayed = serde_json::to_value(&opened).expect("the payload serializes");
+            assert_eq!(
+                relayed["origin"],
+                serde_json::json!(origin),
+                "the origin a turn's opening was read with is not the one it is written \
+                 back with"
+            );
+        }
+        // And on a party's own words, which is where the supervising side's
+        // improvisation is stamped as its own.
+        let said = serde_json::from_value::<oneagentgraph::event::TurnMessage>(serde_json::json!({
+            "turn": 2,
+            "role": "user",
+            "text": "Stop. The manager has cancelled this dispatch.",
+            "origin": "supervisor",
+        }))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the linked oneagentgraph does not say who authored a party's words, so the \
+                 supervising side's improvisation reaches a consumer as an unattributed `user` \
+                 turn: {error}. {MOVE_THE_LOCK}"
+            )
+        });
+        assert_eq!(
+            serde_json::to_value(&said).expect("the payload serializes")["origin"],
+            serde_json::json!("supervisor")
+        );
+        // Absent is not a fourth value: a producer that says nothing writes no
+        // key, so an envelope from before the field is byte-identical to one
+        // from a producer that stayed silent, and a consumer reads either as
+        // unknown.
+        let silent =
+            serde_json::from_value::<oneagentgraph::event::TurnMessage>(serde_json::json!({
+                "turn": 1,
+                "role": "assistant",
+                "text": "done",
+            }))
+            .expect("a payload carrying no origin still reads");
+        assert!(
+            serde_json::to_value(&silent)
+                .expect("the payload serializes")
+                .get("origin")
+                .is_none(),
+            "a turn whose producer said nothing about its author was written back with an \
+             origin it did not carry"
+        );
+    }
+
     /// The linked `onevcs` reads the schema this repository's declaration is
     /// written against.
     ///

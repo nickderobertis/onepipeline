@@ -1273,6 +1273,9 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
         instruction,
         instruction_truncated: false,
         started_at: fake::now(),
+        // A single-sided member's one turn opens on the composed task and on
+        // nothing else, which is what the real producer stamps it as.
+        origin: Some(oneagentgraph::event::Origin::Task),
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
@@ -1706,6 +1709,9 @@ fn emit(
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
             text: said,
             truncated: false,
+            // The agent's own words are the agent's: none of the three origins
+            // names them, and the real producer leaves them unattributed.
+            origin: None,
         }) {
             Ok(payload) => payload,
             Err(error) => fake::fail(&format!("a turn message is not an object: {error}")),

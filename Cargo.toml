@@ -90,6 +90,18 @@ resolver = "2"
 #   `src/note.rs` exists to end. `tests/note/` drives it against the real
 #   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
 #   than reads differently.
+# - `oneagentgraph` 0.3.16 stamps **who authored** a turn: `TurnStarted` and
+#   `TurnMessage` carry an optional `origin` — the composed task, the member's
+#   own supervising side, or text a caller handed the graph to deliver — absent by
+#   default and read as unknown when absent. Below it a manager's delivered note
+#   and the simulated supervisor's improvisation reach the merged stream as the
+#   same `user` turn, which is what let a monitor cancel a live dispatch on a stop
+#   order nobody issued. This crate relays the payload untouched; what it owes is
+#   that its note delivery goes through `oneagentgraph::control::note`, the path
+#   that release stamps as `delivered`, and `src/agentgraph.rs` holds the field
+#   against the linked library so a pin below 0.3.16 fails rather than reads
+#   differently. A **lock floor** rather than a requirement: `^0.3.15` already
+#   admits it, so only the resolution moved.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -376,7 +388,7 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.15"
+oneagentgraph = "0.3.16"
 onevcs = "0.19.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
