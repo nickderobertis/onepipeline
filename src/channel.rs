@@ -1100,6 +1100,17 @@ impl Queue {
         let surface = &record.surface;
         match record.event(self.next_id) {
             SurfaceEvent::Queued => {
+                // An id with no successor is one no writer here allocated, and
+                // it is refused rather than folded. The counter is one past the
+                // highest id queued, and there is no one past this: a fold that
+                // kept the record and left the counter at the id itself would
+                // hand that id to every surface queued afterwards, for good —
+                // the collision this whole design exists to rule out. Refused,
+                // the record costs one line nobody wrote honestly, and the
+                // counter stays where the last usable id put it.
+                let Some(after) = surface.id.checked_add(1) else {
+                    return;
+                };
                 // Exactly one check-in is ever pending, and it is kept current
                 // rather than kept still: the next interval's update replaces
                 // the queued one instead of being blocked by it.
@@ -1108,9 +1119,7 @@ impl Queue {
                         .retain(|existing| existing.source != source::CHECK_IN);
                 }
                 self.waiting.push(surface.clone());
-                // Saturating, so an id no writer here allocated cannot take the fold
-                // down with it: the record is folded and the counter stays put.
-                self.next_id = self.next_id.max(surface.id.saturating_add(1));
+                self.next_id = self.next_id.max(after);
             }
             SurfaceEvent::Claimed => {
                 let Some(at) = self.waiting.iter().position(|w| w.id == surface.id) else {
@@ -1472,11 +1481,12 @@ impl ChannelState {
     /// queue is read until after the projection is written, so what `derive`
     /// sees is the log as it is and nothing lands between the decision and the
     /// record of it: an id it allocates is one no other writer can allocate, and
-    /// a surface it claims is one no other reader can claim. What it returns is
-    /// the surfaces it recorded, in the order it recorded them.
+    /// a surface it claims is one no other reader can claim. A refusal `derive`
+    /// hands back records nothing and is handed on. What it returns is the
+    /// surfaces it recorded, in the order it recorded them.
     fn record(
         &self,
-        derive: impl FnOnce(&Queue) -> Vec<(SurfaceEvent, Surface)>,
+        derive: impl FnOnce(&Queue) -> crate::Result<Vec<(SurfaceEvent, Surface)>>,
     ) -> crate::Result<Vec<Surface>> {
         let mut log = crate::ledger::Appender::open(&self.log_path())?;
         // A tail this handle cannot read refuses the mutation: this path stamps
@@ -1485,7 +1495,7 @@ impl ChannelState {
         // — a question hidden for good, by the very write meant to record one.
         let (mut queue, _) = self.current(|from| log.records_from(from))?;
         let mut recorded = Vec::new();
-        for (event, surface) in derive(&queue) {
+        for (event, surface) in derive(&queue)? {
             let record = SurfaceRecord {
                 event: Some(event),
                 surface,
@@ -1507,7 +1517,10 @@ impl ChannelState {
     ///
     /// The id is allocated from the log under its lock — one past the highest it
     /// has ever queued — so a surface queued while a reader is reading the
-    /// channel keeps its id and its place. Exactly one check-in is ever pending,
+    /// channel keeps its id and its place. The one id that cannot be allocated
+    /// is the last one there is: no id could follow it, so a surface queued
+    /// under it would be the id every later surface was allocated too. The push
+    /// is refused instead, and records nothing. Exactly one check-in is ever pending,
     /// and it is kept current rather than kept still: the next interval's update
     /// **replaces** the queued one instead of being blocked by it, so being
     /// ignored makes the harness louder rather than quieter. The clock is not
@@ -1515,8 +1528,15 @@ impl ChannelState {
     /// queued content stays fresh.
     pub fn push(&self, mut surface: Surface) -> crate::Result<Surface> {
         let mut queued = self.record(|queue| {
+            if queue.next_id.checked_add(1).is_none() {
+                return Err(crate::Error::Refused(format!(
+                    "surface: the channel has no id left to allocate; the last one, \
+                     {}, has already been queued",
+                    queue.next_id - 1
+                )));
+            }
             surface.id = queue.next_id;
-            vec![(SurfaceEvent::Queued, surface)]
+            Ok(vec![(SurfaceEvent::Queued, surface)])
         })?;
         queued
             .pop()
@@ -1555,11 +1575,11 @@ impl ChannelState {
                 .position(|surface| surface.blocking && !surface.abandoned)
                 .or_else(|| queue.waiting.iter().position(|surface| !surface.abandoned))
                 .unwrap_or(0);
-            queue
+            Ok(queue
                 .waiting
                 .get(next)
                 .map(|surface| vec![(SurfaceEvent::Claimed, surface.clone())])
-                .unwrap_or_default()
+                .unwrap_or_default())
         })?;
         Ok(claimed.pop())
     }
@@ -1594,7 +1614,7 @@ impl ChannelState {
     /// it.
     pub fn abandon(&self, raised: &[u64]) -> crate::Result<Vec<Surface>> {
         self.record(|queue| {
-            queue
+            Ok(queue
                 .waiting
                 .iter()
                 .chain(queue.pending.iter())
@@ -1608,7 +1628,7 @@ impl ChannelState {
                         },
                     )
                 })
-                .collect()
+                .collect())
         })
     }
 
@@ -1640,7 +1660,7 @@ impl ChannelState {
     /// true.
     pub fn attend(&self, asker: &Asker) -> crate::Result<Vec<Surface>> {
         self.record(|queue| {
-            queue
+            Ok(queue
                 .waiting
                 .iter()
                 .chain(queue.pending.iter())
@@ -1654,7 +1674,7 @@ impl ChannelState {
                         },
                     )
                 })
-                .collect()
+                .collect())
         })
     }
 
@@ -1687,11 +1707,11 @@ impl ChannelState {
     /// a reader that finds the reply finds the slot already released.
     pub fn answer(&self, reply: &Reply) -> crate::Result<u64> {
         self.record(|queue| {
-            queue
+            Ok(queue
                 .pending
                 .iter()
                 .map(|held| (SurfaceEvent::Answered, held.clone()))
-                .collect()
+                .collect())
         })?;
         let path = self.paths.channel("replies.jsonl");
         let id = crate::ledger::read_lines(&path).len() as u64;

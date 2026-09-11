@@ -1809,6 +1809,115 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
     ended(serving);
 }
 
+/// A log line carrying an id nothing can follow does not make the next surface
+/// take an id already in use.
+///
+/// The allocator hands out one past the highest id the log has queued, so an
+/// id with no successor — the last one there is, which no writer here ever
+/// allocates — is one the counter cannot move past. A fold that kept such a
+/// record and left the counter *at* it would allocate that id to every surface
+/// queued afterwards, for good: not one collision but all of them. So the
+/// record is refused rather than folded, the counter stays where the last
+/// usable id put it, and every later surface takes an id nothing has used. And
+/// where the log has queued the id *before* the last, so that the last is the
+/// one the allocator would hand out next, the push is refused rather than
+/// made: nothing could follow it either.
+#[test]
+fn a_log_line_carrying_an_id_nothing_can_follow_does_not_make_a_later_surface_take_a_used_id() {
+    let world = World::new("channel-last-id");
+    world.script("build.wait", "hold");
+    let run = running(&world, "lastid", vec![agent("build", &[])]);
+    let first = world.run(&["surface", &run, "--kind", "finding", "--message", "first"]);
+    first.exited(0);
+    assert_eq!(first.json()["surface"], json!(0));
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the line is placed
+    // because no writer here allocates this id: the allocator refuses it
+    // below, so a line carrying it is a corrupt or hostile one, and what is
+    // under test is that such a line cannot turn the allocator into one that
+    // collides. Everything else is driven through the CLI.
+    let log = world.run_file(&run, "channel/surfaces.jsonl");
+    let line_under = |id: u64| {
+        format!(
+            r#"{{"event":"queued","id":{id},"kind":"finding","message":"placed under {id}","source":"proposal","blocking":false,"queued_at":0,"abandoned":false}}"#,
+        )
+    };
+    let mut placed = std::fs::read_to_string(&log).expect("the log");
+    placed.push_str(&line_under(u64::MAX));
+    placed.push('\n');
+    std::fs::write(&log, &placed).expect("the line is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Two surfaces queued afterwards take two distinct ids, neither of which
+    // the log has ever carried.
+    let second = world.run(&["surface", &run, "--kind", "finding", "--message", "second"]);
+    second.exited(0);
+    assert_eq!(second.json()["surface"], json!(1));
+    let third = world.run(&["surface", &run, "--kind", "finding", "--message", "third"]);
+    third.exited(0);
+    assert_eq!(third.json()["surface"], json!(2));
+    let mut read = Vec::new();
+    for _ in 0..3 {
+        let next = world.run(&["next", &run]);
+        next.exited(0);
+        read.push((
+            next.json()["surface"]["id"].as_u64().expect("an id"),
+            next.json()["surface"]["message"]
+                .as_str()
+                .expect("a message")
+                .to_owned(),
+        ));
+    }
+    assert_eq!(
+        read,
+        vec![
+            (0, "first".to_owned()),
+            (1, "second".to_owned()),
+            (2, "third".to_owned())
+        ]
+    );
+    let none = world.run(&["next", &run]);
+    none.exited(0);
+    assert_eq!(
+        none.json()["surface"],
+        Value::Null,
+        "the placed line was folded"
+    );
+
+    // And with the id before the last queued, the push that would hand out the
+    // last is refused by name, recording nothing.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] placed for the reason the
+    // block above gives: this id is one the log reaches after 2^64 - 1 pushes.
+    let mut placed = std::fs::read_to_string(&log).expect("the log");
+    placed.push_str(&line_under(u64::MAX - 1));
+    placed.push('\n');
+    std::fs::write(&log, &placed).expect("the line is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run(&["surface", &run, "--kind", "finding", "--message", "fourth"])
+        .exited(REFUSED)
+        .err_has("the channel has no id left to allocate")
+        .err_has(&format!("{}, has already been queued", u64::MAX - 1));
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("the log"),
+        placed,
+        "a refused push still appended to the log"
+    );
+    assert!(
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .all(|event| event["payload"]["message"] != json!("fourth")),
+        "the journal says a surface was queued that the log does not hold"
+    );
+    // What the log does hold under a usable id is still handed over.
+    let last = world.run(&["next", &run]);
+    last.exited(0).out_has("placed under 18446744073709551614");
+
+    world.release("build.go");
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
