@@ -1853,47 +1853,41 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
 /// reads of that file are touched; everything else the process does is real.
 ///
 /// The push reads the log's tail only where the projection is behind it, and
-/// the run's own driver repairs a projection it finds behind: it wakes on the
-/// channel's fingerprint moving, folds the log, and writes the projection back.
-/// So the projection is left behind inside a channel directory nobody can
-/// write into until the traced push has run — the driver's repair fails at its
-/// temporary file and leaves nothing, exactly as
-/// `a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back`
-/// holds — and the directory is made read-only *before* the projection is
-/// emptied in place, so there is no instant at which a repair could land.
+/// a run's own driver repairs a projection it finds behind: it wakes on the
+/// channel's fingerprint moving, folds the log, and writes the projection back
+/// — and on a slow host it did so between this journey leaving the projection
+/// behind and the traced push starting, so the push had nothing to fold and
+/// the injected failure had no read to land on. So the run is one that has
+/// **settled**, with its driver gone: every verb here answers for a settled run
+/// as for a live one, and with no driver there is nothing but this journey's
+/// own commands to touch the channel, wherever it runs.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
-    use std::os::unix::fs::PermissionsExt;
-
     let world = World::new("channel-unreadable-log");
-    world.script("build.wait", "hold");
-    let run = running(&world, "unreadablelog", vec![agent("build", &[])]);
+    let run = "unreadablelog";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--attach"]).exited(0);
+    assert!(
+        world.run_file(run, "result.json").is_file(),
+        "the run did not settle under the attach"
+    );
     world
-        .run(&["surface", &run, "--kind", "finding", "--message", "first"])
+        .run(&["surface", run, "--kind", "finding", "--message", "first"])
         .exited(0);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] the projection is emptied
+    // llmlint: ignore-block[tests_mirror_real_usage] the projection is removed
     // because a push reads the log's tail only where the projection is behind
     // it, and nothing user-facing leaves it behind on purpose: a lost write to
     // the projection is the very state the log-derived queue exists to survive,
     // and the one shape of it a journey can place is the write never landing.
-    // The channel directory is made read-only first, so the driver cannot
-    // rebuild the projection between here and the traced push; a file's
-    // contents are still writable inside a directory whose entries are not.
     // Everything under test is driven through the CLI.
-    let queue = world.run_file(&run, "channel/queue.json");
-    let channel = queue.parent().expect("the channel directory").to_path_buf();
-    let writable = std::fs::metadata(&channel)
-        .expect("the channel directory")
-        .permissions();
-    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
-        .expect("the directory is made read-only");
-    std::fs::write(&queue, b"").expect("the projection's write is lost");
+    let queue = world.run_file(run, "channel/queue.json");
+    std::fs::remove_file(&queue).expect("the projection's write is lost");
     // llmlint: ignore-end[tests_mirror_real_usage]
-    let log = world.run_file(&run, "channel/surfaces.jsonl");
+    let log = world.run_file(run, "channel/surfaces.jsonl");
     let logged = std::fs::read(&log).expect("the log");
-    let journalled = world.events_of(&run, "planner-surface-queued").len();
+    let journalled = world.events_of(run, "planner-surface-queued").len();
 
     let trace = world.root.join("unreadable-log.strace");
     let refused = under_strace(
@@ -1907,9 +1901,8 @@ fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
             "inject=read:error=EIO:when=2",
         ],
         &trace,
-        &["surface", &run, "--kind", "finding", "--message", "second"],
+        &["surface", run, "--kind", "finding", "--message", "second"],
     );
-    std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
     // The failure the command reports is the one that was induced: exactly one
     // read of the log was answered `EIO`, and the command named that file.
     let traced = std::fs::read_to_string(&trace).expect("the trace the tracer wrote");
@@ -1936,34 +1929,32 @@ fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
         logged,
         "a push that could not read the log still appended to it"
     );
-    assert_eq!(
-        std::fs::read(&queue).expect("the projection"),
-        b"",
-        "a push that could not read the log still stamped a projection"
+    assert!(
+        !queue.exists(),
+        "a push that could not read the log still stamped a projection: {}",
+        std::fs::read_to_string(&queue).unwrap_or_default()
     );
     assert_eq!(
-        world.events_of(&run, "planner-surface-queued").len(),
+        world.events_of(run, "planner-surface-queued").len(),
         journalled,
         "the journal says a surface was queued that the log does not hold"
     );
 
     // Readable again, the next push takes the id the refused one would have,
     // and every surface the log holds is handed over under its own id.
-    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "second"]);
+    let queued = world.run(&["surface", run, "--kind", "finding", "--message", "second"]);
     queued.exited(0);
     assert_eq!(queued.json()["surface"], json!(1));
     world
-        .run(&["status", &run])
+        .run(&["status", run])
         .exited(0)
         .out_has("2 planner update(s) waiting");
-    let first = world.run(&["next", &run]);
+    let first = world.run(&["next", run]);
     first.exited(0).out_has("first");
     assert_eq!(first.json()["surface"]["id"], json!(0));
-    let second = world.run(&["next", &run]);
+    let second = world.run(&["next", run]);
     second.exited(0).out_has("second");
     assert_eq!(second.json()["surface"]["id"], json!(1));
-
-    world.release("build.go");
 }
 
 /// The binary under `strace`, with the tracer's own options in front of it.
