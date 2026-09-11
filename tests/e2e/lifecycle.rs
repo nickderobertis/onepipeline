@@ -2157,6 +2157,97 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
     );
 }
 
+/// A node cancelled while its publication was already under way settles on
+/// that publication, and the settlement ends the park.
+///
+/// The second run the park defect was found on. A cancel landed after the
+/// node's dispatch had finished and while its push was at the merge path, so
+/// the dispatch was never stopped and the run's **own** settlement path wrote
+/// `done` seventy-five seconds after the park — and the park was never cleared.
+/// That run read one deliverable short from then on, with both of its
+/// deliverables verified complete: the park lives on the definition and
+/// outranks every recorded status, so nothing that read the node saw the
+/// outcome. No manager settlement was involved, which is why the park has to
+/// come off wherever a node reaches a settled outcome and not only in the
+/// settled-from-evidence op.
+///
+/// A cancel that *does* stop a dispatch settles `cancelled` and keeps its park
+/// — `live_edit::a_node_parked_while_it_was_running_stays_parked_and_holds_its_dependents`
+/// holds that half — so what this journey holds is the other one: a publication
+/// the cancel arrived too late to stop is the node's answer, and a node with an
+/// answer is idle by nobody's decision.
+#[test]
+fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked() {
+    let world = World::new("lifecycle-cancelparked");
+    let go = world.fakes.join("push.go");
+    let held = held_merge_path(&world, &go);
+    world.repository("local-direct", &held.argv());
+    world.script("service.work", "the worker wrote this\n");
+
+    let path = world.plan(
+        "cancelparked",
+        &plan_of("cancelparked", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "cancelparked".to_string();
+
+    // The dispatch is over and the publication has committed its work and is
+    // held at the merge path: the moment a cancel is too late to stop anything.
+    world.until("the publication to reach its merge path", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "author": "monitor", "commands": [{
+                "op": "cancel", "id": "service",
+                "reason": "this looked stalled at its push",
+            }]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the park to be committed", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    held.release();
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // The park was recorded, and the publication settled the node after it.
+    let parked: Vec<serde_json::Value> = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "cancel")
+        .collect();
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == "service")
+        .expect("the node settled");
+    assert_eq!(settled["payload"]["status"], "done", "{settled}");
+    assert_eq!(settled["payload"]["outcome"], "merged", "{settled}");
+    assert!(
+        settled["ts"].as_str() > parked[0]["ts"].as_str(),
+        "the settlement did not follow the park: {settled} before {parked:?}"
+    );
+
+    // And the node reads as what it reached rather than as what a cancel too
+    // late to stop it asked for: `done`, and the run complete.
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "the park outlived the settlement that followed it\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
 /// A merge path the reads never answer settles the node saying where the work is.
 ///
 /// The other end of the bound. Nothing here is recoverable — the host never comes
