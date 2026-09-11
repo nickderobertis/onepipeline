@@ -823,6 +823,30 @@ fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
         && !subject.ends_with("Fast-forward")
 }
 
+/// Hold until the clock has left the second `began` fell in.
+///
+/// The reflog [`level_with_base`] reads is stamped in whole seconds, so a commit
+/// written in the second a dispatch began cannot be told, by its stamp, from one
+/// written just before the dispatch did. Waiting that second out before the
+/// dispatch's first session opens is what makes the boundary exact: every entry
+/// stamped in that second or earlier was there before this dispatch, and every
+/// one it writes is stamped later. At most a second, once per node, and only
+/// where a session is about to open — which is also the one place it matters.
+/// A `began` the clock cannot place waits for nothing; the read that follows
+/// then takes the epoch as its boundary, and credits everything.
+pub fn wait_out_the_second(began: std::time::SystemTime) {
+    let Ok(since) = began.duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let next = std::time::UNIX_EPOCH + Duration::from_secs(since.as_secs() + 1);
+    while let Ok(remaining) = next.duration_since(std::time::SystemTime::now()) {
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining);
+    }
+}
+
 /// Where a session's branch stands against its base, asked of the worktree
 /// `onevcs` opened for it.
 ///
@@ -837,10 +861,13 @@ fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
 /// The evidence that this dispatch wrote a commit is the worktree's own `HEAD`
 /// reflog, which git writes for every move of `HEAD` there, stamps with the
 /// clock, and names the action that made — see [`reflog_entry_wrote_a_commit`].
-/// Only the entries stamped at or after `began` are this dispatch's: `onevcs`
-/// cuts every session its own non-bare clone and adds the worktree fresh, but a
-/// session it takes up again for a later dispatch keeps the worktree and its
-/// reflog, and what an earlier dispatch wrote there is not what this one did. A
+/// Only the entries stamped **after the second `began` fell in** are this
+/// dispatch's: `onevcs` cuts every session its own non-bare clone and adds the
+/// worktree fresh, but a session it takes up again for a later dispatch keeps
+/// the worktree and its reflog, and what an earlier dispatch wrote there is not
+/// what this one did. The stamp is whole seconds, so the boundary is a second
+/// rather than an instant, and [`wait_out_the_second`] is what makes it exact —
+/// the caller holds its first session open until that second has passed. A
 /// commit counts only while the branch still carries it: one written and then
 /// reset away is not on the base whatever the reflog says.
 ///
@@ -905,19 +932,15 @@ pub fn level_with_base(
     // split on spaces a stamp and a commit name never contain. A stamp this
     // build cannot read leaves the entry out: it is not evidence either way.
     //
-    // llmlint: ignore[changed_behavior_has_e2e] the stamp is whole seconds, so an entry
-    // from the second this dispatch began in is taken as this dispatch's. Comparing
-    // strictly would drop a worker's own first-second commit — which the doubles here
-    // write within the second — and report real work as none, which is the worse error
-    // by far and the one this read exists to end. The other direction over-credits by
-    // one commit, on an edge no path reaches: a worktree is taken up again only by a
-    // later run pinned to the same branch, and between that run's dispatch and the last
-    // commit the earlier one wrote stand the earlier run's publication of it and its
-    // stop, then the later run's `start` and the sibling resuming the session record —
-    // a sequence nothing here bounds to a second, but none of which this file enforces
-    // either, so this is the honest statement of an edge rather than a proof. The reuse
-    // journey in `tests/e2e/session_reuse.rs` drives the reuse that does happen, and
-    // the unit test drives the boundary through git's own clock.
+    // Strictly after the second `began` fell in. The stamp is whole seconds, so
+    // an entry from that second could be either side of the boundary; at-or-after
+    // took it as this dispatch's, and credited a retry with the commit the run it
+    // took the worktree from had written moments before — a stop and a retry
+    // land within one second on a fast host, which `tests/e2e/session_reuse.rs`'s
+    // stranded retry met on a hosted runner. Strictly-after is exact because the
+    // caller waited that second out before its first session opened, so nothing
+    // this dispatch wrote is stamped in it; the unit test drives the boundary
+    // through git's own clock, and that journey drives it over a real stop.
     let began = began
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -932,7 +955,7 @@ pub fn level_with_base(
                 .strip_suffix('}')?
                 .parse()
                 .ok()?;
-            (stamped >= began && reflog_entry_wrote_a_commit(subject)).then(|| sha.to_owned())
+            (stamped > began && reflog_entry_wrote_a_commit(subject)).then(|| sha.to_owned())
         })
         .collect();
     let mut wrote = Wrote::Nothing;
@@ -2581,7 +2604,8 @@ mod tests {
         // that the base then took, and this dispatch — begun after it — wrote
         // nothing. The reflog still holds the earlier commit; it is not this
         // dispatch's. Stamped a day earlier through git's own clock rather
-        // than waited for.
+        // than waited for, and read from three beginnings: the second before
+        // the stamp, the stamp's own second, and an hour after it.
         let (_, resumed) = a_cut_worktree("resumed");
         std::fs::write(resumed.join("earlier.md"), "earlier\n").expect("the file");
         git_in(&resumed, &["add", "-A"]);
@@ -2611,9 +2635,25 @@ mod tests {
             Some(Wrote::ACommitTheBaseCarries),
             "read as the dispatch that wrote it, the commit counts"
         );
-        let later = earlier + Duration::from_secs(3_600);
+        let begun = |began: SystemTime| {
+            super::level_with_base(&resumed, "main", began).map(|read| read.wrote)
+        };
         assert_eq!(
-            super::level_with_base(&resumed, "main", later).map(|read| read.wrote),
+            begun(earlier - Duration::from_secs(1)),
+            Some(Wrote::ACommitTheBaseCarries),
+            "a commit stamped the second after this dispatch began was not read as its own"
+        );
+        // The boundary itself: a dispatch begun in the commit's own second waited
+        // that second out before it could have written anything, so the commit
+        // is the earlier dispatch's. This is the stop-and-retry that landed
+        // within one second on a hosted runner.
+        assert_eq!(
+            begun(earlier),
+            Some(Wrote::Nothing),
+            "a commit stamped in the second this dispatch began was read as this one's"
+        );
+        assert_eq!(
+            begun(earlier + Duration::from_secs(3_600)),
             Some(Wrote::Nothing),
             "a commit an earlier dispatch wrote in this worktree was read as this one's"
         );
@@ -2640,6 +2680,35 @@ mod tests {
                     .join(format!("onepipeline-level-{name}-{}", std::process::id())),
             );
         }
+    }
+
+    /// Waiting a second out returns with the clock in a later whole second than
+    /// the one it was given, and returns at once for a beginning already past.
+    #[test]
+    fn the_second_a_dispatch_began_in_is_over_before_its_first_session_opens() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let seconds = |at: SystemTime| {
+            at.duration_since(UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_secs()
+        };
+        let began = SystemTime::now();
+        super::wait_out_the_second(began);
+        assert!(
+            seconds(SystemTime::now()) > seconds(began),
+            "the wait returned inside the second it was asked to leave"
+        );
+
+        // Already over: nothing to wait for.
+        let long_ago = SystemTime::now() - Duration::from_secs(60);
+        let asked = std::time::Instant::now();
+        super::wait_out_the_second(long_ago);
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "a second already past was waited for"
+        );
+        // And one the clock cannot place at all.
+        super::wait_out_the_second(UNIX_EPOCH - Duration::from_secs(1));
     }
 
     /// The reflog subjects that record a commit being written, against the ones

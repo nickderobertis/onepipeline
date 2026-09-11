@@ -184,7 +184,9 @@ fn attempt_once(
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
 
     // When this dispatch began, which is what tells its commits from ones an
-    // earlier dispatch left in a worktree the session took up again.
+    // earlier dispatch left in a worktree the session took up again. The second
+    // it fell in is waited out before the first session opens, so that nothing
+    // this dispatch writes shares a stamp with what was there before it.
     let began = std::time::SystemTime::now();
     let mut session: Option<onevcs::SessionToken> = None;
     // The session's own stream, followed from the moment there is a token to
@@ -279,6 +281,9 @@ fn attempt_once(
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
+        if worktree.is_none() {
+            crate::vcs::wait_out_the_second(began);
+        }
         let drained = engine::attempt(executor, node, cancel, tx, &build);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
