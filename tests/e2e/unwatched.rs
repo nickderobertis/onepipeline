@@ -2067,12 +2067,6 @@ fn binary_in_cache() {
 /// turn held **in flight** (`observer.wait`) as the graph settles — leaves a
 /// document current for its journal, read off the files before any view, so
 /// `unwatched` excludes it. Clause 2 of the verb's rule, for an **attached** driver.
-///
-/// This is the clause-2 **guarantee**, not a reproduction: it passes before this
-/// change as well as after it, because the writer already leaves a current document
-/// in every shape that can be driven offline. The deterministic proof that a stale
-/// settled document is no longer reported at `6` is
-/// `a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_journal_is_undecidable`.
 #[test]
 fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_excluded() {
     let world = World::new("unwatched-observed");
@@ -2134,12 +2128,9 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
 /// The same clause-2 guarantee for a **detached** driver, whose only journal
 /// appender is the engine loop: a run started detached that the retained driver
 /// drives to settlement leaves a document current for its journal, read off the
-/// files before any view, so `unwatched` excludes it.
-///
-/// The engine loop's own closeout seal, on the path where there is no observer
-/// relay beside it — the documented happy path `onepipeline start --detach`
-/// returns on. As with the attached and adopted journeys this is the clause-2
-/// guarantee and passes on the tree before this change as well as after it.
+/// files before any view, so `unwatched` excludes it — the documented happy path
+/// `onepipeline start --detach` returns on, with no observer relay beside the
+/// engine loop.
 #[test]
 fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
     let world = World::new("unwatched-detached");
@@ -2242,10 +2233,8 @@ fn settled_over_the_measured_shape(world: &World, run: &str) -> RunPaths {
     paths_of(world, run)
 }
 
-/// The clause-2 guarantee for an **adopted** driver, over the fullest shape that
-/// can be driven offline — [`settled_over_the_measured_shape`]. The adopted
-/// driver's closeout leaves a current document just as the attached one does; a
-/// guarantee, not a reproduction.
+/// The clause-2 guarantee for an **adopted** driver, over
+/// [`settled_over_the_measured_shape`].
 #[test]
 fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_excluded() {
     let world = World::new("unwatched-adopted");
@@ -2275,24 +2264,16 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
 }
 
 /// The measured report, reproduced: a run the **previous release** drove to
-/// settlement is not reported by this one.
+/// settlement is not reported by this one. Entry 68 records the measurement.
 ///
-/// Entry 68 records the measurement. What matters to the fixture is what that
-/// run's driver left — a document current for its journal, recording
-/// `graph_complete: true`, at the schema this build has moved past — and that
-/// the verb's old rule reported such a document unread, reading the standing
-/// word off the launch record alone, which is the `DRIVER DEAD` measured. None
-/// of the observer, the adoption or the lifecycle streams is necessary to reach
-/// it; they are driven because the measured run had them, through
-/// [`settled_over_the_measured_shape`]. The document is then put where the
-/// previous release's writer leaves it and the verb is asked with no view
-/// between.
-///
-/// The rule held is entry 68's amended clause 4: such a document is
-/// **refreshed** — folded once and rewritten at this build's schema, exactly as
-/// `runs` refreshes it — and then decided as any other. A settled run is
-/// excluded, and the document it leaves behind is this build's own, current for
-/// the journal, so the next turn's question costs nothing again.
+/// The fixture is what that run's driver left — a document current for its
+/// journal, recording `graph_complete: true`, at the schema this build has moved
+/// past — reached by driving [`settled_over_the_measured_shape`], putting the
+/// document where the previous release's writer leaves it, and asking the verb
+/// with no view between. The observer, the adoption and the lifecycle streams are
+/// driven because the measured run had them; none is necessary to reach the
+/// report. The verb refreshes the document and excludes the run, and what it
+/// leaves behind is this build's own document, current for the journal.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a document
 // at a schema it has moved past, and none could: the writer stamps its own version. The
