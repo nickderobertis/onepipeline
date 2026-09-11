@@ -908,11 +908,16 @@ pub fn level_with_base(
     // llmlint: ignore[changed_behavior_has_e2e] the stamp is whole seconds, so an entry
     // from the second this dispatch began in is taken as this dispatch's. Comparing
     // strictly would drop a worker's own first-second commit — which the doubles here
-    // write within the second — for an edge no path reaches: a worktree is taken up
-    // again only by a later run pinned to the same branch, after the run that left it
-    // has stopped, and nothing here starts one inside the second the last one committed
-    // in. The reuse journey in `tests/e2e/session_reuse.rs` drives the reuse that does
-    // happen, and the unit test drives the boundary through git's own clock.
+    // write within the second — and report real work as none, which is the worse error
+    // by far and the one this read exists to end. The other direction over-credits by
+    // one commit, on an edge no path reaches: a worktree is taken up again only by a
+    // later run pinned to the same branch, and between that run's dispatch and the last
+    // commit the earlier one wrote stand the earlier run's publication of it and its
+    // stop, then the later run's `start` and the sibling resuming the session record —
+    // a sequence nothing here bounds to a second, but none of which this file enforces
+    // either, so this is the honest statement of an edge rather than a proof. The reuse
+    // journey in `tests/e2e/session_reuse.rs` drives the reuse that does happen, and
+    // the unit test drives the boundary through git's own clock.
     let began = began
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
