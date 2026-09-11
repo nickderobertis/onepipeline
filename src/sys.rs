@@ -2096,15 +2096,11 @@ mod tests {
     /// the process that started it — the same shape the Unix fixtures take with
     /// `echo $$`.
     ///
-    /// **Nothing here asks the operating system where the tree is.** The fixture
-    /// this replaces waited for each level to appear in a `Win32_Process` listing
-    /// under its parent, and on a loaded two-core runner the wait was the load:
-    /// every listing was a process start spent from the same budget the tree it
-    /// was waiting for needed to grow, which is the rule `tests/e2e/harness.rs`
-    /// states on its wait helper. A process that announces its own child needs
-    /// no listing, no image name to tell that child from the `conhost.exe` it
-    /// gets beside it, and no patience — the read blocks on the announcement and
-    /// nothing else.
+    /// Nothing here asks the operating system where the tree is: a listing is a
+    /// process start spent from the budget the tree needs to grow, which is the
+    /// rule `tests/AGENTS.md` states. A level that announces its own child needs
+    /// no listing, no image name to tell that child from the `conhost.exe` beside
+    /// it, and no patience — the read blocks on the announcement alone.
     #[cfg(windows)]
     fn console_tree_of(below: usize) -> (std::process::Child, Vec<u32>) {
         let script = level_script();

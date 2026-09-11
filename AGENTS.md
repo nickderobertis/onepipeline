@@ -83,13 +83,6 @@ consuming `project.json` — an undeclared one silently drops that project out o
   binary as a subprocess and assert on exit code, stdout, and stderr; assemble
   the real package around the real binary. An in-process `main()` call is not an
   e2e, and nothing is `#[ignore]`d or skipped to pass.
-- **A wait may not spend what it waits for needs.** Process starts are the
-  scarce resource on the hosted cross-platform runners, so a wait polls files, a
-  wait that has to ask a process yields between asks, and a test that needs to
-  know a spawned child has arrived has the child say so — a pid on its own
-  stdout, a double's `<key>.arrived` — rather than asking a process listing. The
-  wait helper in `tests/e2e/harness.rs` says why; a wall-clock deadline is the
-  backstop, not the signal.
 - **Two tiers, split by credential.** The offline tier runs in `just check`. The
   credentialled one is `just smoke-real`, kept out of `check` and `gate` so a
   laptop pays nothing for it, and run by CI's `smoke` job through that same

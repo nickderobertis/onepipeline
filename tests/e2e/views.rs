@@ -2000,12 +2000,9 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
     // Waited for at the worker and in the registry, not at `node-dispatched`:
-    // that event is the driver saying it launched something, and on a loaded
-    // Windows runner the stop below landed after it and before the executor had
-    // recorded where the work was — ending a dispatch the run never registered,
-    // so the view afterwards had no stale entry to ignore. The double's own
-    // arrival says the worker is inside its hold, and the entry says the stop
-    // has something to leave behind.
+    // that event is the driver saying it launched something, and a stop landing
+    // before the executor records where the work is ends a dispatch the run
+    // never registered — leaving the view below no stale entry to ignore.
     let worker = world.held("build", &[]);
     world.until("the dispatch to record its place", |world| {
         world.registered("halted", worker)
@@ -2039,26 +2036,12 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     world.script("build.wait", "hold");
     let path = world.plan("retaken", &plan_of("retaken", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    // Both waits are on the worker's own arrival at its hold — the double's
-    // half of a handshake, announced by pid — and neither is the view under
-    // test: `host` is read once, below, and never polled. A journey that waited
-    // on the command it asserts would pass at the instant the assertion would,
-    // which is a test that can only succeed — and `status` is no better,
-    // deciding liveness from the same registry through the same code the defect
-    // was in.
-    //
-    // The registry entry is waited for beside the arrival, because it is what
-    // makes the second wait able to end at all. `node-dispatched` is the driver
-    // saying it dispatched; the executor records *where* the work is after that,
-    // and a `stop` landing between the two ends a dispatch that never recorded
-    // its place — so the adoption's entry would be the only one this run ever
-    // held. That is not hypothetical: it is how this journey failed on a loaded
-    // Windows runner, where the 413ms between the event and the stop was not
-    // enough. This journey used to watch a relayed heartbeat for the same
-    // purpose, and on the next loaded Windows runner waited out its whole
-    // deadline for a beat that never came: the beat was a proxy for the fact,
-    // arriving on the double's clock through the driver's relay, and the pid the
-    // double writes as it arrives is the fact itself.
+    // Waited for at the worker's own arrival and in the registry, and neither
+    // is the view under test: `host` is read once, below, and never polled — a
+    // journey that waited on the command it asserts could only succeed. The
+    // registry entry matters because a `stop` landing before it ends a dispatch
+    // that never recorded its place, and the adoption's entry would then be the
+    // only one this run ever held.
     let stopped = world.held("build", &[]);
     world.until("the dispatch to record its place", |world| {
         world.registered("retaken", stopped)
