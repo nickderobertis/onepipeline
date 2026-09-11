@@ -376,13 +376,16 @@ pub(crate) fn of(
 /// One note as a dispatch of the node it was for is handed it, and as the run's
 /// record names it against that dispatch.
 ///
-/// The same fields the delivery committed under
-/// [`NoteDelivered`](crate::edits::Operation::NoteDelivered), carried whole rather
-/// than referenced, because a note has no id of its own: the record that says a
-/// dispatch was given a note has to be able to say *which*, and a reader
-/// verifying that a ruling reached the party it was for reads it off this without
-/// joining another record. Who was shown it is not here: that is what each
-/// `note-shown` records, as the stream shows it happening.
+/// The **note's own** fields of a
+/// [`NoteDelivered`](crate::edits::Operation::NoteDelivered) — whose task it
+/// updated, what it said, what it bound, and what became of it — carried whole
+/// rather than referenced, because a note has no id of its own: the record that
+/// says a dispatch was given a note has to be able to say *which*. What that
+/// operation says about presentations (`shown_to`, `routed_to`) is deliberately
+/// not here: a presentation belongs to the conversation that made it, and each
+/// one a later dispatch makes is its own `note-shown`. Built from the operation
+/// by [`of_delivery`](Self::of_delivery) and nowhere else, and this module's
+/// tests hold the two shapes field for field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Consumed {
     /// Whose task it said it was updating.
@@ -395,6 +398,28 @@ pub(crate) struct Consumed {
     /// What became of it when it was delivered.
     #[serde(flatten)]
     pub reached: Reached,
+}
+
+impl Consumed {
+    /// The note a committed delivery carried, or `None` for any other operation.
+    pub(crate) fn of_delivery(operation: &crate::edits::Operation) -> Option<Self> {
+        let crate::edits::Operation::NoteDelivered {
+            addressee,
+            text,
+            criterion,
+            reached,
+            ..
+        } = operation
+        else {
+            return None;
+        };
+        Some(Self {
+            addressee: *addressee,
+            text: text.clone(),
+            criterion: criterion.clone(),
+            reached: reached.clone(),
+        })
+    }
 }
 
 /// The payload key under which a `node-dispatched` names the notes the dispatch
@@ -533,27 +558,16 @@ pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
             serde_json::from_value(operations.clone())
                 .map_err(|error| unreadable_record(envelope, "operations", &error))?;
         for operation in operations {
-            let crate::edits::Operation::NoteDelivered {
-                node: whose,
-                addressee,
-                text,
-                criterion,
-                reached,
-                ..
-            } = operation
-            else {
+            let crate::edits::Operation::NoteDelivered { node: whose, .. } = &operation else {
                 continue;
             };
             if whose == node {
-                standing.held.push(Held {
-                    note: Consumed {
-                        addressee,
-                        text,
-                        criterion,
-                        reached,
-                    },
-                    placement: Placement::DeliveredSince,
-                });
+                if let Some(note) = Consumed::of_delivery(&operation) {
+                    standing.held.push(Held {
+                        note,
+                        placement: Placement::DeliveredSince,
+                    });
+                }
             }
         }
     }
@@ -580,24 +594,83 @@ pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     standing(&crate::journal::read(&paths.journal()), node)
 }
 
+/// How a conversation presents a note it has been told to, which decides which
+/// relayed turns count as the presentations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The worker's turn is reopened carrying it, and the judge receives it with
+    /// the worker's response: the worker's presentation is the turn the producer
+    /// stamps `delivered`, and the judge's is a turn answering that one or a
+    /// later one — never a supervisor turn that opened before it.
+    ReopenedWorkerTurn,
+    /// The judge re-took its decision with it in hand, which the delivery
+    /// already confirmed, and the note rides that decision to the worker: the
+    /// one presentation owed is the worker's `delivered` turn.
+    RidesTheDecision,
+    /// Nobody was taking a turn, so whichever turn opens next takes it and the
+    /// other party receives it after: a `delivered` worker turn or any supervisor
+    /// turn, in either order.
+    NextTurnToOpen,
+    /// Composed into the dispatch's own task: the opening worker turn carries it
+    /// as the task itself, whatever origin it is stamped with, and the judge
+    /// reads it in the first turn that answers.
+    ComposedIntoTheTask,
+}
+
+impl Route {
+    /// The route a conversation's own acknowledgement implies, or `None` for a
+    /// disposition that routes nothing onward.
+    fn of(reached: &Reached) -> Option<Self> {
+        match reached {
+            Reached::Worker => Some(Self::ReopenedWorkerTurn),
+            Reached::Supervisor => Some(Self::RidesTheDecision),
+            // llmlint: ignore[changed_behavior_has_e2e] no journey drives this
+            // arm, for the reason `Reached::Queued` states over that variant:
+            // the conversation answers it only for a note offered with no turn
+            // live, and this suite has no seam that holds the gap between two
+            // turns open. What the arm decides is held by this module's own
+            // tests over the same relayed shapes the journeys read.
+            Reached::Queued => Some(Self::NextTurnToOpen),
+            Reached::JudgedWith { .. } | Reached::Carried => None,
+        }
+    }
+
+    /// Whether a worker turn stamped with `origin` is this route's presentation
+    /// to the worker.
+    fn presented_to_the_worker_by(self, origin: Option<oneagentgraph::event::Origin>) -> bool {
+        match self {
+            Self::ReopenedWorkerTurn | Self::RidesTheDecision | Self::NextTurnToOpen => {
+                origin == Some(oneagentgraph::event::Origin::Delivered)
+            }
+            Self::ComposedIntoTheTask => true,
+        }
+    }
+
+    /// Whether a supervisor turn numbered `turn` is this route's presentation to
+    /// the judge, given the worker turn that presented it so far.
+    ///
+    /// The supervisor answers the worker's reply under that reply's own turn
+    /// number, so the turn that reads a note the worker's turn carried is
+    /// numbered as that turn, not after it.
+    fn presented_to_the_judge_by(self, turn: u64, worker_turn: Option<u64>) -> bool {
+        match self {
+            Self::ReopenedWorkerTurn | Self::ComposedIntoTheTask => {
+                worker_turn.is_some_and(|opened| turn >= opened)
+            }
+            Self::NextTurnToOpen => true,
+            Self::RidesTheDecision => false,
+        }
+    }
+}
+
 /// One note a conversation has been told to present, and to whom it has not yet
 /// been shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Routed {
     note: Consumed,
+    route: Route,
     /// The parties still owed a presentation.
     awaiting: Vec<Party>,
-    /// Whether the worker has to be shown it before the supervisor can be: true
-    /// for a note that rides a reopened worker turn — the judge receives it with
-    /// the worker's response, so a supervisor turn opening *before* that worker
-    /// turn was not shown it — and for one composed into a dispatch's task; false
-    /// for a queued note, which whichever turn opens next takes.
-    worker_first: bool,
-    /// Whether only a worker turn the producer stamps as **delivered** counts as
-    /// the worker's presentation. True for every note a conversation routed;
-    /// false for one composed into the dispatch's task, which the opening turn
-    /// carries as the task itself.
-    delivered_turn_only: bool,
     /// The instant this routing was recorded, against which a relayed turn is
     /// read: a turn that opened before it cannot be the presentation of it.
     routed_at: u64,
@@ -623,14 +696,13 @@ impl Shown {
             Ok(Value::Object(note)) => note,
             _ => serde_json::Map::new(),
         };
-        payload.insert("party".into(), json_party(self.party));
+        payload.insert(
+            "party".into(),
+            serde_json::to_value(self.party).unwrap_or(Value::Null),
+        );
         payload.insert("turn".into(), Value::from(self.turn));
         payload
     }
-}
-
-fn json_party(party: Party) -> Value {
-    serde_json::to_value(party).unwrap_or(Value::Null)
 }
 
 /// What one dispatch's conversation has been told to present and has not yet
@@ -653,16 +725,14 @@ impl Presentations {
     /// A note a conversation acknowledged and routed onward, as
     /// [`Reached::routed_to`] says.
     pub(crate) fn routed_by_the_conversation(&mut self, note: Consumed, at: u64) {
-        let awaiting = note.reached.routed_to().to_vec();
-        if awaiting.is_empty() {
+        let Some(route) = Route::of(&note.reached) else {
             return;
-        }
-        let worker_first = !matches!(note.reached, Reached::Queued);
+        };
+        let awaiting = note.reached.routed_to().to_vec();
         self.routed.push(Routed {
             note,
+            route,
             awaiting,
-            worker_first,
-            delivered_turn_only: true,
             routed_at: at,
             worker_turn: None,
         });
@@ -673,9 +743,8 @@ impl Presentations {
     pub(crate) fn composed_into_the_task(&mut self, note: Consumed, at: u64) {
         self.routed.push(Routed {
             note,
+            route: Route::ComposedIntoTheTask,
             awaiting: vec![Party::Worker, Party::Supervisor],
-            worker_first: true,
-            delivered_turn_only: false,
             routed_at: at,
             worker_turn: None,
         });
@@ -685,10 +754,13 @@ impl Presentations {
     /// presentation it shows happening.
     ///
     /// Only a `turn-started` the producer published, opened no earlier than the
-    /// routing it would confirm, on the member the notes were addressed to. The
-    /// caller decides the member; this reads the role, the origin and the turn
-    /// off the payload the producer wrote — by name, because this crate relays
-    /// that payload as an opaque map and reads no variant of it otherwise.
+    /// routing it would confirm, on the member the notes were addressed to — the
+    /// caller decides the member. The payload is read through the producer's
+    /// **own** declared type, which refuses a shape that library does not write;
+    /// a turn this build cannot read that way is no evidence of a presentation,
+    /// and answers none. It is not refused further up, because the envelope
+    /// itself was already relayed whole and a producer newer than this build is
+    /// held to its floor in `src/agentgraph.rs` rather than here.
     pub(crate) fn observe(&mut self, envelope: &Envelope) -> Vec<Shown> {
         if self.routed.is_empty()
             || envelope.source != crate::event::Source::Agentgraph
@@ -696,47 +768,42 @@ impl Presentations {
         {
             return Vec::new();
         }
-        let (Some(role), Some(turn), Some(opened_at)) = (
-            envelope.payload.get("role").and_then(Value::as_str),
-            envelope.payload.get("turn").and_then(Value::as_u64),
-            crate::projection::millis_of(&envelope.ts),
+        let Ok(opened) = serde_json::from_value::<oneagentgraph::event::TurnStarted>(
+            Value::Object(envelope.payload.clone()),
         ) else {
             return Vec::new();
         };
-        let delivered = envelope.payload.get("origin").and_then(Value::as_str)
-            == Some(oneagentgraph::event::Origin::Delivered.as_str());
-        let party = if role == oneagentgraph::event::Party::Assistant.as_str() {
+        let Some(started_at) = crate::projection::millis_of(&opened.started_at) else {
+            return Vec::new();
+        };
+        let party = if opened.role == oneagentgraph::event::Party::Assistant.as_str() {
             Party::Worker
-        } else if role == oneagentgraph::event::Party::User.as_str() {
+        } else if opened.role == oneagentgraph::event::Party::User.as_str() {
             Party::Supervisor
         } else {
             return Vec::new();
         };
         let mut shown = Vec::new();
         for routed in &mut self.routed {
-            if opened_at < routed.routed_at || !routed.awaiting.contains(&party) {
+            if started_at < routed.routed_at || !routed.awaiting.contains(&party) {
                 continue;
             }
             let presents = match party {
-                Party::Worker => delivered || !routed.delivered_turn_only,
-                // The supervisor answers the worker's reply under that reply's
-                // own turn number, so the turn that reads a note the worker's
-                // turn carried is numbered as that turn, not after it.
-                Party::Supervisor => match routed.worker_turn {
-                    Some(worker_turn) => turn >= worker_turn,
-                    None => !routed.worker_first || !routed.awaiting.contains(&Party::Worker),
-                },
+                Party::Worker => routed.route.presented_to_the_worker_by(opened.origin),
+                Party::Supervisor => routed
+                    .route
+                    .presented_to_the_judge_by(opened.turn, routed.worker_turn),
             };
             if !presents {
                 continue;
             }
             routed.awaiting.retain(|owed| *owed != party);
             if party == Party::Worker {
-                routed.worker_turn = Some(turn);
+                routed.worker_turn = Some(opened.turn);
             }
             shown.push(Shown {
                 party,
-                turn,
+                turn: opened.turn,
                 note: routed.note.clone(),
             });
         }
@@ -1147,5 +1214,43 @@ mod tests {
             json!([crate::event::PipelineKind::NoteShown.as_str()]),
             "the kind a presentation is recorded under is not the one entry 69 names"
         );
+    }
+
+    /// A note as a dispatch is handed it is the delivery's own record, field for
+    /// field, less the node and the two presentation fields — so the two shapes
+    /// cannot drift apart without this saying so.
+    #[test]
+    fn a_consumed_note_is_the_deliverys_own_fields_less_the_node_and_the_presentations() {
+        let delivery = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: Some(
+                "`version.txt` holds `v: 2`"
+                    .parse()
+                    .expect("a usable criterion"),
+            ),
+            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
+            routed_to: Reached::Supervisor.routed_to().to_vec(),
+            reached: Reached::Supervisor,
+        };
+        let consumed = Consumed::of_delivery(&delivery).expect("a delivery carries a note");
+        let mut recorded = serde_json::to_value(&delivery).expect("it serializes");
+        let recorded = recorded.as_object_mut().expect("an object");
+        for not_the_notes_own in ["kind", "node", "shown_to", "routed_to"] {
+            assert!(
+                recorded.remove(not_the_notes_own).is_some(),
+                "the delivery no longer writes `{not_the_notes_own}`; this gate is stale"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&consumed).expect("it serializes"),
+            Value::Object(recorded.clone()),
+            "a consumed note and the delivery it came from no longer share the note's fields"
+        );
+        assert!(Consumed::of_delivery(&Operation::HumanAttested {
+            node: "approve".into()
+        })
+        .is_none());
     }
 }

@@ -149,7 +149,7 @@ fn words_of(world: &World, run: &str, node: &str) -> Vec<TurnMessage> {
 
 /// The `note-shown` records of one node, in order: one per presentation the
 /// run saw happen.
-fn shown_to(world: &World, run: &str, node: &str) -> Vec<Value> {
+fn presentations_of(world: &World, run: &str, node: &str) -> Vec<Value> {
     world
         .events_of(run, "note-shown")
         .into_iter()
@@ -405,7 +405,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     // Each presentation is then recorded as the stream showed it happening:
     // the worker's turn that opened on the note, and then the judge's turn
     // that answered it — in that order, and each once.
-    let shown = shown_to(&world, run, "build");
+    let shown = presentations_of(&world, run, "build");
     assert_eq!(
         shown
             .iter()
@@ -1227,7 +1227,7 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
          made: {delivery}"
     );
     assert_eq!(delivery["routed_to"], json!(["worker", "supervisor"]));
-    let shown = shown_to(&world, run, "build");
+    let shown = presentations_of(&world, run, "build");
     assert_eq!(
         shown
             .iter()
@@ -1296,7 +1296,7 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
 
     // The node was dispatched again by the engine, on the failure the host
     // reported, and the second dispatch's record names the note it was composed
-    // with — as shown to both parties, because a task reaches both.
+    // with — the note itself, and no presentation it has not yet made.
     let records = dispatch_records_of(&world, run, "service");
     assert_eq!(
         records.len(),
@@ -1323,10 +1323,10 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         again["payload"].get("notes_spent").is_none(),
         "a dispatch composed with the note reported it spent: {again}"
     );
-    // The second conversation's presentations are recorded as its stream
-    // showed them — the opening worker turn that carried the note as the task,
-    // and the judge's turn that answered it — after the ones the first
-    // conversation made, and never assumed from the composition alone.
+    // What the record says about the second conversation's presentations is
+    // only what its stream showed — the opening worker turn that carried the
+    // note as the task, and the judge's turn that answered it — after the ones
+    // the first conversation made; the composition itself claims none.
     let journal = world.journal(run);
     let redispatched_at = journal
         .iter()
@@ -1346,13 +1346,13 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         vec![json!("worker"), json!("supervisor")],
         "the second conversation's presentations are not the worker's and then the \
          judge's:\n{:#?}",
-        shown_to(&world, run, "service")
+        presentations_of(&world, run, "service")
     );
     assert_eq!(
-        shown_to(&world, run, "service").len(),
+        presentations_of(&world, run, "service").len(),
         4,
         "each conversation shows the note to each party once:\n{:#?}",
-        shown_to(&world, run, "service")
+        presentations_of(&world, run, "service")
     );
 
     // The worker of the second conversation was handed it, in the task it opened
@@ -1508,7 +1508,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     // only routed to, until the stream shows the turn that rode the decision.
     assert_eq!(operation["shown_to"], json!(["supervisor"]), "{operation}");
     assert_eq!(operation["routed_to"], json!(["worker"]), "{operation}");
-    let shown = shown_to(&world, run, "build");
+    let shown = presentations_of(&world, run, "build");
     assert_eq!(
         shown
             .iter()
@@ -1590,7 +1590,7 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
         "a note the judge completed with was routed onward: {operation}"
     );
     assert!(
-        shown_to(&world, run, "build").is_empty(),
+        presentations_of(&world, run, "build").is_empty(),
         "a presentation was recorded for a note that reached no turn after the decision"
     );
 

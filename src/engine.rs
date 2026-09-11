@@ -2598,25 +2598,13 @@ fn commit_command(
     // presentation the stream has to show: handed to the dispatch's own watch,
     // which records each as it happens and nothing before.
     for operation in operations {
-        if let edits::Operation::NoteDelivered {
-            node,
-            addressee,
-            text,
-            criterion,
-            reached,
-            ..
-        } = operation
+        if let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
+            (operation, crate::note::Consumed::of_delivery(operation))
         {
             if let Some(dispatch) = in_flight.get_mut(node) {
-                dispatch.presentations.routed_by_the_conversation(
-                    crate::note::Consumed {
-                        addressee: *addressee,
-                        text: text.clone(),
-                        criterion: criterion.clone(),
-                        reached: reached.clone(),
-                    },
-                    offered_at,
-                );
+                dispatch
+                    .presentations
+                    .routed_by_the_conversation(note, offered_at);
             }
         }
     }
