@@ -358,7 +358,7 @@ index_versions() {
     # closing brace, or 0 where it never closes. What it decides lands in
     # DEP_BAD and DEPS rather than in a return value, because the walk has to
     # go on past an entry this cannot read to find the end of the record.
-    function read_dep(s, i,   n, c, key, name, req, kind, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, twice) {
+    function read_dep(s, i,   n, c, key, name, req, kind, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, name_twice, twice) {
       n = length(s)
       i = skip_ws(s, i + 1)
       if (substr(s, i, 1) == "}") { DEP_BAD = 1; return i + 1 }
@@ -380,7 +380,7 @@ index_versions() {
         } else {
           i = scan_literal(s, i); if (i == 0) return 0
         }
-        if (key == "name")      { if (saw_name) twice = 1; saw_name = 1 }
+        if (key == "name")      { if (saw_name) name_twice = 1; saw_name = 1 }
         else if (key == "req")  { if (saw_req)  twice = 1; saw_req  = 1 }
         else if (key == "kind") { if (saw_kind) twice = 1; saw_kind = 1 }
         i = skip_ws(s, i)
@@ -389,12 +389,12 @@ index_versions() {
         if (c == "}") break
         return 0
       }
-      # An entry whose name cannot be read is one this cannot tell from a
-      # sibling, so it is refused; one that names some other crate is skipped
-      # whole, whatever else is on it.
-      if (!ok_name || twice) { DEP_BAD = 1; return i + 1 }
+      # An entry whose name cannot be read, or that names two, is one this
+      # cannot tell from a sibling, so it is refused; one that names some other
+      # crate is skipped whole, whatever else is on it.
+      if (!ok_name || name_twice) { DEP_BAD = 1; return i + 1 }
       if (!(name in SIBLING)) return i + 1
-      if (!ok_req || !ok_kind) { DEP_BAD = 1; return i + 1 }
+      if (!ok_req || !ok_kind || twice) { DEP_BAD = 1; return i + 1 }
       if (kind != "normal" && kind != "build" && kind != "dev") { DEP_BAD = 1; return i + 1 }
       DEPS[++NDEPS] = name " " kind " " req
       return i + 1
@@ -806,16 +806,25 @@ if [ "$format" = notes ]; then
 fi
 # llmlint: ignore-end[tool_output_is_signal]
 
-# A held-back release is news rather than a finding, and it goes on stdout in
-# both verdicts: what it says is true of the lock whichever way the check goes,
-# and it carries no fix because there is none — the update that would take the
-# release is the one the unification refusal above exists to end. What lifts it
-# is the requirement it names moving.
+# A held-back release is news rather than a finding, and it goes on stdout
+# before either verdict: what it says is true of the lock whichever way the
+# check goes, and it carries no fix because there is none — the update that
+# would take the release is the one the unification refusal above exists to end.
+# What lifts it is the requirement it names moving.
+# llmlint: ignore-block[tool_output_is_signal] the judged tier reads a passing
+# run that prints this line and the summary as one line too many. The line is
+# the signal: it appears only where the registry holds a release this lock
+# cannot take, names the pin holding it and what the release requires, and is
+# the whole of what a reader deciding whether to move that pin needs — the
+# per-change workflow's contract states it as its own line on stdout, apart
+# from the exit status, precisely so it is read and not searched for. One line
+# per held-back engine, and none on a lock nothing holds back.
 for entry in ${heldback[@]+"${heldback[@]}"}; do
   read -r name version held dep dep_req manifest_req state <<<"$entry"
   [ "$state" = current ] || continue
   echo "$name: links $version, the newest its requirement permits that this manifest admits; $held is held back by $dep = \"$manifest_req\" ($held requires $dep $dep_req)"
 done
+# llmlint: ignore-end[tool_output_is_signal]
 
 if [ "${#behind[@]}" -eq 0 ]; then
   summary=""

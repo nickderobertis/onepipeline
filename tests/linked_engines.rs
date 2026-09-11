@@ -521,9 +521,15 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
 fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_a_finding() {
     let linked_testing = &linked("onevcs-testing")[0];
     let pinned_vcs = required("onevcs");
+    // Two releases held back, so the line names the newest of them; and the
+    // one holding the older back is a `build` requirement, which cargo does
+    // resolve for a dependency and which holds back exactly as `normal` does.
     let index = index_serving(
         "held-back",
-        &[served("onevcs-testing", "0.5.100").requiring(&[("onevcs", "^0.99.0", "normal")])],
+        &[
+            served("onevcs-testing", "0.5.99").requiring(&[("onevcs", "^0.98.0", "build")]),
+            served("onevcs-testing", "0.5.100").requiring(&[("onevcs", "^0.99.0", "normal")]),
+        ],
     );
 
     let run = linked_engines(&["--index", &index]);
@@ -543,6 +549,12 @@ fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_
         "the check passed without naming the release held back, the requirement of this \
          manifest holding it, and what the release itself requires — which is the whole of \
          what a reader needs to decide whether to move the pin:\n{}",
+        said(&run)
+    );
+    assert!(
+        !report.contains("0.5.99"),
+        "the check named a held-back release below the newest one, which is not the release \
+         a reader moving the pin would take:\n{}",
         said(&run)
     );
     assert!(
@@ -645,6 +657,85 @@ fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_
     assert!(
         !String::from_utf8_lossy(&run.stdout).contains("the newest its requirement permits"),
         "the check called a behind engine the newest this manifest admits:\n{}",
+        said(&run)
+    );
+}
+
+/// A held-back release below the newest one this manifest admits is not news.
+///
+/// It is a release the manifest already moved past — taking the admissible one
+/// above it is the fix, and it carries no `--precise`, because a bare update
+/// resolves to that release and nothing splits. Reporting it would send a reader
+/// to move a pin nothing is waiting on.
+#[test]
+fn a_held_back_release_below_the_newest_admitted_one_is_not_reported() {
+    let stale_testing = &linked("onevcs-testing")[0];
+    let index = index_serving(
+        "held-back-below-admitted",
+        &[
+            served("onevcs-testing", "0.5.99").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs-testing", "0.5.100"),
+        ],
+    );
+    let run = linked_engines(&["--index", &index]);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "the lock is behind a release this manifest admits:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        report.contains(&format!(
+            "fix: cargo update -p onevcs-testing@{stale_testing}\n"
+        )),
+        "the fix carries a `--precise` the bare update does not need, or names a release \
+         other than the admissible one:\n{}",
+        said(&run)
+    );
+    assert!(
+        !report.contains("held back")
+            && !String::from_utf8_lossy(&run.stdout).contains("held back"),
+        "the check reported a held-back release the manifest has already moved past:\n{}",
+        said(&run)
+    );
+}
+
+/// A `deps` entry naming a crate outside `SIBLINGS` is skipped whole, whatever
+/// shape its other members are in.
+///
+/// The registry's records carry every dependency, most of them crates this
+/// check has no requirement about, and a reader that refused a record over a
+/// member it was never going to consult would refuse the live index over a
+/// crate nobody here links. Only the name is read of such an entry, and only to
+/// learn it is not a sibling's.
+#[test]
+fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() {
+    let fixture = tree("foreign-dep-shape", &CARET_SHAPES);
+    let entry = repo_root()
+        .join(&fixture.index)
+        .join(index_path("oneagentgraph"));
+    let served = fs::read_to_string(&entry).expect("the fixture index entry");
+    fs::write(
+        &entry,
+        format!(
+            "{served}{{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{{\"name\":\"serde\",\
+             \"req\":5,\"kind\":7,\"req\":null}}],\"yanked\":false}}\n"
+        ),
+    )
+    .expect("one more record in it");
+    let run = linked_engines(&fixture.args());
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "a release whose only odd entry names a crate this check has no requirement about is \
+         a release the lock is plainly behind:\n{}",
+        said(&run)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("cargo update -p oneagentgraph@2.4.0"),
+        "the refusal does not carry the update, so the foreign entry was read rather than \
+         skipped:\n{}",
         said(&run)
     );
 }
@@ -842,6 +933,44 @@ fn the_release_note_says_so_where_a_newer_release_is_held_back() {
         !notes.contains("Every linked engine is the newest its own requirement permits."),
         "the note claims every engine is the newest its requirement permits while recording \
          a newer release it could not take:\n{}",
+        said(&run)
+    );
+}
+
+/// Where an engine is behind an admissible release **and** a newer one is held
+/// back, the notes carry the held-back fact on that engine's own warning line,
+/// where "links the newest this manifest admits" would be untrue of it.
+#[test]
+fn the_release_note_carries_a_held_back_release_on_the_warning_of_an_engine_that_is_also_behind() {
+    let stale_testing = &linked("onevcs-testing")[0];
+    let pinned_vcs = required("onevcs");
+    let index = index_serving(
+        "notes-behind-under-held-back",
+        &[
+            served("onevcs-testing", "0.5.100"),
+            served("onevcs-testing", "0.5.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+        ],
+    );
+    let run = linked_engines(&["--index", &index, "--format", "notes"]);
+    assert!(
+        run.status.success(),
+        "the note is composed for a behind release too:\n{}",
+        said(&run)
+    );
+    let notes = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        notes.contains(&format!(
+            "- `onevcs-testing` links {stale_testing}; the requirement already permitted \
+             0.5.100 (0.5.101 is held back by `onevcs = \"{pinned_vcs}\"`: 0.5.101 requires \
+             onevcs ^0.99.0)."
+        )),
+        "the warning names the release the lock is behind without saying a newer one is held \
+         back, so a reader who takes the update still meets the newer release unexplained:\n{}",
+        said(&run)
+    );
+    assert!(
+        !notes.contains("the newest its requirement permits that this manifest admits"),
+        "the note called a behind engine the newest this manifest admits:\n{}",
         said(&run)
     );
 }
@@ -1279,6 +1408,34 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "dep-without-name",
             "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"req\":\"^0.0.7\",\
              \"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-name-twice",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"serde\",\
+             \"name\":\"onejudge\",\"req\":\"^0.0.7\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-restyped-name",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":[\"onejudge\"],\
+             \"req\":\"^0.0.7\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-restyped-kind",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"kind\":null}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-unknown-kind",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"kind\":\"optional\"}],\"yanked\":false}",
             "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
              check cannot read",
         ),
