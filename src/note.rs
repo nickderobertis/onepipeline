@@ -1402,6 +1402,64 @@ mod tests {
             "both were carried by turns the judge's answer follows: {shown:?}"
         );
 
+        // A note the conversation queued — offered with no turn live, for the
+        // next turn to open — is owed to both parties in whichever order the
+        // stream shows them: the worker by the turn stamped `delivered` that
+        // carries its text, the judge by the first supervisor turn after the
+        // note was offered. A turn from before the offer confirms nothing, a
+        // worker turn the producer did not stamp as a delivery confirms nothing,
+        // and once both have been shown a further turn confirms nothing more.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(recorded("queued ruling", Reached::Queued), 7_000);
+        assert!(watch.observe(&turn(20, 6_900, "user", 1, None)).is_empty());
+        assert!(watch
+            .observe(&turn(21, 7_050, "assistant", 2, Some("supervisor")))
+            .is_empty());
+        let shown = watch.observe(&turn_on(
+            22,
+            7_100,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- queued ruling",
+        ));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
+        assert_eq!(shown[0].payload()["reached"], json!("queued"));
+        let shown = watch.observe(&turn(23, 7_200, "user", 3, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
+        assert!(watch.observe(&turn(24, 7_300, "user", 4, None)).is_empty());
+
+        // And the judge first, where the supervisor's turn is the one to open.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(recorded("queued ruling", Reached::Queued), 8_000);
+        let shown = watch.observe(&turn(25, 8_100, "user", 5, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Supervisor);
+        let shown = watch.observe(&turn_on(
+            26,
+            8_200,
+            "assistant",
+            6,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- queued ruling",
+        ));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Worker);
+        assert!(watch
+            .observe(&turn_on(
+                27,
+                8_300,
+                "assistant",
+                7,
+                Some("delivered"),
+                "## Notes delivered to you during this run\n\n- queued ruling",
+            ))
+            .is_empty());
+
         // Nothing the conversation routes nowhere is watched at all.
         let mut watch = Presentations::default();
         watch.routed_by_the_conversation(

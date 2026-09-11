@@ -2578,16 +2578,10 @@ mod tests {
     /// relays.
     ///
     /// The third floor carried by `Cargo.lock`; what it holds is with the pin.
-    /// A turn payload carries an optional `origin` naming who wrote the text it
-    /// opens on — the composed task, the member's own supervising side, or text
-    /// a caller handed the graph to deliver — absent by default and read as
-    /// unknown when absent. This crate relays the payload as an opaque map, so
-    /// the field reaches a consumer untouched; what is held here is that the
-    /// linked producer *has* it, because the consumer that needs it is reading a
-    /// stream this engine composed, and a resolution without the field would
-    /// hand that consumer a manager's note and the supervisor's own improvisation
-    /// as the same bytes — which is what cancelled a live dispatch on a stop
-    /// order nobody issued.
+    /// It is held *here*, in the crate that only relays the payload, because the
+    /// consumer that needs the field is reading a stream this engine composed:
+    /// the relay would pass a resolution without it through just as untouched,
+    /// and nothing downstream could tell the field was never there.
     ///
     /// Written in items the older resolution also has — the two payload types,
     /// which carry `deny_unknown_fields` and refuse the key below the floor — and
