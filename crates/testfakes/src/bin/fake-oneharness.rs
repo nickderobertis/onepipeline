@@ -18,14 +18,19 @@
 //! library that declares it rather than copied — at the copy **onejudge** links,
 //! which is the pin the workspace manifest explains.
 
+use oneharness_core::domain::dialogue::DialogueRefusal;
 use oneharness_core::domain::events::ActionEvent;
-use oneharness_core::domain::fallback::RunWork;
+use oneharness_core::domain::fallback::{startup_failure_reason, RunWork};
+use oneharness_core::domain::history::HistoryLabels;
 use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
-    OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status, SCHEMA_VERSION,
+    FallThrough, FallbackReport, OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status,
+    SCHEMA_VERSION,
 };
 use oneharness_core::domain::signals::{FailureKind, Usage};
+use oneharness_core::io::history::HistoryWriter;
 use onepipeline_testfakes as fake;
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 /// What a scripted `harness.work` turn writes into the worktree it was given.
@@ -180,8 +185,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
     };
-    let identity = match ran(&config_text) {
-        Ok(identity) => identity,
+    let selection = match selection(&config_text) {
+        Ok(selection) => selection,
         Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
     };
     fake::record(dir, "oneharness-config", &[prompt.clone(), config_text]);
@@ -199,12 +204,20 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // Whether onejudge asked this run to write its history record, and the name
+    // it asked for it under. Read off the argv rather than assumed: the record a
+    // journey reads back is one this process was *asked* to write.
+    let history = args
+        .iter()
+        .any(|arg| arg == "--history")
+        .then(|| fake::flag(args, "--history-name").unwrap_or_else(|| "turn".to_string()));
+
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir, &identity),
+            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_deref()),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
-        Side::Judge => judge_turn(&prompt, dir, &identity),
+        Side::Judge => judge_turn(&prompt, dir, selection.first()),
     }
 }
 
@@ -223,10 +236,20 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 // read for the field it needs and left alone.
 #[derive(serde::Deserialize)]
 struct Config {
-    /// The chain the config names, already resolved to the identity it would run
-    /// as. Absent when the config names none and leaves the selection to
-    /// oneharness's own discovery.
+    /// The chain the config names, every candidate checked. Absent when the
+    /// config names none and leaves the selection to oneharness's own discovery.
     harnesses: Option<Chain>,
+    /// The per-harness sections, read for the one field a turn here answers to:
+    /// the model a candidate was asked to run under, which is what a server's
+    /// own statement of the model is held against.
+    #[serde(default)]
+    harness: BTreeMap<String, HarnessSection>,
+}
+
+/// One `[harness.<id>]` section, as far as this process reads it.
+#[derive(serde::Deserialize)]
+struct HarnessSection {
+    model: Option<String>,
 }
 
 /// One harness identity, which is a name.
@@ -253,44 +276,83 @@ impl Identity {
     }
 }
 
-/// A config's identity chain, as the identity it would run the turn as: the
-/// first candidate, which is the one a run that stepped past nothing reports.
+/// A config's identity chain, in the order a run tries it: the first candidate is
+/// the one a run that stepped past nothing reports, and the next is where a
+/// refusal the chain steps past lands.
 ///
-/// Every candidate is checked, not only that one — a nameless entry anywhere is a
-/// config a real `oneharness` would refuse, and this turn not reaching it is no
-/// reason to wave it through.
-struct Chain(Identity);
+/// Every candidate is checked, not only the first — a nameless entry anywhere is
+/// a config a real `oneharness` would refuse, and this turn not reaching it is no
+/// reason to wave it through. Non-empty by construction.
+struct Chain(Vec<Identity>);
 
 impl<'de> serde::Deserialize<'de> for Chain {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let candidates = Vec::<String>::deserialize(deserializer)?;
-        let mut named = candidates
+        let named = candidates
             .iter()
             .map(|candidate| Identity::named(candidate))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(D::Error::custom)?
-            .into_iter();
-        named.next().map(Self).ok_or_else(|| {
-            D::Error::custom("its identity chain names no candidate to run the turn")
-        })
+            .map_err(D::Error::custom)?;
+        if named.is_empty() {
+            return Err(D::Error::custom(
+                "its identity chain names no candidate to run the turn",
+            ));
+        }
+        Ok(Self(named))
     }
 }
 
-/// The identity a turn under `config` ran as.
+/// What a config selects: the chain a turn under it is tried down, and the model
+/// each candidate was asked for.
+struct Selection {
+    chain: Chain,
+    /// The `model` of each `[harness.<id>]` section that states one, by id.
+    requested: BTreeMap<String, String>,
+}
+
+impl Selection {
+    /// The candidate a run that steps past nothing runs as.
+    fn first(&self) -> &Identity {
+        &self.chain.0[0]
+    }
+
+    /// The candidate after `identity`, if the chain names one.
+    fn after(&self, identity: &Identity) -> Option<&Identity> {
+        let at = self
+            .chain
+            .0
+            .iter()
+            .position(|candidate| candidate.as_str() == identity.as_str())?;
+        self.chain.0.get(at + 1)
+    }
+
+    /// The model `identity` was asked to run under, where its section states one.
+    fn requested(&self, identity: &Identity) -> Option<&str> {
+        self.requested.get(identity.as_str()).map(String::as_str)
+    }
+}
+
+/// What a turn under `config` selects.
 ///
 /// Read off the config rather than assumed, so a report names the identity the
-/// launch selected. Which candidate that is, and what makes a chain resolvable at
-/// all, is [`Chain`]'s — what is left here is the one case a chain cannot answer.
-fn ran(config: &str) -> Result<Identity, String> {
+/// launch selected. What makes a chain resolvable at all is [`Chain`]'s — what
+/// is left here is the one case a chain cannot answer.
+fn selection(config: &str) -> Result<Selection, String> {
     let config: Config = toml::from_str(config)
         .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
-    match config.harnesses {
-        Some(chain) => Ok(chain.0),
+    let chain = match config.harnesses {
+        Some(chain) => chain,
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
-        None => Identity::named(DISCOVERED),
-    }
+        None => Chain(vec![Identity::named(DISCOVERED)?]),
+    };
+    let requested = config
+        .harness
+        .into_iter()
+        .filter_map(|(id, section)| section.model.map(|model| (id, model)))
+        .collect();
+    Ok(Selection { chain, requested })
 }
 
 /// The identity oneharness discovers when a config names no chain — the only one
@@ -320,8 +382,14 @@ fn prompt(args: &[String]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
-    match work(prompt, cwd, dir, identity) {
+fn agent_turn(
+    prompt: &str,
+    cwd: &str,
+    dir: &std::path::Path,
+    selection: &Selection,
+    history: Option<&str>,
+) -> ExitCode {
+    match work(prompt, cwd, dir, selection, history) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -335,8 +403,10 @@ fn work(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
-    identity: &Identity,
+    selection: &Selection,
+    history: Option<&str>,
 ) -> Result<Outcome, String> {
+    let ran = chain_step(dir, selection)?;
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -422,10 +492,209 @@ fn work(
         }
     }
 
-    stream(&RunStreamEnvelope::Result {
-        report: report(outcome.text(), Some(events), outcome, identity),
-    })?;
+    let mut report = report(outcome.text(), Some(events), outcome, &ran.identity);
+    report.results[0].observed_model = ran.observed_model.clone();
+    if let Some(refused) = ran.refused {
+        // The candidate stepped past goes first, as oneharness orders a chain's
+        // attempts, and the fallback block says which one ran — with the reason
+        // read through oneharness's own rule rather than restated beside it.
+        let reason = startup_failure_reason(
+            refused.status,
+            refused.failure_kind,
+            false,
+            refused.work.unwrap_or(RunWork::None),
+        )
+        .ok_or_else(|| {
+            format!(
+                "a chain does not step past a candidate refused as {:?}",
+                refused.failure_kind
+            )
+        })?;
+        report.fallback = Some(FallbackReport {
+            ran: Some(ran.identity.as_str().to_string()),
+            fell_through: vec![FallThrough {
+                harness: refused.harness.clone(),
+                reason,
+                detail: refused.error.clone(),
+            }],
+            stopped_without_work: false,
+        });
+        report.results.insert(0, refused);
+    }
+    if let Some(name) = history {
+        report.history_file = Some(write_history(dir, cwd, name, prompt, &report.results)?);
+    }
+    stream(&RunStreamEnvelope::Result { report })?;
     Ok(outcome)
+}
+
+/// How this turn's chain resolved: the candidate that ran the turn, what its
+/// server said the turn would run under, and the candidate stepped past on the
+/// way, if any.
+struct Ran {
+    identity: Identity,
+    /// The model the candidate's server reported the turn would run under —
+    /// only where the harness stand-in reports one, which is where a journey
+    /// scripted `harness.serves`. `None` is the honest answer on every other
+    /// path, exactly as it is on every oneharness path but codex's app-server.
+    observed_model: Option<String>,
+    /// The first candidate, refused before any token was spent, in oneharness's
+    /// own result shape — the one a supervisor attributes and a chain steps past.
+    refused: Option<RunResult>,
+}
+
+/// Resolve the chain: which candidate runs this turn, and whether the first was
+/// stepped past.
+///
+/// `harness.serves` scripts the model the first candidate's server names as the
+/// one the thread runs under — the statement codex's app-server makes on
+/// `thread/start`, before any token is spent. Held against the model the
+/// candidate's own config section asked for, exactly as oneharness holds it: a
+/// section that names none, or names the served one, proceeds under that
+/// candidate with the observation on its result; a section that names another
+/// is refused as `model_mismatch` — the config said Sol and the server would
+/// spend Astra — and the turn runs under the next candidate, which reports no
+/// observation, as a harness that names no model does. A chain with nothing
+/// after the refused candidate is a scenario nobody wrote here, and is refused
+/// rather than acted out as an exhausted chain.
+fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, String> {
+    let first = selection.first();
+    let Some(served) = fake::node_script(dir, "harness", "serves") else {
+        return Ok(Ran {
+            identity: Identity::named(first.as_str())?,
+            observed_model: None,
+            refused: None,
+        });
+    };
+    if served.is_empty() {
+        return Err("harness.serves names no model for the server to report".to_string());
+    }
+    match selection.requested(first) {
+        Some(requested) if requested != served => {
+            let next = selection.after(first).ok_or_else(|| {
+                format!(
+                    "the chain names nothing after '{}', which was refused for serving {served:?} \
+                     where {requested:?} was requested; a chain this double steps past has a \
+                     next candidate",
+                    first.as_str()
+                )
+            })?;
+            Ok(Ran {
+                identity: Identity::named(next.as_str())?,
+                observed_model: None,
+                refused: Some(refused(first, requested, &served)),
+            })
+        }
+        _ => Ok(Ran {
+            identity: Identity::named(first.as_str())?,
+            observed_model: Some(served),
+            refused: None,
+        }),
+    }
+}
+
+/// The result oneharness writes for a candidate refused before its turn started
+/// because the server named a model other than the requested one.
+///
+/// The shape is the one `oneharness_core` writes over a refused dialogue: a
+/// non-`ok` status with no exit code (the server was torn down, it did not
+/// exit), the classified kind, both models — `model` requested, `observed_model`
+/// served — and the refusal's own sentence as the `error`, composed by that
+/// library's [`DialogueRefusal`] so the words are oneharness's rather than a copy.
+/// Nothing was spent: no text, no usage, no events.
+fn refused(identity: &Identity, requested: &str, served: &str) -> RunResult {
+    let refusal = DialogueRefusal::ModelMismatch {
+        requested: requested.to_string(),
+        observed: served.to_string(),
+    };
+    RunResult {
+        harness: identity.as_str().into(),
+        variant: None,
+        harness_id: identity.as_str().into(),
+        bin: identity.as_str().into(),
+        available: true,
+        status: Status::Nonzero,
+        prompt: None,
+        model: Some(requested.to_string()),
+        observed_model: Some(served.to_string()),
+        exit_code: None,
+        duration_ms: Some(1),
+        telemetry: None,
+        command: vec![identity.as_str().into(), "app-server".into()],
+        output_format: OutputFormat::StreamJson,
+        text: None,
+        text_source: None,
+        usage: Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_usd: None,
+        },
+        usage_source: None,
+        session_id: None,
+        events: None,
+        events_source: None,
+        structured: None,
+        schema_valid: None,
+        schema_attempts: None,
+        schema_error: None,
+        failure_kind: Some(FailureKind::ModelMismatch),
+        failure_kind_source: Some("app-server".into()),
+        work: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        error: Some(refusal.error(identity.as_str())),
+    }
+}
+
+/// Write this run's history records — one per attempted candidate, in result
+/// order — through oneharness's **own** writer, and answer with the session
+/// file's path for the report's `history_file`.
+///
+/// The library's writer rather than lines composed here, for the reason every
+/// other document this double answers with is the library's: what a consumer
+/// reads back is oneharness's record — its schema version chosen by what the
+/// record carries, `observed_model` gated to the version that introduced it —
+/// and a record written by hand would go on reading after the producer changed
+/// it. The store is inside the script directory, so nothing here reaches an
+/// operator's own history.
+fn write_history(
+    dir: &std::path::Path,
+    cwd: &str,
+    name: &str,
+    prompt: &str,
+    results: &[RunResult],
+) -> Result<String, String> {
+    let store = dir.join("oneharness-history");
+    let writer = HistoryWriter::open(
+        &store,
+        std::path::Path::new(cwd),
+        name,
+        HistoryLabels::default(),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot open a history session under {}: {error}",
+            store.display()
+        )
+    })?;
+    for result in results {
+        writer
+            .append(
+                PermissionMode::Bypass,
+                result.model.as_deref(),
+                prompt,
+                result,
+            )
+            .map_err(|error| {
+                format!(
+                    "cannot write the history record for '{}': {error}",
+                    result.harness_id
+                )
+            })?;
+    }
+    Ok(writer.path().display().to_string())
 }
 
 /// The side that supervises: one buffered document carrying the answer.
@@ -777,9 +1046,10 @@ fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
 /// same way: the agent's words *are* its outcome, and the supervisor's are a
 /// decision it reached over a turn that succeeded.
 ///
-/// `fallback` is absent, which is what says this run had one candidate rather than
-/// a chain — a report with a chain and no `ran` is an exhausted chain, and this
-/// turn ran.
+/// `fallback` is absent, which is what says this run stepped past nothing — a
+/// report with a chain and no `ran` is an exhausted chain, and this turn ran.
+/// [`work`] adds the block, and the candidate it stepped past, where the chain
+/// did step.
 fn report(
     said: &str,
     events: Option<Vec<ActionEvent>>,
@@ -816,6 +1086,7 @@ fn report(
             status: outcome.status(),
             prompt: None,
             model: None,
+            observed_model: None,
             exit_code: Some(outcome.code()),
             duration_ms: Some(1),
             telemetry: None,

@@ -1280,6 +1280,9 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
         instruction,
         instruction_truncated: false,
         started_at: fake::now(),
+        // The first turn's instruction is the composed task, which is the one
+        // authorship the sibling's own rule stamps on it.
+        origin: Some(oneagentgraph::event::Origin::Task),
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
@@ -1713,6 +1716,9 @@ fn emit(
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
             text: said,
             truncated: false,
+            // The agent's own words: none of the sibling's three origins names
+            // them, so the sibling stamps nothing and so does this double.
+            origin: None,
         }) {
             Ok(payload) => payload,
             Err(error) => fake::fail(&format!("a turn message is not an object: {error}")),
