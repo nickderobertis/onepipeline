@@ -892,9 +892,21 @@ fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, 
                  without a side: a member stamps both or neither"
             ));
         }
+        // The reason is oneharness's: the real library writes a candidate's
+        // `FallThroughReason` here in that library's own spelling, so the script's
+        // word is read through that closed enum rather than copied onto the
+        // wire. A journey that wrote `rate_limit` — a *failure kind's* spelling,
+        // not a reason's — would otherwise render a token no producer publishes.
+        let reason: oneharness_core::domain::fallback::FallThroughReason =
+            serde_json::from_value(reason.into()).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "a `.refused` line names the reason {reason:?}, which is not one oneharness \
+                     falls through for: {error}"
+                ))
+            });
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
-            reason: reason.to_string(),
+            reason: reason.as_str().to_string(),
             // `-` is a single-sided member: one chain, so no side to name and no
             // per-side turn to attribute it to — the real library leaves both
             // absent there, and a double that filled either in would be an
@@ -1407,6 +1419,9 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
         instruction,
         instruction_truncated: false,
         started_at: fake::now(),
+        // The first turn's instruction is the composed task, which is the one
+        // authorship the sibling's own rule stamps on it.
+        origin: Some(oneagentgraph::event::Origin::Task),
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
@@ -1840,6 +1855,9 @@ fn emit(
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
             text: said,
             truncated: false,
+            // The agent's own words: none of the sibling's three origins names
+            // them, so the sibling stamps nothing and so does this double.
+            origin: None,
         }) {
             Ok(payload) => payload,
             Err(error) => fake::fail(&format!("a turn message is not an object: {error}")),

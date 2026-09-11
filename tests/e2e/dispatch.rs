@@ -2813,6 +2813,256 @@ fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
     }
 }
 
+/// A candidate whose server would run the turn under a model other than the one
+/// its config names is refused before a token is spent, stepped past, and named
+/// — on the record the settled node points at and under the node's own failure
+/// line, as the recovery it was.
+///
+/// What puts `oneharness-core` 0.13's fix in front of a dispatch is **this
+/// build's lock**: a dispatched node runs the `oneagentgraph`, `onejudge` and
+/// `oneharness-core` this crate links, never the CLI pins beside them. So this
+/// journey drives the three linked releases together through the real
+/// supervisor and the real graph, with the one stand-in at onejudge's spawning
+/// seam, and a lock resolving any of them below its floor fails here rather
+/// than reading differently.
+///
+/// The node fails on its **own** bar — the evaluator refuses its `done_when` —
+/// because a failed node is the one place this crate renders what a chain did,
+/// and the point of the line is that a chain which recovered is reported beside
+/// the failure and never as its reason. Every spelling below is read through
+/// oneharness's own types rather than restated here.
+#[test]
+fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record() {
+    use oneharness_core::domain::fallback::FallThroughReason;
+    use oneharness_core::domain::signals::FailureKind;
+
+    let world = World::new("real-misrouted-model");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let requested = "gpt-5.5";
+    let served = "gpt-5.5-mini";
+    // The agent side's chain, with the model its first candidate is asked for
+    // stated where oneharness reads it: the candidate's own section.
+    std::fs::write(
+        world.graphs().join("chain.toml"),
+        format!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n\n\
+             [harness.codex]\nmodel = \"{requested}\"\n"
+        ),
+    )
+    .expect("the two-candidate chain is written");
+    // What the first candidate's server says the thread would run under.
+    world.script("harness.serves", served);
+    // The evaluator refuses the node's own criterion over the finished
+    // conversation, which is the one failure that is the node's rather than a
+    // harness's.
+    world.script("judge.unmet", "the change builds nothing");
+    let path = world.plan(
+        "misrouted",
+        &plan_of("misrouted", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            "members.worker.agent.oneharness_config=./chain.toml",
+        ])
+        .settled();
+    world.until("the run to settle on the refused criterion", |world| {
+        world.run_file("misrouted", "result.json").is_file()
+    });
+    let node = world.run_json("misrouted", "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["status"], "failed",
+        "the node fails on its own criterion over the turn the honouring candidate ran, \
+         not on the chain: {node}"
+    );
+    assert_eq!(
+        node["outcome"], "task-failed",
+        "a chain that recovered was settled as something other than its own \
+         conversation's verdict: {node}"
+    );
+
+    // The advance, as the real graph published it and this crate relayed it:
+    // the identity stepped past, under oneharness's own reason for it.
+    let advanced: Vec<Value> = world
+        .journal("misrouted")
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "fallback-advanced"
+                && event["labels"]["onepipeline.node"] == "build"
+        })
+        .collect();
+    assert_eq!(
+        advanced.len(),
+        1,
+        "one candidate was stepped past once: {advanced:#?}"
+    );
+    let advanced: oneagentgraph::event::FallbackAdvanced =
+        serde_json::from_value(advanced[0]["payload"].clone())
+            .expect("the relayed advance is the sibling's own payload");
+    assert_eq!(advanced.identity, "codex", "{advanced:?}");
+    assert_eq!(
+        advanced.reason,
+        FallThroughReason::ModelMismatch.as_str(),
+        "the chain stepped past the misrouted candidate for some other reason: {advanced:?}"
+    );
+
+    // The settlement's own report attributes the refused candidate by kind, with
+    // both models, and names the one that ran — onejudge's typed telemetry, at
+    // the copy this build links.
+    let settled = world.events_of("misrouted", "member-settled");
+    let stored = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settle named no stored report: {settled:#?}"));
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(stored).expect("the stored report is readable"),
+    )
+    .expect("the stored report is JSON");
+    let telemetry: onejudge::Telemetry = serde_json::from_value(report["telemetry"].clone())
+        .expect("the retained report carries onejudge's telemetry");
+    let attribution = telemetry
+        .attribution
+        .iter()
+        .find(|attribution| {
+            attribution.role == onejudge::TelemetryRole::Agent && attribution.turn_index == 1
+        })
+        .unwrap_or_else(|| {
+            panic!("the agent side's first turn attributes nothing: {telemetry:#?}")
+        });
+    assert_eq!(
+        attribution.ran.as_deref(),
+        Some("claude-code"),
+        "{attribution:#?}"
+    );
+    let [fell] = attribution.fell_through.as_slice() else {
+        panic!("one candidate fell through: {attribution:#?}");
+    };
+    assert_eq!(fell.harness, "codex", "{attribution:#?}");
+    assert_eq!(
+        fell.reason,
+        FallThroughReason::ModelMismatch.as_str(),
+        "{attribution:#?}"
+    );
+    let [refused, ran] = attribution.candidates.as_slice() else {
+        panic!("two candidates were attempted, in order: {attribution:#?}");
+    };
+    assert_eq!(refused.harness, "codex", "{attribution:#?}");
+    assert!(!refused.ran, "{attribution:#?}");
+    assert_eq!(
+        refused.failure_kind.as_deref(),
+        Some(FailureKind::ModelMismatch.as_str()),
+        "the refused candidate is attributed under some other kind: {attribution:#?}"
+    );
+    assert_eq!(
+        refused.model.as_deref(),
+        Some(requested),
+        "{attribution:#?}"
+    );
+    assert_eq!(ran.harness, "claude-code", "{attribution:#?}");
+    assert!(ran.ran, "{attribution:#?}");
+
+    // The record the settled node points at: the run's `oneharness-session` for
+    // that side and turn, resolved through oneharness's own store layout and
+    // read through its own reader. The refused candidate's record carries both
+    // models — the served one as `observed_model`, exactly as the stand-in
+    // reported it and nowhere it did not — beside the kind; the one that ran
+    // reports no observation, and is the record the pointer names.
+    let session = world
+        .journal("misrouted")
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "oneharness-session"
+                && event["labels"]["onepipeline.node"] == "build"
+        })
+        .find_map(|event| {
+            serde_json::from_value::<oneagentgraph::event::OneharnessSession>(
+                event["payload"].clone(),
+            )
+            .ok()
+            .filter(|session| {
+                session.role == oneagentgraph::event::Role::Agent && session.turn == 1
+            })
+        })
+        .expect("the agent side's first turn names the record it wrote");
+    let file = oneharness_core::io::history::find_session_path(
+        std::path::Path::new(&session.history_dir),
+        Some(&session.history_project),
+        &session.history_session,
+    )
+    .expect("the history store is readable")
+    .unwrap_or_else(|| panic!("the pointer names a session the store does not hold: {session:?}"));
+    let records = oneharness_core::io::history::read_session(&file)
+        .expect("the session file is oneharness's");
+    let record_of = |identity: &str| {
+        records
+            .iter()
+            .find(|record| record.harness_id == identity)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no record for '{identity}' in {}: {records:#?}",
+                    file.display()
+                )
+            })
+    };
+    let misrouted = record_of("codex");
+    assert_eq!(
+        misrouted.model.as_deref(),
+        Some(requested),
+        "{misrouted:#?}"
+    );
+    assert_eq!(
+        misrouted.observed_model.as_deref(),
+        Some(served),
+        "the record does not carry the model the server said it would run under: {misrouted:#?}"
+    );
+    assert_eq!(
+        misrouted.failure_kind,
+        Some(FailureKind::ModelMismatch),
+        "{misrouted:#?}"
+    );
+    let honoured = record_of("claude-code");
+    assert_eq!(
+        honoured.observed_model, None,
+        "an observation was invented for a harness that reported none: {honoured:#?}"
+    );
+    assert_eq!(
+        honoured.history_id.to_string(),
+        session.history_id,
+        "the pointer names a record other than the invocation that ran: {session:?}"
+    );
+
+    // And the line a reader is shown under the node's failure: the side, the
+    // identity, oneharness's reason, and who served the turn instead — a
+    // recovery beside the failure, never the reason for it, because the chain
+    // did not run out.
+    let line = format!(
+        "fallback: the agent side fell through 'codex' ({}) → served by 'claude-code'",
+        FallThroughReason::ModelMismatch.as_str()
+    );
+    let results = world.run(&["results", "misrouted"]);
+    results.exited(0).out_has(&line);
+    assert!(
+        !results.stdout.contains("provider:") && !results.stdout.contains("refused"),
+        "a chain that recovered was reported as a refusal:\n{}",
+        results.stdout
+    );
+    let status = world.run(&["status", "misrouted"]);
+    status
+        .exited(0)
+        .out_has("build: fallback — the agent side fell through 'codex'")
+        .out_has("served by 'claude-code'");
+    assert!(
+        !status.stdout.contains("build: failed — the agent side"),
+        "a chain that recovered was reported as the node's failure:\n{}",
+        status.stdout
+    );
+}
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///

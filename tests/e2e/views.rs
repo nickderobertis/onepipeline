@@ -2550,12 +2550,19 @@ fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
 /// has to be able to tell apart.
 #[test]
 fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+    // The reason in oneharness's own spelling, because the real graph writes
+    // that library's `FallThroughReason` onto the advance and the double holds
+    // its script to the same enum: `rate_limit` is a failure *kind*, and a line
+    // rendering it would be one no producer ever publishes.
+    let rate_limited = oneharness_core::domain::fallback::FallThroughReason::RateLimit.as_str();
     let world = World::new("views-refused");
     world.script(
         "build.refused",
         // The judge side's chain refuses twice over, which is one fact recorded
         // twice rather than two facts.
-        "agent 1 claude-code quota\njudge 1 codex rate_limit\njudge 1 codex rate_limit\n",
+        &format!(
+            "agent 1 claude-code quota\njudge 1 codex {rate_limited}\njudge 1 codex {rate_limited}\n"
+        ),
     );
     // Only the agent side ever ran a turn: the judge side's chain reached its
     // end with no successful candidate, which is what a bare "refused" is for.
@@ -2567,9 +2574,10 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
     results
         .exited(0)
         .out_has("failed")
-        .out_has(
-            "provider: the judge side: identity 'codex' refused (rate_limit), recorded 2 times",
-        )
+        .out_has(&format!(
+            "provider: the judge side: identity 'codex' refused ({rate_limited}), recorded 2 \
+             times",
+        ))
         .out_has(
             "fallback: the agent side fell through 'claude-code' (quota) → served by \
              'claude-code:alternate'",
