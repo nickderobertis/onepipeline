@@ -1976,7 +1976,16 @@ impl World {
         for (node, file) in nodes.iter().zip(&files) {
             self.task(&identifier, node, file, &named);
         }
-        if let Some(missing) = undiscriminating(&self.store()) {
+        // Asked of the two documents this writer put there, not of the whole store.
+        // A board an earlier run of this world was projecting onto when it was
+        // stopped is whatever the store's writer had got to when the signal
+        // landed: `local-md` replaces a document with one `fs::write`, and a copy
+        // ended between its truncate and its rewrite leaves an empty file that no
+        // wait settles. That is the product's state, not this fixture's, and it
+        // failed a sound fixture on the gate as `has no front matter`.
+        if let Some(missing) =
+            undiscriminating_among(&self.store(), Some(&[identifier.as_str(), DECOY_PROJECT]))
+        {
             panic!("{missing}");
         }
         format!("{STORE_SOURCE}:{identifier}")
@@ -3422,6 +3431,16 @@ pub fn project_id(name: &str) -> String {
 /// or front matter it could not parse would pass exactly the fixtures nobody can
 /// check.
 pub fn undiscriminating(store: &Path) -> Option<String> {
+    undiscriminating_among(store, None)
+}
+
+/// The same rule, asked only of the projects `only` names when it names any.
+///
+/// [`World::plan`] asks it of what it wrote — the project and the decoy — so a
+/// board an earlier run of the same world was stopped over is left to the
+/// product; `undiscriminating` asks it of everything, which is what a whole
+/// store a journey authored by hand is held to.
+fn undiscriminating_among(store: &Path, only: Option<&[&str]>) -> Option<String> {
     let fixture = store
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -3452,6 +3471,9 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if only.is_some_and(|only| !only.contains(&identifier.as_str())) {
+            continue;
+        }
         let title = match settled_title(&path) {
             Ok(title) => title,
             Err(why) => return Some(format!("fixture '{identifier}': {why}")),
