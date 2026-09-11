@@ -1486,11 +1486,13 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
 /// process and every read its own `next`, with nothing between them but the
 /// channel's own lock. What is asserted is the whole invariant the queue
 /// promises — nothing queued is lost, nothing is delivered twice, and no id is
-/// handed out twice.
+/// handed out twice. Sized to the invocations an ordinary journey here makes:
+/// a dozen pushes and the reads that drain them, which is enough for the
+/// writers to overlap each other and the readers.
 #[test]
 fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() {
-    const WRITERS: usize = 4;
-    const EACH: usize = 6;
+    const WRITERS: usize = 3;
+    const EACH: usize = 4;
     const READERS: usize = 2;
 
     let world = World::new("channel-contended");
@@ -1577,13 +1579,13 @@ fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() 
     world.release("build.go");
 }
 
-/// A projection the reader cannot write back costs nothing but the fold: the
-/// read still answers from the log.
+/// A projection that is not a queue is rebuilt from the log, and a reader that
+/// cannot write the rebuilt one back still answers.
 ///
-/// A read that finds the projection behind the log repairs it, and the repair
-/// is a cache write — a run root the reader may not write into is still a run
-/// whose record is intact, and a view that refused over it would be the
-/// supervisory verb going dark on exactly the run it is asked about.
+/// A read that finds the projection unreadable or behind the log repairs it,
+/// and the repair is a cache write — a run root the reader may not write into
+/// is still a run whose record is intact, and a view that refused over it would
+/// be the supervisory verb going dark on exactly the run it is asked about.
 #[cfg(unix)]
 #[test]
 fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() {
@@ -1603,10 +1605,11 @@ fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() 
         ])
         .exited(0);
 
-    // The projection is lost, and the directory it would be repaired into is
-    // one this reader may not write.
+    // The projection is not a queue any more — a write that died halfway —
+    // and the directory it would be repaired into is one this reader may not
+    // write.
     let queue = world.run_file(&run, "channel/queue.json");
-    std::fs::remove_file(&queue).expect("the projection is removed");
+    std::fs::write(&queue, b"{\"waiting\": [").expect("the projection is torn");
     let channel = queue.parent().expect("the channel directory").to_path_buf();
     let writable = std::fs::metadata(&channel)
         .expect("the channel directory")
@@ -1617,15 +1620,18 @@ fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() 
     let status = world.run(&["status", &run]);
     std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
     status.exited(0).out_has("1 planner update(s) waiting");
-    assert!(
-        !queue.exists(),
+    assert_eq!(
+        std::fs::read(&queue).expect("the projection"),
+        b"{\"waiting\": [",
         "the projection was written into a directory the reader may not write"
     );
 
     // Writable again, the next read repairs it and hands the surface over.
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("still here");
-    assert!(queue.exists(), "the projection was not repaired");
+    let repaired: Value = serde_json::from_slice(&std::fs::read(&queue).expect("the projection"))
+        .expect("the projection was repaired");
+    assert_eq!(repaired["waiting"], json!([]), "{repaired}");
 
     world.release("build.go");
 }

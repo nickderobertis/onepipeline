@@ -1006,6 +1006,11 @@ impl SurfaceRecord {
     /// later line under it was the surface being abandoned or taken back, which
     /// the flag it carries tells apart. `next_id` is what decides whether the id
     /// has been seen: the fold keeps it one past every id queued so far.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the lines this reads are
+    // ones only an older build writes — this build writes the event on every line
+    // — so no journey driving this binary can produce one, and placing one by hand
+    // is what `a_log_and_a_projection_an_older_build_wrote_are_read_as_that_build_
+    // meant_them` does, against the real files.
     fn event(&self, next_id: u64) -> SurfaceEvent {
         self.event.unwrap_or(if self.surface.id >= next_id {
             SurfaceEvent::Queued
@@ -1015,6 +1020,7 @@ impl SurfaceRecord {
             SurfaceEvent::Attended
         })
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 impl Queue {
