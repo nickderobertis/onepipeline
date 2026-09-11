@@ -372,26 +372,18 @@ resolver = "2"
 # holds both halves against the linked library. `onevcs-testing` 0.5.6 requires
 # `onevcs` 0.19.3, so the one resolution carries both.
 #
-# `onevcs` 0.21.0 carries a **session's own change request after it exists**:
-# `session_change`, `describe_change` and `ready_change`, the `SessionChange` and
-# `ChangeDescription` they speak in, and `DraftReason::Held` beside the release
-# reason — a draft the session that opened it is holding while its work is still
-# being made, which a later publication carrying no reason lifts. It is the
-# release cut from onevcs #138, and it is what `src/lifecycle.rs`'s closeout
-# **finishes a change request the worker opened as a draft** with: the drafted
-# description is written onto it and the same publication lifts it and lands,
-# where before this floor nothing could edit a change request once it existed and
-# an adopted one silently kept whatever body it had. A **requirement** and not a
-# lock floor, twice over: `^0.19` admits no 0.21.x, the breaking position pre-1.0,
-# and `DraftReason` became an enum on the way — `src/release.rs` matches it arm by
-# arm, so a pin below 0.21.0 does not compile. Between the two, 0.20.0 (onevcs
-# #136) **retired** the registry's inferred `workflow` and `repo_type` and stopped
-# `onevcs resolve` printing the first; `src/plan.rs` keeps both words as the
-# schema-3 vocabulary they still are, read by nothing, and `src/destination.rs`
-# reads the resolution without one. `tests/e2e/lifecycle.rs`'s draft-closeout
-# journeys and `tests/onevcs_seam.rs` drive the surface against the real sibling,
-# so a pin below the floor fails rather than reads differently. `onevcs-testing`
-# 0.6.0 requires exactly this `onevcs`, so the two floors move together.
+# `onevcs` 0.21.0 carries a **session's own change request after it exists** —
+# `session_change`, `describe_change`, `ready_change`, and `DraftReason::Held`
+# beside the release reason — which is what `src/lifecycle.rs`'s closeout
+# finishes a worker's draft with. A **requirement** and not a lock floor, twice
+# over: `^0.19` admits no 0.21.x, the breaking position pre-1.0, and
+# `DraftReason` became an enum on the way, which `src/release.rs` matches arm by
+# arm. Its 0.20.0 predecessor retired the registry's inferred `workflow` and
+# `repo_type`, which is why `src/plan.rs` keeps both words as schema-3 vocabulary
+# read by nothing and `src/destination.rs` reads a resolution without one.
+# `tests/e2e/lifecycle.rs`'s draft-closeout journeys drive the surface against
+# the real sibling. `onevcs-testing` 0.6.0 requires exactly this `onevcs`, so the
+# two floors move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -414,17 +406,11 @@ onevcs = "0.21.0"
 # satisfied the copy would still be refused by the conversation it was written
 # for.
 #
-# 0.8.1 is where that pair stands now, and moving it is **not optional**:
-# `oneagentgraph` 0.3.17 — inside the caret above, so the lock takes it whether
-# this line moves or not — requires `onejudge 0.8.1`, and `^0.7.0` admits no
-# 0.8.x because pre-1.0 the minor is the breaking position. Left at 0.7.0 the
-# graph carries onejudge twice, which is the state `just engines-current` refuses
-# outright rather than reports: each copy is separately current, and the note
-# vocabulary `src/note.rs` re-exports would be one copy's while the verdicts
-# `src/report.rs` reads off `member-settled` were the other's. `onejudge::note`
-# is unchanged across the move — 0.8.0 re-asks an unparseable supervisor answer
-# instead of failing the member, and lets an evaluator verify the finished tree
-# read-only — so nothing here reads differently; what moved is which copy exists.
+# Moving it to 0.8.1 is **not optional**: `oneagentgraph` 0.3.17 requires that
+# release and is inside the caret above, so the lock takes it whether this line
+# moves or not, while `^0.7.0` admits no 0.8.x. Left behind, the graph carries
+# onejudge twice — `src/note.rs`'s vocabulary one copy's and `src/report.rs`'s
+# verdicts the other's — which `just engines-current` refuses outright.
 onejudge = "0.8.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
@@ -432,18 +418,13 @@ onejudge = "0.8.1"
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links, and it moves
+# The reader is **onejudge**, so this pin is whatever onejudge links and moves
 # when that does: at 0.8.1 onejudge requires `oneharness-core 0.13.0`, as does
-# `oneagentgraph` 0.3.17, so the shared `0.13` requirement resolves one
-# compatible copy and the double writes the one its consumer parses. Held at
-# `0.12` while onejudge moved, this would be the second engine the lock carried
-# twice — `tests/e2e/turns.rs` fails on a report shape onejudge cannot read,
-# which names the drift rather than hiding it, and `just engines-current` refuses
-# the doubled lock before a test gets that far. What the move costs the double is
-# one field: 0.13's `RunResult::observed_model` — the model the harness itself
-# reported the turn ran under — which `crates/testfakes`'s `fake-oneharness`
-# writes absent, because a double that invented one would be answering a
-# question no journey here asks. Nothing this crate publishes links it.
+# `oneagentgraph` 0.3.17, so the shared `0.13` requirement resolves one copy and
+# the double writes the one its consumer parses. Held at `0.12` it would be the
+# second engine the lock carried twice. `tests/e2e/turns.rs` is what names the
+# drift if this pin and onejudge's ever part — it fails on a report shape
+# onejudge cannot read. Nothing this crate publishes links it.
 oneharness-core = "0.13"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
