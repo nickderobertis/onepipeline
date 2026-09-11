@@ -2081,12 +2081,26 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     // that has attached to nothing yet, and an arrival counted rather than
     // identified could be the one the stop was aimed at.
     //
+    // What the handshake does **not** explain: this journey once waited out its
+    // whole deadline here on a Windows runner (run 34137622276) on a run whose
+    // held dispatch had settled `task-failed` on its own a quarter of a second
+    // in — before the stop, and before anything below ran — so the takeover had
+    // nothing left to dispatch and no arrival could come. Why a held double ended
+    // that way is not established. The check below makes a recurrence say so at
+    // once instead of after the deadline.
+    //
     // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
     // the same reason: the run's own records and the double's own announcement, because
     // the surfaces that would say the same are the ones under test.
     world.until("the adoption to be recorded", |world| {
         !world.events_of("retaken", "driver-adopted").is_empty()
     });
+    assert!(
+        !world.run_file("retaken", "result.json").is_file(),
+        "the run settled before the takeover reached a worker, so no dispatch is coming — the \
+         held dispatch ended on its own, which nothing here explains; the runs root held:\n{}",
+        world.dump()
+    );
     let retaken = world.held("build", &[stopped]);
     world.until(
         "the adopted driver's dispatch to record its place",
