@@ -1440,6 +1440,33 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
              check cannot read",
         ),
         (
+            "dep-without-req",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-req-twice",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"req\":\"^0.0.8\",\"kind\":\"normal\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "dep-with-kind-twice",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{\"name\":\"onejudge\",\
+             \"req\":\"^0.0.7\",\"kind\":\"normal\",\"kind\":\"dev\"}],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
+            "deps-entry-not-an-object",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[5],\"yanked\":false}",
+            "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \
+             check cannot read",
+        ),
+        (
             "deps-not-a-list",
             "{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":\"none\",\"yanked\":false}",
             "served a 'oneagentgraph' 2.9.9 record whose deps entry for a sibling engine this \

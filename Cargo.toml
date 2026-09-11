@@ -353,18 +353,9 @@ resolver = "2"
 # seam that op exists to end. `tests/note/`, the `note` test binary declared below,
 # drives the delivery against the real sibling and a real two-party conversation.
 #
-# 0.3.16 stamps a turn announcement and a turn message with **who authored it** —
-# `origin`: the composed task, the member's own simulated supervisor, or text a
-# caller delivered — optional, and absent from what an unstamped producer writes.
-# A floor carried by the lock alone: the requirement below admits it and no
-# reader here changes, because `src/agentgraph.rs`'s `relayed` crosses the
-# sibling's `Serialize` whole on purpose, so a field the sibling adds reaches the
-# journal rather than being dropped. That is the whole reason to take it: without
-# the stamp a consumer cannot tell a simulated supervisor's stop order from one
-# the manager really delivered, and one such guess cancelled a live dispatch.
-# `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
-# holds both halves — the stamp arrives intact, an unstamped turn is written as
-# before — against the linked library.
+# 0.3.16 is a floor the **lock** carries and the requirement below does not name:
+# it admits 0.3.16 already, and what that release adds — the `origin` stamp —
+# reaches the journal through `relayed` unchanged. Its test holds the lock at it.
 #
 # All three are recorded in the floors list at the top of this file.
 #

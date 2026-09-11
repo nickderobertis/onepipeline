@@ -259,12 +259,21 @@ index_path() {
 # record token by token, tracks nesting so a `deps` entry's fields are never
 # mistaken for the record's own, requires each of the members it reads to
 # appear exactly once and to hold the type it should, and refuses the record
-# otherwise. It is checked against `json.loads` over all five engines' real index
-# files, and the shapes it refuses are driven in `tests/linked_engines.rs`. The
-# library the rule asks for does not exist in bash — the language this has to be
+# otherwise. The shapes it refuses are driven in `tests/linked_engines.rs`, and
+# every run of `just engines-current` reads it over all five engines' real index
+# files. The library the rule asks for does not exist in bash — the language this has to be
 # in, because a per-change workflow and a release job both reach it through a recipe
 # — and shelling out to one adds an interpreter to a release job whose whole
 # purpose is to be reachable without a build.
+# llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the member
+# names read here — `name`, `vers`, `yanked`, `deps`, and an entry's `name`,
+# `req` and `kind` with its three values — are cargo's own sparse-index record
+# format, whose one source is the registry-index reference cargo publishes and
+# whose gate is the registry itself: `.github/workflows/engine-currency.yml`
+# runs this reader over the live index on every pull request, and a member
+# renamed or a kind added there is refused by name, exit 3, rather than read
+# past. A checked-in copy of the schema would be a second source of exactly the
+# thing this reads live.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
@@ -399,15 +408,24 @@ index_versions() {
       DEPS[++NDEPS] = name " " kind " " req
       return i + 1
     }
-    # The `deps` array: every entry an object, or the record is not one the
-    # registry wrote.
+    # The `deps` array, entry by entry.
     function read_deps(s, i,   n, c) {
       n = length(s)
       i = skip_ws(s, i + 1)
       if (substr(s, i, 1) == "]") return i + 1
       while (1) {
-        if (substr(s, i, 1) != "{") return 0
-        i = read_dep(s, i); if (i == 0) return 0
+        c = substr(s, i, 1)
+        if (c == "{") {
+          i = read_dep(s, i); if (i == 0) return 0
+        } else {
+          # Not an entry at all — a number, a string, a list — which is an
+          # entry this cannot read rather than a line that is not JSON.
+          DEP_BAD = 1
+          if (c == "\"") i = scan_string(s, i, 0)
+          else if (c == "[") i = scan_nested(s, i)
+          else i = scan_literal(s, i)
+          if (i == 0) return 0
+        }
         i = skip_ws(s, i)
         c = substr(s, i, 1)
         if (c == ",") { i = skip_ws(s, i + 1); continue }
@@ -493,6 +511,7 @@ index_versions() {
   '
 }
 # llmlint: ignore-end[boundary_inputs_validated]
+# llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 # One row per resolved copy, in the order the report prints them.
 rows=()
