@@ -3251,7 +3251,7 @@ fn start_ready(
         // record; what this site adds is that the pass ends on it rather than
         // announcing a dispatch as having spent nothing — the same answer the
         // lifecycle continuation gives, for the same reason, at its own site.
-        let spent = spent_by(paths, state, &node.id)?;
+        let AtDispatch { spent, carried_in } = notes_at_dispatch(paths, state, &node.id)?;
         if !spent.is_empty() {
             payload.insert(
                 crate::note::SPENT_KEY.to_string(),
@@ -3263,6 +3263,15 @@ fn start_ready(
             journal::labels(&paths.run, Some(&node.id)),
             payload,
         )?;
+        // A note carried to this dispatch rides in as the node's own context, and
+        // the stream will show the opening turn carry it and the judge answer:
+        // watched from the start, so each presentation is recorded as it
+        // happens and the carried record is not the last word on the note.
+        let mut presentations = crate::note::Presentations::default();
+        let composed_at = sys::now_millis();
+        for note in carried_in {
+            presentations.composed_into_the_task(note, composed_at);
+        }
         // What the run can say about every dependency of this node that lands
         // outside its own repository. Empty for a node that has none — which is
         // every node a plan naming neither new field carries — and the dispatch
@@ -3287,7 +3296,7 @@ fn start_ready(
                 last_progress: now,
                 reported_quiet: false,
                 control: None,
-                presentations: crate::note::Presentations::default(),
+                presentations,
             },
         );
         settled_here = true;
@@ -3298,28 +3307,33 @@ fn start_ready(
     Ok(settled_here)
 }
 
-/// The manager's notes a fresh dispatch of `node` is composed without.
-///
-/// Everything a conversation of the node's last dispatch read, and — where this
-/// node is a `retry`'s replacement — everything the node it supersedes was ever
-/// delivered, read or carried: a replacement's task is the manager's own and
-/// composes none of it in. Read off the run's record at the moment of dispatch,
-/// which is a change rather than a pass, and the same fold the continuation
-/// composes its own notes from, so the two cannot disagree about what a
-/// dispatch was owed.
+/// What the run's record says about a fresh dispatch of a node and the manager's
+/// notes: which it was composed **with**, and which it was composed **without**.
+struct AtDispatch {
+    /// The notes an earlier conversation of the node read that this dispatch is
+    /// composed without — everything a conversation of the node's last dispatch
+    /// read, and, where this node is a `retry`'s replacement, everything that
+    /// stood for the node it supersedes: a replacement's task is the manager's
+    /// own and composes none of it in.
+    spent: Vec<crate::note::RecordedNote>,
+    /// The notes carried to this dispatch, which ride in as the node's own
+    /// context and are owed a presentation the stream has to show.
+    carried_in: Vec<crate::note::RecordedNote>,
+}
+
+/// Read the run's record at the moment of a dispatch — a change rather than a
+/// pass, and the same fold the continuation composes its own notes from, so the
+/// two cannot disagree about what a dispatch was owed.
 ///
 /// # Errors
 ///
 /// [`crate::note::standing`]'s: a record of this crate's own that cannot be read
 /// as what it says it carries, which ends the pass rather than announcing a
 /// dispatch as having spent nothing.
-fn spent_by(
-    paths: &RunPaths,
-    state: &RunState,
-    node: &str,
-) -> Result<Vec<crate::note::RecordedNote>> {
+fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<AtDispatch> {
     let journal = journal::read(&paths.journal());
-    let mut spent = crate::note::standing(&journal, node)?.read();
+    let standing = crate::note::standing(&journal, node)?;
+    let mut spent = standing.read();
     for superseded in state
         .superseded
         .iter()
@@ -3328,7 +3342,10 @@ fn spent_by(
     {
         spent.extend(crate::note::standing(&journal, superseded)?.notes());
     }
-    Ok(spent)
+    Ok(AtDispatch {
+        spent,
+        carried_in: standing.carried(),
+    })
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.

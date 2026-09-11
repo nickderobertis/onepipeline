@@ -424,6 +424,18 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
                 && event["payload"]["reached"] == json!("worker")),
         "{shown:#?}"
     );
+    // And each says what it was decided from: the producer's own stamp on the
+    // worker's turn, and the turn that answered it for the judge.
+    assert_eq!(
+        shown[0]["payload"]["evidence"],
+        json!("delivered-origin"),
+        "{shown:#?}"
+    );
+    assert_eq!(
+        shown[1]["payload"]["evidence"],
+        json!("answering-turn"),
+        "{shown:#?}"
+    );
     let worker_turn = shown[0]["payload"]["turn"].as_u64().expect("a turn");
     let judge_turn = shown[1]["payload"]["turn"].as_u64().expect("a turn");
     assert!(judge_turn >= worker_turn, "{shown:#?}");
@@ -971,6 +983,130 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         records[0]["payload"].get("notes_spent").is_none(),
         "the dispatch a note was carried to reported it spent: {}",
         records[0]
+    );
+    // The carried record is not the last word on the note: the dispatch it was
+    // carried to shows it — the opening turn as the task, the judge's answer
+    // after — and each presentation is recorded as its stream showed it.
+    let shown = presentations_of(&world, run, "later");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| (
+                event["payload"]["party"].clone(),
+                event["payload"]["evidence"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("worker"), json!("opening-task")),
+            (json!("supervisor"), json!("answering-turn")),
+        ],
+        "the dispatch a note was carried to did not record showing it:\n{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("carried")),
+        "{shown:#?}"
+    );
+}
+
+/// A note recorded `carried` whose text a turn of the **same** dispatch then
+/// opens on is recorded as shown — from the words, since nothing routed it.
+///
+/// This happened to the node this journey was written in. A manager's
+/// correction was recorded `reached: carried`; the manager believed the record
+/// and told their operator it had not arrived; nineteen minutes later the
+/// correction's text opened the worker's turn 2, read in by a lever outside the
+/// note seam. The record a manager reads said nobody had taken it, and the
+/// presentation that demonstrably happened was recorded nowhere: not a receipt
+/// written too early, but a presentation with no receipt at all.
+///
+/// The lever there was an `interrupt` issued by hand into the harness process,
+/// which this suite has no double for. What it produced is what is driven here
+/// against the real conversation: a note the seam never took — `deliver: next`
+/// asks for no live attempt, so it is `carried` while the dispatch is live — and
+/// the supervising side then reading that text into the worker's next turn.
+/// The stream shows a worker turn opening on the note's whole text, stamped as
+/// the supervisor's own, and the record says the worker was shown it, from the
+/// text, and the judge with the turn that answered.
+#[test]
+fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown() {
+    let world = World::new("note-carried-read");
+    let run = "carriedread";
+    // The supervising side's next instruction is the note's own text: the
+    // lever that reads a carried note into a live turn, in this suite.
+    world.script("judge.asks-again", NOTE);
+    world.script("turn.hold", "hold");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    // Recorded `carried` while the conversation is live and the worker's turn is
+    // held open: no live attempt was asked for, so the seam took nothing.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    let delivery = recorded(&world, run);
+    assert_eq!(delivery["reached"], json!("carried"), "{delivery}");
+    assert!(
+        delivery.get("shown_to").is_none() && delivery.get("routed_to").is_none(),
+        "the seam took nothing, and the record says it routed something: {delivery}"
+    );
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The text reached the worker's next turn — by the supervisor's own words,
+    // which the producer stamps as such — and the record says the worker was
+    // shown it and how that was decided, and then the judge.
+    let openings = openings_of(&world, run, "build");
+    let read_in = openings
+        .iter()
+        .find(|opening| opening.instruction.contains(NOTE))
+        .unwrap_or_else(|| panic!("no worker turn opened on the note's text:\n{openings:#?}"));
+    assert_eq!(read_in.origin, Some(Origin::Supervisor), "{read_in:?}");
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| {
+                (
+                    event["payload"]["party"].clone(),
+                    event["payload"]["evidence"].clone(),
+                    event["payload"]["turn"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                json!("worker"),
+                json!("instruction-text"),
+                json!(read_in.turn)
+            ),
+            (
+                json!("supervisor"),
+                json!("answering-turn"),
+                json!(read_in.turn)
+            ),
+        ],
+        "a note recorded carried that a turn then opened on was not recorded as shown:\n\
+         {shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("carried")),
+        "{shown:#?}"
     );
 }
 

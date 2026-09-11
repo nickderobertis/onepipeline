@@ -4739,9 +4739,34 @@ release stamps as `delivered`, and holds the field against the linked library in
    cancelled or failed between the two presentations leaves the first recorded,
    the second unrecorded, and no claim anywhere that the second party saw
    anything. A turn that opened before the note was offered is never read as its
-   presentation, whatever order the loop meets the records in. The block below
-   is what `tests/contract.rs` holds `note::Reached::shown_at_delivery` and
-   `routed_to` to.
+   presentation, whatever order the loop meets the records in. Each `note-shown`
+   names its **evidence** — `delivered-origin`, `opening-task`,
+   `instruction-text`, or `answering-turn` — so a reader knows whether the
+   producer said so or this crate read it off the words. The block below is what
+   `tests/contract.rs` holds `note::Reached::shown_at_delivery` and `routed_to`
+   to, and what `note`'s own tests hold the evidence spellings to.
+
+5. **A note recorded `carried` is watched for a presentation the seam could
+   not predict.** Measured, on this very node: a correction was recorded
+   `reached: carried` at 02:58:53Z, the manager believed the record and told
+   their operator it had not arrived, and at 03:17:55Z the dispatch emitted
+   `turn-interrupted delivered=true` and the correction's text opened the
+   worker's turn 2 — a presentation made by a lever outside the note seam (an
+   `interrupt` issued by hand) inside the same dispatch, with no receipt
+   anywhere. The seam routed nothing, so `routed_to` is empty and honest; but
+   the dispatch's watch now holds a carried note too, and a worker turn whose
+   opening **instruction carries the note's whole text** — not one cut short of
+   it by the payload bound — is recorded as the worker's presentation with
+   evidence `instruction-text`, and the supervisor's answering turn as the
+   judge's. Text is weaker evidence than the producer's stamp, which is why it
+   is named as such on the record and used only where the stamp cannot exist:
+   nothing routed the note, so nothing could stamp it. A note carried to the
+   node's **next** dispatch is watched the same way there, as composed into that
+   dispatch's task — its opening turn and first supervisor turn record it — so a
+   carried note's record is not the last word on it whichever conversation ends
+   up reading it. What this cannot see is stated: a presentation made by a lever
+   this engine did not pull and that does not put the text into a turn's opening
+   instruction whole leaves no evidence in the stream, and is recorded nowhere.
 
 The window this leaves is stated rather than hidden: a lifecycle node's **steps**
 within one attempt are composed together, so a note delivered into step one's
@@ -4765,13 +4790,18 @@ live worker turn recorded as shown to the worker by that turn and to the judge
 by the turn that answered it, in that order; and a conversation **interrupted
 between the two** — the worker's reopened turn held and the dispatch cancelled
 and reaped — leaving the worker's presentation recorded and the judge's
-unrecorded, with no `note-shown` and no `shown_to` claiming otherwise.
+unrecorded, with no `note-shown` and no `shown_to` claiming otherwise; a note
+recorded `carried` while the dispatch was live whose text the supervising side
+then read into the worker's next turn, recorded as shown to the worker from the
+instruction's text and to the judge from the answering turn; and a note carried
+to a node's next dispatch recorded as shown by that dispatch's opening turn.
 
 ```json
 {
   "node_dispatched_keys": ["notes_carried", "notes_spent"],
   "note_delivered_fields": ["shown_to", "routed_to"],
   "event_kinds": ["note-shown"],
+  "note_shown_evidence": ["delivered-origin", "opening-task", "instruction-text", "answering-turn"],
   "heading": "## Manager notes",
   "shown_at_delivery": {
     "queued": [],

@@ -495,6 +495,16 @@ impl Standing {
         self.held.iter().map(|held| held.note.clone()).collect()
     }
 
+    /// The notes delivered since the current dispatch was composed that **no**
+    /// turn took, and which are therefore owed to the node's next dispatch.
+    pub(crate) fn carried(&self) -> Vec<RecordedNote> {
+        self.held
+            .iter()
+            .filter(|held| !held.read())
+            .map(|held| held.note.clone())
+            .collect()
+    }
+
     /// The notes a conversation of the node's current dispatch has read.
     pub(crate) fn read(&self) -> Vec<RecordedNote> {
         self.held
@@ -637,6 +647,31 @@ enum Routing {
         worker_shown: bool,
         judge_shown: bool,
     },
+    /// The conversation took nothing — the note was recorded `carried` — and
+    /// yet its text may still reach a worker turn of this same dispatch by a
+    /// lever outside the note seam: an `interrupt` an operator issues by hand,
+    /// or the supervising side reading it aloud. The seam cannot predict that,
+    /// so the only evidence is the turn's own opening **instruction carrying the
+    /// note's text whole**; the judge is then shown it as every judge is shown
+    /// the transcript. Measured: a correction recorded `carried` at 02:58:53Z
+    /// opened the worker's turn 2 at 03:17:55Z, and the record said nobody had
+    /// taken it.
+    PresentedOutsideTheSeam(WorkerThenJudge),
+}
+
+/// What a `note-shown` was decided from, written on the record so a reader
+/// knows whether the producer said so or this crate read it off the words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Evidence {
+    /// The producer stamped the worker's turn `origin: delivered`.
+    DeliveredOrigin,
+    /// The worker's opening turn carried the task the note was composed into.
+    OpeningTask,
+    /// The worker's turn opened on an instruction carrying the note's whole text.
+    InstructionText,
+    /// The supervisor's turn answered a worker turn that had been shown it.
+    AnsweringTurn,
 }
 
 impl Routing {
@@ -656,49 +691,62 @@ impl Routing {
                 worker_shown: false,
                 judge_shown: false,
             }),
-            Reached::JudgedWith { .. } | Reached::Carried => None,
+            Reached::Carried => Some(Self::PresentedOutsideTheSeam(
+                WorkerThenJudge::AwaitingWorker,
+            )),
+            Reached::JudgedWith { .. } => None,
         }
     }
 
-    /// Advance on a relayed turn of `party`, answering whether that turn is a
-    /// presentation this route was owed.
+    /// Advance on a relayed turn of `party`, answering what that turn is
+    /// evidence of where it is a presentation this route was owed.
     fn presented_by(
         &mut self,
         party: Party,
-        turn: u64,
-        origin: Option<oneagentgraph::event::Origin>,
-    ) -> bool {
-        let delivered = origin == Some(oneagentgraph::event::Origin::Delivered);
+        opened: &oneagentgraph::event::TurnStarted,
+        text: &str,
+    ) -> Option<Evidence> {
+        let turn = opened.turn;
+        let delivered = opened.origin == Some(oneagentgraph::event::Origin::Delivered);
+        let shown_to_both = Self::NextTurnToOpen {
+            worker_shown: true,
+            judge_shown: true,
+        };
         match (party, *self) {
             (Party::Worker, Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingWorker))
                 if delivered =>
             {
                 *self =
                     Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingJudge { worker_turn: turn });
-                true
+                Some(Evidence::DeliveredOrigin)
             }
             (Party::Worker, Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingWorker)) => {
                 *self =
                     Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn: turn });
-                true
+                Some(Evidence::OpeningTask)
+            }
+            // The whole text, and never a turn cut short of it: an instruction
+            // bounded before the note's end is not evidence either way.
+            (Party::Worker, Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingWorker))
+                if !opened.instruction_truncated && opened.instruction.contains(text) =>
+            {
+                *self = Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingJudge {
+                    worker_turn: turn,
+                });
+                Some(Evidence::InstructionText)
             }
             (
                 Party::Supervisor,
                 Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingJudge { worker_turn })
-                | Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn }),
+                | Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn })
+                | Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingJudge { worker_turn }),
             ) if turn >= worker_turn => {
-                *self = Self::NextTurnToOpen {
-                    worker_shown: true,
-                    judge_shown: true,
-                };
-                true
+                *self = shown_to_both;
+                Some(Evidence::AnsweringTurn)
             }
             (Party::Worker, Self::RidesTheDecision) if delivered => {
-                *self = Self::NextTurnToOpen {
-                    worker_shown: true,
-                    judge_shown: true,
-                };
-                true
+                *self = shown_to_both;
+                Some(Evidence::DeliveredOrigin)
             }
             (
                 Party::Worker,
@@ -711,7 +759,7 @@ impl Routing {
                     worker_shown: true,
                     judge_shown,
                 };
-                true
+                Some(Evidence::DeliveredOrigin)
             }
             (
                 Party::Supervisor,
@@ -724,9 +772,9 @@ impl Routing {
                     worker_shown,
                     judge_shown: true,
                 };
-                true
+                Some(Evidence::AnsweringTurn)
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -759,6 +807,8 @@ pub(crate) struct Shown {
     pub party: Party,
     /// The turn of theirs that opened carrying it.
     pub turn: u64,
+    /// What the presentation was decided from.
+    pub evidence: Evidence,
     /// The note.
     pub note: RecordedNote,
 }
@@ -775,6 +825,10 @@ impl Shown {
             serde_json::to_value(self.party).unwrap_or(Value::Null),
         );
         payload.insert("turn".into(), Value::from(self.turn));
+        payload.insert(
+            "evidence".into(),
+            serde_json::to_value(self.evidence).unwrap_or(Value::Null),
+        );
         payload
     }
 }
@@ -790,14 +844,20 @@ impl Shown {
 /// every delivered note in hand. A dispatch that ends between the two — cancelled,
 /// or a worker turn that fails — drops this with it, and the record keeps only
 /// the presentations that happened.
+///
+/// A note recorded `carried` is watched too, and this is where the record can
+/// say something the delivery could not: the seam took nothing, so it predicted
+/// nothing, and a turn that then opens on the note's whole text is a
+/// presentation that happened with no receipt anywhere else.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Presentations {
     routed: Vec<Routed>,
 }
 
 impl Presentations {
-    /// A note a conversation acknowledged and routed onward, as
-    /// [`Reached::routed_to`] says.
+    /// A note the run delivered — routed onward by the conversation, as
+    /// [`Reached::routed_to`] says, or recorded `carried` and watched all the
+    /// same, because a lever outside the seam can still read it into a turn.
     pub(crate) fn routed_by_the_conversation(&mut self, note: RecordedNote, at: u64) {
         let Some(routing) = Routing::of(&note.reached) else {
             return;
@@ -854,16 +914,20 @@ impl Presentations {
         };
         let mut shown = Vec::new();
         for routed in &mut self.routed {
-            if started_at < routed.routed_at
-                || !routed
-                    .routing
-                    .presented_by(party, opened.turn, opened.origin)
-            {
+            if started_at < routed.routed_at {
                 continue;
             }
+            let Some(evidence) =
+                routed
+                    .routing
+                    .presented_by(party, &opened, routed.note.text.as_str())
+            else {
+                continue;
+            };
             shown.push(Shown {
                 party,
                 turn: opened.turn,
+                evidence,
                 note: routed.note.clone(),
             });
         }
@@ -1165,7 +1229,9 @@ mod tests {
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert_eq!(shown[0].party, Party::Worker);
         assert_eq!(shown[0].turn, 3);
+        assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
         assert_eq!(shown[0].payload()["party"], json!("worker"));
+        assert_eq!(shown[0].payload()["evidence"], json!("delivered-origin"));
         assert_eq!(shown[0].payload()["text"], json!("stop"));
         assert_eq!(shown[0].payload()["reached"], json!("worker"));
 
@@ -1194,9 +1260,49 @@ mod tests {
         let shown = watch.observe(&turn(10, 3_100, "assistant", 1, Some("task")));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::OpeningTask);
         let shown = watch.observe(&turn(11, 3_200, "user", 1, None));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].party, Party::Supervisor);
+
+        // A note recorded `carried` is owed nothing by the conversation, and is
+        // watched all the same: a worker turn that opens on its whole text —
+        // however that text got there — is the presentation the seam could not
+        // predict, the judge's answer follows, and each says what it was read
+        // from. A turn cut short of the text, or carrying other words, is not.
+        let mut watch = Presentations::default();
+        watch.routed_by_the_conversation(
+            recorded("stop re-running the tier", Reached::Carried),
+            5_000,
+        );
+        let mut cut = turn(13, 5_100, "assistant", 2, Some("supervisor"));
+        cut.payload
+            .insert("instruction".into(), json!("stop re-running the tier"));
+        cut.payload
+            .insert("instruction_truncated".into(), json!(true));
+        assert!(
+            watch.observe(&cut).is_empty(),
+            "a truncated instruction is no evidence"
+        );
+        let mut other = turn(14, 5_200, "assistant", 3, Some("supervisor"));
+        other
+            .payload
+            .insert("instruction".into(), json!("carry on as you were"));
+        assert!(watch.observe(&other).is_empty());
+        let mut read_aloud = turn(15, 5_300, "assistant", 4, Some("supervisor"));
+        read_aloud.payload.insert(
+            "instruction".into(),
+            json!("The manager says: stop re-running the tier. Do that."),
+        );
+        let shown = watch.observe(&read_aloud);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::InstructionText);
+        assert_eq!(shown[0].payload()["evidence"], json!("instruction-text"));
+        let shown = watch.observe(&turn(16, 5_400, "user", 4, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].party, Party::Supervisor);
+        assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
 
         // Nothing the conversation routes nowhere is watched at all.
         let mut watch = Presentations::default();
@@ -1273,6 +1379,25 @@ mod tests {
             block["event_kinds"],
             json!([crate::event::PipelineKind::NoteShown.as_str()]),
             "the kind a presentation is recorded under is not the one entry 69 names"
+        );
+        // Every kind of evidence a presentation is decided from, spelled as the
+        // record writes it, and no other: a match rather than a list, so a
+        // variant added here has to be named there.
+        let every = |evidence: Evidence| match evidence {
+            Evidence::DeliveredOrigin
+            | Evidence::OpeningTask
+            | Evidence::InstructionText
+            | Evidence::AnsweringTurn => serde_json::to_value(evidence).expect("it serializes"),
+        };
+        assert_eq!(
+            block["note_shown_evidence"],
+            json!([
+                every(Evidence::DeliveredOrigin),
+                every(Evidence::OpeningTask),
+                every(Evidence::InstructionText),
+                every(Evidence::AnsweringTurn),
+            ]),
+            "the evidence a `note-shown` can name is not what entry 69 states"
         );
     }
 
