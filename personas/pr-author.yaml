@@ -9,6 +9,15 @@ system_prompt: |
   `body` is that prose and nothing else — the title is the plan's to state, and
   a title written here reaches nobody.
 
+  Your task may carry a `## Change request` section: the worker opened the
+  change request already, as a draft, and the description under it is what
+  the worker started. Finish that description rather than starting over —
+  keep what is still true of the diff, and drop what is not. It always carries
+  a `## Worker transcript` section naming the command that renders every tool
+  call the worker made: read it for evidence the worker produced that belongs
+  in the body — a demonstration change request it opened, a comment a bot
+  posted, a check it triggered — and link what you find.
+
   You run once, after the branch has already been verified, and you are not on
   the publication path: if you cannot draft a body, say so and stop. The change
   request opens with no body and the change still publishes.

@@ -381,7 +381,13 @@ fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<M
     }
 }
 
-/// Draft the change request's body, then publish through `onevcs`.
+/// Draft the change request's body, write it onto the change request the
+/// session already holds, and publish through `onevcs`.
+///
+/// The closeout, in the order divergence entry 69 states it: what the session
+/// holds is read first, the drafter is shown it, the description is written
+/// onto it, and one publication lifts and lands. A session holding none takes
+/// the path it always took — the drafted body opens the change request.
 #[allow(
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, the run's paths, what its \
@@ -1825,6 +1831,118 @@ mod tests {
             .collect::<Vec<&'static str>>(),
             "the README's endings are not the ones this module emits"
         );
+    }
+
+    /// The literals the drafting task is composed from, and the environment
+    /// names every dispatch carries, are exactly what divergence entry 69 names.
+    ///
+    /// Private vocabulary, so `tests/contract.rs` cannot reach it and the entry
+    /// is the only place it is written down beside the code — and the consumer
+    /// host reads each literal out of this binary to hold its own drafter to the
+    /// same prompt, so one reworded here without the record moving is a prompt
+    /// two hosts no longer share. Held both ways: the entry's words are the
+    /// constants, and the composed task carries each of them where the entry
+    /// says it does.
+    #[test]
+    fn the_drafting_task_and_the_dispatch_environment_are_what_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("69."))
+            .expect("the record still carries entry 69");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 69 carries the json block this test drives");
+
+        let task = &block["drafting_task"];
+        for (key, constant) in [
+            ("opening", DRAFTING_TASK),
+            ("change_request_heading", CHANGE_REQUEST_HEADING),
+            ("held_as_draft_line", HELD_AS_DRAFT_LINE),
+            ("description_heading", DESCRIPTION_HEADING),
+            ("no_description", NO_DESCRIPTION),
+            ("worker_transcript_heading", WORKER_TRANSCRIPT_HEADING),
+        ] {
+            assert_eq!(
+                task[key].as_str(),
+                Some(constant),
+                "entry 69's `{key}` is not the literal this build composes with"
+            );
+        }
+        let environment: Vec<String> =
+            serde_json::from_value(block["environment"].clone()).expect("entry 69 names the names");
+        assert_eq!(
+            environment,
+            vec![
+                crate::agentgraph::SESSION_ENV.to_string(),
+                crate::agentgraph::RUNS_DIR_ENV.to_string()
+            ],
+            "entry 69 names environment variables this build does not compose"
+        );
+
+        // And the composition itself, in the order the entry states: a session
+        // holding a change request gets every section, and one holding none
+        // gets the opening, the task, and the transcript alone.
+        let node = lifecycle(None);
+        let held = onevcs::SessionChange {
+            url: onevcs::Url::parse("https://github.com/owner/service/pull/7").expect("a url"),
+            id: onevcs::ChangeId("7".to_owned()),
+            base: "main".to_owned(),
+            draft: true,
+            title: "wip: the worker's".to_owned(),
+            body: String::new(),
+        };
+        let with = drafting_task(&node, "run-1", Some(&held));
+        let without = drafting_task(&node, "run-1", None);
+        assert!(with.starts_with(DRAFTING_TASK) && without.starts_with(DRAFTING_TASK));
+        let positions: Vec<usize> = [
+            DRAFTING_TASK,
+            CHANGE_REQUEST_HEADING,
+            HELD_AS_DRAFT_LINE,
+            DESCRIPTION_HEADING,
+            NO_DESCRIPTION,
+            WORKER_TRANSCRIPT_HEADING,
+        ]
+        .iter()
+        .map(|literal| {
+            with.find(literal)
+                .unwrap_or_else(|| panic!("the composed task lacks {literal:?}:\n{with}"))
+        })
+        .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "the sections are out of order:\n{with}"
+        );
+        assert!(with.contains(&format!(
+            "{CHANGE_REQUEST_HEADING}\n{}\n{HELD_AS_DRAFT_LINE} yes",
+            held.url
+        )));
+        assert!(with.contains("`onepipeline transcript run-1 service`"));
+        assert!(
+            !without.contains(CHANGE_REQUEST_HEADING)
+                && without.contains(WORKER_TRANSCRIPT_HEADING),
+            "a session holding no change request was shown one:\n{without}"
+        );
+        // The described body goes in verbatim, and a worker that left one is not
+        // told it left none.
+        let described = drafting_task(
+            &node,
+            "run-1",
+            Some(&onevcs::SessionChange {
+                body: "## What\nHalf written.".to_owned(),
+                draft: false,
+                ..held
+            }),
+        );
+        assert!(described.contains(&format!("{DESCRIPTION_HEADING}\n## What\nHalf written.")));
+        assert!(described.contains(&format!("{HELD_AS_DRAFT_LINE} no")));
+        assert!(!described.contains(NO_DESCRIPTION));
     }
 
     /// A workstream refuses before it cuts a branch.

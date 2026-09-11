@@ -3971,6 +3971,72 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
     assert!(CONTRACT.contains("executor_has_capacity"));
 }
 
+/// The `draft` field and the two environment names entry 69 proposes are what
+/// this build carries, at the surfaces this file can reach.
+///
+/// The field: named in the contract's own reserved-key list, and a field of the
+/// plan schema that round-trips as `body` does — omitted when false, carried when
+/// true. The names: what the README documents a dispatch's environment as, since
+/// the constants themselves are engine vocabulary `src/lifecycle.rs` holds to the
+/// same block. Both directions, so a field or a name this build grows without a
+/// line in that entry fails here as loudly as one the entry names that this build
+/// dropped.
+#[test]
+fn the_draft_closeout_is_what_the_divergence_record_names() {
+    let block = divergence_block("69.");
+    let fields: Vec<String> =
+        serde_json::from_value(block["node_fields"].clone()).expect("entry 69 names its fields");
+    assert_eq!(fields, vec!["draft".to_string()]);
+    for field in &fields {
+        assert!(
+            CONTRACT.contains(&format!("`{field}`")),
+            "the contract's reserved-key list does not name `{field}`"
+        );
+    }
+    let written = serde_json::to_value(Node {
+        id: "held".into(),
+        repo: Some("github.com/owner/name".into()),
+        title: Some("feat: hold it".into()),
+        draft: true,
+        ..Node::default()
+    })
+    .expect("a node serialises");
+    assert_eq!(written["draft"], json!(true));
+    let read: Node = serde_json::from_value(written).expect("it re-reads");
+    assert!(read.draft);
+    let omitted = serde_json::to_value(Node::default()).expect("a node serialises");
+    assert!(
+        omitted.get("draft").is_none(),
+        "`draft` is written when false, so a plan no longer round-trips as the file wrote it"
+    );
+
+    let environment: Vec<String> =
+        serde_json::from_value(block["environment"].clone()).expect("entry 69 names the names");
+    assert_eq!(
+        environment,
+        vec![
+            "ONEVCS_SESSION".to_string(),
+            "ONEPIPELINE_RUNS_DIR".to_string()
+        ]
+    );
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    for name in &environment {
+        assert!(
+            readme.contains(name),
+            "the README does not document `{name}`, which entry 69 says every dispatch carries"
+        );
+    }
+    // The opening sentence is the one the approved contract's drafter has always
+    // been given, and the entry says so byte for byte.
+    assert_eq!(
+        block["drafting_task"]["opening"].as_str(),
+        Some(
+            "Read this branch's diff and write the change request's body, following the \
+             repository's own template. The task this branch delivered:"
+        )
+    );
+}
+
 /// The sentence entry 54 proposes to amend is one the contract still carries.
 ///
 /// The entry is open, so the contract says nothing about what a live edit does to
