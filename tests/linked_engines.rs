@@ -106,6 +106,22 @@ fn linked(name: &str) -> Vec<String> {
     found
 }
 
+/// A release inside the window the lock's own requirement admits and past the
+/// version it resolves: the lock's `major.minor`, at patch `100`.
+///
+/// Derived rather than written, because a version copied here is a copy of the
+/// caret it has to fall inside: `0.12.100` went on reading as "newer" after the
+/// `oneharness-core` floor moved to `0.13`, and a check reporting on a release
+/// the requirement excludes is right to say nothing about it. Pre-1.0 the minor
+/// is the breaking position, so a patch past the linked one is always admitted.
+fn a_release_past(name: &str) -> String {
+    let linked = &linked(name)[0];
+    let (major_minor, _) = linked
+        .rsplit_once('.')
+        .unwrap_or_else(|| panic!("the lock's `{name}` version has three components: {linked}"));
+    format!("{major_minor}.100")
+}
+
 /// The requirement `[workspace.dependencies]` states for one engine.
 ///
 /// Read from the manifest for the reason [`linked`] reads the lock: written
@@ -340,11 +356,13 @@ fn the_currency_check_passes_when_every_engine_is_the_newest_its_requirement_per
 fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
     let stale_harness = &linked("oneharness-core")[0];
+    let newer_graph = a_release_past("oneagentgraph");
+    let newer_harness = a_release_past("oneharness-core");
     let index = index_serving(
         "stale",
         &[
-            ("oneagentgraph", "0.3.100", false),
-            ("oneharness-core", "0.12.100", false),
+            ("oneagentgraph", &newer_graph, false),
+            ("oneharness-core", &newer_harness, false),
         ],
     );
 
@@ -358,7 +376,8 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     let report = String::from_utf8_lossy(&run.stderr);
     assert!(
         report.contains(&format!(
-            "oneagentgraph: links {stale_graph}, but its requirement already permits 0.3.100"
+            "oneagentgraph: links {stale_graph}, but its requirement already permits \
+             {newer_graph}"
         )),
         "the refusal does not name what oneagentgraph resolves and what it could:\n{}",
         said(&run)
@@ -374,7 +393,7 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     assert!(
         report.contains(&format!(
             "oneharness-core: links {stale_harness}, but its requirement already permits \
-             0.12.100"
+             {newer_harness}"
         )),
         "the refusal skipped the engine this workspace links only for its doubles, which is \
          the one a generic check is most likely to drop:\n{}",

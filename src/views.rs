@@ -4305,6 +4305,10 @@ mod tests {
     /// at a chain that recovered changes nothing at all.
     #[test]
     fn a_failed_node_tells_a_recovered_chain_from_one_that_ran_out() {
+        // The reason is a stranger's word on the line, but the stranger is
+        // oneharness: a producer writes that library's `FallThroughReason`
+        // spelling, so the record here carries one it could have written.
+        let rate_limited = oneharness_core::domain::fallback::FallThroughReason::RateLimit.as_str();
         let root = scratch("refusal");
         write_run(
             &root,
@@ -4329,10 +4333,10 @@ mod tests {
                     1,
                     "claude-code:alternate",
                 ),
-                advanced(Some("judge"), Some(1), "codex", "rate_limit"),
+                advanced(Some("judge"), Some(1), "codex", rate_limited),
                 // The same side refusing the same way again is one fact
                 // recorded twice, not two facts.
-                advanced(Some("judge"), Some(1), "codex", "rate_limit"),
+                advanced(Some("judge"), Some(1), "codex", rate_limited),
                 event(
                     crate::journal::PipelineKind::NodeSettled,
                     Some("build"),
@@ -4354,9 +4358,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains(
-                "provider: the judge side: identity 'codex' refused (rate_limit), recorded 2 times"
-            ),
+            rendered.contains(&format!(
+                "provider: the judge side: identity 'codex' refused ({rate_limited}), recorded 2 \
+                 times"
+            )),
             "{rendered}"
         );
         assert!(
