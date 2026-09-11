@@ -90,6 +90,15 @@ resolver = "2"
 #   `src/note.rs` exists to end. `tests/note/` drives it against the real
 #   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
 #   than reads differently.
+# - `oneagentgraph` 0.3.16 stamps a turn announcement and a turn message with who
+#   authored it — an optional `origin` naming the composed task, the member's own
+#   simulated supervisor, or text a caller delivered. A floor the lock carries
+#   rather than the requirement: `oneagentgraph = "0.3.15"` already admits it, and
+#   `src/agentgraph.rs` relays the payload whole, so the stamp reaches the journal
+#   with no reader here changing. Below it a stop order a simulated supervisor
+#   generated and one the manager delivered are the same record, and
+#   `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
+#   fails naming the lock rather than reading differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -344,7 +353,20 @@ resolver = "2"
 # seam that op exists to end. `tests/note/`, the `note` test binary declared below,
 # drives the delivery against the real sibling and a real two-party conversation.
 #
-# Both are recorded in the floors list at the top of this file.
+# 0.3.16 stamps a turn announcement and a turn message with **who authored it** —
+# `origin`: the composed task, the member's own simulated supervisor, or text a
+# caller delivered — optional, and absent from what an unstamped producer writes.
+# A floor carried by the lock alone: the requirement below admits it and no
+# reader here changes, because `src/agentgraph.rs`'s `relayed` crosses the
+# sibling's `Serialize` whole on purpose, so a field the sibling adds reaches the
+# journal rather than being dropped. That is the whole reason to take it: without
+# the stamp a consumer cannot tell a simulated supervisor's stop order from one
+# the manager really delivered, and one such guess cancelled a live dispatch.
+# `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
+# holds both halves — the stamp arrives intact, an unstamped turn is written as
+# before — against the linked library.
+#
+# All three are recorded in the floors list at the top of this file.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
