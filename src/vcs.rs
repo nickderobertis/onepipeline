@@ -799,6 +799,249 @@ pub fn branch_head_in(token: &SessionToken) -> Option<String> {
     }
 }
 
+/// A session's branch found **level** with its base: every commit on it is one
+/// the base already carries, and the worktree holds nothing to commit.
+///
+/// Read off the worktree the session opened, *before* a publication is spent on
+/// it — the drafting dispatch and the push both — and split on the one fact the
+/// ahead-count alone cannot say: whether this dispatch **wrote** a commit the
+/// branch still carries. Two situations are zero commits ahead and the two are
+/// opposite endings. A dispatch that wrote no commit left an empty branch, and a
+/// node that did not declare it expected that has a modelling error nobody would
+/// otherwise see; a dispatch that wrote a commit the base then took — an agent
+/// that pushed to the base itself — is the second reading `engine::NO_CHANGES`
+/// documents, a legitimate success. `crate::lifecycle` settles the two apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelBranch {
+    /// The branch the worktree has checked out.
+    pub branch: String,
+    /// What it was measured against: the base's remote-tracking copy where the
+    /// clone carries one, and the local base otherwise — the same ref the
+    /// sibling's own publication compares against.
+    pub base: String,
+    /// What this dispatch wrote to the branch, as far as the worktree's own
+    /// record says. See [`level_with_base`] for the evidence.
+    pub wrote: Wrote,
+}
+
+/// What a dispatch wrote to a level branch: the one distinction that decides
+/// its settlement, named rather than carried as a flag.
+///
+/// Movement alone is neither: a worker that fast-forwarded or reset its branch
+/// onto a commit the base already had moved `HEAD` and wrote nothing, and a
+/// report that the base carried what it committed would be false. Nor is a
+/// commit an earlier dispatch wrote in the same worktree, which a session taken
+/// up again still remembers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    /// No commit of this dispatch's is on the branch: it wrote none, or reset
+    /// away what it wrote.
+    Nothing,
+    /// A commit this dispatch wrote is on the branch — and so, the branch being
+    /// level, already on the base.
+    ACommitTheBaseCarries,
+}
+
+/// Whether one entry of the worktree's `HEAD` reflog records a commit being
+/// **written** there, read off the subject git itself stamps on the entry.
+///
+/// Git names the action that moved `HEAD` on every entry: `commit: …` and its
+/// `(amend)`, `(initial)` and `(merge)` forms, `cherry-pick: …`, `am: …`, a
+/// `rebase (pick): …` that replays one, and a `merge …`/`pull …` that was not a
+/// fast-forward — each of which created the commit the entry points at. A
+/// `reset`, a `checkout`, a fast-forward, and a `rebase (start)`/`(finish)` moved
+/// `HEAD` onto a commit that already existed, and are not that.
+// llmlint: ignore[changed_behavior_has_e2e] `git commit`, a fast-forward and a reset are
+// driven end to end by `tests/e2e/lifecycle.rs`'s three level-branch journeys and
+// `tests/e2e/session_reuse.rs`'s stranded retry — the acts a worker double performs. The
+// other spellings here are git's own for the same act, and each is driven over **real
+// git** in this module's `a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone`,
+// so the subject matched is the one git stamps rather than one written out; a journey per
+// git verb would prove git's reflog rather than this crate.
+fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
+    let subject = subject.trim();
+    if subject.starts_with("commit")
+        || subject.starts_with("cherry-pick")
+        || subject.starts_with("am:")
+    {
+        return true;
+    }
+    if let Some(rest) = subject.strip_prefix("rebase") {
+        return !["(start)", "(finish)", "(abort)"]
+            .iter()
+            .any(|phase| rest.trim_start().starts_with(phase));
+    }
+    (subject.starts_with("merge") || subject.starts_with("pull"))
+        && !subject.ends_with("Fast-forward")
+}
+
+/// Hold until the clock has left the second `began` fell in.
+///
+/// The reflog [`level_with_base`] reads is stamped in whole seconds, so a commit
+/// written in the second a dispatch began cannot be told, by its stamp, from one
+/// written just before the dispatch did. Waiting that second out before the
+/// dispatch's first session opens is what makes the boundary exact: every entry
+/// stamped in that second or earlier was there before this dispatch, and every
+/// one it writes is stamped later. At most a second, once per node, and only
+/// where a session is about to open — which is also the one place it matters.
+/// A `began` the clock cannot place waits for nothing; the read that follows
+/// then takes the epoch as its boundary, and credits everything.
+pub fn wait_out_the_second(began: std::time::SystemTime) {
+    let Ok(since) = began.duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    // A second the clock cannot represent is one it will never reach either.
+    let Some(next) =
+        std::time::UNIX_EPOCH.checked_add(Duration::from_secs(since.as_secs().saturating_add(1)))
+    else {
+        return;
+    };
+    while let Ok(remaining) = next.duration_since(std::time::SystemTime::now()) {
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining);
+    }
+}
+
+/// Where a session's branch stands against its base, asked of the worktree
+/// `onevcs` opened for it.
+///
+/// `Some` only for a branch this read can prove level: a **clean** worktree —
+/// the sibling commits whatever a worktree holds at publication, so a dirty tree
+/// is a commit the branch is about to gain — whose head is an ancestor of the
+/// base, with every read that decides it answered. Anything else is `None`, and
+/// the caller publishes exactly as it always has: a read git would not answer is
+/// not evidence about the branch, and settling a node on it either way would be
+/// a report nobody could stand behind.
+///
+/// The evidence that this dispatch wrote a commit is the worktree's own `HEAD`
+/// reflog, which git writes for every move of `HEAD` there, stamps with the
+/// clock, and names the action that made — see [`reflog_entry_wrote_a_commit`].
+/// Only the entries stamped **after the second `began` fell in** are this
+/// dispatch's: `onevcs` cuts every session its own non-bare clone and adds the
+/// worktree fresh, but a session it takes up again for a later dispatch keeps
+/// the worktree and its reflog, and what an earlier dispatch wrote there is not
+/// what this one did. The stamp is whole seconds, so the boundary is a second
+/// rather than an instant, and [`wait_out_the_second`] is what makes it exact —
+/// the caller holds its first session open until that second has passed. A
+/// commit counts only while the branch still carries it: one written and then
+/// reset away is not on the base whatever the reflog says.
+///
+/// This crate runs git itself here, inside a session and against the worktree
+/// and base the session's own record names; why that is the one place it may is
+/// `docs/contract-divergences.md` entry 35.
+pub fn level_with_base(
+    worktree: &std::path::Path,
+    base: &str,
+    began: std::time::SystemTime,
+) -> Option<LevelBranch> {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| {
+                eprintln!(
+                    "onepipeline: cannot run `git {}` in {}: {error}",
+                    args.join(" "),
+                    worktree.display()
+                );
+            })
+            .ok()?;
+        if !output.status.success() {
+            eprintln!(
+                "onepipeline: `git {}` in {} exited {}: {}",
+                args.join(" "),
+                worktree.display(),
+                output.status.code().unwrap_or(-1),
+                crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
+            );
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    if !git(&["status", "--porcelain"])?.is_empty() {
+        return None;
+    }
+    let remote = format!("origin/{base}");
+    // Answered with nothing rather than with a failure for a ref that is not
+    // there, which is the ordinary case for a repository with no remote.
+    let carried = git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        &format!("refs/remotes/{remote}"),
+    ])?;
+    let compared = if carried.is_empty() {
+        base.to_owned()
+    } else {
+        remote
+    };
+    let ahead = git(&["rev-list", "--count", &format!("{compared}..HEAD")])?;
+    if ahead.parse::<u64>().ok()? != 0 {
+        return None;
+    }
+    // Every commit the reflog says was written here since this dispatch began,
+    // that the branch still carries. Each line is the entry's stamp as seconds
+    // — `%gd` under `--date=unix` is `HEAD@{<seconds>}` — the commit it moved
+    // `HEAD` to, and the entry's own subject, which is the action; the three are
+    // split on spaces a stamp and a commit name never contain. A stamp this
+    // build cannot read leaves the entry out: it is not evidence either way.
+    //
+    // Strictly after the second `began` fell in. The stamp is whole seconds, so
+    // an entry from that second could be either side of the boundary; at-or-after
+    // took it as this dispatch's, and credited a retry with the commit the run it
+    // took the worktree from had written moments before — a stop and a retry
+    // land within one second on a fast host, which `tests/e2e/session_reuse.rs`'s
+    // stranded retry met on a hosted runner. Strictly-after is exact because the
+    // caller waited that second out before its first session opened, so nothing
+    // this dispatch wrote is stamped in it; the unit test drives the boundary
+    // through git's own clock, and that journey drives it over a real stop.
+    let began = began
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let written: Vec<String> = git(&["log", "-g", "--date=unix", "--format=%gd %H %gs", "HEAD"])?
+        .lines()
+        .filter_map(|line| {
+            let (stamp, rest) = line.split_once(' ')?;
+            let (sha, subject) = rest.split_once(' ')?;
+            let stamped: u64 = stamp
+                .strip_prefix("HEAD@{")?
+                .strip_suffix('}')?
+                .parse()
+                .ok()?;
+            (stamped > began && reflog_entry_wrote_a_commit(subject)).then(|| sha.to_owned())
+        })
+        .collect();
+    let mut wrote = Wrote::Nothing;
+    for sha in &written {
+        // Exit 1 is git's answer "not an ancestor", which the closure reports as
+        // a refusal; only a refusal to answer at all leaves the read undecided,
+        // and that one exits higher than 1.
+        match std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(answered) if answered.status.success() => {
+                wrote = Wrote::ACommitTheBaseCarries;
+                break;
+            }
+            Ok(answered) if answered.status.code() == Some(1) => {}
+            _ => return None,
+        }
+    }
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    Some(LevelBranch {
+        branch,
+        base: compared,
+        wrote,
+    })
+}
+
 /// A commit value this crate will carry.
 ///
 /// A newtype and never a bare `String`, because [`usable`] is what stands
@@ -2232,6 +2475,360 @@ mod tests {
         assert!(!session_open_conflicted(&Error::Invalid(format!(
             "{SESSION_OPEN_CONFLICT}: sync conflict"
         ))));
+    }
+
+    /// A worktree cut the way `onevcs` cuts a session's: a base repository with
+    /// one commit, a shared non-checkout clone of it whose `origin` is that base,
+    /// and a worktree on a fresh branch from `origin/main`.
+    ///
+    /// Real git, because what [`level_with_base`] reads is git's own reflog and
+    /// its own ancestry, and a double for either would be an oracle for what
+    /// this test wants to know.
+    fn a_cut_worktree(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-level-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let base = root.join("base");
+        let clone = root.join("clone");
+        let worktree = root.join("worktree");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "base"]);
+        std::fs::write(base.join("README.md"), "seed\n").expect("the seed file");
+        git_in(&base, &["add", "-A"]);
+        git_in(&base, &["commit", "-q", "-m", "chore: seed"]);
+        // Taken as a push target below, which a checkout refuses for its own
+        // branch; the cut origin is a bare repository too.
+        git_in(
+            &base,
+            &["config", "receive.denyCurrentBranch", "updateInstead"],
+        );
+        git_in(
+            &root,
+            &["clone", "-q", "--shared", "--no-checkout", "base", "clone"],
+        );
+        git_in(
+            &clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work",
+                &worktree.to_string_lossy(),
+                "origin/main",
+            ],
+        );
+        (base, worktree)
+    }
+
+    /// Run git as the test's own actor, refusing anything but success.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let ran = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .expect("git runs");
+        assert!(
+            ran.status.success(),
+            "`git {}` in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    /// A commit written into the worktree, on the branch it has checked out.
+    fn commit_in(worktree: &std::path::Path, name: &str) {
+        std::fs::write(worktree.join(name), format!("{name}\n")).expect("the file");
+        git_in(worktree, &["add", "-A"]);
+        git_in(worktree, &["commit", "-q", "-m", &format!("feat: {name}")]);
+    }
+
+    /// A level branch is told apart by whether **this dispatch wrote a commit**
+    /// the branch carries, and movement alone is not that.
+    ///
+    /// One worktree per situation the read has to tell apart, over real git: the
+    /// reflog and the ancestry are git's own, and what the read claims — "the
+    /// base already carries what this dispatch committed" — is only true where a
+    /// commit was written here, since this dispatch began, and is still on the
+    /// branch. A worker that fast-forwarded or reset onto a commit the base
+    /// already had moved `HEAD` and committed nothing, and used to be reported as
+    /// the former; so did one taking up a worktree an earlier dispatch had
+    /// committed in.
+    #[test]
+    fn a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        // Begun at the epoch: every entry the worktree's reflog holds is this
+        // dispatch's, which is what a fresh cut gives.
+        let level =
+            |worktree: &std::path::Path| super::level_with_base(worktree, "main", UNIX_EPOCH);
+        let wrote = |worktree: &std::path::Path| level(worktree).map(|read| read.wrote);
+        let land = |worktree: &std::path::Path| {
+            git_in(worktree, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+            git_in(worktree, &["fetch", "-q", "origin"]);
+        };
+
+        // Fresh: level, and nothing written.
+        let (_, fresh) = a_cut_worktree("fresh");
+        assert_eq!(
+            level(&fresh),
+            Some(LevelBranch {
+                branch: "work".into(),
+                base: "origin/main".into(),
+                wrote: Wrote::Nothing,
+            })
+        );
+
+        // The base moved and the worker fast-forwarded onto it — and, in a
+        // second worktree, reset onto it. `HEAD` moved in both; neither wrote.
+        for (name, catch_up) in [
+            ("ff", vec!["merge", "-q", "--ff-only", "origin/main"]),
+            ("reset", vec!["reset", "-q", "--hard", "origin/main"]),
+        ] {
+            let (base, worktree) = a_cut_worktree(name);
+            commit_in(&base, "landed-by-somebody-else.md");
+            git_in(&worktree, &["fetch", "-q", "origin"]);
+            git_in(&worktree, &catch_up);
+            assert_eq!(
+                wrote(&worktree),
+                Some(Wrote::Nothing),
+                "{name}: a worker that moved onto a commit the base already had was read as \
+                 having committed it"
+            );
+        }
+
+        // Every way git writes a commit here, each landed on the base by the
+        // worker itself: written here, still on the branch, and the base carries
+        // it. `git commit` is what a worker ordinarily runs; the rest are git's
+        // other spellings of the same act, each driven for real so the reflog
+        // subject read is the one git stamps rather than one written out here.
+        let (_, landed) = a_cut_worktree("landed");
+        commit_in(&landed, "mine.md");
+        land(&landed);
+        assert_eq!(wrote(&landed), Some(Wrote::ACommitTheBaseCarries), "commit");
+
+        // Picked off a side branch of the base's, and `-x`, so the pick is a
+        // commit of its own rather than — same tree, same parent, same second —
+        // the very object it was picked from.
+        let (base, picked) = a_cut_worktree("picked");
+        git_in(&base, &["checkout", "-q", "-b", "side"]);
+        commit_in(&base, "elsewhere.md");
+        git_in(&base, &["checkout", "-q", "main"]);
+        git_in(&picked, &["fetch", "-q", "origin"]);
+        git_in(&picked, &["cherry-pick", "-x", "origin/side"]);
+        // A pick is a new commit, so the base does not carry it until it is
+        // landed: ahead by one until then.
+        assert_eq!(level(&picked), None, "a cherry-picked commit read as level");
+        land(&picked);
+        assert_eq!(
+            wrote(&picked),
+            Some(Wrote::ACommitTheBaseCarries),
+            "cherry-pick"
+        );
+
+        let (base, merged) = a_cut_worktree("merged");
+        commit_in(&merged, "mine.md");
+        commit_in(&base, "theirs.md");
+        git_in(&merged, &["fetch", "-q", "origin"]);
+        git_in(
+            &merged,
+            &["merge", "-q", "--no-ff", "-m", "merge", "origin/main"],
+        );
+        land(&merged);
+        assert_eq!(wrote(&merged), Some(Wrote::ACommitTheBaseCarries), "merge");
+
+        let (base, rebased) = a_cut_worktree("rebased");
+        commit_in(&rebased, "mine.md");
+        commit_in(&base, "theirs.md");
+        git_in(&rebased, &["fetch", "-q", "origin"]);
+        git_in(&rebased, &["rebase", "-q", "origin/main"]);
+        land(&rebased);
+        assert_eq!(
+            wrote(&rebased),
+            Some(Wrote::ACommitTheBaseCarries),
+            "rebase"
+        );
+
+        // The patch comes off a side branch of the base's, like the pick above,
+        // so `main` stays at the seed and the applied commit is a commit of its
+        // own that the landing then carries. Taken off `main` itself, the
+        // landing only fast-forwards when `am` reproduces the base's very
+        // object — same tree, same parent, same author date, and a committer
+        // date in the same second — which a slow runner does not give, and
+        // which would land nothing even when it did.
+        let (base, applied) = a_cut_worktree("applied");
+        git_in(&base, &["checkout", "-q", "-b", "side"]);
+        commit_in(&base, "patch.md");
+        let patch = std::process::Command::new("git")
+            .args(["format-patch", "-1", "--stdout", "side"])
+            .current_dir(&base)
+            .output()
+            .expect("git runs");
+        assert!(patch.status.success());
+        git_in(&base, &["checkout", "-q", "main"]);
+        std::fs::write(applied.join("../patch.mbox"), &patch.stdout).expect("the patch");
+        git_in(&applied, &["am", "-q", "../patch.mbox"]);
+        assert_eq!(level(&applied), None, "an applied patch read as level");
+        land(&applied);
+        assert_eq!(wrote(&applied), Some(Wrote::ACommitTheBaseCarries), "am");
+
+        // The worker wrote a commit and then reset it away: written here, but
+        // the branch no longer carries it, so the base does not either.
+        let (_, undone) = a_cut_worktree("undone");
+        commit_in(&undone, "undone.md");
+        git_in(&undone, &["reset", "-q", "--hard", "origin/main"]);
+        assert_eq!(
+            wrote(&undone),
+            Some(Wrote::Nothing),
+            "a commit reset off the branch was read as one the base carries"
+        );
+
+        // A worktree taken up again: an earlier dispatch wrote a commit here
+        // that the base then took, and this dispatch — begun after it — wrote
+        // nothing. The reflog still holds the earlier commit; it is not this
+        // dispatch's. Stamped a day earlier through git's own clock rather
+        // than waited for, and read from three beginnings: the second before
+        // the stamp, the stamp's own second, and an hour after it.
+        let (_, resumed) = a_cut_worktree("resumed");
+        std::fs::write(resumed.join("earlier.md"), "earlier\n").expect("the file");
+        git_in(&resumed, &["add", "-A"]);
+        let earlier = SystemTime::now() - Duration::from_secs(86_400);
+        let stamp = format!(
+            "@{} +0000",
+            earlier
+                .duration_since(UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_secs()
+        );
+        let dated = std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "feat: earlier"])
+            .current_dir(&resumed)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .env("GIT_AUTHOR_DATE", &stamp)
+            .env("GIT_COMMITTER_DATE", &stamp)
+            .status()
+            .expect("git runs");
+        assert!(dated.success());
+        land(&resumed);
+        assert_eq!(
+            wrote(&resumed),
+            Some(Wrote::ACommitTheBaseCarries),
+            "read as the dispatch that wrote it, the commit counts"
+        );
+        let begun = |began: SystemTime| {
+            super::level_with_base(&resumed, "main", began).map(|read| read.wrote)
+        };
+        assert_eq!(
+            begun(earlier - Duration::from_secs(1)),
+            Some(Wrote::ACommitTheBaseCarries),
+            "a commit stamped the second after this dispatch began was not read as its own"
+        );
+        // The boundary itself: a dispatch begun in the commit's own second waited
+        // that second out before it could have written anything, so the commit
+        // is the earlier dispatch's. This is the stop-and-retry that landed
+        // within one second on a hosted runner.
+        assert_eq!(
+            begun(earlier),
+            Some(Wrote::Nothing),
+            "a commit stamped in the second this dispatch began was read as this one's"
+        );
+        assert_eq!(
+            begun(earlier + Duration::from_secs(3_600)),
+            Some(Wrote::Nothing),
+            "a commit an earlier dispatch wrote in this worktree was read as this one's"
+        );
+
+        // Not level at all: a commit the base does not have, and a dirty tree
+        // the sibling would commit at publication.
+        let (_, ahead) = a_cut_worktree("ahead");
+        commit_in(&ahead, "ahead.md");
+        assert_eq!(
+            level(&ahead),
+            None,
+            "a branch ahead of its base read as level"
+        );
+        let (_, dirty) = a_cut_worktree("dirty");
+        std::fs::write(dirty.join("dirty.md"), "uncommitted\n").expect("the file");
+        assert_eq!(level(&dirty), None, "a dirty worktree read as level");
+
+        for name in [
+            "fresh", "ff", "reset", "landed", "picked", "merged", "rebased", "applied", "undone",
+            "resumed", "ahead", "dirty",
+        ] {
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir()
+                    .join(format!("onepipeline-level-{name}-{}", std::process::id())),
+            );
+        }
+    }
+
+    /// Waiting a second out returns with the clock in a later whole second than
+    /// the one it was given, and returns at once for a beginning already past.
+    #[test]
+    fn the_second_a_dispatch_began_in_is_over_before_its_first_session_opens() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let seconds = |at: SystemTime| {
+            at.duration_since(UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_secs()
+        };
+        let began = SystemTime::now();
+        super::wait_out_the_second(began);
+        assert!(
+            seconds(SystemTime::now()) > seconds(began),
+            "the wait returned inside the second it was asked to leave"
+        );
+
+        // Already over: nothing to wait for.
+        let long_ago = SystemTime::now() - Duration::from_secs(60);
+        let asked = std::time::Instant::now();
+        super::wait_out_the_second(long_ago);
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "a second already past was waited for"
+        );
+        // And one the clock cannot place at all.
+        super::wait_out_the_second(UNIX_EPOCH - Duration::from_secs(1));
+    }
+
+    /// The reflog subjects that record a commit being written, against the ones
+    /// git stamps for movement onto a commit that already existed.
+    #[test]
+    fn a_reflog_entry_that_wrote_a_commit_is_told_from_one_that_only_moved_head() {
+        for wrote in [
+            "commit: feat: one",
+            "commit (amend): feat: one",
+            "commit (initial): chore: seed",
+            "commit (merge): Merge branch 'x'",
+            "cherry-pick: feat: one",
+            "am: feat: one",
+            "rebase (pick): feat: one",
+            "rebase (continue): feat: one",
+            "merge origin/main: Merge made by the 'ort' strategy.",
+            "pull: Merge made by the 'ort' strategy.",
+        ] {
+            assert!(super::reflog_entry_wrote_a_commit(wrote), "{wrote}");
+        }
+        for moved in [
+            "",
+            "reset: moving to origin/main",
+            "reset: moving to HEAD",
+            "checkout: moving from main to work",
+            "merge origin/main: Fast-forward",
+            "pull: Fast-forward",
+            "rebase (start): checkout origin/main",
+            "rebase (finish): returning to refs/heads/work",
+            "rebase (abort): returning to refs/heads/work",
+        ] {
+            assert!(!super::reflog_entry_wrote_a_commit(moved), "{moved:?}");
+        }
     }
 
     /// The three answers [`session_tip`] gives, against three real streams.

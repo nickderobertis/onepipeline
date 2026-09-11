@@ -1368,7 +1368,14 @@ fn start(world: &World, name: &str, nodes: Vec<Value>) -> String {
 fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> String {
     for node in &nodes {
         let id = node["id"].as_str().expect("every node has an id");
-        world.script(&format!("{id}.work"), &format!("{id} did its work\n"));
+        // Named for the run as well as the node: two runs of one world publish
+        // into one repository, and a second worker writing exactly what the
+        // first already landed leaves a branch level with its base — which is a
+        // failed node now, not a published one.
+        world.script(
+            &format!("{id}.work"),
+            &format!("{id} did its work for {name}\n"),
+        );
     }
     let path = world.plan(name, &plan_of(name, nodes));
     let mut argv: Vec<String> = vec!["start".to_owned(), path, "--detach".to_owned()];

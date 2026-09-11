@@ -1029,7 +1029,10 @@ pub fn derive(
             // `cancelled` a moment later. Read the settlement instead and the
             // node reports as something a `requeue` is not obviously the way
             // back from — while the flag that actually holds it out of every
-            // later dispatch sits unmentioned on its definition.
+            // later dispatch sits unmentioned on its definition. A node that
+            // went on to settle `done` or `failed` no longer carries the flag:
+            // the fold takes it off at the settlement, whichever path recorded
+            // it — see `projection::settlement_ends_the_park`.
             statuses.insert(node.id.clone(), NodeStatus::Parked);
             continue;
         }
