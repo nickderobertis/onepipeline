@@ -104,7 +104,7 @@ pub fn execute(
     // exist. Every attempt after it is composed with what the attempt before it
     // was — read off the run's record, which is the one place both the delivery
     // and this thread can see.
-    let mut notes: Vec<crate::note::Consumed> = Vec::new();
+    let mut notes: Vec<crate::note::RecordedNote> = Vec::new();
     loop {
         let preserved = match attempt_once(
             executor, paths, launch, &node, references, &notes, cancel, tx,
@@ -194,7 +194,7 @@ fn attempt_once(
     launch: &Launch,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
-    notes: &[crate::note::Consumed],
+    notes: &[crate::note::RecordedNote],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Attempt {

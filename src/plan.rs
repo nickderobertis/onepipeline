@@ -404,7 +404,7 @@ impl Step {
         &self,
         node: &Node,
         references: &[CrossRepoReference],
-        notes: &[crate::note::Consumed],
+        notes: &[crate::note::RecordedNote],
     ) -> String {
         render_task(
             self.task.as_deref().unwrap_or_default(),
@@ -421,7 +421,7 @@ fn render_task(
     amendment: Option<&str>,
     context: Option<&str>,
     references: &[CrossRepoReference],
-    notes: &[crate::note::Consumed],
+    notes: &[crate::note::RecordedNote],
 ) -> String {
     let task = match amendment.map(str::trim).filter(|text| !text.is_empty()) {
         None => task.to_string(),
@@ -574,7 +574,7 @@ fn amended(task: &str, amendment: &str) -> String {
 /// Placed exactly as an amendment is — above the operational notes, at the end
 /// of a task that states none — and after the amendment where there is one, so
 /// a reader meets the standing bar and then the rulings issued against it.
-fn with_notes(task: &str, notes: &[crate::note::Consumed]) -> String {
+fn with_notes(task: &str, notes: &[crate::note::RecordedNote]) -> String {
     let mut block =
         format!("{MANAGER_NOTES_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{MANAGER_NOTES_PREAMBLE}\n");
     for (index, note) in notes.iter().enumerate() {
@@ -1178,7 +1178,7 @@ mod tests {
             ..Step::default()
         };
         let notes = [
-            crate::note::Consumed {
+            crate::note::RecordedNote {
                 addressee: crate::note::Addressee::Both,
                 text: "the judged lint tier is a toolchain failure today: do not re-run it, \
                        and do not fail the node for not having re-run it"
@@ -1187,7 +1187,7 @@ mod tests {
                 criterion: None,
                 reached: crate::note::Reached::Worker,
             },
-            crate::note::Consumed {
+            crate::note::RecordedNote {
                 addressee: crate::note::Addressee::Worker,
                 text: "bump the fixture\nand say so"
                     .parse()

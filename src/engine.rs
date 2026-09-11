@@ -614,7 +614,7 @@ pub(crate) struct Redispatch {
     /// The manager's notes the new attempt was composed with: what the attempt
     /// it replaces was shown, carried into the task it recomposes. Empty for an
     /// attempt composed with none, and omitted from the record then.
-    pub carried: Vec<crate::note::Consumed>,
+    pub carried: Vec<crate::note::RecordedNote>,
 }
 
 /// Everything a dispatch needs, resolved before it leaves the writer's thread.
@@ -2599,7 +2599,7 @@ fn commit_command(
     // which records each as it happens and nothing before.
     for operation in operations {
         if let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
-            (operation, crate::note::Consumed::of_delivery(operation))
+            (operation, crate::note::RecordedNote::of_delivery(operation))
         {
             if let Some(dispatch) = in_flight.get_mut(node) {
                 dispatch
@@ -3313,7 +3313,11 @@ fn start_ready(
 /// [`crate::note::standing`]'s: a record of this crate's own that cannot be read
 /// as what it says it carries, which ends the pass rather than announcing a
 /// dispatch as having spent nothing.
-fn spent_by(paths: &RunPaths, state: &RunState, node: &str) -> Result<Vec<crate::note::Consumed>> {
+fn spent_by(
+    paths: &RunPaths,
+    state: &RunState,
+    node: &str,
+) -> Result<Vec<crate::note::RecordedNote>> {
     let journal = journal::read(&paths.journal());
     let mut spent = crate::note::standing(&journal, node)?.read();
     for superseded in state
