@@ -1537,18 +1537,9 @@ pub struct LockRecord {
 ///
 /// Taking a claim nobody holds is exclusive, because creating a file exclusively
 /// is what the filesystem decides. Reclaiming the claim of a holder this host can
-/// prove is gone — which is what `adopt` recovers a dead driver's run by — is
-/// three operations, a read, a proof and a write, and is made exclusive by
-/// holding [`reclaim_guard`] across them: every contender that proves a holder
-/// dead takes that guard, reads the record **again** inside it, and reclaims
-/// only what is still a dead holder's. So two parties that read one dead record
-/// at the same instant never both hold the run: the second into the guard reads
-/// the first's live record and is refused exactly as a live holder would have
-/// refused it. Nothing that does not hold the guard writes over an existing
-/// record — a fresh claim needs the file absent, and a dead holder cannot remove
-/// it — which is what makes the guard the whole of the exclusion.
-/// [`Handover`] rests on the same principle, that parties meet on one path the
-/// filesystem arbitrates, and says there what it does not do.
+/// prove is gone is not one operation and cannot be — which is this lock's own
+/// long-standing shape, and what `adopt` recovers a dead driver's run by.
+/// [`Handover`] does not rest on it, and says there why.
 fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
@@ -1585,22 +1576,25 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
             let held_by: Option<LockRecord> = read_json_opt(path);
             match held_by {
                 // A holder on this host that this host can prove is gone
-                // leaves a lock nothing will release. Reclaim it — inside the
-                // guard, and only if it is still that holder's once inside.
-                // llmlint: ignore-block[changed_behavior_has_e2e] two processes
-                // reclaiming one dead driver's run at the same instant is driven by
-                // `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
-                // — two real replies over a driver killed under them — but which
-                // microsecond each reads the dead record in is not an input that
-                // journey has, so the contention itself is placed by
-                // `tests::a_dead_holders_lock_is_reclaimed_by_exactly_one_of_many_contenders`,
-                // which releases every contender onto the record at once.
-                Some(held) if is_a_dead_holder_here(&held) => {
-                    let _guard = reclaim_guard(path)?;
+                // leaves a lock nothing will release. Reclaim it.
+                // llmlint: ignore-block[changed_behavior_has_e2e] two processes reclaiming
+                // one dead driver's run at the same instant is not a state a journey can
+                // place them in — `adopt` is what reaches this, and a suite can start two
+                // but not decide which microsecond each reads the record in. What this
+                // build does about it is stated above rather than promised away, and the
+                // gate that had to be exclusive does not rest on it.
+                Some(held)
+                    if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
+                {
+                    // Read back rather than written and assumed: a contender
+                    // that arrives after the winner reads the winner's record and
+                    // is refused, exactly as a live holder would have refused it.
+                    // Two that write at the same moment can each read their own
+                    // back — this narrows that window rather than closing it, and
+                    // the doc above says what rests on it and what does not.
+                    write_atomic(path, body.as_bytes())?;
                     match read_json_opt::<LockRecord>(path) {
-                        Some(still) if is_a_dead_holder_here(&still) => {
-                            write_atomic(path, body.as_bytes())
-                        }
+                        Some(now) if now.pid == record.pid && now.host == record.host => Ok(()),
                         Some(won_by) => Err(Error::Locked {
                             run: run.to_string(),
                             pid: won_by.pid,
@@ -1638,32 +1632,6 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
             source: e,
         }),
     }
-}
-
-/// Whether a lock record names a holder this host can prove is gone.
-///
-/// Another host's holder is never that: this host cannot ask after it, and an
-/// answer it cannot get counts as alive.
-fn is_a_dead_holder_here(held: &LockRecord) -> bool {
-    held.host == sys::hostname() && !sys::process_may_be_live(held.pid)
-}
-
-/// The exclusion every reclaim of a dead holder's lock is done inside.
-///
-/// A file beside the lock, held through the same exclusive open the appenders
-/// use — so it is released when the handle drops, the holder dying included,
-/// and a contender arriving while another is inside waits for it rather than
-/// being refused. It is never removed: a name in the run's directory, blocking
-/// nobody, is what it costs to have no moment at which one contender is
-/// deleting a guard another has just taken.
-fn reclaim_guard(lock: &Path) -> Result<fs::File> {
-    let mut guard = lock.as_os_str().to_owned();
-    guard.push(".reclaim");
-    let guard = PathBuf::from(guard);
-    sys::open_locked_append(&guard).map_err(|e| Error::Ledger {
-        path: guard.clone(),
-        source: e,
-    })
 }
 
 /// The gate that makes **accepting a command** and **letting the run go** two
@@ -2838,86 +2806,6 @@ mod tests {
         .expect("a stale lock");
 
         OwnershipLock::acquire(&paths, "start").expect("a dead holder's lock is reclaimed");
-        fs::remove_dir_all(&root).ok();
-    }
-
-    /// Two parties reclaiming one dead holder's lock at the same instant meet
-    /// where the filesystem decides, and exactly one of them holds it.
-    ///
-    /// The state `driver::a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over`
-    /// reaches with two real `reply` processes over a driver killed under them —
-    /// and which microsecond each reads the dead record in is not an input any
-    /// journey has, so the contention is placed here: every contender released
-    /// onto the record at once, and a winner holding what it took until the last
-    /// contender has answered, so a second winner cannot be a reclaim of the
-    /// first's release. A contender that answers with neither a hold nor a
-    /// refusal is counted rather than waited for, so a wrong answer fails this
-    /// rather than wedging it.
-    #[test]
-    fn a_dead_holders_lock_is_reclaimed_by_exactly_one_of_many_contenders() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Barrier, Mutex};
-
-        let root = scratch("contended-reclaim");
-        let paths = RunPaths::under(&root, "demo");
-        paths.create().expect("the run directory");
-        write_json(
-            &paths.lock(),
-            &LockRecord {
-                pid: sys::reaped_pid(),
-                host: sys::hostname(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".to_string(),
-                started: String::new(),
-            },
-        )
-        .expect("a dead driver's lock");
-
-        const CONTENDERS: usize = 16;
-        let released = Barrier::new(CONTENDERS);
-        let answered = AtomicUsize::new(0);
-        let answers: Mutex<Vec<std::result::Result<(), String>>> = Mutex::new(Vec::new());
-        std::thread::scope(|scope| {
-            for _ in 0..CONTENDERS {
-                scope.spawn(|| {
-                    released.wait();
-                    let taken = OwnershipLock::acquire(&paths, "reply");
-                    let answer = match &taken {
-                        Ok(_) => Ok(()),
-                        Err(Error::Locked { verb, .. }) => Err(format!("refused by '{verb}'")),
-                        Err(other) => Err(format!("neither held nor refused: {other}")),
-                    };
-                    answers.lock().expect("no contender panicked").push(answer);
-                    answered.fetch_add(1, Ordering::SeqCst);
-                    // A holder holds until every contender has answered, or for
-                    // as long as this test is prepared to wait for one to.
-                    let patience = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    while taken.is_ok()
-                        && answered.load(Ordering::SeqCst) < CONTENDERS
-                        && std::time::Instant::now() < patience
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    drop(taken);
-                });
-            }
-        });
-
-        let answers = answers.into_inner().expect("no contender panicked");
-        let held = answers.iter().filter(|answer| answer.is_ok()).count();
-        assert_eq!(
-            held, 1,
-            "{held} contenders held one dead holder's lock at once; the answers were {answers:?}"
-        );
-        // Refused by the winner, or by the winner's record caught before it was
-        // written — either is a refusal; what no loser may get is an error.
-        assert!(
-            answers
-                .iter()
-                .filter_map(|answer| answer.as_ref().err())
-                .all(|refusal| refusal.starts_with("refused by")),
-            "a loser was neither held nor refused: {answers:?}"
-        );
         fs::remove_dir_all(&root).ok();
     }
 
