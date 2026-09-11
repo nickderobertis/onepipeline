@@ -834,9 +834,21 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
                  without a side: a member stamps both or neither"
             ));
         }
+        // The reason is oneharness's: the real library writes a candidate's
+        // `FallThroughReason` here in that library's own spelling, so the script's
+        // word is read through that closed enum rather than copied onto the
+        // wire. A journey that wrote `rate_limit` — a *failure kind's* spelling,
+        // not a reason's — would otherwise render a token no producer publishes.
+        let reason: oneharness_core::domain::fallback::FallThroughReason =
+            serde_json::from_value(reason.into()).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "a `.refused` line names the reason {reason:?}, which is not one oneharness \
+                     falls through for: {error}"
+                ))
+            });
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
-            reason: reason.to_string(),
+            reason: reason.as_str().to_string(),
             // `-` is a single-sided member: one chain, so no side to name and no
             // per-side turn to attribute it to — the real library leaves both
             // absent there, and a double that filled either in would be an
