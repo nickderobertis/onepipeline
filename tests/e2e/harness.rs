@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{arrival, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -2175,13 +2175,11 @@ impl World {
     /// The pid of every dispatch that has reached the hold scripted at `key`, in
     /// the order they arrived.
     ///
-    /// Read off `<key>.arrived`, which the double appends its own pid to as it
-    /// enters the hold — `fake::arrive` says why it is the pid. A file the
-    /// doubles have not written yet is nobody having arrived; any other refusal
-    /// to read it, or a line that is not a pid, is a failure rather than an
-    /// empty answer.
+    /// Read off the file `fake::arrive` appends to. A file the doubles have not
+    /// written yet is nobody having arrived; any other refusal to read it, or a
+    /// line that is not a pid, is a failure rather than an empty answer.
     pub fn arrivals(&self, key: &str) -> Vec<u32> {
-        let path = self.fakes.join(format!("{key}.arrived"));
+        let path = arrival(&self.fakes, key);
         let arrived = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -2202,19 +2200,14 @@ impl World {
     /// `key`, and return its pid.
     ///
     /// The test's half of the handshake `fake::arrive` is the double's half of:
-    /// the double announces itself and blocks, this returns once it has, and
-    /// what the caller does next lands on a worker that is genuinely inside its
-    /// hold. That is what a wait on `node-dispatched` cannot promise — it is the
-    /// driver saying it launched something, and the process it launched is still
-    /// starting — and a wait on a proxy of arrival, a relayed beat or a registry
-    /// entry, is a wall-clock deadline standing in for the fact. `before` is how
-    /// a takeover names the dispatch it already knows about: a run stopped and
-    /// then adopted holds twice at the same key, and the second arrival is the
-    /// one that proves the takeover reached a worker.
+    /// once this returns, what the caller does next lands on a worker that is
+    /// inside its hold, which neither `node-dispatched` — the driver saying it
+    /// launched something — nor a relayed beat can promise. `before` is how a
+    /// takeover names the dispatch it already knows about, so the second arrival
+    /// at one key is the one that proves the takeover reached a worker.
     ///
-    /// Bounded like every wait here, and the bound is on the product's own
-    /// asynchrony — launching the dispatch — so reaching it means the dispatch
-    /// never got there.
+    /// Bounded on the product's own asynchrony — launching the dispatch — so
+    /// reaching the bound means the dispatch never got there.
     pub fn held(&self, key: &str, before: &[u32]) -> u32 {
         let fresh = |world: &Self| {
             world
@@ -2243,12 +2236,9 @@ impl World {
 
     /// Wait for a predicate that reads the store through a real sibling process.
     ///
-    /// A normal wait observes files and can poll cheaply. Each store observation
-    /// starts `onetaskgraph`, though, and polling that boundary every 20ms
-    /// consumes the process-start capacity the asynchronous copy itself needs on
-    /// a loaded cross-platform runner — the rule `tests/AGENTS.md` states. The
-    /// deadline and assertion stay identical; only the expensive observer yields
-    /// between reads.
+    /// Each store observation starts `onetaskgraph`, so this yields between
+    /// reads for the reason `tests/AGENTS.md` gives; the deadline and assertion
+    /// are [`until`](Self::until)'s.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
         self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
     }
@@ -2552,15 +2542,19 @@ impl World {
     /// for the arrival: the registry is what both read, and a stop that lands
     /// before the entry does ends a dispatch the run never recorded.
     ///
-    /// An entry this cannot read as JSON is a failure, not a non-match: the
-    /// registry is the engine's, and an unreadable record in it is a finding.
+    /// An entry this cannot read as JSON, or that names no pid, is a failure
+    /// rather than a non-match: the registry is the engine's, and a record in it
+    /// this cannot read is a finding.
     pub fn registered(&self, run: &str, pid: u32) -> bool {
         self.dispatch_records(run).iter().any(|record| {
             let text = std::fs::read_to_string(record)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", record.display()));
             let entry: Value = serde_json::from_str(&text)
                 .unwrap_or_else(|error| panic!("{} is not JSON: {error}", record.display()));
-            entry["pid"] == pid
+            let named = entry["pid"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{} names no pid: {entry}", record.display()));
+            named == u64::from(pid)
         })
     }
 
@@ -2676,10 +2670,7 @@ fn dirty_bytes() -> Option<u64> {
 /// the evidence a caller prints when it runs out, which is why this answers
 /// rather than panicking.
 ///
-/// `ready` reads files and nothing else — `tests/AGENTS.md` states the rule. A
-/// wait that has to ask a process goes through [`World::until_store`], which
-/// yields between asks, and a wait for a double to arrive goes through
-/// [`World::held`], which waits on the double's own announcement.
+/// `ready` reads files and nothing else; `tests/AGENTS.md` says why.
 fn waited(ready: impl FnMut() -> bool) -> bool {
     waited_every(std::time::Duration::from_millis(20), ready)
 }

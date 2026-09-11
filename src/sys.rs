@@ -2081,12 +2081,13 @@ mod tests {
     /// be asking the code under test to grade itself.
     #[cfg(windows)]
     fn console_tree() -> (std::process::Child, u32) {
-        let (root, below) = console_tree_of(1);
+        let (root, below) = console_tree_of(std::num::NonZeroUsize::MIN);
         (root, below[0])
     }
 
-    /// A console process tree of `below` levels under its root, and the pid of
-    /// each of those levels, **as the tree itself reported them**.
+    /// A console process tree of `below` levels under its root — at least one, or
+    /// there is no tree — and the pid of each of those levels, **as the tree
+    /// itself reported them**.
     ///
     /// Every level is a `powershell` running [`LEVEL_SCRIPT`]: it starts the
     /// level under it — another of itself, or the `ping` leaf — writes that
@@ -2096,13 +2097,12 @@ mod tests {
     /// the process that started it — the same shape the Unix fixtures take with
     /// `echo $$`.
     ///
-    /// Nothing here asks the operating system where the tree is: a listing is a
-    /// process start spent from the budget the tree needs to grow, which is the
-    /// rule `tests/AGENTS.md` states. A level that announces its own child needs
-    /// no listing, no image name to tell that child from the `conhost.exe` beside
-    /// it, and no patience — the read blocks on the announcement alone.
+    /// Nothing here asks the operating system where the tree is — `tests/AGENTS.md`
+    /// says why — so there is no image name to tell a level from the
+    /// `conhost.exe` beside it and no patience: the read blocks on the
+    /// announcement alone.
     #[cfg(windows)]
-    fn console_tree_of(below: usize) -> (std::process::Child, Vec<u32>) {
+    fn console_tree_of(below: std::num::NonZeroUsize) -> (std::process::Child, Vec<u32>) {
         let script = level_script();
         let mut root = std::process::Command::new("powershell")
             .args([
@@ -2121,7 +2121,7 @@ mod tests {
         let mut lines =
             std::io::BufReader::new(root.stdout.take().expect("the tree reports itself")).lines();
         let mut pids: Vec<u32> = Vec::new();
-        while pids.len() < below {
+        while pids.len() < below.get() {
             let line = match lines.next() {
                 Some(Ok(line)) => line,
                 Some(Err(error)) => abandon(root, &format!("the tree stopped reporting: {error}")),
@@ -2504,7 +2504,7 @@ try {
     /// reporting the pid of the one it started.
     #[cfg(windows)]
     fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
-        console_tree_of(2)
+        console_tree_of(std::num::NonZeroUsize::new(2).expect("two levels"))
     }
 
     /// This host's own listing descends from a real tree's root to its leaf.

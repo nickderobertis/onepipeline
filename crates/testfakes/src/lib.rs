@@ -261,19 +261,22 @@ pub fn ignore_the_polite_ask() {
     }
 }
 
+/// Where a double announces that it has reached the hold scripted at `key`:
+/// `<key>.arrived` under the script directory, one pid per line.
+///
+/// The one spelling of that path, for the double that writes it and the
+/// harness that reads it.
+pub fn arrival(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!("{key}.arrived"))
+}
+
 /// Announce that this process has reached a hold, by appending its pid to
 /// `arrived` — the first half of the handshake [`wait_for`] is the second half
-/// of.
+/// of; `World::held` in `tests/e2e/harness.rs` reads it.
 ///
-/// A hold on its own is one-way: the test releases it, and learns nothing about
-/// whether anything was there to release. Every proxy a test could watch instead
-/// — a beat relayed off the double's stdout, a registry entry the engine writes
-/// once the launch returns — is downstream of the arrival and lands on its own
-/// cadence, so a wait on one is a wall-clock deadline standing in for the fact.
 /// The pid rather than a bare marker, and appended rather than written: one
-/// dispatch after another may hold at the same key, and a test taking over a run
-/// has to tell the dispatch it stopped from the one its fresh driver started.
-/// The test's half is `World::held` in `tests/e2e/harness.rs`.
+/// dispatch after another may hold at the same key, and a takeover has to tell
+/// the dispatch it stopped from the one its fresh driver started.
 pub fn arrive(arrived: &Path) {
     append(arrived, &std::process::id().to_string());
 }
