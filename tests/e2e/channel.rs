@@ -1347,25 +1347,13 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
 /// A surface queued while a reader was reading the channel survives that
 /// reader's write-back of what it read.
 ///
-/// The defect this holds against, as it was observed. The queue was one file,
-/// read, modified in memory, and written back whole — by the writer that queued
-/// a surface *and* by the reader that consumed one, with no lock anywhere and
-/// the reader's write unconditional. A push landing between a reader's read and
-/// its write-back was overwritten by the reader's stale copy, and the surface
-/// was gone for good: the run's files at that instant recorded the surface
-/// queued in the journal and appended to the surface log with id 0, while the
-/// queue file read `waiting: [], pending: null, next_id: 0` — an allocator
-/// that had never advanced past an id already allocated. The reader was the
-/// manager's own `next`, and the question it destroyed was a worker's blocking
-/// one, which the worker then waited its whole reply window on.
-///
-/// That write-back is reproduced here exactly, at the instant it landed: a
-/// reader's copy of the queue, taken before the question was queued, is placed
-/// over the queue after it — the very file the reader used to write. The
-/// question is still counted, still handed over under its own id, and the next
-/// surface takes an id nothing has used, because the surface log is what the
-/// queue is now derived from and the file beside it is a projection a stale
-/// write costs nothing but a fold.
+/// The queue used to be one file, read, modified, and written back whole by
+/// writer and reader alike with no lock, so a push landing inside a reader's
+/// read-modify-write was overwritten by the reader's stale copy and gone for
+/// good — with the queue file left saying `waiting: [], next_id: 0` beside a log
+/// carrying the surface under id 0. That write-back is reproduced here at the
+/// instant it landed, and the question is still counted, still handed over under
+/// its id, and the next surface takes an id nothing has used.
 #[test]
 fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_back() {
     use std::io::Write;
@@ -1409,9 +1397,20 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
     // The reader's write-back lands: its stale copy over the queue the question
     // was just written into. Renamed into place rather than written over, as the
     // reader's own atomic write was.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the write-back is placed
+    // because nothing user-facing can hold a reader between its read and its
+    // write-back: the window is microseconds inside one `next`, and a journey
+    // that raced real invocations against it would report the defect on the
+    // runs it happened to hit. The bytes placed are exactly what that reader
+    // wrote, taken from the reader itself, and everything before and after them
+    // is driven through the CLI.
+    // `surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once`
+    // is the concurrent journey over real invocations.
     let staged = queue.with_extension("staged");
     std::fs::write(&staged, &stale).expect("the stale copy is staged");
     std::fs::rename(&staged, &queue).expect("the stale copy lands");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The question is still there: counted by the supervisory views, holding
     // the subtree it named, and handed over under its own id.
@@ -1480,6 +1479,157 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
     ended(serving);
 }
 
+/// Surfaces queued by several writers while several readers read the channel
+/// are each read exactly once, under distinct ids.
+///
+/// Real invocations, contending for real: every push is its own `surface`
+/// process and every read its own `next`, with nothing between them but the
+/// channel's own lock. What is asserted is the whole invariant the queue
+/// promises — nothing queued is lost, nothing is delivered twice, and no id is
+/// handed out twice.
+#[test]
+fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() {
+    const WRITERS: usize = 4;
+    const EACH: usize = 6;
+    const READERS: usize = 2;
+
+    let world = World::new("channel-contended");
+    world.script("build.wait", "hold");
+    let run = running(&world, "contended", vec![agent("build", &[])]);
+
+    let writing = std::sync::atomic::AtomicBool::new(true);
+    let read = std::sync::Mutex::new(Vec::<Value>::new());
+    let queued = std::sync::Mutex::new(Vec::<(u64, String)>::new());
+    std::thread::scope(|scope| {
+        for writer in 0..WRITERS {
+            let (world, run, queued) = (&world, &run, &queued);
+            scope.spawn(move || {
+                for n in 0..EACH {
+                    let message = format!("writer {writer} finding {n}");
+                    let pushed =
+                        world.run(&["surface", run, "--kind", "finding", "--message", &message]);
+                    pushed.exited(0);
+                    let id = pushed.json()["surface"].as_u64().expect("the surface's id");
+                    queued.lock().expect("the list").push((id, message));
+                }
+            });
+        }
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let (world, run, read, writing) = (&world, &run, &read, &writing);
+                scope.spawn(move || loop {
+                    let next = world.run(&["next", run]);
+                    next.exited(0);
+                    let surface = next.json()["surface"].clone();
+                    if !surface.is_null() {
+                        read.lock().expect("the list").push(surface);
+                        continue;
+                    }
+                    // A reader stops at the first empty read once every writer
+                    // is done, so a surface the queue lost is a shortfall in
+                    // what was read rather than a reader waiting for ever.
+                    if !writing.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                })
+            })
+            .collect();
+        // The writers are the scope's other threads; they are joined by the
+        // scope, but the readers' stop is what needs them done first.
+        while queued.lock().expect("the list").len() < WRITERS * EACH {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        writing.store(false, std::sync::atomic::Ordering::SeqCst);
+        for reader in readers {
+            reader.join().expect("a reader finishes");
+        }
+    });
+
+    let mut sent = queued.into_inner().expect("the list");
+    sent.sort();
+    let mut ids: Vec<u64> = sent.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        (0..(WRITERS * EACH) as u64).collect::<Vec<_>>(),
+        "an id was handed out twice or skipped: {sent:?}"
+    );
+    let mut got: Vec<(u64, String)> = read
+        .into_inner()
+        .expect("the list")
+        .iter()
+        .map(|surface| {
+            (
+                surface["id"].as_u64().expect("an id"),
+                surface["message"].as_str().expect("a message").to_owned(),
+            )
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, sent, "a surface was lost or delivered twice");
+    assert_eq!(
+        world.events_of(&run, "planner-surfaced").len(),
+        WRITERS * EACH,
+        "the journal does not record one read per surface"
+    );
+
+    world.release("build.go");
+}
+
+/// A projection the reader cannot write back costs nothing but the fold: the
+/// read still answers from the log.
+///
+/// A read that finds the projection behind the log repairs it, and the repair
+/// is a cache write — a run root the reader may not write into is still a run
+/// whose record is intact, and a view that refused over it would be the
+/// supervisory verb going dark on exactly the run it is asked about.
+#[cfg(unix)]
+#[test]
+fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("channel-unwritable");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unwritable", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "still here",
+        ])
+        .exited(0);
+
+    // The projection is lost, and the directory it would be repaired into is
+    // one this reader may not write.
+    let queue = world.run_file(&run, "channel/queue.json");
+    std::fs::remove_file(&queue).expect("the projection is removed");
+    let channel = queue.parent().expect("the channel directory").to_path_buf();
+    let writable = std::fs::metadata(&channel)
+        .expect("the channel directory")
+        .permissions();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory is made read-only");
+
+    let status = world.run(&["status", &run]);
+    std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
+    status.exited(0).out_has("1 planner update(s) waiting");
+    assert!(
+        !queue.exists(),
+        "the projection was written into a directory the reader may not write"
+    );
+
+    // Writable again, the next read repairs it and hands the surface over.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("still here");
+    assert!(queue.exists(), "the projection was not repaired");
+
+    world.release("build.go");
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
@@ -1494,6 +1644,10 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
 /// every path that writes an asker checks it first. That is what makes this
 /// worth a journey rather than a unit test — what is under test is not the
 /// parse, it is whether a live run still answers for the queue holding it.
+///
+/// The queue placed carries no stamp, so this is also the journey for a
+/// projection an older build wrote: it is taken as it stands rather than
+/// rebuilt from a log that has no line for the surface it holds.
 #[test]
 fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces() {
     let world = World::new("channel-blank-record");

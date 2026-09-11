@@ -1269,7 +1269,7 @@ impl ChannelState {
         let (queue, folded) =
             self.current(|from| crate::ledger::read_records_from(&self.log_path(), from));
         if folded {
-            // llmlint: ignore-block[no_panics_on_recoverable_errors] the repair is a cache write and the answer is already in hand: failing the read over it would refuse a view of a run whose log is intact, and the next reader simply folds again.
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] the repair is a cache write and the answer is already in hand: failing the read over it would refuse a view of a run whose log is intact, and the next reader simply folds again — `tests/e2e/channel.rs` drives that against a channel directory the reader may not write.
             let _ = self.write_queue(&queue);
             // llmlint: ignore-end[no_panics_on_recoverable_errors]
         }
@@ -1295,6 +1295,12 @@ impl ChannelState {
             None => (Queue::default(), 0),
         };
         let length = mark(&self.log_path()).map_or(0, |(length, _)| length);
+        // llmlint: ignore-block[changed_behavior_has_e2e] no user-facing route
+        // replaces or truncates a run's surface log — every append heals back to
+        // a boundary at or past every stamp ever written — so the journey that
+        // would drive this has no way to arrange it; `the_queue_is_rebuilt_from_
+        // the_log_alone_whatever_became_of_the_projection` holds it against the
+        // real files.
         let replaced = length < from;
         let from = if replaced {
             queue = Queue::default();
@@ -1302,12 +1308,21 @@ impl ChannelState {
         } else {
             from
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let mut accounted = from;
         let mut folded = replaced;
         for record in tail(from) {
+            // llmlint: ignore-block[changed_behavior_has_e2e] a record whose
+            // writer has not finished it takes a writer dying mid-append, which
+            // is the tear `tests/e2e/journal.rs` drives for the same primitive
+            // against the store where it actually happens; this fold's half of
+            // it — the stamp staying before the fragment until the record is
+            // whole — is held by `the_queue_is_rebuilt_from_the_log_alone_
+            // whatever_became_of_the_projection` against the real file.
             if !record.terminated {
                 break;
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             accounted = record.offset + record.bytes + 1;
             folded = true;
             // A line this build cannot read is still a line the file holds, so
@@ -1315,9 +1330,15 @@ impl ChannelState {
             // read for ever. What it costs is one record going unfolded, which
             // is one surface a reader cannot see — and every line here is one
             // this crate wrote.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] nothing this crate
+            // does writes a line here it cannot read back, so no journey can
+            // place one without editing the run's own record; the same unit test
+            // places one and holds that the fold goes on past it.
             if let Ok(record) = serde_json::from_str::<SurfaceRecord>(&record.text) {
                 queue.apply(&record);
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
         queue.accounted = Some(accounted);
         (queue, folded)
@@ -2246,20 +2267,12 @@ mod tests {
     /// A surface queued while the channel is being read is still readable
     /// afterwards, and no id is ever handed out twice.
     ///
-    /// The defect this holds against: the queue used to be a file read, modified
-    /// in memory, and written back whole by the writer that queued a surface
-    /// *and* by the reader that consumed one, with no lock anywhere — so a push
-    /// landing between a reader's read and its write-back was overwritten by the
-    /// reader's stale copy, and the surface was gone for good. Observed three
-    /// times in three runs of a consumer's ask-seam tier, each with the
-    /// allocator counter sitting at an id already allocated.
-    ///
     /// Real threads over a real run root, pushing and claiming at once with no
-    /// coordination between them beyond the channel's own: the writers are
-    /// several because two sessions raising at once must not share an id
-    /// either, and the readers are several because the manager's own reading
-    /// verb is what did the damage. Every push is accounted for by exactly one
-    /// claim, every id is distinct, and the log alone carries both facts.
+    /// coordination beyond the channel's own lock. Several writers, because two
+    /// sessions raising at once must not share an id; several readers, because
+    /// a reader's write-back is what used to destroy a concurrent push. Every
+    /// push is accounted for by exactly one claim, every id is distinct, and
+    /// the log alone carries both facts.
     #[test]
     fn a_surface_queued_during_a_read_of_the_channel_is_neither_lost_nor_given_a_used_id() {
         const WRITERS: usize = 4;
@@ -2518,6 +2531,49 @@ mod tests {
             assert!(queue.waiting.is_empty(), "{queue:?}");
             assert_eq!(queue.next_id, 4);
         });
+
+        // A record whose writer has not finished it is not folded and does not
+        // move the stamp: the read resumes before it, and folds it whole once
+        // its writer is done. A line the build cannot read is passed over and
+        // does move the stamp, so it is not re-read for ever.
+        let log = paths.channel("surfaces.jsonl");
+        let settled = channel.queue();
+        let fragment = serde_json::to_string(&SurfaceRecord {
+            event: Some(SurfaceEvent::Queued),
+            surface: surface(4, true),
+        })
+        .expect("a record");
+        let (head, tail) = fragment.split_at(fragment.len() / 2);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, head.as_bytes()))
+            .expect("the fragment is written");
+        let torn = channel.queue();
+        assert_eq!(torn, settled, "a torn record was folded");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, format!("{tail}\nnot a record\n").as_bytes())
+            })
+            .expect("the record is finished");
+        let whole = channel.queue();
+        assert_eq!(
+            whole
+                .waiting
+                .iter()
+                .map(|surface| surface.id)
+                .collect::<Vec<_>>(),
+            vec![4],
+            "{whole:?}"
+        );
+        assert_eq!(
+            whole.accounted,
+            Some(std::fs::metadata(&log).expect("the log").len()),
+            "the unreadable line was not accounted for"
+        );
+        assert_eq!(channel.queue(), whole, "a settled log was folded again");
         let _ = std::fs::remove_dir_all(&root);
     }
 
