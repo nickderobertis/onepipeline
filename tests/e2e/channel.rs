@@ -1608,6 +1608,14 @@ fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() 
     // The projection is not a queue any more — a write that died halfway —
     // and the directory it would be repaired into is one this reader may not
     // write.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] both halves of this state
+    // are placed because nothing user-facing produces either: the projection is
+    // written atomically, so only a writer dying between its temporary file and
+    // its rename leaves a torn one, and a run root the reader may not write
+    // into is the host's doing rather than the CLI's. What is under test is
+    // driven through the CLI — whether `status` and `next` still answer for a
+    // run whose record is intact.
     let queue = world.run_file(&run, "channel/queue.json");
     std::fs::write(&queue, b"{\"waiting\": [").expect("the projection is torn");
     let channel = queue.parent().expect("the channel directory").to_path_buf();
@@ -1616,6 +1624,7 @@ fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() 
         .permissions();
     std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
         .expect("the directory is made read-only");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let status = world.run(&["status", &run]);
     std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
