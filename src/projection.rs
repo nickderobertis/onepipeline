@@ -2269,6 +2269,7 @@ mod tests {
                         addressee: crate::note::Addressee::Worker,
                         text: "the fixture moved".parse().expect("a usable note"),
                         criterion: None,
+                        shown_to: reached.shown_to().to_vec(),
                         reached,
                     }]),
                 )],

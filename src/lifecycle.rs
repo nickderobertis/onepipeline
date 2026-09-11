@@ -93,12 +93,22 @@ pub fn execute(
     // diagnostics in full would carry none of them — every payload text this
     // crate writes is bounded.
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
+    let launched = node;
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
     // The commit the branch stood at when the previous attempt published it.
     let mut published: Option<String> = None;
+    // The manager's notes each attempt is composed with. The first attempt is
+    // composed with none: what it was owed rode in as the node's own `context`,
+    // and a note delivered into a conversation it has not opened yet cannot
+    // exist. Every attempt after it is composed with what the attempt before it
+    // was — read off the run's record, which is the one place both the delivery
+    // and this thread can see.
+    let mut notes: Vec<crate::note::Consumed> = Vec::new();
     loop {
-        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
+        let preserved = match attempt_once(
+            executor, paths, launch, &node, references, &notes, cancel, tx,
+        ) {
             Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
         };
@@ -124,6 +134,13 @@ pub fn execute(
             return stopped_retrying(&node.id, &preserved, &endings);
         }
         attempt = attempt.saturating_add(1);
+        // What the conversation that just ended was shown, and what reached the
+        // node while nothing of it was live: both are composed into the attempt
+        // that replaces it, and the record of that dispatch names them, so a
+        // ruling issued during one attempt is in the hands of the judge that
+        // rules on the next. Read here, once, and handed to both the record and
+        // the composition, so the two cannot name different notes.
+        notes = crate::note::standing_for(paths, &node.id).composed();
         // Another `node-dispatched` rather than a kind of its own, so a reader
         // counting dispatches sees the retry without a second word to learn.
         let _ = tx.send(Message::Redispatched(Box::new(engine::Redispatch {
@@ -131,8 +148,10 @@ pub fn execute(
             attempt,
             attempts,
             reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
+            carried: notes.clone(),
         })));
-        node = std::borrow::Cow::Owned(continued(&node, &preserved, attempt, attempts, &endings));
+        node =
+            std::borrow::Cow::Owned(continued(launched, &preserved, attempt, attempts, &endings));
     }
 }
 
@@ -146,6 +165,7 @@ fn attempt_once(
     launch: &Launch,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    notes: &[crate::note::Consumed],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Attempt {
@@ -265,7 +285,7 @@ fn attempt_once(
         );
         let build = || DispatchRequest {
             graph: graph.clone(),
-            task: step.rendered_task_for(node, references),
+            task: step.rendered_task_carrying(node, references, notes),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -951,7 +971,8 @@ fn stopped_retrying(
 
 /// The node the next attempt is dispatched as.
 ///
-/// Three changes and no others. It is **pinned to the preserved branch**, so the
+/// Three changes and no others, made to the node **as it was launched** rather
+/// than to the attempt before. It is **pinned to the preserved branch**, so the
 /// session `onevcs` opens continues that branch from its own tip rather than
 /// cutting a second one beside committed work. It records **no step as
 /// completed**, so every step runs again — against the tree that was rejected,
@@ -961,20 +982,29 @@ fn stopped_retrying(
 /// **diagnosis** as its node context, so the worker meets the failure rather than
 /// having to go and find it.
 ///
-/// The planner's own note does not survive: a note carries exactly one dispatch
-/// and the attempt that just ran was it.
+/// The planner's own note **survives** it, above the diagnosis: this attempt is
+/// the engine's continuation of the dispatch that note was composed into, not a
+/// dispatch anybody asked for, so a ruling the first attempt was given is not
+/// spent by a retry nobody issued. It is the launched node's context that is
+/// kept, because the attempt before carried the diagnosis of the one before it,
+/// and each diagnosis already names every ending so far.
 fn continued(
-    node: &Node,
+    launched: &Node,
     preserved: &Preserved,
     attempt: std::num::NonZeroU32,
     attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> Node {
+    let diagnosis = diagnosis(preserved, attempt, attempts, endings);
+    let context = match launched.context.as_deref().map(str::trim) {
+        Some(note) if !note.is_empty() => format!("{note}\n\n{diagnosis}"),
+        _ => diagnosis,
+    };
     Node {
         branch: Some(preserved.branch.clone()),
         resume: None,
-        context: Some(diagnosis(preserved, attempt, attempts, endings)),
-        ..node.clone()
+        context: Some(context),
+        ..launched.clone()
     }
 }
 
@@ -1532,6 +1562,101 @@ mod tests {
         // And nothing to compare against is nothing to conclude, whatever this
         // attempt says: the first attempt of every node arrives here.
         assert_eq!(republished(None, &crate::vcs::SessionTip::Unmoved), None);
+    }
+
+    /// The attempt that continues a preserved branch keeps the note the node was
+    /// launched with, above the diagnosis — and keeps the *launched* node's, so a
+    /// third attempt carries one diagnosis rather than a stack of them.
+    ///
+    /// The half an e2e cannot hold still: `tests/note/` drives the continuation
+    /// against a real conversation and reads the task it was handed, but a
+    /// third attempt on a host whose check flips is scheduling rather than a
+    /// claim, so which diagnosis a later attempt carries is stated here.
+    #[test]
+    fn a_continuation_keeps_the_launched_note_and_carries_one_diagnosis() {
+        let launched = Node {
+            id: "service".into(),
+            context: Some("the reviewer asked for a smaller diff".into()),
+            ..Node::default()
+        };
+        let preserved = |reason: &str| Preserved {
+            branch: "feat/service".into(),
+            outcome: crate::vcs::Preserving::ChecksFailed,
+            reason: reason.into(),
+            evidence: Vec::new(),
+            undrafted: None,
+            tip: crate::vcs::SessionTip::Unknown,
+        };
+        let two = std::num::NonZeroU32::new(2).expect("two");
+        let three = std::num::NonZeroU32::new(3).expect("three");
+        let endings = [
+            crate::vcs::Preserving::ChecksFailed,
+            crate::vcs::Preserving::ChecksFailed,
+        ];
+
+        let second = continued(
+            &launched,
+            &preserved("llmlint red"),
+            two,
+            three,
+            &endings[..1],
+        );
+        let context = second
+            .context
+            .as_deref()
+            .expect("the continuation carries context");
+        assert!(
+            context.starts_with("the reviewer asked for a smaller diff\n\n"),
+            "the launched note does not lead the continuation's context:\n{context}"
+        );
+        assert!(context.contains("attempt 2 of 3") && context.contains("llmlint red"));
+        assert_eq!(second.branch.as_deref(), Some("feat/service"));
+        assert!(second.resume.is_none());
+
+        // The third is composed from the launched node too, not from the second:
+        // one note, one diagnosis, and the endings so far named inside it.
+        let third = continued(
+            &launched,
+            &preserved("llmlint still red"),
+            three,
+            three,
+            &endings,
+        );
+        let context = third
+            .context
+            .as_deref()
+            .expect("the continuation carries context");
+        assert_eq!(
+            context
+                .matches("the reviewer asked for a smaller diff")
+                .count(),
+            1
+        );
+        assert_eq!(
+            context
+                .matches("The previous attempt's publication failed")
+                .count(),
+            1
+        );
+        assert!(!context.contains("llmlint red\n"), "{context}");
+        assert!(context.contains("attempt 3 of 3") && context.contains("llmlint still red"));
+        assert!(
+            context.contains("Every attempt so far ended: checks-failed, checks-failed."),
+            "{context}"
+        );
+
+        // And a node launched with no note carries the diagnosis alone.
+        let bare = continued(
+            &Node::default(),
+            &preserved("red"),
+            two,
+            three,
+            &endings[..1],
+        );
+        assert!(bare
+            .context
+            .as_deref()
+            .is_some_and(|context| context.starts_with("The previous attempt's publication")));
     }
 
     /// The endings this module emits and the endings the contract names are one

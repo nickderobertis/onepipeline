@@ -49,6 +49,7 @@
 
 use oneagentgraph::note::Accepted;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use oneagentgraph::note::{
     Addressee, Criterion, Note, NoteRefused, NoteText, Party, Undelivered,
@@ -56,6 +57,7 @@ pub use oneagentgraph::note::{
 
 use crate::channel::{Author, Command, Deliver, Reply, REPLY_ENVELOPE_VERSION};
 use crate::error::{Error, Result};
+use crate::event::Envelope;
 use crate::views::RunPaths;
 
 /// What became of one note, as the run records it.
@@ -138,6 +140,30 @@ impl Reached {
             Self::Supervisor => "supervisor",
             Self::JudgedWith { .. } => "judged-with",
             Self::Carried => "carried",
+        }
+    }
+
+    /// The parties this disposition puts the note in front of.
+    ///
+    /// The conversation's own routing, written down where the run records the
+    /// delivery rather than left for a reader to infer from the disposition's
+    /// documentation: a note is delivered to whichever party is live and the
+    /// other party receives it with that party's response, so a turn that took
+    /// it means **both** were shown it — the one whose turn was reopened or
+    /// re-taken now, and the other with what that turn answered. The one
+    /// exception is a judge whose re-taken decision was completion, which left
+    /// no worker turn for the note to ride to.
+    ///
+    /// Empty for the two dispositions no party has read *yet*: a queued note is
+    /// taken by the next turn of the conversation to open, and that turn's own
+    /// `turn-started` says who it was; a carried note is composed into the
+    /// node's next dispatch, whose `node-dispatched` names it.
+    #[must_use]
+    pub fn shown_to(&self) -> &'static [Party] {
+        match self {
+            Self::Worker | Self::Supervisor => &[Party::Worker, Party::Supervisor],
+            Self::JudgedWith { .. } => &[Party::Supervisor],
+            Self::Queued | Self::Carried => &[],
         }
     }
 }
@@ -328,5 +354,331 @@ pub(crate) fn of(
     match criterion {
         None => Ok(note),
         Some(criterion) => note.binding(criterion.as_str()),
+    }
+}
+
+/// One note as a dispatch of the node it was for is handed it, and as the run's
+/// record names it against that dispatch.
+///
+/// The same fields the delivery committed under
+/// [`NoteDelivered`](crate::edits::Operation::NoteDelivered), carried whole rather
+/// than referenced, because a note has no id of its own: the record that says a
+/// dispatch was given a note has to be able to say *which*, and a reader
+/// verifying that a ruling reached the party it was for reads it off this without
+/// joining another record. [`shown_to`](Self::shown_to) is the one field that is
+/// not the delivery's: a note composed into a dispatch's task is read by both
+/// parties — the task is the first message of the transcript the judge is handed —
+/// whichever party the conversation it was delivered into showed it to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Consumed {
+    /// Whose task it said it was updating.
+    pub addressee: Addressee,
+    /// What that party read.
+    pub text: NoteText,
+    /// The criterion it bound, when it bound one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<Criterion>,
+    /// What became of it when it was delivered.
+    #[serde(flatten)]
+    pub reached: Reached,
+    /// The parties that were shown it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown_to: Vec<Party>,
+}
+
+/// The payload key under which a `node-dispatched` names the notes the dispatch
+/// it announces was **composed with**: each was read by an earlier dispatch of
+/// the node, or carried to this one, and this dispatch's task carries it.
+pub(crate) const CARRIED_KEY: &str = "notes_carried";
+
+/// The payload key under which a `node-dispatched` names the notes an earlier
+/// dispatch of the node read that this dispatch was **not** composed with.
+///
+/// The other half of [`CARRIED_KEY`], and the one a manager reads: a note that
+/// reached a conversation is consumed by it, and a dispatch composed without it
+/// has spent it. The receipt for the delivery named the party that read it, which
+/// looks like success; this is the record that says the ruling did not survive
+/// the dispatch it was issued during, so the manager knows to re-issue it rather
+/// than believe the receipt.
+pub(crate) const SPENT_KEY: &str = "notes_spent";
+
+/// The notes a node's **current** dispatch holds, as the run's record has them.
+///
+/// Folded off the journal rather than kept in memory, because the two readers of
+/// it are on different threads and neither owns the answer: the dispatch thread
+/// composing the node's next attempt, and the reconcile loop about to announce a
+/// dispatch that was composed without them. Each starts from the node's last
+/// `node-dispatched` — the notes that dispatch was composed with — and adds every
+/// note the run delivered to the node since.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Standing {
+    /// Notes a conversation of the node's current dispatch has read: what that
+    /// dispatch was composed with, and every delivery since that a party took.
+    pub read: Vec<Consumed>,
+    /// Notes delivered since that dispatch was composed that **no** turn took, and
+    /// which are therefore owed to the node's next dispatch.
+    pub carried: Vec<Consumed>,
+}
+
+impl Standing {
+    /// Every note of both kinds, in the order the run recorded them, as the
+    /// node's next dispatch is composed with them.
+    ///
+    /// A dispatch's task reaches both parties, so each is stamped as shown to
+    /// both — whatever the conversation it was first delivered into did with it.
+    pub(crate) fn composed(&self) -> Vec<Consumed> {
+        self.read
+            .iter()
+            .chain(&self.carried)
+            .cloned()
+            .map(|note| Consumed {
+                shown_to: vec![Party::Worker, Party::Supervisor],
+                ..note
+            })
+            .collect()
+    }
+
+    /// Everything here, as a dispatch composed **without** any of it spends it.
+    pub(crate) fn spent(&self) -> Vec<Consumed> {
+        self.read.iter().chain(&self.carried).cloned().collect()
+    }
+}
+
+/// Fold what stands for `node` out of the run's journal.
+///
+/// A `node-dispatched` resets the fold to what that dispatch was composed with —
+/// [`CARRIED_KEY`], or nothing for a dispatch composed with none — and a
+/// committed `note` adds its note to whichever of the two lists its disposition
+/// says: read, where a party of the conversation took it, and carried where none
+/// did. A record this build cannot read as either contributes nothing, exactly as
+/// the projection folds it.
+pub(crate) fn standing(journal: &[Envelope], node: &str) -> Standing {
+    let mut standing = Standing::default();
+    for envelope in journal {
+        // A dispatch is stamped with its node; a committed edit is not — it may
+        // touch several — so the note inside it is matched on its own `node`.
+        if envelope.kind.0 == crate::event::PipelineKind::NodeDispatched.as_str() {
+            if envelope.labels.node.as_deref() != Some(node) {
+                continue;
+            }
+            standing = Standing {
+                read: envelope
+                    .payload
+                    .get(CARRIED_KEY)
+                    .and_then(|carried| serde_json::from_value(carried.clone()).ok())
+                    .unwrap_or_default(),
+                carried: Vec::new(),
+            };
+            continue;
+        }
+        let Some(operations) = envelope.payload.get("operations").and_then(|value| {
+            serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
+        }) else {
+            continue;
+        };
+        for operation in operations {
+            let crate::edits::Operation::NoteDelivered {
+                node: whose,
+                addressee,
+                text,
+                criterion,
+                reached,
+                shown_to,
+            } = operation
+            else {
+                continue;
+            };
+            if whose != node {
+                continue;
+            }
+            let consumed = Consumed {
+                addressee,
+                text,
+                criterion,
+                shown_to,
+                reached: reached.clone(),
+            };
+            if reached.a_conversation_read_it() {
+                standing.read.push(consumed);
+            } else {
+                standing.carried.push(consumed);
+            }
+        }
+    }
+    standing
+}
+
+/// The same, read off the run's own journal.
+pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Standing {
+    standing(&crate::journal::read(&paths.journal()), node)
+}
+
+/// The value a `node-dispatched` carries a list of notes as.
+pub(crate) fn payload_of(notes: &[Consumed]) -> Value {
+    serde_json::to_value(notes).unwrap_or_else(|_| Value::Array(Vec::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edits::Operation;
+    use crate::event::{Labels, Source, ENVELOPE_VERSION};
+    use crate::journal::{self, labels, payload};
+    use serde_json::json;
+
+    fn pipeline(
+        kind: journal::PipelineKind,
+        seq: u64,
+        node: Option<&str>,
+        fields: &[(&str, Value)],
+    ) -> Envelope {
+        Envelope {
+            v: ENVELOPE_VERSION,
+            ts: crate::sys::rfc3339_from_millis(1_786_000_000_000 + seq * 1_000),
+            stream: "s".into(),
+            seq,
+            source: Source::Pipeline,
+            kind: kind.into(),
+            phase: None,
+            labels: Labels {
+                node: node.map(str::to_string),
+                ..labels("demo", None)
+            },
+            payload: payload(fields),
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// One committed `note`, as the reconciler journals it: unlabelled, because a
+    /// committed edit may touch several nodes, with the node on the operation.
+    fn delivered(seq: u64, node: &str, text: &str, reached: Reached) -> Envelope {
+        pipeline(
+            journal::PipelineKind::EditCommitted,
+            seq,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NoteDelivered {
+                    node: node.into(),
+                    addressee: Addressee::Worker,
+                    text: text.parse().expect("a usable note"),
+                    criterion: None,
+                    shown_to: reached.shown_to().to_vec(),
+                    reached,
+                }]),
+            )],
+        )
+    }
+
+    fn texts(notes: &[Consumed]) -> Vec<&str> {
+        notes.iter().map(|note| note.text.as_str()).collect()
+    }
+
+    /// What stands for a node is what its last dispatch was composed with plus
+    /// what reached it since — and nothing from before that dispatch, which a
+    /// record composed without it already spent.
+    #[test]
+    fn what_stands_for_a_node_starts_at_its_last_dispatch_and_reads_forward() {
+        let journal = vec![
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                1,
+                Some("build"),
+                &[("attempt", json!(1))],
+            ),
+            delivered(2, "build", "first ruling", Reached::Worker),
+            // Another node's note, on an unlabelled record like every committed
+            // edit: matched on the operation's own node, so it stays out.
+            delivered(3, "other", "not yours", Reached::Worker),
+            delivered(4, "build", "landed nowhere", Reached::Carried),
+        ];
+        let before = standing(&journal, "build");
+        assert_eq!(texts(&before.read), ["first ruling"]);
+        assert_eq!(texts(&before.carried), ["landed nowhere"]);
+        // Composed into the next dispatch, both are shown to both parties —
+        // a task is the first message of the transcript the judge reads —
+        // whatever the conversation they were first delivered into did.
+        let composed = before.composed();
+        assert_eq!(texts(&composed), ["first ruling", "landed nowhere"]);
+        assert!(composed
+            .iter()
+            .all(|note| note.shown_to == [Party::Worker, Party::Supervisor]));
+
+        // A continuation composed with them resets the fold to exactly them, and
+        // a dispatch composed with none resets it to nothing: what an earlier
+        // dispatch read is spent by the first dispatch that does not carry it.
+        let mut continued = journal.clone();
+        continued.push(pipeline(
+            journal::PipelineKind::NodeDispatched,
+            5,
+            Some("build"),
+            &[("attempt", json!(2)), (CARRIED_KEY, payload_of(&composed))],
+        ));
+        continued.push(delivered(6, "build", "second ruling", Reached::Supervisor));
+        let after = standing(&continued, "build");
+        assert_eq!(
+            texts(&after.read),
+            ["first ruling", "landed nowhere", "second ruling"]
+        );
+        assert!(after.carried.is_empty());
+
+        let mut fresh = continued.clone();
+        fresh.push(pipeline(
+            journal::PipelineKind::NodeDispatched,
+            7,
+            Some("build"),
+            &[("attempt", json!(1))],
+        ));
+        assert_eq!(standing(&fresh, "build"), Standing::default());
+    }
+
+    /// The parties each disposition puts a note in front of, written on the
+    /// record so a note addressed to both is verifiable from it alone.
+    #[test]
+    fn each_disposition_names_the_parties_it_showed_the_note_to() {
+        assert_eq!(
+            Reached::Worker.shown_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert_eq!(
+            Reached::Supervisor.shown_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert_eq!(
+            Reached::JudgedWith {
+                completion_reason: "done".into()
+            }
+            .shown_to(),
+            [Party::Supervisor]
+        );
+        assert!(Reached::Queued.shown_to().is_empty());
+        assert!(Reached::Carried.shown_to().is_empty());
+
+        // And on the wire the field is omitted where it is empty, so a record of
+        // a queued or carried note reads exactly as it did before the field.
+        let queued = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: Reached::Queued.shown_to().to_vec(),
+            reached: Reached::Queued,
+        };
+        let wire = serde_json::to_value(&queued).expect("it serializes");
+        assert!(wire.get("shown_to").is_none(), "{wire}");
+        let read = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: Reached::Worker.shown_to().to_vec(),
+            reached: Reached::Worker,
+        };
+        let wire = serde_json::to_value(&read).expect("it serializes");
+        assert_eq!(wire["shown_to"], json!(["worker", "supervisor"]), "{wire}");
+        assert_eq!(
+            serde_json::from_value::<Operation>(wire.clone()).expect("it reads back"),
+            read
+        );
     }
 }

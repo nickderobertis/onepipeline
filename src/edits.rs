@@ -260,6 +260,17 @@ pub enum Operation {
         /// Which party of the conversation actually took it.
         #[serde(flatten)]
         reached: crate::note::Reached,
+        /// The parties the conversation put it in front of — the one whose turn
+        /// took it, and the other with that turn's response — written down so a
+        /// note addressed to both is verifiable from this record alone rather
+        /// than from what each disposition is documented to imply. It is
+        /// [`Reached::shown_to`](crate::note::Reached::shown_to)'s answer, and
+        /// is omitted where that is nobody yet: a queued note is taken by the
+        /// next turn to open, and a carried one by the node's next dispatch,
+        /// each of which records it. Absent from a record written before the
+        /// field existed, which reads back the same way.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        shown_to: Vec<crate::note::Party>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
@@ -3390,6 +3401,7 @@ mod tests {
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
             reached: crate::note::Reached::Carried,
+            shown_to: Vec::new(),
         };
         let mut graph = graph_of(vec![agent("build", &[])]);
         apply(&mut graph, &carried);
@@ -3406,6 +3418,7 @@ mod tests {
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
             reached: crate::note::Reached::Worker,
+            shown_to: crate::note::Reached::Worker.shown_to().to_vec(),
         };
         let mut untouched = graph_of(vec![agent("build", &[])]);
         apply(&mut untouched, &taken);

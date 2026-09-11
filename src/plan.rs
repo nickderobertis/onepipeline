@@ -95,6 +95,26 @@ pub const AMENDMENT_HEADING: &str = "## Amendment";
 const AMENDMENT_PRECEDENCE: &str =
     "Where this section and the operational notes below disagree, this section wins.";
 
+/// The heading the notes an earlier dispatch of the node read are rendered under.
+///
+/// Beside [`AMENDMENT_HEADING`] because it is read with the amendment's authority
+/// rather than a carried note's: a manager's note reaches both parties of the
+/// conversation it is delivered into and may bind that conversation's judge, so
+/// when the engine opens a fresh conversation for the same node — a publication
+/// failed and the node is continued on its branch — what that conversation read
+/// is composed back in as the ruling it was, and not as observed state.
+pub(crate) const MANAGER_NOTES_HEADING: &str = "## Manager notes";
+
+/// What the manager-notes section tells its reader about itself.
+///
+/// The first sentence is [`AMENDMENT_PRECEDENCE`]'s, because that is the
+/// authority a delivered note had in the conversation it reached — a ruling
+/// issued *because* of how the operational notes were being read — and a
+/// continuation that demoted it to observed state would be the incident this
+/// section exists to end: a worker obeying a manager ruling and its judge failing
+/// it for exactly that, having never been shown the ruling.
+const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this node during an      earlier dispatch of it, and this dispatch continues that node's work: each stands here      exactly as it stood there, for the worker and for the supervisor alike. A note that      states a criterion is part of the bar this node is judged against.";
+
 /// The task section an amendment is rendered immediately above, when the task
 /// has one.
 ///
@@ -322,6 +342,7 @@ impl Node {
             self.amendment.as_deref(),
             self.context.as_deref(),
             references,
+            &[],
         )
     }
 }
@@ -354,6 +375,7 @@ impl Step {
             None,
             node_context,
             references,
+            &[],
         )
     }
 
@@ -366,11 +388,30 @@ impl Step {
     /// workstream shares one branch and one bar. So the node is what this takes,
     /// rather than three values a caller has to remember to pass.
     pub fn rendered_task_for(&self, node: &Node, references: &[CrossRepoReference]) -> String {
+        self.rendered_task_carrying(node, references, &[])
+    }
+
+    /// The same, carrying the notes an earlier dispatch of the node read.
+    ///
+    /// What the engine composes when it opens a fresh conversation for a node
+    /// on its own — a continuation after a preserving publication failure —
+    /// rather than the plan's first dispatch of it: every note the manager
+    /// delivered into the conversation that ended is rendered under
+    /// [`MANAGER_NOTES_HEADING`], so the ruling the worker obeyed is read by the
+    /// judge that rules on the worker. An empty slice renders exactly what
+    /// [`rendered_task_for`](Self::rendered_task_for) renders.
+    pub(crate) fn rendered_task_carrying(
+        &self,
+        node: &Node,
+        references: &[CrossRepoReference],
+        notes: &[crate::note::Consumed],
+    ) -> String {
         render_task(
             self.task.as_deref().unwrap_or_default(),
             node.amendment.as_deref(),
             node.context.as_deref(),
             references,
+            notes,
         )
     }
 }
@@ -380,10 +421,16 @@ fn render_task(
     amendment: Option<&str>,
     context: Option<&str>,
     references: &[CrossRepoReference],
+    notes: &[crate::note::Consumed],
 ) -> String {
     let task = match amendment.map(str::trim).filter(|text| !text.is_empty()) {
         None => task.to_string(),
         Some(text) => amended(task, text),
+    };
+    let task = if notes.is_empty() {
+        task
+    } else {
+        with_notes(&task, notes)
     };
     let task = task.as_str();
     let mut rendered = match context.map(str::trim).filter(|note| !note.is_empty()) {
@@ -519,6 +566,64 @@ fn amended(task: &str, amendment: &str) -> String {
     match additional_info_at(task) {
         Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
         None => format!("{}\n\n{block}", task.trim_end()),
+    }
+}
+
+/// One task with the notes an earlier dispatch of its node read rendered into it.
+///
+/// Placed exactly as an amendment is — above the operational notes, at the end
+/// of a task that states none — and after the amendment where there is one, so
+/// a reader meets the standing bar and then the rulings issued against it.
+fn with_notes(task: &str, notes: &[crate::note::Consumed]) -> String {
+    let mut block =
+        format!("{MANAGER_NOTES_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{MANAGER_NOTES_PREAMBLE}\n");
+    for (index, note) in notes.iter().enumerate() {
+        block.push_str(&format!(
+            "\n{}. Addressed to {} — {}.\n",
+            index + 1,
+            addressed(note.addressee),
+            delivered_as(&note.reached)
+        ));
+        for line in note.text.as_str().lines() {
+            block.push_str(&format!("   > {line}\n"));
+        }
+        if let Some(criterion) = &note.criterion {
+            block.push_str(&format!("   Criterion: {}\n", criterion.as_str()));
+        }
+    }
+    match additional_info_at(task) {
+        Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
+        None => format!("{}\n\n{block}", task.trim_end()),
+    }
+}
+
+/// Whose task a note said it was updating, as the section names it.
+fn addressed(addressee: crate::note::Addressee) -> &'static str {
+    match addressee {
+        crate::note::Addressee::Worker => "the worker",
+        crate::note::Addressee::Supervisor => "the supervisor",
+        crate::note::Addressee::Both => "both parties",
+    }
+}
+
+/// What the conversation the note was first delivered into did with it, as the
+/// section tells its reader — so a party reading a note here knows whether the
+/// earlier dispatch acted on it or never saw it.
+fn delivered_as(reached: &crate::note::Reached) -> &'static str {
+    match reached {
+        crate::note::Reached::Worker => {
+            "delivered into the worker's turn, and read by the supervisor with that turn's response"
+        }
+        crate::note::Reached::Supervisor => {
+            "delivered into the supervisor's turn, and read by the worker with that decision"
+        }
+        crate::note::Reached::JudgedWith { .. } => {
+            "delivered into the supervisor's turn, whose decision with it in hand was completion"
+        }
+        crate::note::Reached::Queued => "queued to the next turn of that conversation to open",
+        crate::note::Reached::Carried => {
+            "delivered while no turn of that dispatch was live, and carried to this one"
+        }
     }
 }
 
@@ -1047,6 +1152,100 @@ mod tests {
             rendered.contains("Run the gate once, over the finished tree."),
             "{rendered}"
         );
+    }
+
+    /// The notes an earlier dispatch of the node read render with the amendment's
+    /// authority, after the amendment and above the operational notes, saying
+    /// which party each was for, what the conversation it reached did with it,
+    /// and — for one that bound a criterion — that the criterion is part of the
+    /// bar. A step composed with none renders exactly what it always rendered.
+    #[test]
+    fn the_notes_an_earlier_dispatch_read_render_as_rulings_above_the_operational_notes() {
+        let node = Node {
+            id: "build".into(),
+            task: Some(
+                "## What\nship it\n\n## Acceptance criteria\n\n- it ships\n\n\
+                 ## Additional info\n\nRun the judged lint tier before you report.\n"
+                    .into(),
+            ),
+            amendment: Some("The four comment lines are out of scope: leave them.".into()),
+            context: Some("the fixture moved".into()),
+            ..Node::default()
+        };
+        let step = Step {
+            id: "build".into(),
+            task: node.task.clone(),
+            ..Step::default()
+        };
+        let notes = [
+            crate::note::Consumed {
+                addressee: crate::note::Addressee::Both,
+                text: "the judged lint tier is a toolchain failure today: do not re-run it, \
+                       and do not fail the node for not having re-run it"
+                    .parse()
+                    .expect("a usable note"),
+                criterion: None,
+                reached: crate::note::Reached::Worker,
+                shown_to: vec![crate::note::Party::Worker, crate::note::Party::Supervisor],
+            },
+            crate::note::Consumed {
+                addressee: crate::note::Addressee::Worker,
+                text: "bump the fixture\nand say so"
+                    .parse()
+                    .expect("a usable note"),
+                criterion: Some(
+                    "`version.txt` holds `v: 2`"
+                        .parse()
+                        .expect("a usable criterion"),
+                ),
+                reached: crate::note::Reached::Carried,
+                shown_to: vec![crate::note::Party::Worker, crate::note::Party::Supervisor],
+            },
+        ];
+        let rendered = step.rendered_task_carrying(&node, &[], &notes);
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in:\n{rendered}"))
+        };
+        assert!(
+            at(AMENDMENT_HEADING) < at(MANAGER_NOTES_HEADING)
+                && at(MANAGER_NOTES_HEADING) < at("## Additional info")
+                && at("## Additional info") < at(PLANNER_CONTEXT_HEADING),
+            "the notes are not between the amendment and the operational notes:\n{rendered}"
+        );
+        // The authority is the amendment's, stated once per section.
+        assert_eq!(
+            rendered.matches(AMENDMENT_PRECEDENCE).count(),
+            2,
+            "{rendered}"
+        );
+        for said in [
+            "1. Addressed to both parties — delivered into the worker's turn, and read by the \
+             supervisor with that turn's response.",
+            "   > the judged lint tier is a toolchain failure today",
+            "2. Addressed to the worker — delivered while no turn of that dispatch was live, \
+             and carried to this one.",
+            "   > bump the fixture\n   > and say so\n   Criterion: `version.txt` holds `v: 2`",
+            "part of the bar this node is judged against",
+            // And everything around it is still there, whole.
+            "The four comment lines are out of scope: leave them.",
+            "Run the judged lint tier before you report.",
+            "the fixture moved",
+        ] {
+            assert!(
+                rendered.contains(said),
+                "the rendering lacks {said:?}:\n{rendered}"
+            );
+        }
+        assert_eq!(
+            step.rendered_task_carrying(&node, &[], &[]),
+            step.rendered_task_for(&node, &[]),
+            "a step composed with no notes renders differently from one never offered any"
+        );
+        assert!(!step
+            .rendered_task_for(&node, &[])
+            .contains(MANAGER_NOTES_HEADING));
     }
 
     /// A task with no operational notes takes its amendment at the end, and a

@@ -611,6 +611,10 @@ pub(crate) struct Redispatch {
     pub attempts: NonZeroU32,
     /// A bounded reason, as the failing attempt reported it.
     pub reason: String,
+    /// The manager's notes the new attempt was composed with: what the attempt
+    /// it replaces was shown, carried into the task it recomposes. Empty for an
+    /// attempt composed with none, and omitted from the record then.
+    pub carried: Vec<crate::note::Consumed>,
 }
 
 /// Everything a dispatch needs, resolved before it leaves the writer's thread.
@@ -1271,15 +1275,27 @@ fn converge(
                 }
                 // A dispatch asked again is a dispatch started again, and it reaches
                 // the run's own record as one rather than only a log.
-                Message::Redispatched(again) => journal.emit(
-                    journal::PipelineKind::NodeDispatched,
-                    journal::labels(&paths.run, Some(&again.node)),
-                    journal::payload(&[
+                Message::Redispatched(again) => {
+                    let mut payload = journal::payload(&[
                         ("attempt", json!(again.attempt)),
                         ("attempts", json!(again.attempts)),
                         ("reason", json!(bounded(&again.reason))),
-                    ]),
-                )?,
+                    ]);
+                    // Named on the record only where there is something to name,
+                    // so a re-dispatch composed with no note reads exactly as it
+                    // did before the field existed.
+                    if !again.carried.is_empty() {
+                        payload.insert(
+                            crate::note::CARRIED_KEY.to_string(),
+                            crate::note::payload_of(&again.carried),
+                        );
+                    }
+                    journal.emit(
+                        journal::PipelineKind::NodeDispatched,
+                        journal::labels(&paths.run, Some(&again.node)),
+                        payload,
+                    )?;
+                }
                 // A cancellation that reached a live turn, and one that ran out of
                 // patience and reaped it. Surfaced rather than only journalled
                 // because a planner reading its own updates is who decides what to
@@ -2811,6 +2827,7 @@ fn note_record(
         addressee,
         text: text.clone(),
         criterion: criterion.cloned(),
+        shown_to: reached.shown_to().to_vec(),
         reached,
     }]
 }
@@ -3153,10 +3170,26 @@ fn start_ready(
         }
 
         let cancel = CancellationToken::new();
+        let mut payload =
+            journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]);
+        // A dispatch the plan or a manager asked for is composed from the plan,
+        // and a note an earlier conversation of this node read is not in it. The
+        // receipt for that note named the party that read it, which looks like
+        // success, so the dispatch that spends it says so here — and a manager
+        // reading the node's history can tell a ruling that survived from one
+        // that has to be re-issued. Only what a conversation **read**: a note
+        // no turn took rides in as the node's own context, and is not spent.
+        let spent = spent_by(paths, state, &node.id);
+        if !spent.is_empty() {
+            payload.insert(
+                crate::note::SPENT_KEY.to_string(),
+                crate::note::payload_of(&spent),
+            );
+        }
         journal.emit(
             journal::PipelineKind::NodeDispatched,
             journal::labels(&paths.run, Some(&node.id)),
-            journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]),
+            payload,
         )?;
         // What the run can say about every dependency of this node that lands
         // outside its own repository. Empty for a node that has none — which is
@@ -3190,6 +3223,29 @@ fn start_ready(
         state.refresh(paths);
     }
     Ok(settled_here)
+}
+
+/// The manager's notes a fresh dispatch of `node` is composed without.
+///
+/// Everything a conversation of the node's last dispatch read, and — where this
+/// node is a `retry`'s replacement — everything the node it supersedes was ever
+/// delivered, read or carried: a replacement's task is the manager's own and
+/// composes none of it in. Read off the run's record at the moment of dispatch,
+/// which is a change rather than a pass, and the same fold the continuation
+/// composes its own notes from, so the two cannot disagree about what a
+/// dispatch was owed.
+fn spent_by(paths: &RunPaths, state: &RunState, node: &str) -> Vec<crate::note::Consumed> {
+    let journal = journal::read(&paths.journal());
+    let mut spent = crate::note::standing(&journal, node).read;
+    for superseded in state
+        .superseded
+        .iter()
+        .filter(|(_, replacement)| replacement.as_str() == node)
+        .map(|(superseded, _)| superseded)
+    {
+        spent.extend(crate::note::standing(&journal, superseded).spent());
+    }
+    spent
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.
@@ -3445,6 +3501,9 @@ pub(crate) fn attempt(
             attempt: NonZeroU32::MIN.saturating_add(attempt),
             attempts,
             reason: last.settlement.detail.clone().unwrap_or_default(),
+            // An attempt that produced nothing opened no conversation, so no
+            // note was read by it: the next one is composed exactly as it was.
+            carried: Vec::new(),
         })));
     }
     last
@@ -6475,6 +6534,7 @@ mod tests {
                 text: "the fixture moved".parse().expect("a usable note"),
                 criterion: None,
                 reached: crate::note::Reached::Carried,
+                shown_to: Vec::new(),
             },
         ];
         assert_eq!(

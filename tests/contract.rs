@@ -5092,6 +5092,37 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         assert_eq!(&read, one, "{written} did not round-trip");
     }
 
+    // And who each disposition puts the note in front of, as entry 69 states it
+    // — the table a reader of the record no longer has to infer. Keyed by the
+    // disposition's own word, and exhaustive both ways: a disposition the table
+    // does not name, or a row naming no disposition, fails here.
+    let shown_to: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_value(divergence_block("69.")["shown_to"].clone())
+            .expect("entry 69 tabulates who is shown a note under each disposition");
+    assert_eq!(
+        shown_to.keys().cloned().collect::<Vec<_>>(),
+        {
+            let mut named = reached.clone();
+            named.sort();
+            named
+        },
+        "entry 69's table and entry 60's dispositions are not one set"
+    );
+    for one in &carried {
+        let parties: Vec<String> = one
+            .shown_to()
+            .iter()
+            .map(|party| serde_json::to_value(party).expect("a party serializes"))
+            .map(|party| party.as_str().expect("a party is a word").to_string())
+            .collect();
+        assert_eq!(
+            &parties,
+            &shown_to[one.as_str()],
+            "`{}` shows the note to parties entry 69 does not say it does",
+            one.as_str()
+        );
+    }
+
     // The boundary: an envelope this seam cannot act on is refused where it
     // arrives, by serde and by the seam's own newtypes, rather than somewhere
     // later. The removed op is in this list, so its refusal is proven by the
