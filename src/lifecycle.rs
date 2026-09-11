@@ -384,10 +384,7 @@ fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<M
 /// Draft the change request's body, write it onto the change request the
 /// session already holds, and publish through `onevcs`.
 ///
-/// The closeout, in the order divergence entry 69 states it: what the session
-/// holds is read first, the drafter is shown it, the description is written
-/// onto it, and one publication lifts and lands. A session holding none takes
-/// the path it always took — the drafted body opens the change request.
+/// The order is divergence entry 69's, and the steps below run in it.
 #[allow(
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, the run's paths, what its \
@@ -409,18 +406,14 @@ fn publish(
     token: &onevcs::SessionToken,
     branch: Option<String>,
 ) -> Attempt {
-    // What the session already holds, asked first because it decides which
-    // closeout this is. A change request open from the session's branch into its
-    // base — a draft the worker opened, or one an earlier attempt of this node
-    // opened and this attempt is continuing — is **finished** rather than
-    // published beside: the drafter is shown it, the drafted description is
-    // written onto it, and the publication below adopts and lifts it. The rule
-    // is about the branch and not about who opened the change request. A session
-    // holding none takes the path it always took.
+    // Asked first, because the answer decides which closeout this is. The rule
+    // is about the **branch**: any change request open from the session's branch
+    // into its base is finished here, whether the worker opened it as a draft or
+    // an earlier attempt of this node opened it and this attempt is continuing.
     //
     // A host that could not be asked has not said the session holds nothing, so
-    // that is said out loud and the closeout publishes as it always has: the
-    // publication asks the same host again, and settles on its own words.
+    // that is said out loud rather than read as `None`: the publication below
+    // asks the same host again and settles on its own words.
     let held = match crate::vcs::session_change(token) {
         Ok(held) => held,
         Err(error) => {
