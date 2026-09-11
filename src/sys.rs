@@ -2157,13 +2157,15 @@ mod tests {
     /// reason rather than blocking on a line that never comes. `-NoNewWindow` is
     /// what keeps every level a console process on the one console with the
     /// pipe inherited down the tree, and `-PassThru` is what hands the pid back.
+    /// The script's own path is quoted by hand, because `Start-Process` joins
+    /// its argument list with spaces and nothing else.
     #[cfg(windows)]
     const LEVEL_SCRIPT: &str = r#"
 param([int]$below)
 $ErrorActionPreference = 'Stop'
 try {
   if ($below -gt 1) {
-    $child = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, ($below - 1)) -PassThru -NoNewWindow
+    $child = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), ($below - 1)) -PassThru -NoNewWindow
   } else {
     $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow
   }
