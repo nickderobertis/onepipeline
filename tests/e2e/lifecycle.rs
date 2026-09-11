@@ -6193,3 +6193,161 @@ fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlem
     // A body that was drafted is not a body that was not.
     assert!(world.events_of(run, "body-not-drafted").is_empty());
 }
+
+/// A host that cannot say whether the session holds a change request is said
+/// out loud, and the publication asks the same host again.
+///
+/// The closeout's read of the host is what decides which closeout this is, and
+/// a host that could not be asked has not said the session holds nothing. So
+/// the refusal is not read as `None` silently: the reason lands on stderr, and
+/// the publication after it — which asks the same host — is what the node
+/// settles on. The host is scripted to refuse **one** invocation, which is that
+/// read and nothing after it, so what is held is that the closeout went on to
+/// publish exactly as it always has: one change request opened, the node on
+/// the publication's own word, and no sentence on the settlement about a change
+/// request the closeout never learned of.
+#[test]
+fn a_host_that_cannot_say_whether_the_session_holds_a_change_is_asked_again_by_the_publication() {
+    let world = World::new("lifecycle-unheld");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // Out for exactly the closeout's read, and answering every call after it.
+    world.script("gh.outage", "1");
+    let (run, launched) = driven(&world, "unheld", vec![lifecycle("service", &[])]);
+    launched.settled();
+    let run = run.as_str();
+
+    // Said, with the session it could not be said of, before the publication.
+    launched
+        .err_has("onevcs could not say whether session")
+        .err_has("so the closeout publishes as it always has");
+
+    // The publication went on and asked the host again: one change request
+    // opened, and the node settled on its word.
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
+    assert_eq!(node["outcome"], "change-open", "{node}");
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        gh_pr_calls(&world, "create").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    assert!(
+        gh_calls(&world).len() > 1,
+        "the host was asked once, so the refused read was the publication's own: {:?}",
+        gh_calls(&world)
+    );
+    // Nothing was written onto a change request the closeout never learned of,
+    // and the settlement says nothing about one.
+    assert!(
+        gh_pr_calls(&world, "edit").is_empty(),
+        "{:?}",
+        gh_calls(&world)
+    );
+    assert!(
+        gh_pr_calls(&world, "ready").is_empty(),
+        "{:?}",
+        gh_calls(&world)
+    );
+    let settled = world.events_of(run, "node-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert!(
+        settled[0]["payload"]["detail"].is_null(),
+        "the settlement speaks of a change request the closeout could not read: {}",
+        settled[0]
+    );
+}
+
+/// A worker's draft whose record this crate cannot read is finished as an
+/// earlier publication's, not as the worker's.
+///
+/// Who opened the change request is read off the session's own stream, and that
+/// stream is a file another build of `onevcs` may have written a line of.
+/// `EventStream` refuses a whole read over one line it cannot parse — so the
+/// draft really is the worker's, the host says so, and the one record that
+/// would attribute it is unreadable. An unreadable record is not evidence of a
+/// worker's draft: the closeout still finishes the change request the host
+/// holds — the description written, the draft lifted, the node on the
+/// publication's own word — and the settlement attributes the draft to an
+/// earlier publication of the branch, which is what the stream could not
+/// contradict.
+#[test]
+fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s() {
+    let world = World::new("lifecycle-draft-unreadable");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point the
+    // unreadable-record journeys above use, and the same reason: a repository's
+    // `pre-push` hook is code an operator wrote, `Stream::emit` is the only writer of a
+    // stream and it appends whole envelopes, and the stream exists only once the session
+    // has opened. The hook runs at the worker's own draft push, which happens before the
+    // `change-drafted` record is written — so the line it appends is on the stream
+    // *before* that record, which is what makes the whole read refuse. Everything
+    // asserted is through the binary.
+    let hook = merge_path(&world, &ReturningHookVerb::AppendFutureEvent);
+    world.repository(
+        "change-open",
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.drafts", "wip: what the worker called it");
+    world.script(
+        "service.drafts-body",
+        "## What\nHalf written by the worker.\n",
+    );
+    world.script(
+        "pr-author.body",
+        "## What\nFinished from the diff and the worker's transcript.\n",
+    );
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land what the worker made");
+    let path = world.plan("draftunread", &plan_of("draftunread", vec![node]));
+    let launched = world.run(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
+    launched.settled();
+    let run = "draftunread";
+
+    // The record really is unreadable, and said so.
+    launched.err_has("is not an event envelope");
+
+    // The host's change request — the worker's draft — was finished exactly as
+    // a readable one is: no second one, the drafted description under the
+    // plan's title, and the draft lifted.
+    let created = gh_pr_calls(&world, "create");
+    assert_eq!(created.len(), 1, "{created:?}\n{}", why(&world, run));
+    assert!(
+        created[0].iter().any(|arg| arg == "--draft"),
+        "the worker's change request was not opened as a draft: {:?}",
+        created[0]
+    );
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        opened[0]["body"],
+        "## What\nFinished from the diff and the worker's transcript.",
+        "{opened:?}\n{}",
+        why(&world, run)
+    );
+    assert_eq!(opened[0]["title"], "feat: land what the worker made");
+    assert_eq!(
+        gh_pr_calls(&world, "ready").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, run));
+    assert_eq!(node["outcome"], "change-open", "{node}");
+
+    // And the draft is attributed to what the stream could not contradict.
+    let settled = world.events_of(run, "node-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(
+        settled[0]["payload"]["detail"],
+        "an earlier publication of this branch left the change request as a draft; the \
+         closeout wrote the drafted description onto it and marked it ready for review",
+        "{}",
+        settled[0]
+    );
+}
