@@ -2722,25 +2722,17 @@ fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
 /// record still names it reads `DRIVER DEAD`, is adoptable, and the stranger is
 /// left alone.
 ///
-/// The other readers of the launch record's pid, and the ones that met this
-/// state for real. An attached launch records itself as the driver, settles the
-/// run, and returns; its pid is free the moment it does, and Windows hands a
-/// freed pid on within moments. A test suite spawning at this crate's rate saw
-/// exactly that: `adopt`, asked next about a run `start --attach` had already
-/// settled, refused it as "still being driven" on the strength of a stranger
-/// wearing the driver's pid. The stamp beside the pid is what says which process
-/// it is, and this holds that every reading consults it: the verdict the run's
-/// own view gives, the one the bounded listing gives off its summary, and the
-/// displacement an adoption makes of a driver it has decided is not working —
-/// which, aimed on the pid alone, would signal the stranger.
+/// The other readers of the launch record's pid — the run's own view, the
+/// bounded listing, and the adoption, whose displacement of a driver it has
+/// decided is not working would signal the stranger if aimed on the pid alone.
+/// The state is the one `sys::claim_on` documents, and the one the Windows gate
+/// met: `adopt` refusing a run `start --attach` had already settled.
 ///
-/// The run is left **open** rather than settled, on a human action nobody has
-/// taken, because a settled run renders `SETTLED` in place of any liveness word:
-/// the driver exits either way, and this is the shape in which the two views
-/// have a verdict to show. The record is edited for the reason the stop journey
-/// above edits one: the reissue happens on the host's schedule rather than on
-/// demand, and the pid is the one fact under test. The stamp is left exactly as
-/// the driver wrote it.
+/// The run is left open on a human action nobody has taken, because a settled
+/// run renders `SETTLED` in place of any liveness word: the driver exits either
+/// way, and this is the shape in which the two views have a verdict to show. The
+/// record is edited for the reason the stop journey above edits one, and the
+/// stamp is left exactly as the driver wrote it.
 // llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
 // launch record names, and no product surface sets it: the verbs that write that field —
 // `start`, `drive-run`, `adopt` — write their own pid and their own stamp together, so a

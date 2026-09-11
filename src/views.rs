@@ -324,13 +324,9 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 /// merged store, and a second implementation of this reading is a second run
 /// liveness to keep true.
 ///
-/// The pid is read **with the stamp beside it**, through the same
-/// [`sys::claim_on`] a stop aims by. A pid alone answered "live" for a driver
-/// that had exited whenever the host had since handed its pid to another
-/// process — which Windows does within moments, and a test suite spawning at
-/// this crate's rate met on every cross-platform run: a run that `start
-/// --attach` had settled and returned from was refused by `adopt` as "still
-/// being driven", on the strength of a stranger wearing its driver's pid.
+/// The pid is read with the stamp beside it, through the same
+/// [`sys::claim_on`] a stop aims by; read alone it called a reissued pid a
+/// live driver.
 fn driver_liveness(
     stop_recorded: bool,
     recorded_host: Option<&str>,
