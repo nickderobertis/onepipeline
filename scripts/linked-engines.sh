@@ -737,8 +737,6 @@ for name in "${SIBLINGS[@]}"; do
   [ -n "$permitted" ] || die "the index serves no '$name' version that '$req' permits" \
     "the requirement names a window the registry has nothing in — correct the pin in '$manifest'"
 
-  # Worth a line only where it is newer than what the lock could take: a release
-  # below that is one the manifest moved past, and nothing about it is news.
   state=current
   for version in ${governed[@]+"${governed[@]}"}; do
     if ver_lt "${version%%+*}" "$permitted"; then
@@ -749,6 +747,8 @@ for name in "${SIBLINGS[@]}"; do
       rows+=("$name|$version|$req|$permitted|current")
     fi
   done
+  # Worth a line only where it is newer than what the lock could take: a release
+  # below that is one the manifest moved past, and nothing about it is news.
   if [ -n "$held_newest" ] && ver_lt "$permitted" "$held_newest"; then
     for entry in ${held[@]+"${held[@]}"}; do
       read -r held_version dep dep_req manifest_req <<<"$entry"

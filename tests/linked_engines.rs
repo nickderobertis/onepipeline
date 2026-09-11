@@ -494,11 +494,14 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     );
 }
 
-/// The qualified spec the refusal prints is one `cargo` accepts.
+/// The qualified spec the refusal prints is one `cargo` accepts — in both
+/// spellings it prints.
 ///
 /// Driven against the real workspace and the real `cargo`, because the claim is
 /// about that program's package-id grammar rather than about this repository's
-/// output. Advice nobody can run is advice this check does not give.
+/// output. Advice nobody can run is advice this check does not give. The
+/// `--precise` spelling is pinned to the copy already linked, which is the one
+/// release an offline run can resolve to.
 #[test]
 fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
     let copies = linked("oneharness-core");
@@ -517,6 +520,25 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
         qualified.status.success(),
         "cargo refused the qualified spec this check prints, so its advice does not run:\n{}",
         said(&qualified)
+    );
+    let precise = Command::new(env!("CARGO"))
+        .args([
+            "update",
+            "--dry-run",
+            "--offline",
+            "-p",
+            &format!("oneharness-core@{}", copies[0]),
+            "--precise",
+            &copies[0],
+        ])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo runs an update dry run");
+    assert!(
+        precise.status.success(),
+        "cargo refused the `--precise` spelling this check prints for an engine behind an \
+         admissible release under a held-back one, so that advice does not run:\n{}",
+        said(&precise)
     );
 }
 
@@ -616,13 +638,17 @@ fn a_dev_requirement_of_a_newer_release_holds_nothing_back() {
 }
 
 /// Where a lock is behind an admissible release **and** a held-back one sits
-/// above it, the fix names the admissible release exactly.
+/// above it, the remedy the refusal prints resolves to the release it named.
 ///
 /// A bare `cargo update -p` resolves the newest release the requirement
 /// permits — the held-back one — and adds the second sibling copy it needs;
 /// the real `onevcs-testing` dry run answers exactly that with `Adding onevcs
-/// v0.20.0`. So the spec the refusal prints carries `--precise`, and the
-/// refusal says why.
+/// v0.20.0`. The contract's own spelling therefore does not do what the line
+/// says in this case, and the planner ruled the property over the spelling: the
+/// remedy, run, moves the lock to the release the check named and leaves one
+/// copy of every sibling. `--precise <admitted>` is that remedy, and the refusal
+/// says why it is spelled so. This case cannot arise against today's registry,
+/// so this index is the only place it is held.
 #[test]
 fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_one() {
     let stale_testing = &linked("onevcs-testing")[0];
@@ -649,12 +675,18 @@ fn the_fix_for_a_lock_behind_an_admissible_release_stops_short_of_the_held_back_
         "the refusal names a release other than the newest one this manifest admits:\n{}",
         said(&run)
     );
-    assert!(
-        report.contains(&format!(
-            "fix: cargo update -p onevcs-testing@{stale_testing} --precise 0.5.100"
-        )),
-        "the fix is not pinned to the admissible release, so running it takes the held-back \
-         one and resolves `onevcs` twice:\n{}",
+    // What the remedy resolves to is read off the line itself: the spec names
+    // the copy the lock holds, and `--precise` names the release the refusal
+    // just called admissible — nothing above it.
+    let fix = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("fix: "))
+        .unwrap_or_else(|| panic!("the refusal carries no fix line:\n{}", said(&run)));
+    assert_eq!(
+        fix,
+        format!("cargo update -p onevcs-testing@{stale_testing} --precise 0.5.100"),
+        "the remedy does not resolve to the admissible release the refusal named: run as \
+         printed it would take the held-back one and resolve `onevcs` twice:\n{}",
         said(&run)
     );
     assert!(
