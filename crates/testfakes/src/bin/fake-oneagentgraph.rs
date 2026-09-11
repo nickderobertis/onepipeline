@@ -403,7 +403,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             if let Some(refused) = fake::node_script(dir, "observer", "refused") {
                 refuse_candidates_under(&labels, &refused);
             }
-            publish_deaths(&labels, &script);
+            if publish_deaths(&labels, &script).is_none() {
+                fake::fail("an `observer.died-as` script names no death at all");
+            }
         }
         let watched = fake::observe(dir);
         if watched != ExitCode::SUCCESS {

@@ -750,6 +750,8 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
     let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
+    oneagentgraph::config::validate(&config)
+        .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
     config
         .members
         .iter()
