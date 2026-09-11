@@ -2068,48 +2068,135 @@ mod tests {
 
     /// A console process tree, and the pids of both its levels.
     ///
-    /// `cmd` runs `ping`, so the root has a real descendant to be reached
-    /// through — the shape a run makes, and the shape a teardown that stopped at
-    /// the root would leave half of. Both levels are console processes with no
+    /// The root runs `ping`, so it has a real descendant to be reached through
+    /// — the shape a run makes, and the shape a teardown that stopped at the
+    /// root would leave half of. Both levels are console processes with no
     /// window between them, which is the property every Windows fact below turns
     /// on.
     ///
-    /// The child's pid is read through `Win32_Process`, which is this test's own
-    /// oracle and deliberately not the crate's: `platform_stop` hands the tree to
-    /// `taskkill /T` and never enumerates one, so a fixture that asked the crate
-    /// where the leaf was would be asking the code under test to grade itself.
+    /// The leaf's pid is the one the tree reported for itself — see
+    /// [`console_tree_of`] — which is this test's own oracle and deliberately not
+    /// the crate's: `platform_stop` hands the tree to `taskkill /T` and never
+    /// enumerates one, so a fixture that asked the crate where the leaf was would
+    /// be asking the code under test to grade itself.
     #[cfg(windows)]
     fn console_tree() -> (std::process::Child, u32) {
-        let root = std::process::Command::new("cmd")
-            .args(["/C", "ping -n 120 127.0.0.1"])
-            .stdout(std::process::Stdio::null())
+        let (root, below) = console_tree_of(1);
+        (root, below[0])
+    }
+
+    /// A console process tree of `below` levels under its root, and the pid of
+    /// each of those levels, **as the tree itself reported them**.
+    ///
+    /// Every level is a `powershell` running [`LEVEL_SCRIPT`]: it starts the
+    /// level under it — another of itself, or the `ping` leaf — writes that
+    /// child's pid on its own stdout, and waits for it. The root's stdout is a
+    /// pipe this reads `below` lines off, and each level beneath inherits the
+    /// same pipe, so the pids arrive top-down in one stream and each is named by
+    /// the process that started it — the same shape the Unix fixtures take with
+    /// `echo $$`.
+    ///
+    /// **Nothing here asks the operating system where the tree is.** The fixture
+    /// this replaces waited for each level to appear in a `Win32_Process` listing
+    /// under its parent, and on a loaded two-core runner the wait was the load:
+    /// every listing was a process start spent from the same budget the tree it
+    /// was waiting for needed to grow, which is the rule `tests/e2e/harness.rs`
+    /// states on its wait helper. A process that announces its own child needs
+    /// no listing, no image name to tell that child from the `conhost.exe` it
+    /// gets beside it, and no patience — the read blocks on the announcement and
+    /// nothing else.
+    #[cfg(windows)]
+    fn console_tree_of(below: usize) -> (std::process::Child, Vec<u32>) {
+        let script = level_script();
+        let mut root = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script.display().to_string(),
+                &below.to_string(),
+            ])
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a console process tree");
-        match awaited_child_of(root.id(), LEAF_IMAGE) {
-            Ok(leaf) => (root, leaf),
-            Err(why) => abandon(root, &why),
+        use std::io::BufRead;
+        let mut lines =
+            std::io::BufReader::new(root.stdout.take().expect("the tree reports itself")).lines();
+        let mut pids: Vec<u32> = Vec::new();
+        while pids.len() < below {
+            let line = match lines.next() {
+                Some(Ok(line)) => line,
+                Some(Err(error)) => abandon(root, &format!("the tree stopped reporting: {error}")),
+                None => abandon(
+                    root,
+                    &format!(
+                        "the tree reported {} of its {below} levels and ended",
+                        pids.len()
+                    ),
+                ),
+            };
+            match line.trim().parse::<u32>() {
+                Ok(pid) => pids.push(pid),
+                Err(_) => abandon(root, &format!("the tree said {line:?} where a pid was due")),
+            }
         }
+        // The leaf goes on writing — `ping` reports every reply — into the pipe
+        // every level inherited, so the pipe is drained for as long as the tree
+        // lasts rather than closed once the pids are in. A reader that went away
+        // would turn the leaf's next write into an error it exits on, and a full
+        // pipe would block it: either is a tree changing shape under a test that
+        // has not touched it yet. The thread ends when the last writer does.
+        std::thread::spawn(move || for _ in lines {});
+        (root, pids)
     }
 
-    /// The image each level of a fixture tree runs, so the level below one is
-    /// asked for by **what it is** rather than as "some child of it".
+    /// One level of a fixture tree, as the `powershell` script each level runs.
     ///
-    /// A console process started where the caller has no console of its own gets
-    /// a `conhost.exe`, and that helper is a child of the level that started it.
-    /// So "some child of this level" names two processes, the listing orders
-    /// them as it pleases, and a fixture that follows the wrong one waits out its
-    /// whole patience under a process that will never have a child — then
-    /// reports a tree that was running the entire time as one that never
-    /// started.
+    /// Given how many levels are still to start under it, it starts one — the
+    /// `ping` leaf when it is the last, another of itself otherwise — and says
+    /// which pid that is before it waits. A level that cannot start says why on
+    /// the same stream and exits, so the fixture reading pids fails quoting the
+    /// reason rather than blocking on a line that never comes. `-NoNewWindow` is
+    /// what keeps every level a console process on the one console with the
+    /// pipe inherited down the tree, and `-PassThru` is what hands the pid back.
     #[cfg(windows)]
-    const SHELL_IMAGE: &str = "cmd.exe";
+    const LEVEL_SCRIPT: &str = r#"
+param([int]$below)
+$ErrorActionPreference = 'Stop'
+try {
+  if ($below -gt 1) {
+    $child = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, ($below - 1)) -PassThru -NoNewWindow
+  } else {
+    $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow
+  }
+  [Console]::Out.WriteLine($child.Id)
+  [Console]::Out.Flush()
+  $child.WaitForExit()
+} catch {
+  [Console]::Out.WriteLine("level " + $below + " could not start the one below it: " + $_.Exception.Message)
+  exit 1
+}
+"#;
 
+    /// Where [`LEVEL_SCRIPT`] is on disk, written once per test process.
+    ///
+    /// A file rather than `-Command`, because each level starts the next with the
+    /// same script and `$PSCommandPath` is how it names it — the nested quoting
+    /// of a script that carries its own text as an argument is the alternative.
     #[cfg(windows)]
-    const LEAF_IMAGE: &str = "PING.EXE";
-
-    #[cfg(windows)]
-    const LEVEL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+    fn level_script() -> std::path::PathBuf {
+        static SCRIPT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        SCRIPT
+            .get_or_init(|| {
+                let path = std::env::temp_dir()
+                    .join(format!("onepipeline-sys-level-{}.ps1", std::process::id()));
+                std::fs::write(&path, LEVEL_SCRIPT).expect("the level script is written");
+                path
+            })
+            .clone()
+    }
 
     /// End a fixture's whole tree and fail with what went wrong.
     ///
@@ -2124,108 +2211,6 @@ mod tests {
         let _ = root.wait();
         panic!("{why}");
     }
-
-    /// The pid of `parent`'s child running `image`, once it has one.
-    ///
-    /// A level appears a moment after the one above it starts, so this waits
-    /// rather than asking once — and gives up rather than waiting for ever, so a
-    /// tree that never grew is a named failure instead of a suite that hangs.
-    ///
-    /// **The wait happens inside one `powershell`, and that is the whole point of
-    /// this shape.** A Rust loop starting a fresh `powershell` every 100ms is a
-    /// load the fixture puts on the host it is measuring, and on a two-core
-    /// runner it starved the very tree it was waiting for. One process per level
-    /// leaves the patience below bounding the tree appearing rather than the
-    /// queue draining.
-    ///
-    /// A listing this host would not give is still **reported** rather than read
-    /// as "no such child yet": those are opposite facts. The shell separates them
-    /// with its own exit code — [`LISTING_REFUSED`] and [`NEVER_APPEARED`] — and
-    /// `ErrorActionPreference = 'Stop'` is what puts the non-terminating half of
-    /// `Get-CimInstance`'s failures into the `catch` rather than into an empty
-    /// result.
-    #[cfg(windows)]
-    fn awaited_child_of(parent: u32, image: &str) -> std::result::Result<u32, String> {
-        let waiting_listing = format!(
-            r#"
-$ErrorActionPreference = 'Stop'
-$deadline = (Get-Date).AddSeconds({patience})
-while ($true) {{
-  try {{
-    $listed = @(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent} AND Name="{image}"')
-  }} catch {{
-    [Console]::Error.Write($_.Exception.Message)
-    exit {refused}
-  }}
-  if ($listed.Count -gt 0) {{
-    $listed | ForEach-Object {{ $_.ProcessId }}
-    exit 0
-  }}
-  if ((Get-Date) -ge $deadline) {{ exit {never} }}
-  Start-Sleep -Milliseconds 100
-}}
-"#,
-            patience = LEVEL_PATIENCE.as_secs(),
-            refused = LISTING_REFUSED,
-            never = NEVER_APPEARED,
-        );
-        let listed = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &waiting_listing])
-            .output()
-            .map_err(|error| format!("`powershell` could not be run: {error}"))?;
-        let complained = String::from_utf8_lossy(&listed.stderr).trim().to_owned();
-
-        // Anything on stderr is this host declining to answer, whatever the
-        // status says — the reason the old shape checked both, kept because a
-        // shell that complained and still exited 0 has not answered the question
-        // that was asked.
-        if listed.status.code() == Some(NEVER_APPEARED) && complained.is_empty() {
-            return Err(format!(
-                "this host listed no {image} under {parent} within {}s, so that level of the \
-                 tree never started",
-                LEVEL_PATIENCE.as_secs()
-            ));
-        }
-        if listed.status.code() != Some(0) || !complained.is_empty() {
-            return Err(format!(
-                "this host would not list the processes under {parent}: exited {} saying \
-                 {complained:?}",
-                listed.status
-            ));
-        }
-
-        // Read strictly, for the reason [`parse_table`] is: the command asked for
-        // one column of pids, so a non-blank line that is not one means the answer
-        // is not the one that was asked for — and reading that as "no such child"
-        // is the fold this whole helper exists to undo.
-        let mut listed_pids: Vec<u32> = Vec::new();
-        for line in String::from_utf8_lossy(&listed.stdout).lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            listed_pids.push(
-                line.parse::<u32>()
-                    .map_err(|_| format!("listed {line:?} where a pid was due"))?,
-            );
-        }
-        listed_pids.first().copied().ok_or_else(|| {
-            format!("this host reported a {image} under {parent} and then listed none of them")
-        })
-    }
-
-    /// The exit status the listing above takes when this host refused to answer.
-    ///
-    /// Both are outside the range `powershell` itself uses for its own failures,
-    /// so a shell that died on its own is read as a refusal rather than as
-    /// either of these.
-    #[cfg(windows)]
-    const LISTING_REFUSED: i32 = 3;
-
-    /// And the one it takes when the host answered, every time, that the level
-    /// below has not started.
-    #[cfg(windows)]
-    const NEVER_APPEARED: i32 = 4;
 
     /// Whether every pid in `tree` is gone inside `patience`.
     #[cfg(windows)]
@@ -2471,10 +2456,10 @@ while ($true) {{
     /// A tree of real processes, and the pids of everything below its root.
     ///
     /// The shape a run makes — a driver, the graph it starts, and the paid agent
-    /// under that — built out of what each platform has and read back through
-    /// that platform's own oracle rather than through the crate's. The Unix arm
-    /// has every level print its own pid; the Windows arm reads each level's
-    /// child out of `Win32_Process`, for the reason [`console_tree`] gives.
+    /// under that — built out of what each platform has and reported by the tree
+    /// itself rather than read through the crate's oracle. The Unix arm has
+    /// every level print its own pid; the Windows arm has every level print the
+    /// pid of the one it started, for the reason [`console_tree_of`] gives.
     ///
     /// The root is this process's own child, so the fixture can reap it. What is
     /// below it is not, and that is what makes a liveness probe on those pids
@@ -2519,23 +2504,11 @@ while ($true) {{
     }
 
     /// The same tree, made of the console processes this platform builds one out
-    /// of: `cmd` starting `cmd` starting `ping`.
+    /// of: `powershell` starting `powershell` starting `ping`, each level
+    /// reporting the pid of the one it started.
     #[cfg(windows)]
     fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
-        let root = std::process::Command::new("cmd")
-            .args(["/C", "cmd /C ping -n 120 127.0.0.1"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("a process tree");
-        // Each level asked for by the image it runs, for the reason
-        // [`SHELL_IMAGE`] gives.
-        let below = awaited_child_of(root.id(), SHELL_IMAGE)
-            .and_then(|middle| awaited_child_of(middle, LEAF_IMAGE).map(|leaf| vec![middle, leaf]));
-        match below {
-            Ok(below) => (root, below),
-            Err(why) => abandon(root, &why),
-        }
+        console_tree_of(2)
     }
 
     /// This host's own listing descends from a real tree's root to its leaf.
