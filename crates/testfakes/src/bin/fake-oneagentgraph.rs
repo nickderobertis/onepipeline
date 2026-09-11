@@ -387,6 +387,26 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // one to produce *nothing* is a scenario this suite needs, so the
         // announcement belongs to the launched graph rather than to every run.
         announce(args, &graph);
+        // A member of the observer dying — the pacemaker, every interval, on an
+        // identity that ran and produced nothing usable — said the way the real
+        // graph says it: a `member-died` on this stream, and the graph going on
+        // watching. Scripted `observer.died-as` on `<key>.died-as`'s grammar,
+        // with `observer.refused` on `<key>.refused`'s naming what its chain
+        // stepped past first. The member is the one the graph this double was
+        // launched with declares on a schedule, read off that document; it is
+        // single-sided, and publishes no invocation, exactly as the real one
+        // does not.
+        if let Some(script) = fake::node_script(dir, "observer", "died-as") {
+            let pacemaker = fake::scheduled_member(&graph).unwrap_or_else(|why| fake::fail(&why));
+            let mut labels = stamped(args);
+            labels.insert("member".to_string(), pacemaker.into());
+            if let Some(refused) = fake::node_script(dir, "observer", "refused") {
+                refuse_candidates_under(&labels, &refused);
+            }
+            if publish_deaths(&labels, &script).is_none() {
+                fake::fail("an `observer.died-as` script names no death at all");
+            }
+        }
         let watched = fake::observe(dir);
         if watched != ExitCode::SUCCESS {
             return watched;
@@ -566,6 +586,26 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // A worker that commits its work and lands it on the base **itself**, with
+    // git rather than through the sibling — so the session's branch is left
+    // level with a base that already carries what this dispatch committed. The
+    // third of the three situations a level branch can be in, and the one an
+    // ahead-count alone reads as an empty branch. Scripted `<key>.lands-on-base`
+    // holding the base branch's name, for the reason `<key>.publishes` is: it is
+    // the *agent's* behaviour.
+    if let Some(base) = fake::node_script(dir, &key, "lands-on-base") {
+        commit_and_land_on_base(args, &fake::segment(&key), base.trim());
+    }
+
+    // A worker that brings its branch up to a base that moved under it and
+    // commits nothing: `HEAD` moves onto a commit the base already had, which is
+    // the shape a read that took movement for a commit mistook for the case
+    // above. Scripted `<key>.catches-up-with-base` holding the base branch's
+    // name.
+    if let Some(base) = fake::node_script(dir, &key, "catches-up-with-base") {
+        catch_up_with_base(args, base.trim());
+    }
+
     // The same, except that every dispatch writes something the one before it
     // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
     // one fixed body leaves a continued branch with nothing to commit, which is a
@@ -715,6 +755,22 @@ fn died(reason: &str) -> ExitCode {
 /// [`Cause`]: oneagentgraph::event::Cause
 fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> ExitCode {
     let labels = member_labels(args, node, step);
+    let Some(said) = publish_deaths(&labels, script) else {
+        fake::fail("a `.died-as` script names no death at all");
+    };
+    died(&said)
+}
+
+/// Publish one `member-died` per line of a `died-as` script under these labels,
+/// answering the first death's detail — the sentence the process then exits on.
+///
+/// Shared by a node's dispatch and the observer graph, because the envelope is
+/// the same one and the labels are the only thing that differs: a dispatch's
+/// name its node, the observer's name none.
+fn publish_deaths(
+    labels: &serde_json::Map<String, serde_json::Value>,
+    script: &str,
+) -> Option<String> {
     let mut first = None;
     for (offset, line) in script
         .lines()
@@ -785,10 +841,7 @@ fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> Exi
         );
         first.get_or_insert(detail);
     }
-    let Some(said) = first else {
-        fake::fail("a `.died-as` script names no death at all");
-    };
-    died(&said)
+    first
 }
 
 /// Publish one `fallback-advanced` per candidate an identity chain stepped past.
@@ -798,7 +851,12 @@ fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> Exi
 /// for a payload nothing produces, and the whole point of the journey it serves
 /// is that a consumer reads the identity and the side off the real one.
 fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &str) {
-    let labels = member_labels(args, node, step);
+    refuse_candidates_under(&member_labels(args, node, step), script);
+}
+
+/// The same, under labels a caller composed: a node's dispatch names its node,
+/// the observer graph names none.
+fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, script: &str) {
     // Above every seq `emit` uses — the turn's own envelopes and one per
     // invocation it published — because these are written after it: a
     // producer's seq is its own statement of the order it wrote things in.
@@ -985,6 +1043,75 @@ fn commit_on_a_branch_of_its_own(args: &[String], branch: &str) {
         // the branch the publication is about to read.
         vec!["checkout", "-"],
     ] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
+/// Commit onto the session's branch and push that commit straight to its base.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms.
+/// The push goes to the clone's own `origin` — which for a session is the
+/// repository's origin, on this disk — and the fetch after it is what brings the
+/// clone's remote-tracking copy of the base up to the commit, so the branch reads
+/// as zero commits ahead of a base that now carries its work.
+fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
+    let worktree = session_worktree(args, "landing a dispatch's commit on its base");
+    let path = worktree.join(format!("{name}.md"));
+    if let Err(error) = std::fs::write(&path, "the worker landed this itself\n") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    let onto = format!("HEAD:refs/heads/{base}");
+    for argv in [
+        vec!["add", "-A"],
+        vec!["commit", "-m", "chore: work the worker landed itself"],
+        vec!["push", "origin", &onto],
+        vec!["fetch", "origin"],
+    ] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
+/// Fast-forward the session's branch onto its base as the origin now has it.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms,
+/// and deliberately **no commit**: the fetch brings the base's new commit into
+/// the clone, and the fast-forward moves `HEAD` onto it.
+fn catch_up_with_base(args: &[String], base: &str) {
+    let worktree = session_worktree(args, "catching a dispatch's branch up with its base");
+    let onto = format!("origin/{base}");
+    for argv in [vec!["fetch", "origin"], vec!["merge", "--ff-only", &onto]] {
         let ran = std::process::Command::new("git")
             .args(&argv)
             .current_dir(&worktree)

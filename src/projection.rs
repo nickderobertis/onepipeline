@@ -856,6 +856,9 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 // The whole record, so the dispatch a cancellation was waiting
                 // on is not still awaited by a node that has settled.
                 state.recorded.insert(node.clone(), Recorded::At(status));
+                if settlement_ends_the_park(status) {
+                    end_the_park(state, node);
+                }
             }
             if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
                 state.outcomes.insert(node.clone(), outcome.to_string());
@@ -1285,6 +1288,43 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
     node.branch = Some(branch);
 }
 
+/// Whether a node settling at this status ends the park it was under.
+///
+/// A park is the planner's own idle, and [`graph::derive`] reads it ahead of every
+/// recorded status. The two outcomes a `settle` can name end it, whichever path
+/// recorded them: a node whose outcome is recorded is idle by nobody's decision,
+/// and one left parked reads unfinished for the rest of the run.
+///
+/// `cancelled` is **not** an outcome here, and deliberately. `cancel` exists to
+/// park a node until its manager says otherwise, and `requeue` is that node's
+/// only exit; the `cancelled` a stopped dispatch settles is the park's own
+/// effect, not a decision anybody took about the node. Cleared on it, a parked
+/// node would un-park itself — the one thing a park must never do — and the
+/// cancel/requeue pair would be gone. The same holds one level up: a run holding
+/// a cancelled node is waiting on a decision, and it does not report itself
+/// complete until the manager requeues or drops the node. That is correct
+/// rather than a gap, and [`graph::state_of`] reads a park as `waiting` for it.
+/// A human step's `waiting` and a draft's `complete-but-draft` are not outcomes
+/// either.
+fn settlement_ends_the_park(status: NodeStatus) -> bool {
+    matches!(status, NodeStatus::Done | NodeStatus::Failed)
+}
+
+/// Take a settled node out of its park, on the graph and in the record of who
+/// parked it.
+///
+/// Both, because they are read by different questions: the graph's flag is what
+/// [`graph::derive`] holds the node out of every later dispatch by, and the
+/// park's record is what a later `cancel` or `requeue` of the same node is judged
+/// against — a park nothing cleared would tell a monitor that re-parks a settled
+/// node it was undoing the planner's decision.
+fn end_the_park(state: &mut RunState, node: &str) {
+    if let Some(parked) = state.graph.get_mut(node) {
+        parked.parked = false;
+    }
+    state.parks.remove(node);
+}
+
 /// Fold one committed command's operations into the run's state.
 ///
 /// The single derivation of what an accepted command *did*, so the reconciler's
@@ -1366,6 +1406,9 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 state
                     .outcomes
                     .insert(node.clone(), journal::SETTLED_FROM_EVIDENCE.to_string());
+                // Both outcomes a settle can name end the park; the graph's own
+                // flag went with `edits::apply` above.
+                end_the_park(state, node);
             }
             // Only a note that is still owed to a dispatch. One the
             // running turn already took has been read, and holding it
@@ -3293,6 +3336,121 @@ mod tests {
             state.recorded["sweep"],
             Recorded::At(NodeStatus::Cancelled),
             "the settlement left the node still waiting on the dispatch that settled it"
+        );
+    }
+
+    /// A settlement ends the park it was made under, whichever path recorded
+    /// it, and the one settlement a park itself produces does not.
+    ///
+    /// Every branch of [`settlement_ends_the_park`] is driven here through the
+    /// real fold, and both records it clears are read back — the graph's flag,
+    /// which `graph::derive` holds a node out of every dispatch by, and the park's
+    /// own record, which a later `cancel` or `requeue` is judged against.
+    #[test]
+    fn a_settlement_ends_the_park_and_a_cancellation_keeps_it() {
+        let plan = plan_of_nodes(vec![agent("sweep", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let park = pipeline(
+            journal::PipelineKind::EditCommitted,
+            1,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NodeParked {
+                    node: "sweep".into(),
+                    by: crate::channel::Author::Monitor,
+                    reason: Some("taking the deliverable over by hand".into())
+                }]),
+            )],
+        );
+        let settled_by_the_run = |status: &str| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                2,
+                Some("sweep"),
+                &[("status", json!(status))],
+            )
+        };
+        let parked_after = |state: &RunState| {
+            (
+                state.graph.get("sweep").expect("sweep").parked,
+                state.parks.contains_key("sweep"),
+                state.recorded["sweep"].status(),
+            )
+        };
+
+        // The run's own settlement of a dispatch, at each outcome a `settle`
+        // can name: the park is over on both records.
+        for outcome in ["done", "failed"] {
+            let state = fold(&[started.clone(), park.clone(), settled_by_the_run(outcome)]);
+            assert_eq!(
+                parked_after(&state),
+                (false, false, NodeStatus::parse(outcome).expect("a status")),
+                "a node that settled {outcome} is still parked"
+            );
+        }
+        // The settlement a cancel of a running node produces is the park's own
+        // effect, and the node goes on reading parked: `requeue` is the way back.
+        let state = fold(&[
+            started.clone(),
+            park.clone(),
+            settled_by_the_run("cancelled"),
+        ]);
+        assert_eq!(
+            parked_after(&state),
+            (true, true, NodeStatus::Cancelled),
+            "a cancellation ended the park that made it"
+        );
+        // And the run holding it is waiting on the manager, not complete: the
+        // derived status is the park, and a park is not a settled outcome.
+        let derived = crate::graph::derive(&state.graph, &state.settled(), &|_| None);
+        assert_eq!(derived["sweep"], NodeStatus::Parked);
+        assert_eq!(
+            crate::graph::state_of(&derived),
+            crate::graph::GraphState::Waiting,
+            "a run holding a deliberately parked node reported itself complete"
+        );
+        // Whereas the same run whose node settled done is complete.
+        let state = fold(&[started.clone(), park.clone(), settled_by_the_run("done")]);
+        let derived = crate::graph::derive(&state.graph, &state.settled(), &|_| None);
+        assert_eq!(
+            crate::graph::state_of(&derived),
+            crate::graph::GraphState::Complete
+        );
+        // And a human step held at `waiting` is not an outcome.
+        let state = fold(&[started.clone(), park.clone(), settled_by_the_run("waiting")]);
+        assert!(parked_after(&state).0, "a wait ended a park");
+
+        // A manager's settlement from evidence, folded through the edit rather
+        // than through the run's record: the same two records clear.
+        let settled_from_evidence = pipeline(
+            journal::PipelineKind::EditCommitted,
+            2,
+            None,
+            &[(
+                "operations",
+                json!([Operation::SettledFromEvidence {
+                    node: "sweep".into(),
+                    outcome: crate::channel::SettleOutcome::Done,
+                    evidence: "the comment is on the issue".into()
+                }]),
+            )],
+        );
+        let state = fold(&[started, park, settled_from_evidence]);
+        assert_eq!(
+            parked_after(&state),
+            (false, false, NodeStatus::Done),
+            "a node settled from evidence is still parked"
+        );
+        assert_eq!(
+            crate::graph::derive(&state.graph, &state.settled(), &|_| None)["sweep"],
+            NodeStatus::Done,
+            "the derived status still reads the park ahead of the settlement"
         );
     }
 

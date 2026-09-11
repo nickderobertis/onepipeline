@@ -193,6 +193,10 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         world.root.join(worker_config),
     )
     .expect("the relative graphs' harness config is written");
+    // The real sibling's worker is the harness double, and it writes, so the
+    // workstream publishes rather than failing on a branch its steps left level
+    // with the base.
+    world.script("harness.work", "the engineer wrote this");
     let node = json!({
         "id": "service",
         "repo": "service",

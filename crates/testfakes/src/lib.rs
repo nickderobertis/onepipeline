@@ -783,6 +783,32 @@ fn judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), Stri
     Ok((program, arguments.iter().map(|part| expand(part)).collect()))
 }
 
+/// The member one graph document declares on a schedule — its pacemaker — or
+/// why it declares none.
+///
+/// Read through `oneagentgraph`'s own config types, as [`declared_judge_command`]
+/// reads the judge, so the name this double dies under is the one the graph it
+/// was launched with declares rather than a copy of the shipped graph's kept
+/// here: a graph that renamed its pacemaker would die under the new name.
+pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
+    use oneagentgraph::config::Member;
+
+    let text = std::fs::read_to_string(graph)
+        .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
+    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+        .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
+    oneagentgraph::config::validate(&config)
+        .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
+    config
+        .members
+        .iter()
+        .find_map(|(name, member)| match member {
+            Member::Oneharness(member) if member.schedule.is_some() => Some(name.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| format!("{graph} declares no member on a schedule"))
+}
+
 /// The command one graph document declares a command judge with, or why it
 /// declares none this double can run.
 ///
