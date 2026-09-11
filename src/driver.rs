@@ -894,15 +894,55 @@ fn keep_the_run_watched(
     let Some(observer) = observer else {
         return;
     };
+    // A retained driver's observer logs rather than relays, so what it says
+    // reaches no reader but this one. Its log is read here for the one thing a
+    // supervisor has to be told out of it — a member whose identity chain
+    // stopped — which for a pacemaker that dies every interval on one identity
+    // is otherwise a payload repeated in a file nobody opens. A raise the ledger
+    // refuses is said on this driver's own log rather than ending the watch:
+    // the run is still being driven, and an unwatched run is the worse failure.
+    let mut journal = Journal::open(watch.paths);
+    let mut chains = engine::ChainRecords::default();
     while driving.load(Ordering::Acquire) {
+        for envelope in observer.logged_envelopes() {
+            if let Err(error) =
+                report_a_stopped_chain(watch.paths, &mut journal, &mut chains, &envelope)
+            {
+                eprintln!(
+                    "onepipeline: cannot raise a finding about the observer of '{}': {error}",
+                    watch.paths.run
+                );
+            }
+        }
         if observer.has_exited() {
             observer_stopped_watching(&watch.paths.run);
             if watch.restart(observer).is_none() {
                 return;
             }
+            // A replacement is a new chain: what the one that died stepped past
+            // says nothing about what this one will.
+            chains = engine::ChainRecords::default();
         }
         std::thread::sleep(ATTACH_POLL);
     }
+}
+
+/// Raise the finding an observer envelope warrants, if it warrants one.
+///
+/// The observer's members belong to no node, so what is raised names the run's
+/// observer graph and holds no workstream. Every other envelope folds into the
+/// chain records and raises nothing.
+fn report_a_stopped_chain(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    chains: &mut engine::ChainRecords,
+    envelope: &crate::event::Envelope,
+) -> Result<()> {
+    chains.read(envelope);
+    if let Some(stopped) = chains.stopped_by(envelope, None) {
+        engine::raise(paths, journal, engine::chain_stopped_finding(&stopped))?;
+    }
+    Ok(())
 }
 
 /// What the driver says on its own log when the graph watching the run stops.
@@ -1240,6 +1280,10 @@ fn attach(
     let mut reported = 0usize;
     let mut observer_gone = false;
     let mut journal = Journal::open(paths);
+    // What the observer's stream says about its members' identity chains, for
+    // the one death that is raised rather than only relayed. See
+    // [`report_a_stopped_chain`].
+    let mut chains = engine::ChainRecords::default();
 
     let driving = paths.clone();
     let engine = std::thread::Builder::new()
@@ -1252,6 +1296,7 @@ fn attach(
         // a later replay see the same stream.
         while let Ok(envelope) = rx.try_recv() {
             journal.relay(&envelope)?;
+            report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
         }
 
         // Asked *before* the state is read, so the two cannot disagree in the
@@ -1296,7 +1341,10 @@ fn attach(
             let deadline = std::time::Instant::now() + DRAIN_GRACE;
             while std::time::Instant::now() < deadline {
                 match rx.recv_timeout(ATTACH_POLL) {
-                    Ok(envelope) => journal.relay(&envelope)?,
+                    Ok(envelope) => {
+                        journal.relay(&envelope)?;
+                        report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }

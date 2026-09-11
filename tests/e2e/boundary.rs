@@ -239,6 +239,98 @@ fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_e
         .out_has("the provider killed the dispatch (quota), so nothing here is the work's fault");
 }
 
+/// A provider failure the producer could not classify is raised to the manager
+/// as a finding naming the candidate the chain stopped at, what it stepped past
+/// and what the candidate said — and fails no node by itself.
+///
+/// A candidate that refuses to run is stepped past, and the producer says so.
+/// A candidate that ran and produced no usable result stops the chain: the
+/// identities behind it are never tried, and the only record was a death whose
+/// cause is `unclassified` and whose detail pointed a reader at a field that
+/// reached no supervisory surface. One pacemaker died that way every interval
+/// for a whole night — 107 deaths across eight runs, three identities behind it
+/// never tried on any of them, every indicator green. Stopping a chain is a
+/// decision a supervisor should see, so it is a finding on the planner channel;
+/// the node settles on the death exactly as it did before, because the finding
+/// is the decision the classifier could not make and not a verdict.
+#[test]
+fn a_provider_failure_nothing_could_classify_raises_a_finding_naming_where_the_chain_stopped() {
+    let world = World::new("boundary-unclassified");
+    // The chain stepped past one candidate that would not run, ran on the next,
+    // and the member died on it with a cause the producer could not name.
+    world.script("build.refused", "- - fake-provider/first auth\n");
+    world.script(
+        "build.died-as",
+        "provider-failure unclassified the harness answered with no usable result; see \
+         `raw_response` on the transcript\n",
+    );
+    let run = settle(&world, "unclassified", vec![agent("build", &[])]);
+
+    let findings: Vec<serde_json::Value> = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "finding")
+        .collect();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let finding = &findings[0]["payload"];
+    assert_eq!(finding["blocking"], false, "{finding}");
+    assert_eq!(findings[0]["labels"]["node"], "build", "{finding}");
+    let message = finding["message"]
+        .as_str()
+        .expect("a finding says something");
+    for named in [
+        "node 'build'",
+        // The candidate the chain stopped at: the identity the default turn ran on.
+        "stopped at fake-provider/claude-code",
+        "no identity behind that candidate was tried",
+        "stepped past: fake-provider/first [auth]",
+        "detail: the harness answered with no usable result; see `raw_response` on the \
+         transcript",
+        "Nothing was failed on this",
+    ] {
+        assert!(
+            message.contains(named),
+            "the finding does not say {named:?}:\n{message}"
+        );
+    }
+
+    // And the node settled as it always has on a provider death: the finding
+    // fails nothing and changes nothing about the settlement.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["outcome"], "provider-failed", "{node}");
+    assert_eq!(node["cause"], "unclassified", "{node}");
+    // The manager reads it where every finding is read.
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("stopped at fake-provider/claude-code");
+}
+
+/// A classified provider death raises nothing: the chain moved on, or it stopped
+/// on a cause a supervisor can already read off the settlement.
+#[test]
+fn a_provider_failure_the_producer_classified_raises_no_finding() {
+    let world = World::new("boundary-classified");
+    world.script(
+        "build.died-as",
+        "provider-failure quota harness failed (quota)\n",
+    );
+    let run = settle(&world, "classified", vec![agent("build", &[])]);
+    let findings: Vec<serde_json::Value> = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "finding")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "a classified death was raised as a stopped chain: {findings:?}"
+    );
+    assert_eq!(
+        world.run_json(&run, "result.json")["nodes"][0]["cause"],
+        "quota"
+    );
+}
+
 /// The same failure with a verdict of the agent's own settles exactly as it did.
 ///
 /// The pair is the point: a word that is *distinct* is only distinct if the

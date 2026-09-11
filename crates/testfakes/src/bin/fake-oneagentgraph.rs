@@ -387,6 +387,29 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // one to produce *nothing* is a scenario this suite needs, so the
         // announcement belongs to the launched graph rather than to every run.
         announce(args, &graph);
+        // A member of the observer dying — the pacemaker, every interval, on an
+        // identity that ran and produced nothing usable — said the way the real
+        // graph says it: a `member-died` on this stream, and the graph going on
+        // watching. Scripted `observer.died-as` on `<key>.died-as`'s grammar,
+        // with `observer.served` naming the identity its turn ran on. The
+        // member is the shipped pacemaker's own name.
+        if let Some(script) = fake::node_script(dir, "observer", "died-as") {
+            let mut labels = stamped(args);
+            labels.insert("member".to_string(), "check-in".into());
+            if let Some(identity) = fake::node_script(dir, "observer", "served") {
+                publish_oneharness_session(
+                    &labels,
+                    "observer",
+                    0,
+                    &(
+                        oneagentgraph::event::Role::Agent,
+                        1,
+                        identity.trim().to_owned(),
+                    ),
+                );
+            }
+            publish_deaths(&labels, &script);
+        }
         let watched = fake::observe(dir);
         if watched != ExitCode::SUCCESS {
             return watched;
@@ -559,6 +582,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // A worker that commits its work and lands it on the base **itself**, with
+    // git rather than through the sibling — so the session's branch is left
+    // level with a base that already carries what this dispatch committed. The
+    // third of the three situations a level branch can be in, and the one an
+    // ahead-count alone reads as an empty branch. Scripted `<key>.lands-on-base`
+    // holding the base branch's name, for the reason `<key>.publishes` is: it is
+    // the *agent's* behaviour.
+    if let Some(base) = fake::node_script(dir, &key, "lands-on-base") {
+        commit_and_land_on_base(args, &fake::segment(&key), base.trim());
+    }
+
     // The same, except that every dispatch writes something the one before it
     // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
     // one fixed body leaves a continued branch with nothing to commit, which is a
@@ -708,6 +742,22 @@ fn died(reason: &str) -> ExitCode {
 /// [`Cause`]: oneagentgraph::event::Cause
 fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> ExitCode {
     let labels = member_labels(args, node, step);
+    let Some(said) = publish_deaths(&labels, script) else {
+        fake::fail("a `.died-as` script names no death at all");
+    };
+    died(&said)
+}
+
+/// Publish one `member-died` per line of a `died-as` script under these labels,
+/// answering the first death's detail — the sentence the process then exits on.
+///
+/// Shared by a node's dispatch and the observer graph, because the envelope is
+/// the same one and the labels are the only thing that differs: a dispatch's
+/// name its node, the observer's name none.
+fn publish_deaths(
+    labels: &serde_json::Map<String, serde_json::Value>,
+    script: &str,
+) -> Option<String> {
     let mut first = None;
     for (offset, line) in script
         .lines()
@@ -778,10 +828,7 @@ fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> Exi
         );
         first.get_or_insert(detail);
     }
-    let Some(said) = first else {
-        fake::fail("a `.died-as` script names no death at all");
-    };
-    died(&said)
+    first
 }
 
 /// Publish one `fallback-advanced` per candidate an identity chain stepped past.
@@ -965,6 +1012,46 @@ fn commit_on_a_branch_of_its_own(args: &[String], branch: &str) {
         // reachable from a ref the session's branch does not carry — rather than
         // the branch the publication is about to read.
         vec!["checkout", "-"],
+    ] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
+/// Commit onto the session's branch and push that commit straight to its base.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms.
+/// The push goes to the clone's own `origin` — which for a session is the
+/// repository's origin, on this disk — and the fetch after it is what brings the
+/// clone's remote-tracking copy of the base up to the commit, so the branch reads
+/// as zero commits ahead of a base that now carries its work.
+fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
+    let worktree = session_worktree(args, "landing a dispatch's commit on its base");
+    let path = worktree.join(format!("{name}.md"));
+    if let Err(error) = std::fs::write(&path, "the worker landed this itself\n") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    let onto = format!("HEAD:refs/heads/{base}");
+    for argv in [
+        vec!["add", "-A"],
+        vec!["commit", "-m", "chore: work the worker landed itself"],
+        vec!["push", "origin", &onto],
+        vec!["fetch", "origin"],
     ] {
         let ran = std::process::Command::new("git")
             .args(&argv)

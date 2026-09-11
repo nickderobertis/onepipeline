@@ -3281,54 +3281,149 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     world.run(&["results", &run]).exited(0).out_has(&published);
 }
 
-/// A publication that had nothing to publish.
+/// A worker asked for a change that produced none leaves an empty branch, and the
+/// node fails naming it rather than settling `done` under the no-change word.
 ///
-/// `onevcs` reports `PublishOutcome::NothingToPublish` on a branch its base
-/// already carries: it writes no push, no change request, and no merge. Read as
-/// a success with no outcome, this crate settled it as a bare "published" — so a
-/// node whose worker wrote nothing reported as one that landed work, and the
-/// only way to tell was to notice that the merged store held no publication at
-/// all. The real-everything smoke is where that turned up, on the first run that
-/// reached a real `onevcs` with a clean tree.
+/// The modelling error this makes visible: a node whose job was an external side
+/// effect needed its checkout, built and probed against it, and committed
+/// nothing — its task said so outright, and its plan did not. The engine went on
+/// to draft a change request for a branch zero commits ahead of its base, and
+/// then settled the node `done` with `no-changes`, the word the documentation
+/// reserves for a node that **declared** it expects no diff and settled without
+/// a dispatch — so the omission was invisible in every view, and the only thing
+/// between such a plan and an empty change request was somebody noticing.
+///
+/// Now nothing is drafted and nothing is published for a branch level with its
+/// base, and with the declaration absent and this dispatch having committed
+/// nothing the node settles `failed` under a word of its own, naming the branch
+/// and what it was measured against, so a manager decides between the two
+/// repairs the detail offers. The sibling's own `NothingToPublish` is untouched:
+/// a branch that *is* ahead and whose tree the base already carries still reaches
+/// it, and `a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes`
+/// holds the other level case.
 #[test]
-fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_landed() {
+fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
     let world = World::new("lifecycle-nothing");
     published_locally(&world);
     // Nothing is scripted for the worker to write, so the session's branch
-    // carries exactly what its base does.
+    // carries exactly what its base does — and the node declares nothing about
+    // expecting that.
     let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
 
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    // Done: nothing failed, and there was nothing to do.
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    assert_eq!(node["change_url"], json!(null), "{node}");
+    // No change of this node's exists, so it claims no landing either way.
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let branch = node["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement names no branch: {node}"))
+        .to_owned();
+
+    // Neither a drafting dispatch nor a publication was spent on it: the only
+    // dispatch is the worker's own, and the sibling recorded no publication.
+    let dispatched: Vec<serde_json::Value> = world
+        .events_of(&run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "service")
+        .collect();
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a level branch was published anyway ({spent}): {kinds:?}"
+        );
+    }
+    assert!(
+        world.events_of(&run, "body-not-drafted").is_empty()
+            && !world
+                .journal(&run)
+                .iter()
+                .any(|event| event["labels"]["persona"] == "pr-author"),
+        "a drafting dispatch was spent on a level branch:\n{}",
+        why(&world, &run)
+    );
+
+    // The detail says what was compared and what to do about it, and `results`
+    // shows it: the word alone would send a reader to look for a diff.
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    for claim in [
+        &format!("compared against origin/main: {branch} carries nothing it does not"),
+        "committed nothing",
+        "does not declare `expects_no_diff`",
+        "retry the node with `expects_no_diff: true`",
+    ] {
+        assert!(
+            detail.contains(claim),
+            "the settlement does not say '{claim}': {detail}"
+        );
+    }
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("empty-branch")
+        .out_has("compared against origin/main");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
+}
+
+/// A worker that landed its commit on the base itself leaves a branch level with
+/// a base that already carries it, which is the no-change success and not the
+/// empty branch.
+///
+/// The case that decides the split is on the commit rather than on the count.
+/// This branch is zero commits ahead exactly as an empty one is, and split on the
+/// count alone it would fail as one — while what happened is the second reading
+/// of `no-changes` this crate documents, a publication whose base already carried
+/// the branch. Nothing is drafted or published for it either: there is nothing
+/// the base does not have.
+#[test]
+fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+    let world = World::new("lifecycle-landeditself");
+    let repo = published_locally(&world);
+    // The worker commits and pushes straight to `main` with git, then fetches, so
+    // the session's clone reads its branch as an ancestor of the base.
+    world.script("service.lands-on-base", "main");
+    let run = settle(&world, "landeditself", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
     assert_eq!(node["change_url"], json!(null), "{node}");
-    // And it claims no landing either way. There was no change of this node's,
-    // so "landed" would say work reached the base that never existed and "not
-    // landed" would send a planner looking for a change request nobody opened.
     assert_eq!(node["landing"], json!(null), "{node}");
-    // The sibling's own record of the publication claims nothing either.
-    let published = world.events_of(&run, "published");
-    assert_eq!(published.len(), 1, "{}", why(&world, &run));
+    // The work really is on the base, put there by the worker and not by a
+    // publication of this crate's.
     assert_eq!(
-        published[0]["payload"]["landing"],
-        json!(null),
-        "{}",
-        published[0]
+        repo.base_file("service.md").as_deref(),
+        Some("the worker landed this itself\n"),
+        "the worker's commit never reached the base"
     );
-    // And it says what it compared against, which `no-changes` alone does not:
-    // the same word covers a worker that wrote nothing and a branch measured
-    // against itself, and only the ref tells them apart.
-    let results = world.run(&["results", &run]);
-    results
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a branch the base already carried was published anyway ({spent}): {kinds:?}"
+        );
+    }
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("compared against origin/main"), "{detail}");
+    assert!(
+        detail.contains("the base already carries what this dispatch committed"),
+        "{detail}"
+    );
+    world
+        .run(&["results", &run])
         .exited(0)
         .out_has("no-changes")
-        .out_has("compared against main");
-    assert!(
-        !results.stdout.contains("landed"),
-        "a node with nothing to publish is reported as one whose change did or did not land:\n{}",
-        results.stdout
-    );
+        .out_has("compared against origin/main");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]

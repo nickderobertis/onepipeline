@@ -747,6 +747,116 @@ pub fn branch_head_in(token: &SessionToken) -> Option<String> {
     }
 }
 
+/// A session's branch found **level** with its base: every commit on it is one
+/// the base already carries, and the worktree holds nothing to commit.
+///
+/// Read off the worktree the session opened, *before* a publication is spent on
+/// it — the drafting dispatch and the push both — and split on the one fact the
+/// ahead-count alone cannot say: whether the branch has moved since the session
+/// opened it. Two situations are zero commits ahead and the two are opposite
+/// endings. A dispatch that wrote no commit left an empty branch, and a node that
+/// did not declare it expected that has a modelling error nobody would otherwise
+/// see; a dispatch that wrote a commit the base then took — an agent that pushed
+/// to the base itself, a continued branch whose earlier work the session's own
+/// integration found already landed — is the second reading `engine::NO_CHANGES`
+/// documents, a legitimate success. `crate::lifecycle` settles the two apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelBranch {
+    /// The branch the worktree has checked out.
+    pub branch: String,
+    /// What it was measured against: the base's remote-tracking copy where the
+    /// clone carries one, and the local base otherwise — the same ref the
+    /// sibling's own publication compares against.
+    pub base: String,
+    /// Whether the branch stands somewhere other than where this session opened
+    /// it. `true` is a commit put on it since — by the dispatch, or by the
+    /// session's own integration of the base — that the base now also carries.
+    pub moved: bool,
+}
+
+/// Where a session's branch stands against its base, asked of the worktree
+/// `onevcs` opened for it.
+///
+/// `Some` only for a branch this read can prove level: a **clean** worktree —
+/// the sibling commits whatever a worktree holds at publication, so a dirty tree
+/// is a commit the branch is about to gain — whose head is an ancestor of the
+/// base, with every read that decides it answered. Anything else is `None`, and
+/// the caller publishes exactly as it always has: a read git would not answer is
+/// not evidence about the branch, and settling a node on it either way would be
+/// a report nobody could stand behind.
+///
+/// The commit the session opened the worktree at is the oldest entry of the
+/// worktree's own `HEAD` reflog, which git writes when the worktree is added and
+/// which nothing here has to guess at. `onevcs` cuts every session its own
+/// non-bare clone and adds the worktree fresh, so that entry is the open.
+///
+/// This crate runs git itself here, which `docs/contract-divergences.md` entry 35
+/// records it otherwise does not, and for the reason that entry gives for the
+/// place it *can*: inside a session the worktree and the base are the sibling's
+/// own record, named by [`working_session`], so there is no repository to guess
+/// at. What the sibling offers is the same comparison at publication, answered as
+/// `PublishOutcome::NothingToPublish` after a drafting dispatch has been spent
+/// reaching it — and no read of a session's standing before that.
+pub fn level_with_base(worktree: &std::path::Path, base: &str) -> Option<LevelBranch> {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| {
+                eprintln!(
+                    "onepipeline: cannot run `git {}` in {}: {error}",
+                    args.join(" "),
+                    worktree.display()
+                );
+            })
+            .ok()?;
+        if !output.status.success() {
+            eprintln!(
+                "onepipeline: `git {}` in {} exited {}: {}",
+                args.join(" "),
+                worktree.display(),
+                output.status.code().unwrap_or(-1),
+                crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
+            );
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    if !git(&["status", "--porcelain"])?.is_empty() {
+        return None;
+    }
+    let remote = format!("origin/{base}");
+    // Answered with nothing rather than with a failure for a ref that is not
+    // there, which is the ordinary case for a repository with no remote.
+    let carried = git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        &format!("refs/remotes/{remote}"),
+    ])?;
+    let compared = if carried.is_empty() {
+        base.to_owned()
+    } else {
+        remote
+    };
+    let ahead = git(&["rev-list", "--count", &format!("{compared}..HEAD")])?;
+    if ahead.parse::<u64>().ok()? != 0 {
+        return None;
+    }
+    let head = git(&["rev-parse", "HEAD"])?;
+    let opened_at = git(&["log", "-g", "--format=%H", "HEAD"])?
+        .lines()
+        .last()
+        .map(str::to_owned)?;
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    Some(LevelBranch {
+        branch,
+        base: compared,
+        moved: head != opened_at,
+    })
+}
+
 /// A commit value this crate will carry.
 ///
 /// A newtype and never a bare `String`, because [`usable`] is what stands

@@ -512,6 +512,9 @@ pub(crate) enum Message {
     /// One acceptance criterion was compared against the branch its node is
     /// settling on.
     CriterionChecked(Box<CriterionChecked>),
+    /// A dispatch's identity chain stopped at a candidate that ran and produced
+    /// no usable result.
+    ChainStopped(Box<ChainStopped>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
 }
@@ -1317,6 +1320,12 @@ fn converge(
                     if let crate::criteria::Answer::Mismatch { holds } = &checked.answer {
                         raise(paths, journal, criterion_finding(&checked, holds))?;
                     }
+                }
+                // A decision a supervisor should see rather than a side effect of a
+                // classifier that could not name a cause. Raised beside whatever the
+                // dispatch goes on to settle as, and changing none of it.
+                Message::ChainStopped(stopped) => {
+                    raise(paths, journal, chain_stopped_finding(&stopped))?;
                 }
                 Message::Settled(settlement) => {
                     in_flight.remove(&settlement.node);
@@ -3551,6 +3560,9 @@ pub(crate) fn drain(
     // What the producer published about the turns its members ran, which is what
     // a death is reconciled against before it is acted on.
     let mut turns = TurnRecords::default();
+    // And about the identity chains they ran on, which is what a death that
+    // stopped one is raised with.
+    let mut chains = ChainRecords::default();
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
     loop {
@@ -3563,6 +3575,13 @@ pub(crate) fn drain(
                     }
                 }
                 turns.read(&envelope);
+                chains.read(&envelope);
+                // Every such death, not only the first: each one is a chain
+                // that stopped, and the settlement below is what reads only the
+                // first.
+                if let Some(stopped) = chains.stopped_by(&envelope, Some(node)) {
+                    let _ = tx.send(Message::ChainStopped(Box::new(stopped)));
+                }
                 if matches!(death, Death::Unstated) {
                     if let Some(published) = MemberDeath::of(&envelope) {
                         // The turn record arrives before the death it is about —
@@ -3800,6 +3819,22 @@ pub const INVALID_NODE: &str = "invalid-node";
 /// names it as such rather than letting the next sharing in unnoticed.
 pub const NO_CHANGES: &str = "no-changes";
 
+/// A lifecycle node whose dispatch left its branch level with its base, having
+/// committed nothing to it, with no declaration that it expected to.
+///
+/// The situation [`NO_CHANGES`] does **not** cover, and the one it used to hide.
+/// That word has two readings and both are successes: a node that declared it
+/// expects no diff, and a publication whose base already carried the branch. A
+/// worker that was asked for a change and produced none is neither, and settling
+/// it `done` under the same word made the modelling error invisible in every
+/// view — the only thing between a plan that omitted the declaration and an
+/// empty change request was somebody noticing. So it fails, naming the empty
+/// branch, and a manager decides: a retry carrying `expects_no_diff` accepts it
+/// as the deterministic success that word is documented for, and an amended task
+/// sends it back to produce a diff. Settled by `crate::lifecycle` from
+/// [`crate::vcs::level_with_base`], before any drafting or publication is spent.
+pub const EMPTY_BRANCH: &str = "empty-branch";
+
 /// The dispatch layer refused **before any work began**.
 ///
 /// The word [`DISPATCH_DIED`] is deliberately not: see the reasoning there.
@@ -3870,6 +3905,12 @@ struct MemberDeath {
     /// producer's unbounded string, and a rule renamed there is a compile error
     /// here rather than a word that silently stops matching.
     from_provider: bool,
+    /// What the cause said, in the producer's words, bounded and on one line.
+    ///
+    /// Carried for the one death that is raised to a supervisor — see
+    /// [`stopped_a_chain`](Self::stopped_a_chain) — because for that death the
+    /// detail is the whole of the evidence: the cause names nothing.
+    detail: String,
 }
 
 impl MemberDeath {
@@ -3908,7 +3949,178 @@ impl MemberDeath {
             cause: cause.to_owned(),
             from_provider: envelope.payload.get("rule").and_then(Value::as_str)
                 == Some(oneagentgraph::member::Rule::ProviderFailure.as_str()),
+            detail: envelope
+                .payload
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(|detail| bounded(&crate::views::one_line(detail)))
+                .unwrap_or_default(),
         })
+    }
+
+    /// Whether this death is the provider rule firing on a cause the producer
+    /// **could not classify** — which is where an identity chain stops.
+    ///
+    /// A candidate that refuses to run is stepped past, and the producer says so
+    /// on a `fallback-advanced` naming the next one. A candidate that ran, spent
+    /// the turn, and produced no usable result is not: the chain stops there,
+    /// the identities behind it are never tried, and the only record is a death
+    /// whose cause is `unclassified` and whose detail points at a field no
+    /// supervisory surface carries. A pacemaker died that way every interval
+    /// for a whole night, on one identity, with the three behind it never tried
+    /// on any run. Stopping a chain is a decision a supervisor should see, so
+    /// this is the death that is raised as a finding rather than only relayed.
+    fn stopped_a_chain(&self) -> bool {
+        self.from_provider && self.cause == oneagentgraph::event::Cause::Unclassified.as_str()
+    }
+}
+
+/// What one producer's stream has said about the identity chains its members
+/// ran on, kept only for the death that stops one.
+///
+/// Two records per member, both read off the producer's own declared payloads
+/// exactly as [`crate::projection`] folds them: the candidates a
+/// `fallback-advanced` said the chain stepped past, with the reason each gave,
+/// and the identity the last `oneharness-session` said actually served a turn.
+/// Together they are what a finding about a stopped chain can name from the
+/// payload the harness supplies today — the candidate it stopped at, the ones it
+/// stepped past to get there, and what the candidate said — and nothing here
+/// invents the rest of the chain, which the producer never states.
+#[derive(Debug, Default)]
+pub(crate) struct ChainRecords {
+    stepped_past: BTreeMap<String, Vec<(String, String)>>,
+    served_by: BTreeMap<String, String>,
+}
+
+impl ChainRecords {
+    /// Fold one relayed envelope in, where it says something about a chain.
+    pub(crate) fn read(&mut self, envelope: &Envelope) {
+        if envelope.source != crate::event::Source::Agentgraph {
+            return;
+        }
+        let Some(member) = member_of(envelope).map(str::to_owned) else {
+            return;
+        };
+        let kind = &envelope.kind.0;
+        if kind == oneagentgraph::event::EventKind::FallbackAdvanced.as_str() {
+            if let Ok(advanced) = serde_json::from_value::<oneagentgraph::event::FallbackAdvanced>(
+                Value::Object(envelope.payload.clone()),
+            ) {
+                self.stepped_past.entry(member).or_default().push((
+                    bounded(&crate::views::one_line(&advanced.identity)),
+                    bounded(&crate::views::one_line(&advanced.reason)),
+                ));
+            }
+        } else if kind == oneagentgraph::event::EventKind::OneharnessSession.as_str() {
+            if let Ok(session) = serde_json::from_value::<oneagentgraph::event::OneharnessSession>(
+                Value::Object(envelope.payload.clone()),
+            ) {
+                self.served_by
+                    .insert(member, bounded(&crate::views::one_line(&session.identity)));
+            }
+        }
+    }
+
+    /// The chain this envelope says stopped, read against what the stream had
+    /// said about it, or `None` for an envelope that is not that death.
+    ///
+    /// `node` is the dispatch's node where the stream is a node's, and `None`
+    /// for the run's observer, whose members belong to no node.
+    pub(crate) fn stopped_by(
+        &self,
+        envelope: &Envelope,
+        node: Option<&str>,
+    ) -> Option<ChainStopped> {
+        let death = MemberDeath::of(envelope)?;
+        if !death.stopped_a_chain() {
+            return None;
+        }
+        let member = member_of(envelope)?.to_owned();
+        Some(ChainStopped {
+            node: node.map(str::to_owned),
+            candidate: self.served_by.get(&member).cloned(),
+            stepped_past: self.stepped_past.get(&member).cloned().unwrap_or_default(),
+            detail: death.detail,
+            member,
+        })
+    }
+}
+
+/// An identity chain that stopped at a candidate which ran and produced no
+/// usable result, as far as the producer's own stream says.
+///
+/// Handed over rather than raised where it is read, for [`UndraftedBody`]'s
+/// reason: the reader is a relay thread, and the run's single writer is where a
+/// surface is queued and journalled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChainStopped {
+    /// The node whose dispatch the chain belonged to; `None` for the observer.
+    pub node: Option<String>,
+    /// The member whose chain it was, as the producer labelled it.
+    pub member: String,
+    /// The identity the stream last said served this member a turn — the one
+    /// the chain stopped at — where the stream named one.
+    pub candidate: Option<String>,
+    /// The candidates the chain stepped past before it, each with its reason.
+    pub stepped_past: Vec<(String, String)>,
+    /// What the death said, which is the whole of the evidence.
+    pub detail: String,
+}
+
+/// The finding a stopped chain raises on the planner channel.
+///
+/// **Non-blocking**, and it fails nothing: where the chain was a node's, the node
+/// settles on the death exactly as it always has, and where it was the
+/// observer's, no node is involved at all. What it puts in front of a supervisor
+/// is the decision the classifier could not make — whether the candidate it
+/// stopped at is one to keep in the chain — with the three things the stream
+/// could say about it: which candidate, what it stepped past to get there, and
+/// what the candidate said.
+pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
+    let whose = match &stopped.node {
+        Some(node) => format!("node '{node}'"),
+        None => "the run's observer graph".to_owned(),
+    };
+    let candidate = match &stopped.candidate {
+        Some(identity) => format!("stopped at {identity}"),
+        None => "stopped at a candidate the stream did not name".to_owned(),
+    };
+    let stepped_past = if stopped.stepped_past.is_empty() {
+        "none".to_owned()
+    } else {
+        stopped
+            .stepped_past
+            .iter()
+            .map(|(identity, reason)| format!("{identity} [{reason}]"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let detail = if stopped.detail.is_empty() {
+        "the death carried no detail".to_owned()
+    } else {
+        stopped.detail.clone()
+    };
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: bounded(&format!(
+            "{whose} (member '{member}'): its identity chain {candidate}, which ran and \
+             produced no usable result. The provider failure could not be classified, so \
+             the chain did not move on and no identity behind that candidate was tried.\n\
+             stepped past: {stepped_past}\n\
+             detail: {detail}\n\
+             Nothing was failed on this: a node settles on its dispatch as it always would, \
+             and the observer is restarted as it always is. It is the decision the \
+             classifier could not make, for you to rule on — whether that candidate is one \
+             to keep in the chain.",
+            member = stopped.member,
+        )),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: stopped.node.clone(),
     }
 }
 
@@ -5498,9 +5710,10 @@ mod tests {
     /// this carries is the other half: a word *added* is a deliberate edit here,
     /// and the gate below is what stops it colliding with a vocabulary an
     /// operator reads through the same views.
-    const SETTLEMENT_OUTCOMES: [&str; 8] = [
+    const SETTLEMENT_OUTCOMES: [&str; 9] = [
         INVALID_NODE,
         NO_CHANGES,
+        EMPTY_BRANCH,
         INFRASTRUCTURE_FAILURE,
         NO_AGENT_PROGRESS,
         TASK_FAILED,
@@ -5664,6 +5877,153 @@ mod tests {
             assert!(
                 MemberDeath::of(&beside).is_none(),
                 "{beside:?} was read as a member this producer said had died"
+            );
+        }
+    }
+
+    /// A chain that stopped is read off the producer's own three payloads —
+    /// the invocation that ran, the candidates stepped past, and the death —
+    /// and the finding names all three; every other death raises nothing.
+    ///
+    /// The end-to-end halves are `boundary`'s two chain journeys and
+    /// `driver`'s detached observer one. What is held here is the reading: the
+    /// payloads go through the sibling's own types, the death has to be the
+    /// provider rule on the one cause that names nothing, and the records are
+    /// kept per member so one member's refusals are not another's.
+    #[test]
+    fn a_stopped_chain_is_read_off_the_producers_own_payloads_and_named_whole() {
+        use crate::event::Source;
+        let relayed = |kind: oneagentgraph::event::EventKind, member: &str, payload: Value| {
+            let mut labels = Labels::default();
+            labels.extra.insert("member".into(), json!(member));
+            Envelope {
+                v: crate::event::ENVELOPE_VERSION,
+                ts: "2026-09-10T00:00:00.000Z".into(),
+                stream: "oneagentgraph-1".into(),
+                seq: 0,
+                source: Source::Agentgraph,
+                kind: crate::event::EventKind(kind.as_str().into()),
+                phase: None,
+                labels,
+                payload: payload.as_object().cloned().expect("an object"),
+                artifacts: Vec::new(),
+            }
+        };
+        let served = |member: &str, identity: &str| {
+            relayed(
+                oneagentgraph::event::EventKind::OneharnessSession,
+                member,
+                serde_json::to_value(oneagentgraph::event::OneharnessSession {
+                    role: oneagentgraph::event::Role::Agent,
+                    turn: 1,
+                    identity: identity.into(),
+                    session_id: None,
+                    history_id: "h".into(),
+                    history_dir: "/h".into(),
+                    history_project: "p".into(),
+                    history_session: "s".into(),
+                })
+                .expect("it serialises"),
+            )
+        };
+        let stepped_past = |member: &str, identity: &str, reason: &str| {
+            relayed(
+                oneagentgraph::event::EventKind::FallbackAdvanced,
+                member,
+                serde_json::to_value(oneagentgraph::event::FallbackAdvanced {
+                    identity: identity.into(),
+                    reason: reason.into(),
+                    role: None,
+                    turn: None,
+                })
+                .expect("it serialises"),
+            )
+        };
+        let died = |member: &str, rule: &str, cause: &str| {
+            relayed(
+                oneagentgraph::event::EventKind::MemberDied,
+                member,
+                json!({"rule": rule, "cause": cause,
+                       "detail": "no usable result;\nsee `raw_response`"}),
+            )
+        };
+
+        let mut chains = ChainRecords::default();
+        for envelope in [
+            stepped_past("check-in", "a/first", "auth"),
+            stepped_past("check-in", "a/second", "quota"),
+            served("check-in", "a/third"),
+            // Another member's chain, which must not be read into this one's.
+            stepped_past("monitor", "m/first", "spawn"),
+        ] {
+            chains.read(&envelope);
+            assert!(
+                chains.stopped_by(&envelope, None).is_none(),
+                "an envelope that is not a death was read as a stopped chain"
+            );
+        }
+        let stopped = chains
+            .stopped_by(
+                &died("check-in", "provider-failure", "unclassified"),
+                Some("build"),
+            )
+            .expect("an unclassified provider death is a chain that stopped");
+        assert_eq!(
+            stopped,
+            ChainStopped {
+                node: Some("build".into()),
+                member: "check-in".into(),
+                candidate: Some("a/third".into()),
+                stepped_past: vec![
+                    ("a/first".into(), "auth".into()),
+                    ("a/second".into(), "quota".into()),
+                ],
+                // One line, as every rendered relayed value is.
+                detail: "no usable result; see `raw_response`".into(),
+            }
+        );
+        let finding = chain_stopped_finding(&stopped);
+        assert_eq!(finding.kind, crate::channel::SurfaceKind::Finding.as_str());
+        assert!(!finding.blocking);
+        assert_eq!(finding.workstream.as_deref(), Some("build"));
+        for named in [
+            "node 'build' (member 'check-in')",
+            "stopped at a/third",
+            "stepped past: a/first [auth], a/second [quota]",
+            "detail: no usable result; see `raw_response`",
+            "Nothing was failed on this",
+        ] {
+            assert!(finding.message.contains(named), "{}", finding.message);
+        }
+        // The observer's: no node, no workstream, and a stream that named no
+        // invocation and stepped past nothing still says what it can.
+        let bare = ChainRecords::default()
+            .stopped_by(&died("check-in", "provider-failure", "unclassified"), None)
+            .expect("a stopped chain nothing else was said about");
+        assert_eq!(bare.candidate, None);
+        assert!(bare.stepped_past.is_empty());
+        let finding = chain_stopped_finding(&bare);
+        assert_eq!(finding.workstream, None);
+        assert!(finding
+            .message
+            .contains("the run's observer graph (member 'check-in')"));
+        assert!(finding
+            .message
+            .contains("stopped at a candidate the stream did not name"));
+        assert!(finding.message.contains("stepped past: none"));
+
+        // Every other death is not a chain that stopped: a classified provider
+        // death, the unclassified cause under another rule, and a cause this
+        // build will not carry at all.
+        for other in [
+            died("check-in", "provider-failure", "quota"),
+            died("check-in", "provider-failure", "other"),
+            died("check-in", "heartbeat", "unclassified"),
+            died("check-in", "provider-failure", "not a cause"),
+        ] {
+            assert!(
+                chains.stopped_by(&other, None).is_none(),
+                "{other:?} was raised as a chain that stopped"
             );
         }
     }
@@ -5844,6 +6204,7 @@ mod tests {
             word(&Death::Published(MemberDeath {
                 cause: "quota".into(),
                 from_provider: true,
+                detail: String::new(),
             })),
             PROVIDER_FAILED
         );
@@ -5851,6 +6212,7 @@ mod tests {
             word(&Death::Published(MemberDeath {
                 cause: "timeout".into(),
                 from_provider: false,
+                detail: String::new(),
             })),
             DISPATCH_DIED
         );

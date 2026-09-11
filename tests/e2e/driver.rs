@@ -415,6 +415,139 @@ fn the_launch_record_exists_before_the_member_the_launcher_starts_reads_the_ledg
     world.release("build.go");
 }
 
+/// The observer's own pacemaker dying on an identity the producer could not
+/// classify reaches the manager as a finding, from a **detached** driver whose
+/// observer logs rather than relays.
+///
+/// The incident itself. A retained driver's observer writes to the driver log,
+/// which nothing reads, so a pacemaker that died every interval on one identity
+/// left 107 identical payloads in files nobody opens while the health report
+/// read that identity available. The driver is the only reader that log has, so
+/// it reads the observer's envelopes out of it for this one thing and raises
+/// it on the channel naming the candidate and what it said. No node is involved
+/// and none is failed: the observer goes on watching as it did.
+#[test]
+fn a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding() {
+    let world = World::new("driver-observer-unclassified");
+    world.script("observer.served", "fake-provider/claude-code");
+    world.script(
+        "observer.died-as",
+        "provider-failure unclassified the pacemaker's turn produced no usable result\n",
+    );
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "observed-unclassified", vec![agent("build", &[])]);
+
+    world.until("the observer's death to reach the manager", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["kind"] == "finding")
+    });
+    let findings: Vec<serde_json::Value> = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "finding")
+        .collect();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let finding = &findings[0]["payload"];
+    assert_eq!(finding["blocking"], false, "{finding}");
+    assert!(
+        findings[0]["labels"]["node"].is_null(),
+        "the observer's finding was attributed to a node: {finding}"
+    );
+    let message = finding["message"]
+        .as_str()
+        .expect("a finding says something");
+    for named in [
+        "the run's observer graph (member 'check-in')",
+        "stopped at fake-provider/claude-code",
+        "detail: the pacemaker's turn produced no usable result",
+    ] {
+        assert!(
+            message.contains(named),
+            "the finding does not say {named:?}:\n{message}"
+        );
+    }
+    // The run itself is untouched: its node is still in flight and nothing
+    // settled on the observer's death.
+    assert!(world.events_of(&run, "node-settled").is_empty());
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("stopped at fake-provider/claude-code");
+
+    world.release("observer.go");
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+}
+
+/// The same death reaches the manager from an **attached** launch, whose
+/// observer relays rather than logs.
+///
+/// The other of the two ways an observer's stream reaches this crate. What an
+/// attach relays into the merged store is read for the same one thing on the
+/// way through, so which way a run was launched does not decide whether its
+/// supervisor hears about a chain that stopped.
+#[test]
+fn an_attached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding() {
+    let world = World::new("driver-observer-unclassified-attached");
+    world.script("observer.served", "fake-provider/claude-code");
+    world.script(
+        "observer.died-as",
+        "provider-failure unclassified the pacemaker's turn produced no usable result\n",
+    );
+    let path = world.plan(
+        "attached-unclassified",
+        &plan_of("attached-unclassified", vec![agent("build", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    let run = "attached-unclassified";
+    // This observer exits as soon as it has said its piece, so the launch starts
+    // another in its place — which dies the same way — until the run settles.
+    // Every one of those is a chain that stopped, and every one is raised: a
+    // pacemaker that dies on every restart is exactly the incident.
+    let findings: Vec<serde_json::Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "finding")
+        .collect();
+    let deaths = world.events_of(run, "member-died").len();
+    assert!(
+        deaths >= 1,
+        "the observer's death never reached the merged store"
+    );
+    assert_eq!(
+        findings.len(),
+        deaths,
+        "one finding per death the observer published: {findings:?}"
+    );
+    for finding in &findings {
+        let message = finding["payload"]["message"]
+            .as_str()
+            .expect("a finding says something");
+        assert!(
+            message.contains("the run's observer graph (member 'check-in')")
+                && message.contains("stopped at fake-provider/claude-code"),
+            "{message}"
+        );
+        assert!(finding["labels"]["node"].is_null(), "{finding}");
+    }
+    // And the run settled complete beside them: nothing was failed on this.
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
 #[test]
 fn an_attached_start_returns_when_the_graph_completes() {
     let world = World::new("driver-attach");

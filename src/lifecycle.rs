@@ -391,6 +391,18 @@ fn publish(
     token: &onevcs::SessionToken,
     branch: Option<String>,
 ) -> Attempt {
+    // A branch level with its base has nothing to draft a body for and nothing
+    // to push, so neither is spent on it. Asked of the session's own record —
+    // the worktree it opened and the base it measures against — and only where
+    // both were read: a session whose record could not be read publishes as it
+    // always did, and the sibling answers `NothingToPublish` after the drafting
+    // dispatch has run, which is what this read exists to get ahead of.
+    if let Some(level) = worktree
+        .zip(base)
+        .and_then(|(worktree, base)| crate::vcs::level_with_base(worktree, base))
+    {
+        return level_branch_settlement(node, &level, branch);
+    }
     // The plan's own body wins outright and spends no dispatch: a planner who
     // wrote the change request has already done the drafting.
     let (body, undrafted) = match node.body.clone() {
@@ -571,6 +583,65 @@ fn publish(
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
     }
+}
+
+/// The settlement of a node whose branch is level with its base, split on
+/// whether this dispatch wrote a commit rather than on the ahead-count alone.
+///
+/// Three situations are zero commits ahead, and the ahead-count reads all three
+/// as one. The node **declared** it expects no diff: the success `engine::NO_CHANGES`
+/// is documented for, and the word it settles under. The branch **moved** since
+/// the session opened it and the base carries where it moved to: the second
+/// reading of that same word — a publication whose base already carried the
+/// branch — and a legitimate success, which is why the split is on the commit.
+/// Split on the count alone, it would be reported as the third: the declaration
+/// absent and the dispatch having committed nothing, which is a worker asked for
+/// a change that produced none. That one settles `failed` under
+/// [`engine::EMPTY_BRANCH`], naming the branch and what it was measured against,
+/// so a manager decides — a retry carrying the declaration accepts it as the
+/// deterministic success that declaration is, and an amended task sends it back
+/// to produce a diff. Settled `done` under the no-change word, as it used to be,
+/// the modelling error was invisible in every view.
+///
+/// The detail says what was compared, exactly as the `NothingToPublish` arm of
+/// [`publish`] does for the same word: `no-changes` alone covers a worker that
+/// wrote nothing and a branch measured against itself, and only the ref tells
+/// them apart.
+fn level_branch_settlement(
+    node: &Node,
+    level: &crate::vcs::LevelBranch,
+    branch: Option<String>,
+) -> Attempt {
+    let branch = branch.unwrap_or_else(|| level.branch.clone());
+    let compared = format!(
+        "compared against {}: {branch} carries nothing it does not",
+        level.base
+    );
+    if node.expects_no_diff || level.moved {
+        let detail = if level.moved {
+            format!(
+                "{compared}; the base already carries what this dispatch committed to it, so \
+                 there was nothing to draft or publish"
+            )
+        } else {
+            compared
+        };
+        return Attempt::settled(Settlement {
+            branch: Some(branch),
+            detail: Some(crate::views::one_line(&detail)),
+            ..Settlement::plain(&node.id, NodeStatus::Done, Some(engine::NO_CHANGES))
+        });
+    }
+    Attempt::settled(Settlement {
+        branch: Some(branch.clone()),
+        detail: Some(crate::views::one_line(&format!(
+            "{compared}. This dispatch committed nothing to it and the node does not declare \
+             `expects_no_diff`, so nothing was drafted or published. If no diff was ever \
+             expected, retry the node with `expects_no_diff: true`, which settles it done \
+             without a dispatch; otherwise amend its task and retry it to produce one"
+        ))),
+        ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::EMPTY_BRANCH))
+    })
 }
 
 /// The status a publication settles its node at.
@@ -1624,6 +1695,89 @@ mod tests {
             .collect::<Vec<&'static str>>(),
             "the README's endings are not the ones this module emits"
         );
+    }
+
+    /// A branch level with its base settles on whether this dispatch wrote a
+    /// commit, and on the declaration, rather than on the ahead-count alone.
+    ///
+    /// The three situations `level_branch_settlement` tells apart, driven through
+    /// the real function on a session's own reading. The two the engine reaches
+    /// end to end — an empty branch nothing declared, and a branch the base took
+    /// — are `tests/e2e/lifecycle.rs`'s; the declared one is held here, because
+    /// the engine settles a declared node before any dispatch and only a direct
+    /// `execute` can put one in front of this arm.
+    #[test]
+    fn a_level_branch_settles_on_the_commit_and_the_declaration_rather_than_the_count() {
+        let level = |moved: bool| crate::vcs::LevelBranch {
+            branch: "work/service".into(),
+            base: "origin/main".into(),
+            moved,
+        };
+        let settled = |node: &Node, level: &crate::vcs::LevelBranch| match level_branch_settlement(
+            node, level, None,
+        ) {
+            Attempt::Settled(settlement) => *settlement,
+            Attempt::Preserving(_) => panic!("a level branch is an answer, not an attempt"),
+        };
+        let node = lifecycle(None);
+
+        // Nothing declared and nothing committed: the modelling error, named.
+        let empty = settled(&node, &level(false));
+        assert_eq!(empty.status, NodeStatus::Failed);
+        assert_eq!(empty.outcome.as_deref(), Some(engine::EMPTY_BRANCH));
+        assert_eq!(empty.branch.as_deref(), Some("work/service"));
+        let detail = empty.detail.expect("the settlement says why");
+        for claim in [
+            "compared against origin/main: work/service carries nothing it does not",
+            "committed nothing",
+            "does not declare `expects_no_diff`",
+            "nothing was drafted or published",
+            "retry the node with `expects_no_diff: true`",
+        ] {
+            assert!(detail.contains(claim), "{detail}");
+        }
+
+        // The base already carries what the dispatch committed: the second
+        // reading of `no-changes`, and a success whatever the node declares.
+        for declared in [false, true] {
+            let node = Node {
+                expects_no_diff: declared,
+                ..node.clone()
+            };
+            let carried = settled(&node, &level(true));
+            assert_eq!(carried.status, NodeStatus::Done, "declared: {declared}");
+            assert_eq!(carried.outcome.as_deref(), Some(engine::NO_CHANGES));
+            let detail = carried
+                .detail
+                .expect("the settlement says what it compared");
+            assert!(detail.contains("compared against origin/main"), "{detail}");
+            assert!(
+                detail.contains("already carries what this dispatch committed"),
+                "{detail}"
+            );
+        }
+
+        // Declared, and nothing committed: the first reading, as documented.
+        let declared = settled(
+            &Node {
+                expects_no_diff: true,
+                ..node
+            },
+            &level(false),
+        );
+        assert_eq!(declared.status, NodeStatus::Done);
+        assert_eq!(declared.outcome.as_deref(), Some(engine::NO_CHANGES));
+        assert_eq!(
+            declared.detail.as_deref(),
+            Some("compared against origin/main: work/service carries nothing it does not")
+        );
+        // The branch the caller knew wins over the one the read named.
+        let named =
+            match level_branch_settlement(&lifecycle(None), &level(false), Some("kept".into())) {
+                Attempt::Settled(settlement) => settlement.branch,
+                Attempt::Preserving(_) => unreachable!(),
+            };
+        assert_eq!(named.as_deref(), Some("kept"));
     }
 
     /// A workstream refuses before it cuts a branch.
