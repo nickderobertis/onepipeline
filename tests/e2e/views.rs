@@ -2003,10 +2003,19 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     // that event is the driver saying it launched something, and a stop landing
     // before the executor records where the work is ends a dispatch the run
     // never registered — leaving the view below no stale entry to ignore.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the precondition is "the registry
+    // holds this dispatch", and the only user-facing surfaces that would say so are `host`
+    // and `status` — the views under test, which decide liveness off this same registry
+    // through the code the defect was in. A journey polling either for its precondition
+    // would pass at the instant its assertion would. So the precondition is read off the
+    // engine's own record and the double's own announcement, and every claim afterwards
+    // is read off the CLI.
     let worker = world.held("build", &[]);
     world.until("the dispatch to record its place", |world| {
         world.registered("halted", worker)
     });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["host"]).exited(0).out_has("build");
 
     world.run(&["stop", "halted"]).exited(0);
@@ -2042,10 +2051,20 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     // registry entry matters because a `stop` landing before it ends a dispatch
     // that never recorded its place, and the adoption's entry would then be the
     // only one this run ever held.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] both preconditions here and the pair
+    // after the adoption are "the registry holds this dispatch" and "the run recorded the
+    // adoption", and the only user-facing surfaces that say either are `host` and `status`
+    // — the views under test, deciding liveness off this same registry through the code
+    // the defect was in. A journey polling either for its precondition would pass at the
+    // instant its assertion would. So the preconditions are read off the engine's own
+    // records and the double's own announcement, and every claim afterwards is read off
+    // the CLI.
     let stopped = world.held("build", &[]);
     world.until("the dispatch to record its place", |world| {
         world.registered("retaken", stopped)
     });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["stop", "retaken"]).exited(0);
 
     // An adoption attaches, so the adopting driver is left running: it is the
@@ -2061,6 +2080,10 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     // recorded its place. The pair is the claim: an adoption alone is a driver
     // that has attached to nothing yet, and an arrival counted rather than
     // identified could be the one the stop was aimed at.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
+    // the same reason: the run's own records and the double's own announcement, because
+    // the surfaces that would say the same are the ones under test.
     world.until("the adoption to be recorded", |world| {
         !world.events_of("retaken", "driver-adopted").is_empty()
     });
@@ -2069,6 +2092,7 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
         "the adopted driver's dispatch to record its place",
         |world| world.registered("retaken", retaken),
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["host"]);
     rendered.exited(0).out_has("retaken").out_has("build");

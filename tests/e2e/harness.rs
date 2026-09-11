@@ -2542,9 +2542,11 @@ impl World {
     /// for the arrival: the registry is what both read, and a stop that lands
     /// before the entry does ends a dispatch the run never recorded.
     ///
-    /// An entry this cannot read as JSON, or that names no pid, is a failure
-    /// rather than a non-match: the registry is the engine's, and a record in it
-    /// this cannot read is a finding.
+    /// An entry this cannot read as JSON, or that names no `pid`, is a failure
+    /// rather than a non-match — and that refusal is the drift gate on the
+    /// field's name: the record's type is the engine's and private, so this
+    /// spells the field, and a rename lands here as every registry entry failing
+    /// to name a pid rather than as a wait that never ends.
     pub fn registered(&self, run: &str, pid: u32) -> bool {
         self.dispatch_records(run).iter().any(|record| {
             let text = std::fs::read_to_string(record)
