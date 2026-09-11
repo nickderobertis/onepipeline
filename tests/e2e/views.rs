@@ -1999,8 +1999,16 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     world.script("build.wait", "hold");
     let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch to be in flight", |world| {
-        !world.events_of("halted", "node-dispatched").is_empty()
+    // Waited for at the worker and in the registry, not at `node-dispatched`:
+    // that event is the driver saying it launched something, and on a loaded
+    // Windows runner the stop below landed after it and before the executor had
+    // recorded where the work was — ending a dispatch the run never registered,
+    // so the view afterwards had no stale entry to ignore. The double's own
+    // arrival says the worker is inside its hold, and the entry says the stop
+    // has something to leave behind.
+    let worker = world.held("build", &[]);
+    world.until("the dispatch to record its place", |world| {
+        world.registered("halted", worker)
     });
     world.run(&["host"]).exited(0).out_has("build");
 
@@ -2013,21 +2021,6 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
         .out_has("halted/build")
         .out_has("is gone");
     world.release("build.go");
-}
-
-/// Every agentgraph stream that has beaten for a run, which is one per dispatched
-/// process: the double stamps its own pid into the stream it publishes on, so a
-/// beat on a stream a run has not seen before is a beat from a dispatch it has not
-/// had before.
-fn beating(world: &World, run: &str) -> Vec<String> {
-    let mut streams: Vec<String> = world
-        .events_of(run, "member-heartbeat")
-        .iter()
-        .filter_map(|event| event["stream"].as_str().map(str::to_string))
-        .collect();
-    streams.sort();
-    streams.dedup();
-    streams
 }
 
 /// And a run stopped and then **adopted** is running what its fresh driver
@@ -2044,35 +2037,32 @@ fn beating(world: &World, run: &str) -> Vec<String> {
 fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted() {
     let world = World::new("views-stopped-adopted");
     world.script("build.wait", "hold");
-    // A worker that beats while it holds, which is what makes this takeover
-    // observable from outside the product's own files: a held dispatch otherwise
-    // announces nothing between being dispatched and being released, and the only
-    // record that it reached its worker is one the crate wrote for itself.
-    world.script("build.heartbeat", "50");
     let path = world.plan("retaken", &plan_of("retaken", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    // Both waits are on the worker's own beat, which is what an operator watching
-    // a takeover watches, and neither is the view under test: `host` is read once,
-    // below, and never polled. A journey that waited on the command it asserts
-    // would pass at the instant the assertion would, which is a test that can only
-    // succeed — and `status` is no better, deciding liveness from the same
-    // registry through the same code the defect was in.
+    // Both waits are on the worker's own arrival at its hold — the double's
+    // half of a handshake, announced by pid — and neither is the view under
+    // test: `host` is read once, below, and never polled. A journey that waited
+    // on the command it asserts would pass at the instant the assertion would,
+    // which is a test that can only succeed — and `status` is no better,
+    // deciding liveness from the same registry through the same code the defect
+    // was in.
     //
-    // A beat is also the one signal that carries the registration with it, which
-    // is what makes the second wait able to end at all. `node-dispatched` is the
-    // driver saying it dispatched; the executor records *where* the work is after
-    // that, and a `stop` landing between the two ends a dispatch that never
-    // recorded its place — so the adoption's entry would be the only one this run
-    // ever held, and a wait for a second one waits until it times out. That is not
-    // hypothetical: it is how this journey failed on a loaded Windows runner,
-    // where the 413ms between the event and the stop was not enough. A beat cannot
-    // arrive before that record exists, because a dispatch that fails to register
-    // is taken back down and never runs (`executor.rs`), and the beat comes from
-    // inside one that did.
-    world.until("the worker to beat", |world| {
-        !beating(world, "retaken").is_empty()
+    // The registry entry is waited for beside the arrival, because it is what
+    // makes the second wait able to end at all. `node-dispatched` is the driver
+    // saying it dispatched; the executor records *where* the work is after that,
+    // and a `stop` landing between the two ends a dispatch that never recorded
+    // its place — so the adoption's entry would be the only one this run ever
+    // held. That is not hypothetical: it is how this journey failed on a loaded
+    // Windows runner, where the 413ms between the event and the stop was not
+    // enough. This journey used to watch a relayed heartbeat for the same
+    // purpose, and on the next loaded Windows runner waited out its whole
+    // deadline for a beat that never came: the beat was a proxy for the fact,
+    // arriving on the double's clock through the driver's relay, and the pid the
+    // double writes as it arrives is the fact itself.
+    let stopped = world.held("build", &[]);
+    world.until("the dispatch to record its place", |world| {
+        world.registered("retaken", stopped)
     });
-    let stopped = beating(&world, "retaken");
     world.run(&["stop", "retaken"]).exited(0);
 
     // An adoption attaches, so the adopting driver is left running: it is the
@@ -2084,18 +2074,17 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
         .spawn()
         .expect("the adopting driver starts");
     // The takeover has reached the worker when the run has recorded the adoption
-    // *and* a beat has arrived on a stream the stopped run never produced. The
-    // pair is the claim: an adoption alone is a driver that has attached to
-    // nothing yet, and a beat counted rather than identified could be one the
-    // dying dispatch had already written.
+    // *and* a dispatch other than the stopped one has arrived at the hold and
+    // recorded its place. The pair is the claim: an adoption alone is a driver
+    // that has attached to nothing yet, and an arrival counted rather than
+    // identified could be the one the stop was aimed at.
+    world.until("the adoption to be recorded", |world| {
+        !world.events_of("retaken", "driver-adopted").is_empty()
+    });
+    let retaken = world.held("build", &[stopped]);
     world.until(
-        "the adopted driver's dispatch to reach its worker",
-        |world| {
-            !world.events_of("retaken", "driver-adopted").is_empty()
-                && beating(world, "retaken")
-                    .iter()
-                    .any(|stream| !stopped.contains(stream))
-        },
+        "the adopted driver's dispatch to record its place",
+        |world| world.registered("retaken", retaken),
     );
 
     let rendered = world.run(&["host"]);

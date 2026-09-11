@@ -2172,6 +2172,58 @@ impl World {
         std::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
+    /// The pid of every dispatch that has reached the hold scripted at `key`, in
+    /// the order they arrived.
+    ///
+    /// Read off `<key>.arrived`, which the double appends its own pid to as it
+    /// enters the hold — `fake::arrive` says why it is the pid. Empty until the
+    /// first one gets there, and a file the doubles have not written yet is
+    /// nobody having arrived rather than a failure.
+    pub fn arrivals(&self, key: &str) -> Vec<u32> {
+        std::fs::read_to_string(self.fakes.join(format!("{key}.arrived")))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                line.trim()
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| panic!("{key}.arrived holds {line:?} where a pid was due"))
+            })
+            .collect()
+    }
+
+    /// Wait until a dispatch **not among** `before` has reached the hold at
+    /// `key`, and return its pid.
+    ///
+    /// The test's half of the handshake `fake::arrive` is the double's half of:
+    /// the double announces itself and blocks, this returns once it has, and
+    /// what the caller does next lands on a worker that is genuinely inside its
+    /// hold. That is what a wait on `node-dispatched` cannot promise — it is the
+    /// driver saying it launched something, and the process it launched is still
+    /// starting — and a wait on a proxy of arrival, a relayed beat or a registry
+    /// entry, is a wall-clock deadline standing in for the fact. `before` is how
+    /// a takeover names the dispatch it already knows about: a run stopped and
+    /// then adopted holds twice at the same key, and the second arrival is the
+    /// one that proves the takeover reached a worker.
+    ///
+    /// Bounded like every wait here, and the bound is on the product's own
+    /// asynchrony — launching the dispatch — so reaching it means the dispatch
+    /// never got there.
+    pub fn held(&self, key: &str, before: &[u32]) -> u32 {
+        let fresh = |world: &Self| {
+            world
+                .arrivals(key)
+                .into_iter()
+                .find(|pid| !before.contains(pid))
+        };
+        let mut arrived = None;
+        self.until(&format!("a dispatch to reach its hold at {key}"), |world| {
+            arrived = fresh(world);
+            arrived.is_some()
+        });
+        arrived.expect("the wait returned once a dispatch had arrived")
+    }
+
     /// Wait until a predicate holds, or fail with what was seen instead.
     pub fn until(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
         if waited(|| ready(self)) {
@@ -2186,10 +2238,11 @@ impl World {
     /// Wait for a predicate that reads the store through a real sibling process.
     ///
     /// A normal wait observes files and can poll cheaply. Each store observation
-    /// starts `onetaskgraph`, though, and polling that boundary every 20ms can
-    /// consume the process-start capacity the asynchronous copy itself needs on a
-    /// loaded cross-platform runner. The deadline and assertion stay identical;
-    /// only the expensive observer yields between reads.
+    /// starts `onetaskgraph`, though, and polling that boundary every 20ms
+    /// consumes the process-start capacity the asynchronous copy itself needs on
+    /// a loaded cross-platform runner — the rule [`waited`] states, met here by
+    /// the one wait that has to ask a process. The deadline and assertion stay
+    /// identical; only the expensive observer yields between reads.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
         self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
     }
@@ -2484,6 +2537,23 @@ impl World {
         found
     }
 
+    /// Whether the run's dispatch registry names `pid` as one of its dispatches.
+    ///
+    /// The engine's own record of where a dispatch is, written once the launch
+    /// has returned — which is after the process exists, so a double that has
+    /// arrived at its hold may be a moment ahead of its entry. A journey about
+    /// what a `stop` or a view makes of the registry waits for this as well as
+    /// for the arrival: the registry is what both read, and a stop that lands
+    /// before the entry does ends a dispatch the run never recorded.
+    pub fn registered(&self, run: &str, pid: u32) -> bool {
+        self.dispatch_records(run).iter().any(|record| {
+            std::fs::read_to_string(record)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|entry| entry["pid"] == pid)
+        })
+    }
+
     /// A JSON document inside a run's directory.
     pub fn run_json(&self, run: &str, relative: &str) -> Value {
         let path = self.run_file(run, relative);
@@ -2595,6 +2665,19 @@ fn dirty_bytes() -> Option<u64> {
 /// the shape is always the same and the deadline is one number: what differs is
 /// the evidence a caller prints when it runs out, which is why this answers
 /// rather than panicking.
+///
+/// **The rule for every wait, wherever it is written:** a wait may not spend
+/// what the thing it is waiting for needs. Process starts are the scarce
+/// resource on the hosted cross-platform runners, an order of magnitude dearer
+/// than here and shared by a handful of tests at once, so a `ready` that starts
+/// a process each time it is asked is competing with the launch it is waiting
+/// on, and loses on exactly the host where the deadline is tightest. `ready`
+/// reads files and nothing else; a wait that has to ask a process goes through
+/// [`World::until_store`], which yields between asks, and a wait for a double to
+/// arrive goes through [`World::held`], which waits on the double's own
+/// announcement rather than on a proxy of it. That is the one lesson of a whole streak of red
+/// cross-platform runs, and it is stated here because it was applied to one
+/// helper at a time and recurred in the next.
 fn waited(ready: impl FnMut() -> bool) -> bool {
     waited_every(std::time::Duration::from_millis(20), ready)
 }
