@@ -453,24 +453,25 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// gives up a run stopped mid-publication, the work it strands, and the retry that
 /// continues the session; `main` ran it there over `onevcs`'s *gate*, a direct
 /// child of the stopped process rather than git's grandchild.
+/// A run stopped in the middle of its publication, with its work committed on
+/// the branch the plan pinned and its session still open — the state a retry
+/// pinned to that branch takes up.
+///
+/// A `pre-push` hook the journey holds is how a run is stopped *mid-publication*:
+/// `onevcs` commits the worktree onto the branch before it pushes, so by the time
+/// the repository's merge path is running the work is on the branch and the
+/// session is the only thing that still knows where. Answers the repository, the
+/// clone the stopped run cut, and the token of the session it left open.
 #[cfg(unix)]
-#[test]
-fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
-    let world = World::new("session-reuse-adopt");
-    // A `pre-push` hook the journey holds, which is how a run is stopped
-    // *mid-publication*: `onevcs` commits the worktree onto the branch before it
-    // pushes, so by the time the repository's merge path is running the work is on
-    // the branch and the session is the only thing that still knows where.
+fn a_run_stopped_mid_publication(world: &World) -> (crate::harness::Repository, PathBuf, String) {
     let go = world.fakes.join("push.go");
-    let held = abandonable_hook_script(&world, &go);
+    let held = abandonable_hook_script(world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     world.script("service.work", "the worker wrote this\n");
 
-    // A run that stops in the middle of its publication, with its work committed
-    // on the branch the plan pinned.
     let mut stopped = lifecycle("service", &[]);
     stopped["branch"] = json!(STRANDED);
     let path = world.plan("stopped", &plan_of("stopped", vec![stopped]));
@@ -484,27 +485,27 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
             .iter()
             .any(|event| event["source"] == "vcs" && event["kind"] == "merge-queued")
     });
-    let stranded = opened(&world, "stopped");
+    let stranded = opened(world, "stopped");
     let stranded = stranded["payload"]["token"]
         .as_str()
         .unwrap_or_else(|| {
             panic!(
                 "the stopped run opened no session\n{}",
-                why(&world, "stopped")
+                why(world, "stopped")
             )
         })
         .to_owned();
     let clone = PathBuf::from(
-        opened(&world, "stopped")["payload"]["clone"]
+        opened(world, "stopped")["payload"]["clone"]
             .as_str()
             .expect("the sibling named the clone it cut"),
     );
-    stop_the_publication(&world, &mut owner, &go);
+    stop_the_publication(world, &mut owner, &go);
 
     // What it left, which is the whole reason a retry used to be refused: a branch
     // carrying a commit its base does not.
     let ahead = git(
-        &world,
+        world,
         &clone,
         &["log", "--format=%s", &format!("origin/main..{STRANDED}")],
     );
@@ -513,8 +514,16 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
         vec![format!("chore: preserve work on {STRANDED}")],
         "the stopped run left nothing on {STRANDED} for its retry to inherit"
     );
-
     world.release("push.go");
+    (repo, clone, stranded)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
+    let world = World::new("session-reuse-adopt");
+    let (repo, _clone, stranded) = a_run_stopped_mid_publication(&world);
+
     world.script("continuation.work", "and then the worker wrote this\n");
     let mut retry = lifecycle("continuation", &[]);
     retry["branch"] = json!(STRANDED);
@@ -570,6 +579,82 @@ fn a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned() {
             "chore: seed the repository".to_string(),
         ],
         "the base did not advance by exactly the retry's publication"
+    );
+}
+
+/// A retry that takes up a stopped run's session and writes nothing is not
+/// credited with the commit that run left in the worktree.
+///
+/// The worktree a session takes up again keeps its reflog, and in it is the
+/// commit the stopped run's publication preserved there. Somebody lands that
+/// commit on the base by hand, so the retry finds its pinned branch level with
+/// the base — and its own worker writes nothing. Read off the whole reflog, the
+/// retry was settled `done` claiming the base already carried what *it*
+/// committed; read off the entries since its own dispatch began, it committed
+/// nothing and fails as the empty branch it left.
+///
+/// Unix-only for [`a_retry_lands_the_work_a_stopped_run_left_on_the_branch_it_pinned`]'s
+/// reason: stranding a session is a stop mid-publication.
+#[cfg(unix)]
+#[test]
+fn a_retry_that_takes_up_a_stranded_session_is_not_credited_with_its_commit() {
+    let world = World::new("session-reuse-credit");
+    let (repo, clone, stranded) = a_run_stopped_mid_publication(&world);
+
+    // Somebody lands the stranded commit on the base by hand, from the clone
+    // that holds it: the pinned branch is now level with `main`.
+    git(
+        &world,
+        &clone,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("{STRANDED}:refs/heads/main"),
+        ],
+    );
+    assert_eq!(
+        repo.base_file("service.md").as_deref().map(str::trim),
+        Some("the worker wrote this"),
+        "the stranded work was not landed by hand"
+    );
+
+    // The retry, pinned to that branch, with a worker that writes nothing.
+    let mut retry = lifecycle("continuation", &[]);
+    retry["branch"] = json!(STRANDED);
+    let path = world.plan("retry", &plan_of("retry", vec![retry]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the retry to settle", |world| {
+        world.run_file("retry", "result.json").is_file()
+    });
+    let taken = opened(&world, "retry");
+    assert_eq!(
+        taken["payload"]["branch"].as_str(),
+        Some(STRANDED),
+        "the retry did not work on the branch the plan pinned: {taken}"
+    );
+    let _ = &stranded;
+
+    let node = world.run_json("retry", "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, "retry"));
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    let detail = world.events_of("retry", "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("committed nothing"), "{detail}");
+    assert!(
+        !detail.contains("already carries what this dispatch committed"),
+        "the retry was credited with the stopped run's commit: {detail}"
+    );
+    // And the base did not move for it: nothing was published.
+    assert_eq!(
+        repo.base_commits(&world),
+        vec![
+            format!("chore: preserve work on {STRANDED}"),
+            "chore: seed the repository".to_string(),
+        ],
+        "the retry published something"
     );
 }
 

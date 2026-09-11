@@ -595,6 +595,16 @@ fn a_node_parked_while_it_was_running_stays_parked_and_holds_its_dependents() {
         slow["status"], "parked",
         "the park did not survive the settlement that followed it: {slow}"
     );
+    // The `cancelled` its stopped dispatch settled is the park's own effect and
+    // not an outcome: a park is a decision the node idles under until a manager
+    // requeues or drops it, so a run holding one is waiting on that decision
+    // rather than complete — unlike a park a `done` or `failed` ends, which
+    // `a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete`
+    // holds.
+    assert_eq!(
+        result["state"], "waiting",
+        "a run holding a deliberately parked node reported itself complete: {result}"
+    );
 
     let redispatched: Vec<Value> = world
         .events_of(&run, "node-dispatched")
@@ -2211,6 +2221,114 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
         .find(|node| node["id"] == "publish")
         .expect("the settled node kept its id");
     assert_eq!(publish["status"], "done");
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
+// beside the other live-edit journeys in this file, for the reason the settle journey
+// above states: what it exercises is the crate's own edit vocabulary and reconciler,
+// which any change under `src/` can move, so no project edged narrower than the crate
+// could honestly run it.
+/// A node one party parked and another settled is settled, not half-settled: the
+/// settlement ends the park, its dependents start, and the run reports itself
+/// complete.
+///
+/// The park lives on the definition and outranks every recorded status, and
+/// `requeue` — the only other op that clears one — refuses across authorship
+/// and would redispatch the node. Both halves are read off the run rather than
+/// off the edit: the dependent's dispatch is the scheduler no longer holding
+/// it, and the result's `complete` is the counter no longer reading the park.
+#[test]
+fn a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete() {
+    let world = World::new("edit-park-settled");
+    // `publish` waits on the held node, so the park lands on a node nothing has
+    // dispatched — the park a monitor makes on a deliverable it saw go up by
+    // hand — and `announce` is what the park was holding back.
+    let run = live(
+        &world,
+        "park-settled",
+        vec![
+            agent("slow", &[]),
+            agent("publish", &["slow"]),
+            agent("announce", &["publish"]),
+        ],
+        &["slow"],
+    );
+
+    // The monitor parks it, saying why.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "author": "monitor", "commands": [{
+                "op": "cancel", "id": "publish",
+                "reason": "the comment this node would post is already on the issue",
+            }]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+
+    // The planner settles it from the same evidence. Not a requeue: that would
+    // dispatch the node against a deliverable already published, which is the
+    // duplicate execution path the one-path rule forbids.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{
+                "op": "settle", "id": "publish", "outcome": "done",
+                "evidence": "the comment is on the issue; nothing is left for a dispatch to do",
+            }])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the settlement to commit", |world| {
+        committed(world, &run).contains(&"settle".to_string())
+    });
+
+    // The dependent starts on the settlement: a park that outlived it would
+    // have held `announce` blocked behind a node the run still read as idle.
+    world.until("the dependent to start on the settlement", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "announce")
+    });
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    let status_of = |id: &str| {
+        result["nodes"]
+            .as_array()
+            .expect("the result lists every node")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("no node {id} in {result}"))["status"]
+            .clone()
+    };
+    assert_eq!(
+        status_of("publish"),
+        "done",
+        "the park outlived the settlement: {result}"
+    );
+    assert_eq!(status_of("announce"), "done");
+    // Complete, and not `waiting`: every node reached a settled outcome, so
+    // there is nothing left rather than something idle — which is what an
+    // adopted driver over this run would find as well, since it derives the same
+    // statuses from the same record.
+    assert_eq!(result["state"], "complete", "{result}");
+    // And the settled node was never dispatched for it: the settlement ended the
+    // park without sending the node back for a redispatch.
+    assert!(
+        !world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "publish"),
+        "the settled node was dispatched"
+    );
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives

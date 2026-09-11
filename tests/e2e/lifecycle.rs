@@ -304,6 +304,10 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
 fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     let world = World::new("lifecycle-steps");
     published_locally(&world);
+    // The first step writes, so the workstream has a change to publish: a
+    // branch its steps left level with the base is a failed node, not a
+    // published one.
+    world.script("service.implement.work", "the engineer wrote this\n");
     let node = json!({
         "id": "service",
         "repo": "service",
@@ -2157,6 +2161,97 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
     );
 }
 
+/// A node cancelled while its publication was already under way settles on
+/// that publication, and the settlement ends the park.
+///
+/// The second run the park defect was found on. A cancel landed after the
+/// node's dispatch had finished and while its push was at the merge path, so
+/// the dispatch was never stopped and the run's **own** settlement path wrote
+/// `done` seventy-five seconds after the park — and the park was never cleared.
+/// That run read one deliverable short from then on, with both of its
+/// deliverables verified complete: the park lives on the definition and
+/// outranks every recorded status, so nothing that read the node saw the
+/// outcome. No manager settlement was involved, which is why the park has to
+/// come off wherever a node reaches a settled outcome and not only in the
+/// settled-from-evidence op.
+///
+/// A cancel that *does* stop a dispatch settles `cancelled` and keeps its park
+/// — `live_edit::a_node_parked_while_it_was_running_stays_parked_and_holds_its_dependents`
+/// holds that half — so what this journey holds is the other one: a publication
+/// the cancel arrived too late to stop is the node's answer, and a node with an
+/// answer is idle by nobody's decision.
+#[test]
+fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked() {
+    let world = World::new("lifecycle-cancelparked");
+    let go = world.fakes.join("push.go");
+    let held = held_merge_path(&world, &go);
+    world.repository("local-direct", &held.argv());
+    world.script("service.work", "the worker wrote this\n");
+
+    let path = world.plan(
+        "cancelparked",
+        &plan_of("cancelparked", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "cancelparked".to_string();
+
+    // The dispatch is over and the publication has committed its work and is
+    // held at the merge path: the moment a cancel is too late to stop anything.
+    world.until("the publication to reach its merge path", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "author": "monitor", "commands": [{
+                "op": "cancel", "id": "service",
+                "reason": "this looked stalled at its push",
+            }]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the park to be committed", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    held.release();
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // The park was recorded, and the publication settled the node after it.
+    let parked: Vec<serde_json::Value> = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "cancel")
+        .collect();
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == "service")
+        .expect("the node settled");
+    assert_eq!(settled["payload"]["status"], "done", "{settled}");
+    assert_eq!(settled["payload"]["outcome"], "merged", "{settled}");
+    assert!(
+        settled["ts"].as_str() > parked[0]["ts"].as_str(),
+        "the settlement did not follow the park: {settled} before {parked:?}"
+    );
+
+    // And the node reads as what it reached rather than as what a cancel too
+    // late to stop it asked for: `done`, and the run complete.
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "the park outlived the settlement that followed it\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(result["state"], "complete", "{result}");
+}
+
 /// A merge path the reads never answer settles the node saying where the work is.
 ///
 /// The other end of the bound. Nothing here is recoverable — the host never comes
@@ -2696,14 +2791,18 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
         why(&world, &run)
     );
 
-    // The run's own document reports it `parked`, because that is what the
-    // cancel made it and a parked node is one a planner can requeue. The failure
-    // is not lost to that: the outcome beside it is the publication's.
+    // The run's own document reports it `failed`, and not the `parked` the
+    // cancel made it: the publication's failure is a settled outcome, and a
+    // settled outcome ends the park — left on, the node read parked and failed
+    // at once and the run counted it unfinished for as long as it lasted. The
+    // failure is what a planner acts on, and the outcome beside it is the
+    // publication's.
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "parked", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "push-rejected", "{node}");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
     // And the work is on the branch the one attempt was made on, which is what
-    // a requeue would continue.
+    // a `retry` continues.
     let branch = node["branch"].as_str().expect("the node names its branch");
     assert!(
         repo.has_branch(&world, branch),
@@ -3190,54 +3289,209 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     world.run(&["results", &run]).exited(0).out_has(&published);
 }
 
-/// A publication that had nothing to publish.
+/// A worker asked for a change that produced none leaves an empty branch, and the
+/// node fails naming it rather than settling `done` under the no-change word —
+/// which the documentation reserves for a node that **declared** it expects no
+/// diff, and under which a plan that omitted the declaration was invisible.
 ///
-/// `onevcs` reports `PublishOutcome::NothingToPublish` on a branch its base
-/// already carries: it writes no push, no change request, and no merge. Read as
-/// a success with no outcome, this crate settled it as a bare "published" — so a
-/// node whose worker wrote nothing reported as one that landed work, and the
-/// only way to tell was to notice that the merged store held no publication at
-/// all. The real-everything smoke is where that turned up, on the first run that
-/// reached a real `onevcs` with a clean tree.
+/// Nothing is drafted and nothing is published for a branch level with its
+/// base. `a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes`
+/// holds the level case that is a success, and the sibling's own
+/// `NothingToPublish` — a branch that *is* ahead with a tree the base carries —
+/// is untouched.
 #[test]
-fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_landed() {
+fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
     let world = World::new("lifecycle-nothing");
     published_locally(&world);
     // Nothing is scripted for the worker to write, so the session's branch
-    // carries exactly what its base does.
+    // carries exactly what its base does — and the node declares nothing about
+    // expecting that.
     let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
 
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    // Done: nothing failed, and there was nothing to do.
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    assert_eq!(node["change_url"], json!(null), "{node}");
+    // No change of this node's exists, so it claims no landing either way.
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let branch = node["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settlement names no branch: {node}"))
+        .to_owned();
+
+    // Neither a drafting dispatch nor a publication was spent on it: the only
+    // dispatch is the worker's own, and the sibling recorded no publication.
+    let dispatched: Vec<serde_json::Value> = world
+        .events_of(&run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "service")
+        .collect();
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a level branch was published anyway ({spent}): {kinds:?}"
+        );
+    }
+    assert!(
+        world.events_of(&run, "body-not-drafted").is_empty()
+            && !world
+                .journal(&run)
+                .iter()
+                .any(|event| event["labels"]["persona"] == "pr-author"),
+        "a drafting dispatch was spent on a level branch:\n{}",
+        why(&world, &run)
+    );
+
+    // The detail says what was compared and what to do about it, and `results`
+    // shows it: the word alone would send a reader to look for a diff.
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    for claim in [
+        &format!("compared against origin/main: {branch} carries nothing it does not"),
+        "committed nothing",
+        "does not declare `expects_no_diff`",
+        "retry the node with `expects_no_diff: true`",
+    ] {
+        assert!(
+            detail.contains(claim),
+            "the settlement does not say '{claim}': {detail}"
+        );
+    }
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("empty-branch")
+        .out_has("compared against origin/main");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
+}
+
+/// A worker that only caught its branch up with a base that moved under it
+/// wrote nothing, and the node fails as an empty branch — movement of `HEAD`
+/// is not a commit.
+///
+/// The read that decides a level branch used to take "`HEAD` is not where the
+/// session opened it" for "this dispatch wrote a commit", and settled this
+/// worker `done` claiming the base already carried what it committed. It
+/// committed nothing: the base gained a commit while the worker held, and the
+/// worker fast-forwarded onto it. The evidence is git's own record of what
+/// moved `HEAD` — see `vcs::level_with_base` — and a fast-forward is not a
+/// commit written here.
+#[test]
+fn a_worker_that_only_caught_up_with_a_moved_base_fails_as_an_empty_branch() {
+    let world = World::new("lifecycle-caughtup");
+    let repo = published_locally(&world);
+    world.script("service.wait", "hold");
+    world.script("service.catches-up-with-base", "main");
+    let path = world.plan(
+        "caughtup",
+        &plan_of("caughtup", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "caughtup".to_string();
+
+    // The base moves while the worker is held in its session: somebody else
+    // lands a commit on `main`.
+    world.until("the worker to be in its session", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+    });
+    std::fs::write(
+        repo.checkout.join("elsewhere.md"),
+        "landed by somebody else\n",
+    )
+    .expect("the other change");
+    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["commit", "-q", "-m", "feat: somebody else's change"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "-q", "origin", "main"]);
+    world.release("service.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("committed nothing"), "{detail}");
+    assert!(
+        !detail.contains("already carries what this dispatch committed"),
+        "a worker that wrote nothing was reported as having committed: {detail}"
+    );
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a level branch was published anyway ({spent}): {kinds:?}"
+        );
+    }
+}
+
+/// A worker that landed its commit on the base itself leaves a branch level with
+/// a base that already carries it, which is the no-change success and not the
+/// empty branch.
+///
+/// The case that decides the split is on the commit rather than on the count.
+/// This branch is zero commits ahead exactly as an empty one is, and split on the
+/// count alone it would fail as one — while what happened is the second reading
+/// of `no-changes` this crate documents, a publication whose base already carried
+/// the branch. Nothing is drafted or published for it either: there is nothing
+/// the base does not have.
+#[test]
+fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+    let world = World::new("lifecycle-landeditself");
+    let repo = published_locally(&world);
+    // The worker commits and pushes straight to `main` with git, then fetches, so
+    // the session's clone reads its branch as an ancestor of the base.
+    world.script("service.lands-on-base", "main");
+    let run = settle(&world, "landeditself", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
     assert_eq!(node["change_url"], json!(null), "{node}");
-    // And it claims no landing either way. There was no change of this node's,
-    // so "landed" would say work reached the base that never existed and "not
-    // landed" would send a planner looking for a change request nobody opened.
     assert_eq!(node["landing"], json!(null), "{node}");
-    // The sibling's own record of the publication claims nothing either.
-    let published = world.events_of(&run, "published");
-    assert_eq!(published.len(), 1, "{}", why(&world, &run));
+    // The work really is on the base, put there by the worker and not by a
+    // publication of this crate's.
     assert_eq!(
-        published[0]["payload"]["landing"],
-        json!(null),
-        "{}",
-        published[0]
+        repo.base_file("service.md").as_deref(),
+        Some("the worker landed this itself\n"),
+        "the worker's commit never reached the base"
     );
-    // And it says what it compared against, which `no-changes` alone does not:
-    // the same word covers a worker that wrote nothing and a branch measured
-    // against itself, and only the ref tells them apart.
-    let results = world.run(&["results", &run]);
-    results
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a branch the base already carried was published anyway ({spent}): {kinds:?}"
+        );
+    }
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("compared against origin/main"), "{detail}");
+    assert!(
+        detail.contains("the base already carries what this dispatch committed"),
+        "{detail}"
+    );
+    world
+        .run(&["results", &run])
         .exited(0)
         .out_has("no-changes")
-        .out_has("compared against main");
-    assert!(
-        !results.stdout.contains("landed"),
-        "a node with nothing to publish is reported as one whose change did or did not land:\n{}",
-        results.stdout
-    );
+        .out_has("compared against origin/main");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]
