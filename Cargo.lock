@@ -942,6 +942,7 @@ dependencies = [
  "libc",
  "minijinja",
  "oneagentgraph",
+ "oneharness-core",
  "onejudge",
  "onepipeline-testfakes",
  "onevcs",
@@ -968,7 +969,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
- "toml",
 ]
 
 [[package]]
