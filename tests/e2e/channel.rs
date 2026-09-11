@@ -1851,9 +1851,21 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
 /// binary is run under `strace`, with the surface log's second `read(2)` — the
 /// first is the appender looking at the file's own tail — answered `EIO`. Only
 /// reads of that file are touched; everything else the process does is real.
+///
+/// The push reads the log's tail only where the projection is behind it, and
+/// the run's own driver repairs a projection it finds behind: it wakes on the
+/// channel's fingerprint moving, folds the log, and writes the projection back.
+/// So the projection is left behind inside a channel directory nobody can
+/// write into until the traced push has run — the driver's repair fails at its
+/// temporary file and leaves nothing, exactly as
+/// `a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back`
+/// holds — and the directory is made read-only *before* the projection is
+/// emptied in place, so there is no instant at which a repair could land.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
     let world = World::new("channel-unreadable-log");
     world.script("build.wait", "hold");
     let run = running(&world, "unreadablelog", vec![agent("build", &[])]);
@@ -1861,14 +1873,23 @@ fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
         .run(&["surface", &run, "--kind", "finding", "--message", "first"])
         .exited(0);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] the projection is removed
+    // llmlint: ignore-block[tests_mirror_real_usage] the projection is emptied
     // because a push reads the log's tail only where the projection is behind
     // it, and nothing user-facing leaves it behind on purpose: a lost write to
     // the projection is the very state the log-derived queue exists to survive,
     // and the one shape of it a journey can place is the write never landing.
+    // The channel directory is made read-only first, so the driver cannot
+    // rebuild the projection between here and the traced push; a file's
+    // contents are still writable inside a directory whose entries are not.
     // Everything under test is driven through the CLI.
     let queue = world.run_file(&run, "channel/queue.json");
-    std::fs::remove_file(&queue).expect("the projection's write is lost");
+    let channel = queue.parent().expect("the channel directory").to_path_buf();
+    let writable = std::fs::metadata(&channel)
+        .expect("the channel directory")
+        .permissions();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory is made read-only");
+    std::fs::write(&queue, b"").expect("the projection's write is lost");
     // llmlint: ignore-end[tests_mirror_real_usage]
     let log = world.run_file(&run, "channel/surfaces.jsonl");
     let logged = std::fs::read(&log).expect("the log");
@@ -1888,6 +1909,7 @@ fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
         &trace,
         &["surface", &run, "--kind", "finding", "--message", "second"],
     );
+    std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
     // The failure the command reports is the one that was induced: exactly one
     // read of the log was answered `EIO`, and the command named that file.
     let traced = std::fs::read_to_string(&trace).expect("the trace the tracer wrote");
@@ -1914,10 +1936,10 @@ fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
         logged,
         "a push that could not read the log still appended to it"
     );
-    assert!(
-        !queue.exists(),
-        "a push that could not read the log still stamped a projection: {}",
-        std::fs::read_to_string(&queue).unwrap_or_default()
+    assert_eq!(
+        std::fs::read(&queue).expect("the projection"),
+        b"",
+        "a push that could not read the log still stamped a projection"
     );
     assert_eq!(
         world.events_of(&run, "planner-surface-queued").len(),
