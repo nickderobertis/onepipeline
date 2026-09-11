@@ -569,17 +569,11 @@ struct Ran {
 /// Resolve the chain: which candidate runs this turn, and whether the first was
 /// stepped past.
 ///
-/// `harness.serves` scripts the model the first candidate's server names as the
-/// one the thread runs under — the statement codex's app-server makes on
-/// `thread/start`, before any token is spent. Held against the model the
-/// candidate's own config section asked for, exactly as oneharness holds it: a
-/// section that names none, or names the served one, proceeds under that
-/// candidate with the observation on its result; a section that names another
-/// is refused as `model_mismatch` — the config said Sol and the server would
-/// spend Astra — and the turn runs under the next candidate, which reports no
-/// observation, as a harness that names no model does. A chain with nothing
-/// after the refused candidate is a scenario nobody wrote here, and is refused
-/// rather than acted out as an exhausted chain.
+/// `harness.serves` scripts what the first candidate's server says the thread
+/// would run under — codex's `thread/start` statement, made before any token is
+/// spent — and it is held against that candidate's own `model` the way
+/// oneharness holds it. A chain with nothing after a refused candidate is a
+/// scenario nobody wrote here, and is refused rather than acted out as exhausted.
 fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, String> {
     let first = selection.first();
     let Some(served) = fake::node_script(dir, "harness", "serves") else {
@@ -617,14 +611,9 @@ fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, Strin
 }
 
 /// The result oneharness writes for a candidate refused before its turn started
-/// because the server named a model other than the requested one.
-///
-/// The shape is the one `oneharness_core` writes over a refused dialogue: a
-/// non-`ok` status with no exit code (the server was torn down, it did not
-/// exit), the classified kind, both models — `model` requested, `observed_model`
-/// served — and the refusal's own sentence as the `error`, composed by that
-/// library's [`DialogueRefusal`] so the words are oneharness's rather than a copy.
-/// Nothing was spent: no text, no usage, no events.
+/// because the server named a model other than the requested one: no exit code,
+/// because the server was torn down rather than exited, and the `error` composed
+/// by that library's [`DialogueRefusal`] so the sentence is oneharness's.
 fn refused(identity: &Identity, requested: &str, served: &str) -> RunResult {
     let refusal = DialogueRefusal::ModelMismatch {
         requested: requested.to_string(),
@@ -672,16 +661,10 @@ fn refused(identity: &Identity, requested: &str, served: &str) -> RunResult {
 }
 
 /// Write this run's history records — one per attempted candidate, in result
-/// order — through oneharness's **own** writer, and answer with the session
-/// file's path for the report's `history_file`.
-///
-/// The library's writer rather than lines composed here, for the reason every
-/// other document this double answers with is the library's: what a consumer
-/// reads back is oneharness's record — its schema version chosen by what the
-/// record carries, `observed_model` gated to the version that introduced it —
-/// and a record written by hand would go on reading after the producer changed
-/// it. The store is inside the script directory, so nothing here reaches an
-/// operator's own history.
+/// order — through oneharness's **own** writer, which chooses each record's
+/// schema version from what it carries, and answer with the session file's path
+/// for the report's `history_file`. The store is inside the script directory,
+/// so nothing here reaches an operator's own history.
 fn write_history(
     dir: &std::path::Path,
     cwd: &str,

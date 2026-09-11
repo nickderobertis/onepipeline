@@ -2814,32 +2814,19 @@ fn a_classification_the_harness_record_contradicts_settles_rather_than_dies() {
 /// — on the record the settled node points at and under the node's own failure
 /// line, as the recovery it was.
 ///
-/// The loss this is named for. A `--control` codex turn let the server pick the
-/// thread's model, so a config that said Sol silently spent Astra at ten times
-/// the quota per token, and every codex-first supervisory side on the host was
-/// on that path. `oneharness-core` 0.13 reads the server's own statement off
-/// `thread/start`, writes it as `observed_model`, refuses a statement that
-/// differs from the requested model as `model_mismatch`, and a chain steps past
-/// that as `model-mismatch` — and what puts the fix in front of a dispatch is
-/// **this build's lock**: a dispatched node runs the `oneagentgraph`, `onejudge`
-/// and `oneharness-core` this crate links, never the CLI pins beside them. So
-/// this journey drives the three linked releases together, and a lock resolving
-/// any of them below its floor fails here rather than reading differently.
+/// What puts `oneharness-core` 0.13's fix in front of a dispatch is **this
+/// build's lock**: a dispatched node runs the `oneagentgraph`, `onejudge` and
+/// `oneharness-core` this crate links, never the CLI pins beside them. So this
+/// journey drives the three linked releases together through the real
+/// supervisor and the real graph, with the one stand-in at onejudge's spawning
+/// seam, and a lock resolving any of them below its floor fails here rather
+/// than reading differently.
 ///
-/// Driven through the real supervisor and the real graph. The chain is the agent
-/// side's own config — `codex` asked for one model, then `claude-code` — and the
-/// one stand-in, at onejudge's spawning seam, reports the server naming another,
-/// in `oneharness_core`'s own types. The candidate that honoured the model then
-/// runs the turn, and the evaluator refuses the node's `done_when` over it, so
-/// the node fails on its **own** bar: that is the one place this crate renders
-/// what a chain did, and the point of the line is that a chain which recovered
-/// is reported beside the failure and never as its reason. Nothing is asserted
-/// at a seam: the real onejudge reads
-/// that report and attributes it, the real `oneagentgraph` publishes the advance
-/// and the session pointer, and what is read back is this crate's journal, its
-/// rendered views, the report the settlement retained, and the history record
-/// the pointer names — through oneharness's own reader, so every spelling below
-/// is that library's rather than one restated here.
+/// The node fails on its **own** bar — the evaluator refuses its `done_when` —
+/// because a failed node is the one place this crate renders what a chain did,
+/// and the point of the line is that a chain which recovered is reported beside
+/// the failure and never as its reason. Every spelling below is read through
+/// oneharness's own types rather than restated here.
 #[test]
 fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record() {
     use oneharness_core::domain::fallback::FallThroughReason;

@@ -322,33 +322,22 @@ resolver = "2"
 # by moving the pin — which is how the graph came to carry two copies of the turn
 # engine once before, when `^0.6.2` admitted no 0.7.x.
 #
-# `oneharness-core` 0.13 is the release that runs a **controlled codex turn under
-# the model the candidate's config names**. Below it a `--control` turn spawned
-# `codex app-server` and let the server pick the thread's model: a config that
-# said Sol silently spent Astra, at roughly ten times the quota per token, and
-# nothing in the chain noticed. What the release carries is the three halves of
-# noticing. The harness's own statement of the model the thread runs under is
-# read off `thread/start` *before any token is spent* and written as
-# `observed_model` on the result and on the history record (history schema
-# `1.8`, report schema `0.10`) — never inferred, never copied from `model`. A
-# statement that differs from the requested model is refused as the ninth
-# `FailureKind`, `model_mismatch`, at zero cost. And a fallback chain steps past
-# that refusal as `model-mismatch`, so the next identity may honour the model.
-# It is a **requirement** and not a lock floor for the reason 0.8.0, 0.11.0 and
-# 0.12.0 of `onevcs` were: `^0.12` excludes it, because pre-1.0 the minor is the
-# breaking position. `oneagentgraph` 0.3.17 and `onejudge` 0.8.1 are the
+# `oneharness-core` 0.13 runs a **controlled codex turn under the model the
+# candidate's config names**. Below it a `--control` turn let `codex app-server`
+# pick the thread's model, and nothing in the chain noticed. The release carries
+# the server's own statement of that model as `observed_model` on the result and
+# the history record, refuses a statement that differs from the requested model
+# as the ninth `FailureKind`, `model_mismatch`, before any token is spent, and
+# steps a fallback chain past that refusal as `model-mismatch`. A **requirement**
+# and not a lock floor for the reason 0.8.0, 0.11.0 and 0.12.0 of `onevcs` were:
+# `^0.12` excludes it. `oneagentgraph` 0.3.17 and `onejudge` 0.8.1 are the
 # releases whose requirements resolve that core, so the three floors move
-# together or the graph carries two turn engines — and what this build links is
-# the whole of the fix: on the orchestration host a dispatched node runs the
-# `oneagentgraph`, `onejudge` and `oneharness-core` *this* crate's release
-# linked, never the CLI pins beside them, so every codex-first supervisory side
-# — the monitor, the pacemaker, the judge, the llmlint tier — is on the
-# misrouted path until this resolution is the one a dispatch composes.
-# `tests/e2e/dispatch.rs`'s
+# together or the graph carries two turn engines — and the lock is the whole of
+# the fix, because a dispatched node runs the engines *this* crate links, never
+# the CLI pins beside them. `tests/e2e/dispatch.rs`'s
 # `a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record`
-# drives a misrouted candidate through the real `onejudge` and `oneagentgraph`
-# to the settled node's record and its rendered line, so a pin below the floor
-# fails rather than reads differently.
+# drives a misrouted candidate through the linked releases to the settled node's
+# record and its rendered line.
 #
 # **0.3.14 and 0.3.15 are both floors**, for two separate things this crate reads.
 #
