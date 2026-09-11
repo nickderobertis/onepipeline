@@ -957,6 +957,42 @@ pub(crate) struct Queue {
     /// this build writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounted: Option<u64>,
+    /// The seal over everything above: what makes a stamped projection
+    /// **checkable in itself** rather than taken on trust because its stamp
+    /// happens to match the log's length.
+    ///
+    /// A document whose `waiting` was emptied or whose `next_id` was reset with
+    /// its stamp intact is one nothing here wrote, and without this the read that
+    /// trusts the stamp would hide a logged question for good and hand its id out
+    /// again. So every writer seals what it writes and every reader recomputes
+    /// the seal from the document alone — one read, no look at the log — and a
+    /// stamped document that does not seal is read as no document at all, which
+    /// folds the whole log. The same integrity check and the same boundary as the
+    /// checkpoint's: what it detects is the accidents, and a rewrite crafted to
+    /// match is not one anybody here meets. Absent from an older build's document,
+    /// which carries no stamp to vouch for either.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "as_hex_opt",
+        deserialize_with = "of_hex_opt"
+    )]
+    pub seal: Option<u128>,
+}
+
+fn as_hex_opt<S: serde::Serializer>(digest: &Option<u128>, writer: S) -> Result<S::Ok, S::Error> {
+    match digest {
+        Some(digest) => crate::checkpoint::as_hex(digest, writer),
+        None => writer.serialize_none(),
+    }
+}
+
+/// Read a seal, refusing the values [`as_hex_opt`] never wrote — as the
+/// checkpoint refuses them — so a document carrying one reads as no document.
+fn of_hex_opt<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<u128>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct Hex(#[serde(deserialize_with = "crate::checkpoint::of_hex")] u128);
+    Ok(Option::<Hex>::deserialize(reader)?.map(|Hex(digest)| digest))
 }
 
 /// What one line of the surface log says happened.
@@ -1020,6 +1056,37 @@ impl SurfaceRecord {
 }
 
 impl Queue {
+    /// The seal over this projection's claims: the surfaces it holds, the id it
+    /// would allocate, and the bytes of the log it accounts for.
+    ///
+    /// Through the document's own serialization rather than field by field, so a
+    /// field added to a surface is sealed by existing rather than by somebody
+    /// remembering to add it here. [`seal`](Self::seal) itself does not go in,
+    /// which is what stops it sealing over itself; a document without a stamp
+    /// seals to nothing, because there is no claim in it to vouch for.
+    fn sealed(&self) -> Option<u128> {
+        let accounted = self.accounted?;
+        let claims =
+            serde_json::to_vec(&(&self.waiting, &self.pending, self.next_id)).unwrap_or_default();
+        let sealed = crate::checkpoint::digested(crate::checkpoint::NOTHING_DIGESTED, &claims);
+        Some(crate::checkpoint::digested(
+            sealed,
+            &accounted.to_le_bytes(),
+        ))
+    }
+
+    /// Seal this projection so a reader can check it.
+    fn seal(&mut self) {
+        self.seal = self.sealed();
+    }
+
+    /// Whether a stamped projection is one a writer here sealed and nothing has
+    /// moved since. An unstamped one is an older build's, and is vouched for by
+    /// nothing — see [`ChannelState::current`].
+    fn is_sealed(&self) -> bool {
+        self.accounted.is_none() || self.seal.is_some() && self.seal == self.sealed()
+    }
+
     /// Fold one record of the surface log into this projection.
     ///
     /// The one place the queue's transitions are defined: every mutation applies
@@ -1268,8 +1335,15 @@ impl ChannelState {
     /// fold, never an answer, and a read that refused over it would be a view
     /// unable to render a run whose own record is intact.
     pub fn queue(&self) -> Queue {
-        let (queue, folded) =
-            self.current(|from| crate::ledger::read_records_from(&self.log_path(), from));
+        // The file reader hands back nothing for a log it cannot read — the
+        // leniency every ledger reader follows — so the fold here cannot refuse;
+        // what it folded nothing of is left unstamped for the next reader.
+        let Ok((queue, folded)) = self.current(|from| {
+            Ok::<_, std::convert::Infallible>(crate::ledger::read_records_from(
+                &self.log_path(),
+                from,
+            ))
+        });
         if folded {
             // llmlint: ignore-block[no_panics_on_recoverable_errors] the repair is a cache write and the answer is already in hand: failing the read over it would refuse a view of a run whose log is intact, and the next reader simply folds again — `tests/e2e/channel.rs` drives that against a channel directory the reader may not write.
             let _ = self.write_queue(&queue);
@@ -1303,8 +1377,14 @@ impl ChannelState {
     /// counter was accounted for by that build by its own means and is taken as
     /// the projection has it. The result is stamped, so the log is read this way
     /// once and never again.
-    fn current(&self, tail: impl FnOnce(u64) -> Vec<crate::ledger::Record>) -> (Queue, bool) {
-        let checkpoint: Option<Queue> = crate::ledger::read_json_opt(&self.queue_path());
+    fn current<E>(
+        &self,
+        tail: impl FnOnce(u64) -> Result<Vec<crate::ledger::Record>, E>,
+    ) -> Result<(Queue, bool), E> {
+        // A stamped document that does not seal is one nothing here wrote: read as
+        // no document, so the whole log is folded rather than its claims trusted.
+        let checkpoint: Option<Queue> =
+            crate::ledger::read_json_opt(&self.queue_path()).filter(Queue::is_sealed);
         // The id below which an older build's projection is taken at its word.
         let mut floor: Option<u64> = None;
         let (mut queue, from) = match checkpoint {
@@ -1338,7 +1418,7 @@ impl ChannelState {
         // every read.
         let mut folded = replaced || floor.is_some();
         let records = if length > from {
-            tail(from)
+            tail(from)?
         } else {
             Vec::new()
         };
@@ -1375,7 +1455,8 @@ impl ChannelState {
             // llmlint: ignore-end[changed_behavior_has_e2e]
         }
         queue.accounted = Some(accounted);
-        (queue, folded)
+        queue.seal();
+        Ok((queue, folded))
     }
 
     fn write_queue(&self, queue: &Queue) -> crate::Result<()> {
@@ -1396,11 +1477,11 @@ impl ChannelState {
         derive: impl FnOnce(&Queue) -> Vec<(SurfaceEvent, Surface)>,
     ) -> crate::Result<Vec<Surface>> {
         let mut log = crate::ledger::Appender::open(&self.log_path())?;
-        let (mut queue, _) = self.current(|from| {
-            // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every ledger reader follows, stated on `read_records`: a tail this process cannot read reads as empty, and the stamp then stays where it was so the next reader tries again.
-            log.records_from(from).unwrap_or_default()
-            // llmlint: ignore-end[no_panics_on_recoverable_errors]
-        });
+        // A tail this handle cannot read refuses the mutation: this path stamps
+        // the log's whole length afterwards, and a fold that read nothing of the
+        // tail would stamp records the projection never folded as accounted for
+        // — a question hidden for good, by the very write meant to record one.
+        let (mut queue, _) = self.current(|from| log.records_from(from))?;
         let mut recorded = Vec::new();
         for (event, surface) in derive(&queue) {
             let record = SurfaceRecord {
@@ -1415,6 +1496,7 @@ impl ChannelState {
             recorded.push(record.surface);
         }
         queue.accounted = Some(log.len()?);
+        queue.seal();
         self.write_queue(&queue)?;
         Ok(recorded)
     }
@@ -2465,6 +2547,16 @@ mod tests {
                 .accounted
                 .expect("this build stamps what it writes");
             let current = std::fs::read(&queue_path).expect("the projection was written");
+            // A stamped document whose claims moved under an intact stamp — and
+            // under an intact seal, which no longer seals them — is one nothing
+            // here wrote: the same three ways a writer's claims can be wrong
+            // while its stamp still matches the log's length.
+            let claims_moved = |edit: &dyn Fn(&mut serde_json::Value)| -> Vec<u8> {
+                let mut document: serde_json::Value =
+                    serde_json::from_slice(&current).expect("the projection is JSON");
+                edit(&mut document);
+                serde_json::to_vec(&document).expect("the edited document")
+            };
             let placed: Vec<(&str, Option<Vec<u8>>)> = vec![
                 ("deleted", None),
                 (
@@ -2472,6 +2564,26 @@ mod tests {
                     Some(b"{\"waiting\": ".to_vec()),
                 ),
                 ("overwritten with a stale copy", earlier.clone()),
+                (
+                    "stamped but with its waiting surfaces emptied",
+                    Some(claims_moved(&|document| {
+                        document["waiting"] = serde_json::json!([]);
+                        document["pending"] = serde_json::Value::Null;
+                    })),
+                ),
+                (
+                    "stamped but with its counter reset",
+                    Some(claims_moved(&|document| {
+                        document["next_id"] = serde_json::json!(0);
+                    })),
+                ),
+                (
+                    "stamped but with no seal",
+                    Some(claims_moved(&|document| {
+                        document["waiting"] = serde_json::json!([]);
+                        document.as_object_mut().expect("an object").remove("seal");
+                    })),
+                ),
             ];
             for (how, bytes) in placed {
                 match bytes {
@@ -2487,9 +2599,14 @@ mod tests {
                     Some(stamped),
                     "after {what}, with the projection {how}: the stamp moved"
                 );
+                // As a document rather than as bytes: an edit that changed no
+                // claim still seals, and is rightly left as it stands.
                 assert_eq!(
-                    std::fs::read(&queue_path).expect("the projection is written back"),
-                    current,
+                    serde_json::from_slice::<serde_json::Value>(
+                        &std::fs::read(&queue_path).expect("the projection is written back")
+                    )
+                    .expect("a document"),
+                    serde_json::from_slice::<serde_json::Value>(&current).expect("a document"),
                     "after {what}, with the projection {how}: the repair was not written back"
                 );
             }
@@ -2714,6 +2831,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A tail the fold cannot read refuses the fold, and nothing is stamped.
+    ///
+    /// What [`ChannelState::record`] stamps afterwards is the log's whole
+    /// length, so a fold that read nothing of the tail and went on would mark
+    /// every record in it accounted for without having folded one — a question
+    /// hidden for good by the write meant to record one. The refusal is handed
+    /// back instead, and the projection on disk is exactly what it was.
+    #[test]
+    fn a_tail_the_fold_cannot_read_refuses_the_fold_and_stamps_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-unreadtail-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "unreadtail");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        channel.push(surface(0, true)).expect("queued");
+        let written = std::fs::read(channel.queue_path()).expect("the projection");
+        // The log has grown past the stamp, so the fold has a tail to ask for.
+        crate::ledger::append_line(
+            &paths.channel("surfaces.jsonl"),
+            &serde_json::to_string(&SurfaceRecord {
+                event: Some(SurfaceEvent::Queued),
+                surface: surface(1, false),
+            })
+            .expect("a record"),
+        )
+        .expect("the log grows");
+
+        let refused = channel.current(|from| {
+            Err(crate::Error::Refused(format!(
+                "the tail from byte {from} cannot be read"
+            )))
+        });
+        assert!(
+            matches!(&refused, Err(crate::Error::Refused(why)) if why.contains("cannot be read")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(channel.queue_path()).expect("the projection"),
+            written,
+            "a refused fold moved the projection"
+        );
+        // And the record the fold could not read is still there for the next one.
+        let queue = channel.queue();
+        assert_eq!(
+            queue.waiting.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A read of a channel nothing has written since is one read of the
     /// projection and no read of the log.
     ///
@@ -2748,7 +2916,7 @@ mod tests {
         );
         // Bytes cannot see a read that opens the log and finds nothing past the
         // stamp, so the tail reader itself is what is held to never being asked.
-        let (same, folded) = channel.current(|from| {
+        let Ok((same, folded)) = channel.current(|from| -> Result<_, std::convert::Infallible> {
             panic!("an unchanged channel read its log from byte {from}");
         });
         assert_eq!(same, queue);

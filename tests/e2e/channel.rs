@@ -1707,6 +1707,94 @@ fn a_question_an_older_build_lost_from_its_queue_is_restored_from_its_log() {
     world.release("build.go");
 }
 
+/// A projection whose claims moved under an intact stamp is rebuilt from the
+/// log: the question it hid is still counted and handed over, and its id is
+/// not handed out again.
+///
+/// A stamp matching the log's length used to be the whole of what a reader
+/// checked, so a document with its waiting surfaces emptied and its counter
+/// reset — by a rewrite, an editor, or a write that went wrong — was trusted
+/// for good. Every writer now seals its claims and every reader checks the seal
+/// from the document alone, so such a document reads as no document and the
+/// whole log is folded.
+#[test]
+fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log() {
+    use std::io::Write;
+
+    let world = World::new("channel-moved-claims");
+    world.script("seed.wait", "hold");
+    let run = running(&world, "movedclaims", vec![agent("seed", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"Which base should seed build on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to be queued", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the document is edited in
+    // place because nothing this binary does moves a projection's claims under
+    // its stamp — every write it makes seals what it stamps — so a rewrite that
+    // did is one only another writer, an editor, or a failed write can leave.
+    // The stamp is kept exactly as written, which is what a reader trusting the
+    // stamp alone would take as current; everything before and after is driven
+    // through the CLI.
+    let queue = world.run_file(&run, "channel/queue.json");
+    let mut document: Value =
+        serde_json::from_slice(&std::fs::read(&queue).expect("the projection"))
+            .expect("the projection is a document");
+    assert!(
+        document["accounted"]
+            .as_u64()
+            .is_some_and(|stamped| stamped > 0),
+        "the projection carries no stamp to keep intact: {document}"
+    );
+    document["waiting"] = json!([]);
+    document["pending"] = Value::Null;
+    document["next_id"] = json!(0);
+    let staged = queue.with_extension("staged");
+    std::fs::write(
+        &staged,
+        serde_json::to_vec(&document).expect("the document"),
+    )
+    .expect("the moved document is staged");
+    std::fs::rename(&staged, &queue).expect("the moved document lands");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should seed build on?");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"build on main"}"#,
+        )
+        .exited(0);
+    drop(stdin);
+    world.release("seed.go");
+    ended(serving);
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
