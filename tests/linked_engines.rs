@@ -100,7 +100,15 @@ fn siblings_the_script_reports() -> Vec<String> {
 /// serve at least what the lock holds for "current" to mean anything — and a
 /// version copied here would make these tests pass over a lock that had moved.
 fn linked(name: &str) -> Vec<String> {
-    let lock = fs::read_to_string(repo_root().join("Cargo.lock")).expect("this build's lockfile");
+    let found = resolved(&repo_root().join("Cargo.lock"), name);
+    assert!(!found.is_empty(), "this build links `{name}`");
+    found
+}
+
+/// Every version of one package a lockfile resolves — this build's, or one a
+/// fixture workspace's `cargo` wrote.
+fn resolved(lock: &Path, name: &str) -> Vec<String> {
+    let lock = fs::read_to_string(lock).expect("a lockfile");
     let mut lines = lock.lines().peekable();
     let mut found = Vec::new();
     while let Some(line) = lines.next() {
@@ -114,7 +122,6 @@ fn linked(name: &str) -> Vec<String> {
             .unwrap_or_else(|| panic!("the lock's `{name}` entry is followed by its version"));
         found.push(version.to_string());
     }
-    assert!(!found.is_empty(), "this build links `{name}`");
     found
 }
 
@@ -173,6 +180,11 @@ type Requirement<'a> = (&'a str, &'a str, &'a str);
 /// reader that took every entry for a sibling's would hold every release back
 /// on it. `requires` are the sibling entries: what the release states it needs
 /// of the other engines, which is what decides whether this manifest admits it.
+///
+/// And it is a record **cargo itself resolves against**: the feature named here
+/// enables the optional entry, as a real one would, because
+/// [`workspace_resolving_against`] hands this same index to the real `cargo`
+/// as a local registry and a record cargo calls invalid would stop that.
 fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement]) -> String {
     let siblings: String = requires
         .iter()
@@ -188,7 +200,7 @@ fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement
          {{\"name\":\"serde\",\"req\":\"^1.0.219\",\"features\":[\"derive\"],\"optional\":true,\
          \"default_features\":true,\"target\":\"cfg(windows)\",\"kind\":\"normal\"}}{siblings}],\
          \"cksum\":\"0\",\
-         \"features\":{{\"test-doubles\":[\"dep:onevcs-testing\"]}},\"yanked\":{yanked},\
+         \"features\":{{\"test-doubles\":[\"dep:serde\"]}},\"yanked\":{yanked},\
          \"rust_version\":\"1.88\",\"pubtime\":\"2026-08-23T05:22:32Z\"}}\n"
     )
 }
@@ -870,6 +882,206 @@ fn a_sibling_requirement_whose_package_is_null_is_read_by_its_name() {
             ),
         "a sibling requirement with `package` spelled null was not read as the sibling's:\n{}",
         said(&run)
+    );
+}
+
+/// A cargo workspace of the fixture's own, pinned as this repository is and
+/// resolving against `index` — the same tree the check reads — so a remedy the
+/// check prints can be performed by the real `cargo`, offline, and the lock it
+/// leaves read back.
+///
+/// The index is handed to cargo as a local registry replacing crates.io: the
+/// registry's own record format is what both readers consume, and a local
+/// registry needs no crate archives for cargo to *resolve* — only to build,
+/// which nothing here does. The workspace lives beside the index rather than in
+/// a temporary directory so a failed run leaves the tree that failed where the
+/// other fixtures are.
+///
+/// Returned with its lock already generated over whatever `index` served at the
+/// time, which is the starting state the caller then moves the registry past.
+fn workspace_resolving_against(case: &str, index: &str) -> PathBuf {
+    let root = repo_root().join(format!("target/linked-engines/{case}"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).expect("a fixture workspace");
+    fs::create_dir_all(root.join(".cargo")).expect("a fixture workspace config");
+
+    let mut manifest = String::from("[workspace]\n\n[workspace.dependencies]\n");
+    for name in SIBLINGS {
+        manifest.push_str(&format!("{name} = \"{}\"\n", required(name)));
+    }
+    manifest.push_str(
+        "\n[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    for name in SIBLINGS {
+        manifest.push_str(&format!("{name} = {{ workspace = true }}\n"));
+    }
+    fs::write(root.join("Cargo.toml"), manifest).expect("a fixture manifest");
+    fs::write(root.join("src/lib.rs"), "").expect("a fixture crate");
+
+    // A local registry is a directory holding `index/`, so the registry root
+    // is the index's parent. A TOML literal string, so a Windows path's
+    // backslashes are read as written.
+    let registry = repo_root()
+        .join(index)
+        .parent()
+        .expect("the index has a parent")
+        .to_path_buf();
+    fs::write(
+        root.join(".cargo/config.toml"),
+        format!(
+            "[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\nlocal-registry = '{}'\n",
+            registry.display()
+        ),
+    )
+    .expect("a fixture registry source");
+
+    let generated = Command::new(env!("CARGO"))
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&root)
+        .output()
+        .expect("cargo generates a lockfile");
+    assert!(
+        generated.status.success(),
+        "cargo could not resolve the fixture workspace against the fixture index:\n{}",
+        said(&generated)
+    );
+    root
+}
+
+/// Performed with the real `cargo`, the remedy the check prints in the mixed
+/// case leaves the lock resolving the engine at the release its line named,
+/// with one copy of every sibling — and the bare spelling does not.
+///
+/// The case the live registry cannot produce today, driven end to end: a
+/// fixture workspace pinned as this repository is, resolved by cargo against
+/// the fixture index at the linked releases; the index then moved past it — an
+/// admissible release, a newer one held back by the `onevcs` pin, and the
+/// `onevcs` that newer one needs, so that cargo *can* take it; the check run
+/// over that workspace; and the `fix:` line it prints run as printed. What is
+/// asserted is the lock cargo wrote, not the line. The bare spelling is run
+/// from the same starting lock for the contrast: it is what the contract
+/// prescribed, and what it leaves is the split the check's own rule refuses —
+/// which is the whole reason the remedy is spelled with `--precise`.
+#[test]
+fn the_remedy_printed_in_the_mixed_case_performed_with_cargo_moves_the_lock_to_the_release_it_names(
+) {
+    let linked_testing = &linked("onevcs-testing")[0];
+    let linked_vcs = &linked("onevcs")[0];
+    let index = index_serving("mixed-remedy/index", &[]);
+    let workspace = workspace_resolving_against("mixed-remedy/ws", &index);
+    let lock = workspace.join("Cargo.lock");
+    for name in SIBLINGS {
+        assert_eq!(
+            resolved(&lock, name),
+            linked(name),
+            "the fixture workspace did not start where this build's lock is for `{name}`"
+        );
+    }
+    let starting = fs::read_to_string(&lock).expect("the starting lock");
+
+    // The registry moves past the lock.
+    let index = index_serving(
+        "mixed-remedy/index",
+        &[
+            served("onevcs-testing", "0.5.100"),
+            served("onevcs-testing", "0.5.101").requiring(&[("onevcs", "^0.99.0", "normal")]),
+            served("onevcs", "0.99.0"),
+        ],
+    );
+    // Relative to the repository root, as every path the script is handed is.
+    let run = linked_engines(&[
+        "--manifest",
+        "target/linked-engines/mixed-remedy/ws/Cargo.toml",
+        "--lock",
+        "target/linked-engines/mixed-remedy/ws/Cargo.lock",
+        "--index",
+        &index,
+    ]);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "the fixture lock is behind the admissible release:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stderr);
+    let remedy: Vec<&str> = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("fix: "))
+        .unwrap_or_else(|| panic!("the refusal carries no fix line:\n{}", said(&run)))
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        remedy.first().copied(),
+        Some("cargo"),
+        "the remedy is not a cargo command:\n{}",
+        said(&run)
+    );
+    assert!(
+        remedy.contains(&format!("onevcs-testing@{linked_testing}").as_str()),
+        "the remedy does not carry the version-qualified spec consumers match on:\n{}",
+        said(&run)
+    );
+
+    // Performed as printed.
+    let performed = Command::new(env!("CARGO"))
+        .args(&remedy[1..])
+        .arg("--offline")
+        .current_dir(&workspace)
+        .output()
+        .expect("cargo performs the remedy");
+    assert!(
+        performed.status.success(),
+        "cargo refused the remedy the check printed, run as printed:\n{}",
+        said(&performed)
+    );
+    assert_eq!(
+        resolved(&lock, "onevcs-testing"),
+        vec!["0.5.100".to_string()],
+        "performed, the remedy did not leave `onevcs-testing` at the release the refusal \
+         named:\n{}",
+        said(&performed)
+    );
+    assert_eq!(
+        resolved(&lock, "onevcs"),
+        vec![linked_vcs.clone()],
+        "performed, the remedy left `onevcs` other than as one copy at the release the pin \
+         admits — which is the split the check's own rule refuses:\n{}",
+        said(&performed)
+    );
+    for name in SIBLINGS {
+        assert_eq!(
+            resolved(&lock, name).len(),
+            1,
+            "performed, the remedy left `{name}` resolved more than once:\n{}",
+            said(&performed)
+        );
+    }
+
+    // The contrast: the bare spelling, from the same starting lock.
+    fs::write(&lock, &starting).expect("the starting lock restored");
+    let bare: Vec<&str> = remedy[1..]
+        .iter()
+        .copied()
+        .take_while(|arg| *arg != "--precise")
+        .collect();
+    let performed = Command::new(env!("CARGO"))
+        .args(&bare)
+        .arg("--offline")
+        .current_dir(&workspace)
+        .output()
+        .expect("cargo performs the bare spelling");
+    assert!(
+        performed.status.success(),
+        "cargo refused the bare spelling, so the contrast says nothing:\n{}",
+        said(&performed)
+    );
+    assert_eq!(
+        resolved(&lock, "onevcs").len(),
+        2,
+        "the bare spelling no longer resolves `onevcs` twice, so the `--precise` the remedy \
+         carries is doing nothing cargo would not do on its own — re-read the mixed case \
+         before keeping it:\n{}",
+        said(&performed)
     );
 }
 
