@@ -2040,7 +2040,13 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
     let run = "unwatchedobserved";
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     let driver = world
-        .agentgraph_cmd(&["start", &path, "--attach", "--dag-graph", &world.dag_graph()])
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -2063,7 +2069,10 @@ fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_exc
     let left = document(&paths);
     assert_eq!(left["graph_complete"], json!(true), "{left}");
     assert_eq!(
-        (left["journal_len"].as_u64(), left["journal_mtime_ms"].as_u64()),
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
         stamp_of(&paths),
         "the driver left a document behind its journal at handback: {left}"
     );
@@ -2109,7 +2118,10 @@ fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
     let left = document(&paths);
     assert_eq!(left["graph_complete"], json!(true), "{left}");
     assert_eq!(
-        (left["journal_len"].as_u64(), left["journal_mtime_ms"].as_u64()),
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
         stamp_of(&paths),
         "the detached driver left a document behind its journal at handback: {left}"
     );
@@ -2146,7 +2158,13 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
     // keeps a driver to kill.
     world
         .run_on(
-            world.agentgraph_cmd(&["start", &path, "--detach", "--dag-graph", &world.dag_graph()]),
+            world.agentgraph_cmd(&[
+                "start",
+                &path,
+                "--detach",
+                "--dag-graph",
+                &world.dag_graph(),
+            ]),
             "start adopted",
         )
         .exited(0);
@@ -2181,7 +2199,10 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
     let left = document(&paths);
     assert_eq!(left["graph_complete"], json!(true), "{left}");
     assert_eq!(
-        (left["journal_len"].as_u64(), left["journal_mtime_ms"].as_u64()),
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
         stamp_of(&paths),
         "the adopted driver left a document behind its journal at handback: {left}"
     );
