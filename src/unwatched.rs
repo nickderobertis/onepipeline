@@ -7,11 +7,14 @@
 //!
 //! The one thing worth saying beside the code is the cost, because it is a
 //! property of *this* module rather than of the contract: everything here
-//! **reads**, and it reads no run's merged event store at any point — including
-//! for a run whose summary document is absent or stale, which is where a reader
-//! is tempted to fold. Discovery is proportional to the number of run roots,
-//! because ownership lives in each run's own launch record; everything after it is
-//! proportional to the runs the asked-about session owns.
+//! **reads**, and it reads no run's merged event store — including for a run
+//! whose summary document is absent or stale, which is where a reader is tempted
+//! to fold — with one exception, stated at [`decide`]: a document the previous
+//! release wrote is folded once to bring it to this build's schema, and the
+//! document that fold leaves is current, so the next question costs nothing
+//! again. Discovery is proportional to the number of run roots, because ownership
+//! lives in each run's own launch record; everything after it is proportional to
+//! the runs the asked-about session owns.
 
 use std::path::Path;
 
@@ -39,8 +42,8 @@ pub(crate) fn unwatched(args: &UnwatchedArgs) -> Result<i32> {
     let mut reported: Vec<String> = Vec::new();
     let owned = discover_owned_runs(&root, &session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
-    for (paths, launch) in owned.runs {
-        match decide(&paths, &launch) {
+    for paths in owned.runs {
+        match decide(&paths) {
             Decided::Settled => {}
             Decided::Undecidable(reason) => {
                 unresolved.push(format!("{}: {reason}\n", paths.run));
@@ -203,7 +206,7 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
             continue;
         };
         if launch.owned_by(session) {
-            owned.runs.push((paths, launch));
+            owned.runs.push(paths);
         }
     }
     Ok(owned)
@@ -219,14 +222,8 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
 /// incomplete look is exactly how a run nobody is watching goes unmentioned.
 #[derive(Default)]
 struct Discovered {
-    /// The run roots whose launch record names the resolved session, each with
-    /// the record that proved it.
-    ///
-    /// The record is carried rather than re-read: it was opened to decide
-    /// ownership, and it is the one thing this build can still say about a run
-    /// whose own summary document it may not read. Reading it a second time later
-    /// would be a second open per owned run for a fact already in hand.
-    runs: Vec<(RunPaths, LaunchRecord)>,
+    /// The run roots whose launch record names the resolved session.
+    runs: Vec<RunPaths>,
     /// What could not be resolved, each already worded for standard error.
     unresolved: Vec<String>,
 }
@@ -241,11 +238,10 @@ enum Decided {
     /// still going and is deliberately not named as though it were: a document
     /// that records **no** settlement is in here whether its stamp is fresh or
     /// stale, because a run still recording is exactly what a document behind its
-    /// journal recording no settlement looks like — and so is one declaring a
-    /// schema this build has moved past, whose fields say nothing this build may
-    /// read either way. A document that **does** record settlement while standing
-    /// behind its journal is *not* here: its own record says it settled, so a
-    /// stale stamp leaves that undecidable rather than reported — see [`decide`].
+    /// journal recording no settlement looks like. A document that **does** record
+    /// settlement while standing behind its journal is *not* here: its own record
+    /// says it settled, so a stale stamp leaves that undecidable rather than
+    /// reported — see [`decide`].
     ///
     /// Boxed because the document is the largest thing here by two orders of
     /// magnitude, and this value is built once per owned run: an unboxed variant
@@ -256,8 +252,9 @@ enum Decided {
     Undecidable(String),
 }
 
-/// Read one run's settlement out of its **summary document and nothing else**,
-/// never folding to answer it.
+/// Read one run's settlement out of its **summary document**, folding its store
+/// for exactly one reason: to bring a document an earlier build wrote to this
+/// build's schema, as `runs` does for the same run.
 ///
 /// The stamp is required **only for exclusion**, and that asymmetry is the whole
 /// freshness rule. A run that has stopped writing has a current document, so
@@ -276,15 +273,19 @@ enum Decided {
 /// stamp is fresh or stale, because that is what a run still recording looks
 /// like.
 ///
-/// The other asymmetry is between the two ways a document can fail to be read.
-/// **An answer that could not be obtained is not an answer**, and on this path it
-/// must never be the one that silences a run — so a document that declares a
-/// version this build has moved past is *decided*: it is there, it is well-formed,
-/// and it says its fields are an earlier build's to mean, which settles the only
-/// question asked of it in the negative. Only a document that is absent, that this
-/// build could not read at all, or that is another run's leaves the question
-/// unasked.
-fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
+/// The other asymmetry is between the two ways a document can fail to be read. A
+/// document that declares a version this build has **moved past** is one an
+/// earlier build of this engine wrote and left current for its journal — every
+/// run the previous release settled carries one until something refreshes it —
+/// so it is **refreshed** here, folded once through [`RunSummary::of`] and
+/// rewritten at this build's schema, and then decided as any other document. It
+/// is neither reported unread, which is what was measured — every run the
+/// previous release completed reported at `6` on the first turn after an upgrade
+/// — nor passed over, which would silence a run still being driven by that
+/// release's binary. Only a document that is absent, that this build could not
+/// read at all, that is another run's, or that a *later* build wrote leaves the
+/// question unasked.
+fn decide(paths: &RunPaths) -> Decided {
     let text = match std::fs::read_to_string(paths.summary()) {
         Ok(text) => text,
         // Most often an old settled run whose document is gone, and blocking on it
@@ -300,16 +301,26 @@ fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
     let summary = match serde_json::from_str::<RunSummary>(&text) {
         Ok(summary) => summary,
         Err(refusal) => {
-            // A schema this build has moved past is the one refusal that is still
-            // an answer, and the answer is that this document proves nothing: the
-            // run is not excluded, and it is reported when nothing is watching it.
-            // The word on that line is then read from the launch record alone,
-            // because reading a field of *this* document would be reading it by a
-            // meaning its own version says is not this build's.
+            // A schema this build has moved past is the previous release's
+            // document, and it is refreshed rather than read: the one fold on this
+            // path, paid once per run per schema bump — the reader that refreshes
+            // it is the listing's own, so the document it leaves is the one `runs`
+            // would have left, and a store that reader cannot read is decided
+            // exactly as `runs` decides it.
             if crate::summary::version_this_build_moved_past(&text).is_some() {
-                return Decided::NotProvenSettled(Box::new(RunSummary::of_launch_alone(
-                    paths, launch,
-                )));
+                return match RunSummary::of(paths) {
+                    Ok(refreshed) => decided_from(paths, refreshed),
+                    // The one refusal that reader gives an owned run: its root gone
+                    // between discovery and this read. Named rather than dropped,
+                    // because a run this verb never saw is not a run it decided.
+                    // llmlint: ignore[changed_behavior_has_e2e] reachable only by a run
+                    // root removed between two reads of one invocation, which no journey
+                    // can stage without racing the verb it drives.
+                    Err(error) => Decided::Undecidable(format!(
+                        "its settlement cannot be decided: its summary document is at a \
+                         schema this build has moved past, and refreshing it failed: {error}"
+                    )),
+                };
             }
             return Decided::Undecidable(format!(
                 "its settlement cannot be decided: its summary document could not be read: \
@@ -317,6 +328,11 @@ fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
             ));
         }
     };
+    decided_from(paths, summary)
+}
+
+/// Decide a run from a document this build read — stored, or refreshed.
+fn decided_from(paths: &RunPaths, summary: RunSummary) -> Decided {
     if summary.run_id != paths.run {
         return Decided::Undecidable(format!(
             "its settlement cannot be decided: its summary document is run '{}'",
@@ -324,8 +340,8 @@ fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
         ));
     }
     // Its own record says it settled: excluded when its stamp is current,
-    // undecidable when it is stale. The docstring says why the stale case is not
-    // reported.
+    // undecidable when it is stale. The docstring on [`decide`] says why the stale
+    // case is not reported.
     if summary.stop_recorded || summary.graph_complete {
         if stamped(paths, &summary) {
             return Decided::Settled;

@@ -464,38 +464,6 @@ impl RunSummary {
         self
     }
 
-    /// The row this build can honestly render for a run whose own document it may
-    /// **not** read: the launch record, and no records at all.
-    ///
-    /// Not a document, and never written as one. `unwatched` builds one to reach
-    /// the listing's own standing word for a run whose summary declares a schema
-    /// this build has moved past — a run it must report rather than fold, so the
-    /// word has to come from what this build actually read. Everything a store
-    /// would have contributed is what a run that has recorded nothing carries,
-    /// because nothing is what was read; the launch record supplies the rest, and
-    /// it is the record every reader of a run already takes the driver's host and
-    /// pid from.
-    ///
-    /// The consequence is stated rather than hidden: with no `last_write_at` to
-    /// measure quiet against, such a run reads `ACTIVE` or `DRIVER DEAD` and never
-    /// `PARKED`. That is what the evidence supports, and the alternative — taking
-    /// a number out of a document whose own version says it means something else —
-    /// is exactly what that version exists to refuse.
-    pub(crate) fn of_launch_alone(paths: &RunPaths, launch: &LaunchRecord) -> Self {
-        Self::derive(
-            &paths.run,
-            launch,
-            &Store {
-                state: &RunState::default(),
-                event_count: 0,
-                last_event_kind: None,
-                timing: &telemetry::of_run(paths, &[]),
-                judged: &BTreeSet::new(),
-            },
-            (0, 0),
-        )
-    }
-
     /// The same summary, always by folding the whole store.
     ///
     /// What the fallback runs, and what the writer's own account is held equal

@@ -4397,26 +4397,54 @@ per-watch record it decides from to the shipped surface —
 `views::Watchers`, `views::WATCHER_SCHEMA_VERSION`, and
 `error::EXIT_RUNS_UNWATCHED`.**
 
-**Amendment (this change): two additions to the rule below, and no change to the
+**Amendment (this change): three changes to the rule below, and no change to the
 surface.** A settled `onepipeline start` was found to hand back a run this verb
 then reported at exit `6`: the measured run `unwatched-stop-hook-fixes` completed
-at 14:10:42Z and ten minutes later `unwatched` printed it and exited `6`, while
-`status`, `runs` and `results` each reported it `SETTLED` / `complete`. Its
-summary document recorded `graph_complete: true` **and** `stop_recorded: true`,
-and `src/unwatched.rs::decide` has exactly one path by which such a document
-reaches `6` — a stamp stale against the journal, falling through to the reported
-set. So (1) **the engine's guarantee**: a run this engine drove to settlement
-leaves a document that satisfies the exclusion rule by construction, without any
-reader refreshing it — the driver's closeout writes the document *after* the last
-append of every appender it holds (the engine loop, the observer relay, the
-lifecycle relay; observer teardown and an adopted driver included), so handing
-back at settlement never leaves a settled run this verb reports. And (2) **the
-undecidable set grows one case**: a document that *records* settlement while
-**behind its journal** — `stop_recorded` or `graph_complete` true with a stamp
-that does not match — is undecidable, named on standard error and blocking
-nothing, never reported at `6`, because a stale stamp is no proof of what the
-document says and `6` means *proven* unwatched. This is left OPEN, as the entry
-is.
+at 14:10:42Z on 2026-09-11 and ten minutes later `unwatched` printed it —
+`unwatched-stop-hook-fixes  DRIVER DEAD  nothing has recorded a watch on it` —
+and exited `6`, while `status`, `runs` and `results` each reported it `SETTLED` /
+`complete`. **The cause was the upgrade, not the writer.** The summary schema went
+`1` → `2` in 0.27.0, the release that added this verb; that run's own `adopt` node
+is what moved the host to 0.27.0, and the package landed at 14:10:58Z, sixteen
+seconds *after* `node-settled` — so the driver that recorded the settlement was
+the 0.26.1 binary, and the document it left was current for its journal and
+recorded `graph_complete: true` at `schema_version: 1`. The rule below then read
+"a schema this build has moved past" as *decided, reported, with the standing word
+from the launch record alone* — which is the `DRIVER DEAD` measured, since a row
+built from the launch record carries no node counts — and every run the previous
+release had completed was reported the same way until some view happened to
+refresh it. `stop` refreshed this one, which is why it then answered `0`. The
+journal at closeout carries no timestamp anomaly, no duplicate sequence number
+and no record after `node-settled`, and twenty-three driven settlements across
+the measured shape — an observer graph mid-turn, a real `adopt`, a lifecycle node
+over the real `onevcs` seam — each left a current document: the in-process
+writers were never the cause, and none of those three streams is necessary to
+reproduce the report.
+
+So (1) **a document at a schema this build has moved past is refreshed, not
+reported unread**: it is the previous release's document, and the verb folds it
+once through the listing's own reader and rewrites it at this build's schema,
+exactly as `runs` does for the same run, then decides it as any other document —
+a settled run excluded, a run still recording reported from what its store really
+says. Paid once per run per schema bump, and bounded by the runs the asking
+session owns rather than by the root. This replaces the rule that reported such a
+document unread, which was the measured defect, and keeps that rule's one sound
+half: an answer nobody could take must never *silence* a run, and a run still
+being driven by the previous release's binary — there is one on the host now —
+is decided from its store rather than passed over. (2) **The engine's
+guarantee**: a run this engine drove to settlement leaves a document that
+satisfies the exclusion rule by construction, without any reader refreshing it —
+the driver's closeout writes the document *after* the last append of every
+appender it holds (the engine loop, the observer relay, the lifecycle relay;
+observer teardown and an adopted driver included), so handing back at settlement
+never leaves a settled run this verb reports. Proven over the measured shape, and
+kept although it was not the cause: it is the property the verb's exclusion rule
+rests on, and it was held only by inspection before. (3) **The undecidable set
+grows one case**: a document that *records* settlement while **behind its
+journal** — `stop_recorded` or `graph_complete` true with a stamp that does not
+match — is undecidable, named on standard error and blocking nothing, never
+reported at `6`, because a stale stamp is no proof of what the document says and
+`6` means *proven* unwatched. This is left OPEN, as the entry is.
 
 Entry 58 added the verb a supervisor puts in a wake loop. It did not add a way to
 ask whether anybody ran it: `src/watch.rs` said outright that a watch "consumes no
@@ -4556,21 +4584,22 @@ person.
   journal` and blocks nothing. A document behind its journal recording **no**
   settlement is the opposite case and stays **reported**, because that is exactly
   what a run still recording looks like.
-- **A document at a schema version this build has moved *past* is decided, not
-  undecidable**, and the distinction is between an answer and the absence of one.
-  Such a document is there, is well-formed, and says outright that its fields are
-  an earlier build's to mean — which settles the only question this verb asks of
-  it, in the negative: nothing in it may be read as this build's `stop_recorded`
-  or `graph_complete`, so the run is **not excluded**, is reported when nothing is
-  watching it, and counts toward the non-zero exit. An answer that could not be
-  obtained is never the one that silences a run. Its standing word is then read
-  from the launch record alone, because reading a field of that document would be
-  reading it by a meaning its own version says is not this build's; the
-  consequence is that such a run reads `ACTIVE` or `DRIVER DEAD` and never
-  `PARKED`, having no `last_write_at` this build may take. A version *ahead* of
-  this build is the opposite case and stays undecidable: it was written by a build
-  that knows things this one does not, and this one has no reading of it at all,
-  not even that negative one.
+- **A document at a schema version this build has moved *past* is refreshed
+  (this change), and then decided as any other.** Such a document is the previous
+  release's — every run that release settled carries one, current for its journal,
+  until something refreshes it — and nothing in it may be read as this build's
+  `stop_recorded` or `graph_complete`. So the verb folds the run once through the
+  listing's own reader, `views::RunSummary::of`, which rewrites the document at
+  this build's schema, and decides the refreshed document under the rules above:
+  a settled run is excluded, a run still recording is reported with the standing
+  word its own record gives it, and the document left behind is current, so the
+  next question costs nothing again — and a store that reader cannot read is
+  decided exactly as `runs` decides it, since the two are one reader. Before this change such
+  a document was reported unread, with the standing word taken from the launch
+  record alone: that reported every run the previous release completed at `6` on
+  the first turn after an upgrade, which is the measured defect. A version *ahead*
+  of this build stays undecidable: it was written by a build that knows things
+  this one does not, and this one has no reading of it at all.
 - **Reported** when the launch record names the resolved session, the run is not
   excluded, its settlement was decidable, and no record in its `watchers/`
   directory is a live watch. One line per reported run on standard output, naming
@@ -4600,8 +4629,11 @@ person.
   lives in each run's own launch record and reading those is the only way to find
   the owned ones — nothing else about a root is opened to decide it. Everything
   after discovery is proportional to the runs the resolved session owns, and **no
-  run's merged event store is read on this path at any point**, including for a run
-  whose summary document is absent or stale. That is the rule entry 56 states for a
+  run's merged event store is read on this path**, including for a run whose
+  summary document is absent or stale — with the one exception above (**this
+  change**): a document at a schema this build has moved past is folded once, and
+  the document that fold leaves is current, so it is a cost paid once per owned
+  run per schema bump and never again. That is the rule entry 56 states for a
   listing, held here by a verb that runs at the end of every turn.
 
 ```json
@@ -4654,10 +4686,13 @@ this engine drove to settlement leaving a document current for its journal so it
 is excluded without any view refreshing it, proven for an attached driver and an
 adopted one (**this change**); the five undecidable documents named
 on standard error and changing no status; a run whose only watcher record cannot be
-read reported all the same; the superseded-schema document decided the other way
-— reported on standard output and counted toward the status, from a fixture whose
-own fields say the run settled so that the two readings disagree; roots belonging
-to nobody passed over; the option
+read reported all the same; the superseded-schema document refreshed and decided
+from the run (**this change**) — a settled run excluded and its document left at
+this build's schema and current, and a run still recording reported with the word
+its store gives it, beside an undecidable run named on standard error — and the
+measured report reproduced over the measured shape, a run the previous
+release settled asked about with no view between (**this change**); roots
+belonging to nobody passed over; the option
 deciding against an environment naming another session, both ways round; both
 refusals; and — over four hundred run roots holding a gibibyte of journals, and
 then ten — the bound this verb has to meet to be asked at the end of every turn,
