@@ -2782,6 +2782,7 @@ fn an_adoption_never_reads_a_pid_the_host_has_given_to_another_process_as_the_dr
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("it is reaped");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A Linux run launched by the former `ps lstart` implementation remains
 /// stoppable after upgrading to procfs tokens.
