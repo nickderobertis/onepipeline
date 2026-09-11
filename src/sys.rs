@@ -2239,11 +2239,9 @@ try {
     /// leaf's own output arriving first and a deeper level announcing before
     /// the one above it change nothing about the answer.
     ///
-    /// The stream here is the one a root that dawdled before announcing
-    /// produces: the leaf's blank line and banner, then the middle level naming
-    /// the leaf, then the root naming the middle, then a reply. It is also what
-    /// the script produced under `pwsh` when its root was made to sleep before
-    /// its `WriteLine` — see the commit that added this.
+    /// The stream is the one a root that is slow to announce produces: the
+    /// leaf's blank line and banner, the middle level naming the leaf, the root
+    /// naming the middle, then a reply.
     #[test]
     fn a_trees_levels_are_read_by_what_they_say_and_not_by_when_they_arrive() {
         let mut stream = a_stream_of(&[
