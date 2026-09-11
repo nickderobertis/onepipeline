@@ -823,10 +823,11 @@ impl Asker {
 
 /// Read the asker a queue recorded, reading a name that names nobody as none.
 ///
-/// The one lenient boundary in this file, and the leniency is the point. A queue
-/// is read with `read_json_opt(..).unwrap_or_default()`, so a refusal here would
-/// not refuse one field — it would read the **whole queue** as empty and lose
-/// every surface in it, which is a far worse answer to a name this crate never
+/// The one lenient boundary in this file, and the leniency is the point. A
+/// surface is read out of a whole projection or out of one line of the log, and
+/// a refusal here would refuse the record around it rather than one field: the
+/// **whole queue** read as empty, or the surface dropped from the fold — either
+/// way a surface lost, which is a far worse answer to a name this crate never
 /// writes than simply not knowing whose it was. A blank name identifies nobody,
 /// and `None` is what this file already means by that, so it is read as that and
 /// the invariant `Asker` carries survives the round trip.
@@ -913,6 +914,24 @@ pub(crate) struct ChannelState {
 }
 
 /// What is waiting to be read, and what has been read but not answered.
+///
+/// A **projection** of the surface log, and never the truth about it. Every
+/// state a surface reaches is an append to `surfaces.jsonl` — see
+/// [`SurfaceEvent`] — and this document is that log folded: what
+/// [`ChannelState::queue`] hands back is this checkpoint brought up to date with
+/// every record the log has grown by since it was written, and what every
+/// mutation writes is the fold as it stands the moment its own record is
+/// appended. It earns its place by being cheap where the log is not: the unread
+/// count is one read of it, paid per run root by the listing across every root on
+/// the host, and its modification stamp is what lets the reconcile loop skip an
+/// unchanged channel without opening the log.
+///
+/// It used to be the truth, read, modified, and written back whole by every
+/// writer and every reader, and that lost data: a push landing between a
+/// reader's read and its write-back was overwritten by the reader's stale copy,
+/// and a worker's blocking question was destroyed by the manager's own act of
+/// reading the channel. As a projection a lost write costs the next reader a
+/// fold and never a surface.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Queue {
     /// The surfaces nobody has read yet, oldest first.
@@ -921,9 +940,147 @@ pub(crate) struct Queue {
     /// The surface a planner consumed and has not answered.
     #[serde(default)]
     pub pending: Option<Surface>,
-    /// The id the next surface takes.
+    /// The id the next surface takes: one past the highest the log has
+    /// allocated. Derived, never read and incremented — the allocation is made
+    /// under the log's lock from the log itself, so two writers cannot take one
+    /// id and a stale copy cannot hand out one already taken.
     #[serde(default)]
     pub next_id: u64,
+    /// How many bytes of the surface log this projection accounts for, at a
+    /// record boundary.
+    ///
+    /// What makes the projection *checkable*: a log longer than this holds
+    /// records the document has not folded, and a reader folds them before
+    /// answering. Absent from a document an older build wrote, which kept no
+    /// stamp and logged no claim or answer to replay — such a document is taken
+    /// as it stands, exactly as that build took it, and is stamped the first time
+    /// this build writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounted: Option<u64>,
+}
+
+/// What one line of the surface log says happened.
+///
+/// The log is a complete event stream: a surface is written to it when it is
+/// queued and again at every state it reaches afterwards, each line carrying the
+/// surface as it was at that moment under its own id. Appends are atomic and
+/// serialised under the log's lock, so the log alone accounts for a surface's
+/// whole life and the projection beside it can always be rebuilt from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SurfaceEvent {
+    /// It was queued, under the id this line carries.
+    Queued,
+    /// A reader took it from the waiting ones; a blocking one went to the
+    /// pending slot to await its verdict.
+    Claimed,
+    /// A verdict answered it, releasing the pending slot.
+    Answered,
+    /// The session serving it exited with nobody left waiting on its answer.
+    Abandoned,
+    /// A later session of the same asker took it back over.
+    Attended,
+}
+
+/// One line of the surface log.
+///
+/// The event is read as optional because every line an older build wrote lacks
+/// it: that build logged a surface when it was queued, when it was abandoned, and
+/// when it was attended, and never a claim or an answer. Such a line is read as
+/// what that build meant by it — see [`SurfaceRecord::event`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SurfaceRecord {
+    /// What happened. Always written; read leniently for the reason above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<SurfaceEvent>,
+    /// The surface as it was when this happened.
+    #[serde(flatten)]
+    pub surface: Surface,
+}
+
+impl SurfaceRecord {
+    /// What this line says happened, inferring it for a line that does not say.
+    ///
+    /// An older build wrote the surface itself at three moments and marked none
+    /// of them: the first line under an id was the surface being queued, and every
+    /// later line under it was the surface being abandoned or taken back, which
+    /// the flag it carries tells apart. `next_id` is what decides whether the id
+    /// has been seen: the fold keeps it one past every id queued so far.
+    fn event(&self, next_id: u64) -> SurfaceEvent {
+        self.event.unwrap_or(if self.surface.id >= next_id {
+            SurfaceEvent::Queued
+        } else if self.surface.abandoned {
+            SurfaceEvent::Abandoned
+        } else {
+            SurfaceEvent::Attended
+        })
+    }
+}
+
+impl Queue {
+    /// Fold one record of the surface log into this projection.
+    ///
+    /// The one place the queue's transitions are defined: every mutation applies
+    /// its own record through here after appending it, and every reader applies
+    /// the records the log grew by, so the two cannot disagree about what a line
+    /// means. A record about a surface this projection no longer holds — a claim
+    /// of one already claimed, an answer to one already answered — folds to
+    /// nothing, which is what makes a replay from any checkpoint land on the same
+    /// state.
+    fn apply(&mut self, record: &SurfaceRecord) {
+        let surface = &record.surface;
+        match record.event(self.next_id) {
+            SurfaceEvent::Queued => {
+                // Exactly one check-in is ever pending, and it is kept current
+                // rather than kept still: the next interval's update replaces
+                // the queued one instead of being blocked by it.
+                if surface.source == source::CHECK_IN {
+                    self.waiting
+                        .retain(|existing| existing.source != source::CHECK_IN);
+                }
+                self.waiting.push(surface.clone());
+                self.next_id = self.next_id.max(surface.id + 1);
+            }
+            SurfaceEvent::Claimed => {
+                let Some(at) = self.waiting.iter().position(|w| w.id == surface.id) else {
+                    return;
+                };
+                let taken = self.waiting.remove(at);
+                // A blocking surface outlives its delivery while it waits for an
+                // answer, so it is held rather than dropped. An abandoned one
+                // takes the slot only when nothing else is holding one: nothing
+                // waits on its answer, so it may not displace a question somebody
+                // does wait on. The slot's own text is not written over on its way
+                // out: an abandoned occupant goes back among the readable ones,
+                // because this queue is the only place a reader can still reach
+                // it.
+                if taken.blocking && (!taken.abandoned || self.pending.is_none()) {
+                    if let Some(displaced) = self.pending.replace(taken) {
+                        if displaced.abandoned {
+                            self.waiting.push(displaced);
+                        }
+                    }
+                }
+            }
+            SurfaceEvent::Answered => {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|held| held.id == surface.id)
+                {
+                    self.pending = None;
+                }
+            }
+            SurfaceEvent::Abandoned | SurfaceEvent::Attended => {
+                let abandoned = record.event(self.next_id) == SurfaceEvent::Abandoned;
+                for held in self.waiting.iter_mut().chain(self.pending.iter_mut()) {
+                    if held.id == surface.id {
+                        held.abandoned = abandoned;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One reply as it sits in the durable queue.
@@ -949,12 +1106,13 @@ pub(crate) struct QueuedCommands {
     pub commands: Vec<Command>,
 }
 
-/// What the reconcile loop last saw of the channel's two files.
+/// What the reconcile loop last saw of the channel's files.
 ///
 /// Compared rather than read: see [`ChannelState::fingerprint`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Fingerprint {
     queue: Option<(u64, std::time::SystemTime)>,
+    surfaces: Option<(u64, std::time::SystemTime)>,
     commands: Option<(u64, std::time::SystemTime)>,
 }
 
@@ -1070,57 +1228,160 @@ impl ChannelState {
         self.paths.channel("queue.json")
     }
 
+    fn log_path(&self) -> std::path::PathBuf {
+        self.paths.channel("surfaces.jsonl")
+    }
+
     /// A cheap look at everything the reconcile loop reads off this channel.
     ///
-    /// Two `stat` calls and no read, so a converged driver can check for an
+    /// Three `stat` calls and no read, so a converged driver can check for an
     /// arriving edit five times a second for nothing: the loop reconciles only
     /// when this moved. An absent file fingerprints as absent, so the moment one
     /// appears the fingerprint has changed.
     ///
-    /// Length is the load-bearing half — the log only grows, and every queue
-    /// transition the loop can read changes the length too — and the timestamp is
-    /// the belt beside those braces.
+    /// Length is the load-bearing half — the two logs only grow, and every queue
+    /// transition the loop can read changes the projection's length too — and
+    /// the timestamp is the belt beside those braces. The surface log is marked
+    /// beside its projection so that a writer which appended and then died
+    /// before it wrote the projection still wakes the loop, whose read of the
+    /// queue is what folds that record in.
     pub(crate) fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             queue: mark(&self.queue_path()),
+            surfaces: mark(&self.log_path()),
             commands: mark(&self.paths.channel("commands.jsonl")),
         }
     }
 
-    /// The live queue.
+    /// The live queue: the projection, brought up to date with every record the
+    /// surface log has grown by since the projection was written.
+    ///
+    /// One read of the projection and one `stat` of the log when the two agree,
+    /// which is every read of a channel nothing has written since. Where they do
+    /// not — a writer died between its append and its write of the projection,
+    /// or a stale projection landed over a fresh one — the records the projection
+    /// has not accounted for are folded in, and the repaired projection is
+    /// written back so the next reader pays one read again. The repair is best
+    /// effort: a projection that could not be written costs the next reader a
+    /// fold, never an answer, and a read that refused over it would be a view
+    /// unable to render a run whose own record is intact.
     pub fn queue(&self) -> Queue {
-        crate::ledger::read_json_opt(&self.queue_path()).unwrap_or_default()
+        let (queue, folded) =
+            self.current(|from| crate::ledger::read_records_from(&self.log_path(), from));
+        if folded {
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] the repair is a cache write and the answer is already in hand: failing the read over it would refuse a view of a run whose log is intact, and the next reader simply folds again.
+            let _ = self.write_queue(&queue);
+            // llmlint: ignore-end[no_panics_on_recoverable_errors]
+        }
+        queue
+    }
+
+    /// The projection with the log's tail folded in, and whether anything was.
+    ///
+    /// `tail` reads the log from a record boundary; a caller holding the log's
+    /// lock reads through the handle it holds, and one that does not reads the
+    /// file. A log shorter than the stamp is one that was replaced, and is folded
+    /// whole from an empty projection rather than from a boundary it no longer
+    /// has. A record whose writer has not finished it ends the fold: the stamp
+    /// stays at the boundary before it, so a later read resumes there and the
+    /// record is folded whole once its writer is done.
+    fn current(&self, tail: impl FnOnce(u64) -> Vec<crate::ledger::Record>) -> (Queue, bool) {
+        let checkpoint: Option<Queue> = crate::ledger::read_json_opt(&self.queue_path());
+        let (mut queue, from) = match checkpoint {
+            Some(queue) => match queue.accounted {
+                Some(accounted) => (queue, accounted),
+                None => return (queue, false),
+            },
+            None => (Queue::default(), 0),
+        };
+        let length = mark(&self.log_path()).map_or(0, |(length, _)| length);
+        let replaced = length < from;
+        let from = if replaced {
+            queue = Queue::default();
+            0
+        } else {
+            from
+        };
+        let mut accounted = from;
+        let mut folded = replaced;
+        for record in tail(from) {
+            if !record.terminated {
+                break;
+            }
+            accounted = record.offset + record.bytes + 1;
+            folded = true;
+            // A line this build cannot read is still a line the file holds, so
+            // it advances the stamp: leaving it would fold the same tail on every
+            // read for ever. What it costs is one record going unfolded, which
+            // is one surface a reader cannot see — and every line here is one
+            // this crate wrote.
+            if let Ok(record) = serde_json::from_str::<SurfaceRecord>(&record.text) {
+                queue.apply(&record);
+            }
+        }
+        queue.accounted = Some(accounted);
+        (queue, folded)
     }
 
     fn write_queue(&self, queue: &Queue) -> crate::Result<()> {
         crate::ledger::write_json(&self.queue_path(), queue)
     }
 
+    /// Append what `derive` decides to the surface log, under its lock, and
+    /// write the projection as it then stands.
+    ///
+    /// Every mutation of the queue is this. The lock is held from before the
+    /// queue is read until after the projection is written, so what `derive`
+    /// sees is the log as it is and nothing lands between the decision and the
+    /// record of it: an id it allocates is one no other writer can allocate, and
+    /// a surface it claims is one no other reader can claim. What it returns is
+    /// the surfaces it recorded, in the order it recorded them.
+    fn record(
+        &self,
+        derive: impl FnOnce(&Queue) -> Vec<(SurfaceEvent, Surface)>,
+    ) -> crate::Result<Vec<Surface>> {
+        let mut log = crate::ledger::Appender::open(&self.log_path())?;
+        let (mut queue, _) = self.current(|from| {
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every ledger reader follows, stated on `read_records`: a tail this process cannot read reads as empty, and the stamp then stays where it was so the next reader tries again.
+            log.records_from(from).unwrap_or_default()
+            // llmlint: ignore-end[no_panics_on_recoverable_errors]
+        });
+        let mut recorded = Vec::new();
+        for (event, surface) in derive(&queue) {
+            let record = SurfaceRecord {
+                event: Some(event),
+                surface,
+            };
+            log.append(
+                &serde_json::to_string(&record)
+                    .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
+            )?;
+            queue.apply(&record);
+            recorded.push(record.surface);
+        }
+        queue.accounted = Some(log.len()?);
+        self.write_queue(&queue)?;
+        Ok(recorded)
+    }
+
     /// Queue one surface, and record that it was *sent*.
     ///
-    /// Exactly one check-in is ever pending, and it is kept current rather than
-    /// kept still: the next interval's update **replaces** the queued one
-    /// instead of being blocked by it, so being ignored makes the harness
-    /// louder rather than quieter. The clock is not reset by queuing, so the
-    /// staleness a view reports keeps growing while the queued content stays
-    /// fresh.
+    /// The id is allocated from the log under its lock — one past the highest it
+    /// has ever queued — so a surface queued while a reader is reading the
+    /// channel keeps its id and its place. Exactly one check-in is ever pending,
+    /// and it is kept current rather than kept still: the next interval's update
+    /// **replaces** the queued one instead of being blocked by it, so being
+    /// ignored makes the harness louder rather than quieter. The clock is not
+    /// reset by queuing, so the staleness a view reports keeps growing while the
+    /// queued content stays fresh.
     pub fn push(&self, mut surface: Surface) -> crate::Result<Surface> {
-        let mut queue = self.queue();
-        surface.id = queue.next_id;
-        queue.next_id += 1;
-        if surface.source == source::CHECK_IN {
-            queue
-                .waiting
-                .retain(|existing| existing.source != source::CHECK_IN);
-        }
-        queue.waiting.push(surface.clone());
-        self.write_queue(&queue)?;
-        crate::ledger::append_line(
-            &self.paths.channel("surfaces.jsonl"),
-            &serde_json::to_string(&surface)
-                .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
-        )?;
-        Ok(surface)
+        let mut queued = self.record(|queue| {
+            surface.id = queue.next_id;
+            vec![(SurfaceEvent::Queued, surface)]
+        })?;
+        queued
+            .pop()
+            .ok_or_else(|| crate::Error::Invalid("surface: nothing was queued".to_owned()))
     }
 
     /// Claim the next readable surface: **a blocking one first**, and arrival
@@ -1137,44 +1398,31 @@ impl ChannelState {
     /// stays consumable until somebody reads it. A check-in that has been
     /// superseded is replaced at [`push`](Self::push) rather than discarded
     /// here.
+    ///
+    /// A blocking surface outlives its delivery while it waits for an answer,
+    /// so it is held in the pending slot rather than dropped: the run is
+    /// reported as waiting for a planner decision until a reply arrives.
+    /// Narration read afterwards leaves that standing — reading a report is not
+    /// answering a question. An abandoned one is handed over too — the text is
+    /// what a manager reads it for — and last, behind everything somebody is
+    /// still waiting on. What the run *reports* is not decided here but by
+    /// [`pending`](Self::pending), which passes over an abandoned occupant; what
+    /// the slot does with each is [`Queue::apply`]'s.
     pub fn claim(&self) -> crate::Result<Option<Surface>> {
-        let mut queue = self.queue();
-        let next = queue
-            .waiting
-            .iter()
-            .position(|surface| surface.blocking && !surface.abandoned)
-            .or_else(|| queue.waiting.iter().position(|surface| !surface.abandoned))
-            .unwrap_or(0);
-        let claimed = (!queue.waiting.is_empty()).then(|| queue.waiting.remove(next));
-        if let Some(surface) = &claimed {
-            // A blocking surface outlives its delivery while it waits for an
-            // answer, so it is held here rather than dropped: the run is
-            // reported as waiting for a planner decision until a reply arrives.
-            // Narration read afterwards leaves that standing — reading a report
-            // is not answering a question, and a decision the planner never made
-            // must not release the subtree it is holding.
-            //
-            // An abandoned one is handed over too — the text is what a manager
-            // reads it for — and last, behind everything somebody is still
-            // waiting on. It takes the slot only when nothing else is holding
-            // one: nothing waits on its answer, so it may not displace a
-            // question somebody does wait on, and the slot is where a listener
-            // that comes back for it looks. What the run *reports* is not
-            // decided here but by [`pending`](Self::pending), which passes over
-            // an abandoned occupant.
-            if surface.blocking && (!surface.abandoned || queue.pending.is_none()) {
-                // The slot's own text is not written over on its way out: an
-                // abandoned surface goes back among the readable ones, because
-                // this queue is the only place a reader can still reach it.
-                if let Some(displaced) = queue.pending.replace(surface.clone()) {
-                    if displaced.abandoned {
-                        queue.waiting.push(displaced);
-                    }
-                }
-            }
-        }
-        self.write_queue(&queue)?;
-        Ok(claimed)
+        let mut claimed = self.record(|queue| {
+            let next = queue
+                .waiting
+                .iter()
+                .position(|surface| surface.blocking && !surface.abandoned)
+                .or_else(|| queue.waiting.iter().position(|surface| !surface.abandoned))
+                .unwrap_or(0);
+            queue
+                .waiting
+                .get(next)
+                .map(|surface| vec![(SurfaceEvent::Claimed, surface.clone())])
+                .unwrap_or_default()
+        })?;
+        Ok(claimed.pop())
     }
 
     /// Say of every surface in `raised` that nobody is waiting for its answer.
@@ -1201,31 +1449,28 @@ impl ChannelState {
     /// run stops reporting that it awaits a planner nobody is waiting on, and
     /// [`attend`](Self::attend) is what can take it back.
     ///
-    /// Returns what it marked, so the caller can record it.
+    /// Returns what it marked, so the caller can record it. The run's own
+    /// record of what became of each is one further line of the surface log
+    /// under the same id, carrying the same text and saying nobody is waiting on
+    /// it.
     pub fn abandon(&self, raised: &[u64]) -> crate::Result<Vec<Surface>> {
-        let mut queue = self.queue();
-        let mut marked: Vec<Surface> = Vec::new();
-        for surface in queue.waiting.iter_mut().chain(queue.pending.iter_mut()) {
-            if raised.contains(&surface.id) && !surface.abandoned {
-                surface.abandoned = true;
-                marked.push(surface.clone());
-            }
-        }
-        if marked.is_empty() {
-            return Ok(marked);
-        }
-        self.write_queue(&queue)?;
-        // The run's own record of what became of each surface, beside the line
-        // that recorded it being sent: one further line under the same id,
-        // carrying the same text and saying nobody is waiting on it.
-        for surface in &marked {
-            crate::ledger::append_line(
-                &self.paths.channel("surfaces.jsonl"),
-                &serde_json::to_string(surface)
-                    .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
-            )?;
-        }
-        Ok(marked)
+        self.record(|queue| {
+            queue
+                .waiting
+                .iter()
+                .chain(queue.pending.iter())
+                .filter(|surface| raised.contains(&surface.id) && !surface.abandoned)
+                .map(|surface| {
+                    (
+                        SurfaceEvent::Abandoned,
+                        Surface {
+                            abandoned: true,
+                            ..surface.clone()
+                        },
+                    )
+                })
+                .collect()
+        })
     }
 
     /// Take back over everything `asker` left outstanding, and say what was
@@ -1250,31 +1495,28 @@ impl ChannelState {
     ///
     /// Nothing moves and nothing is re-queued: this only clears a flag, so a
     /// surface a manager has already been handed is not handed to them twice by
-    /// its asker coming back.
+    /// its asker coming back. The correction is recorded under the same id and
+    /// beside the line that said nobody was waiting on it, so the run's own
+    /// record carries it rather than ending on a statement that stopped being
+    /// true.
     pub fn attend(&self, asker: &Asker) -> crate::Result<Vec<Surface>> {
-        let mut queue = self.queue();
-        let mut taken: Vec<Surface> = Vec::new();
-        for surface in queue.waiting.iter_mut().chain(queue.pending.iter_mut()) {
-            if surface.abandoned && surface.asker.as_ref() == Some(asker) {
-                surface.abandoned = false;
-                taken.push(surface.clone());
-            }
-        }
-        if taken.is_empty() {
-            return Ok(taken);
-        }
-        self.write_queue(&queue)?;
-        // Recorded under the same id and beside the line that said nobody was
-        // waiting on it, so the run's own record carries the correction rather
-        // than ending on a statement that stopped being true.
-        for surface in &taken {
-            crate::ledger::append_line(
-                &self.paths.channel("surfaces.jsonl"),
-                &serde_json::to_string(surface)
-                    .map_err(|e| crate::Error::Invalid(format!("surface: {e}")))?,
-            )?;
-        }
-        Ok(taken)
+        self.record(|queue| {
+            queue
+                .waiting
+                .iter()
+                .chain(queue.pending.iter())
+                .filter(|surface| surface.abandoned && surface.asker.as_ref() == Some(asker))
+                .map(|surface| {
+                    (
+                        SurfaceEvent::Attended,
+                        Surface {
+                            abandoned: false,
+                            ..surface.clone()
+                        },
+                    )
+                })
+                .collect()
+        })
     }
 
     /// The surface waiting for an answer, if one is.
@@ -1300,10 +1542,18 @@ impl ChannelState {
     /// blocking surface held. An envelope with edits reaches it through
     /// [`answer_if_verdict`](Self::answer_if_verdict), which is where the two
     /// halves are routed apart.
+    ///
+    /// The release is one further line of the surface log under the answered
+    /// surface's id, and the reply itself is appended to the replies after it:
+    /// a reader that finds the reply finds the slot already released.
     pub fn answer(&self, reply: &Reply) -> crate::Result<u64> {
-        let mut queue = self.queue();
-        queue.pending = None;
-        self.write_queue(&queue)?;
+        self.record(|queue| {
+            queue
+                .pending
+                .iter()
+                .map(|held| (SurfaceEvent::Answered, held.clone()))
+                .collect()
+        })?;
         let path = self.paths.channel("replies.jsonl");
         let id = crate::ledger::read_lines(&path).len() as u64;
         let queued = QueuedReply {
@@ -1993,6 +2243,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A surface queued while the channel is being read is still readable
+    /// afterwards, and no id is ever handed out twice.
+    ///
+    /// The defect this holds against: the queue used to be a file read, modified
+    /// in memory, and written back whole by the writer that queued a surface
+    /// *and* by the reader that consumed one, with no lock anywhere — so a push
+    /// landing between a reader's read and its write-back was overwritten by the
+    /// reader's stale copy, and the surface was gone for good. Observed three
+    /// times in three runs of a consumer's ask-seam tier, each with the
+    /// allocator counter sitting at an id already allocated.
+    ///
+    /// Real threads over a real run root, pushing and claiming at once with no
+    /// coordination between them beyond the channel's own: the writers are
+    /// several because two sessions raising at once must not share an id
+    /// either, and the readers are several because the manager's own reading
+    /// verb is what did the damage. Every push is accounted for by exactly one
+    /// claim, every id is distinct, and the log alone carries both facts.
+    #[test]
+    fn a_surface_queued_during_a_read_of_the_channel_is_neither_lost_nor_given_a_used_id() {
+        const WRITERS: usize = 4;
+        const READERS: usize = 3;
+        const EACH: usize = 40;
+        let root = std::env::temp_dir().join(format!("onepipeline-raced-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "raced");
+        paths.create().expect("the run directory");
+
+        let claimed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Surface>::new()));
+        let queued = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Surface>::new()));
+        // Lowered once every writer has finished: a reader stops at the first
+        // empty claim after that, so a surface the queue lost is a shortfall in
+        // what was read rather than a reader waiting for ever.
+        let writing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let channel = ChannelState::new(&paths);
+                let queued = std::sync::Arc::clone(&queued);
+                std::thread::spawn(move || {
+                    for n in 0..EACH {
+                        let pushed = channel
+                            .push(Surface {
+                                message: format!("writer {writer} question {n}"),
+                                ..surface(0, n % 2 == 0)
+                            })
+                            .expect("a surface is queued");
+                        queued.lock().expect("the list").push(pushed);
+                    }
+                })
+            })
+            .collect();
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let channel = ChannelState::new(&paths);
+                let claimed = std::sync::Arc::clone(&claimed);
+                let writing = std::sync::Arc::clone(&writing);
+                std::thread::spawn(move || loop {
+                    if let Some(surface) = channel.claim().expect("a claim") {
+                        claimed.lock().expect("the list").push(surface);
+                        continue;
+                    }
+                    if !writing.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("a writer finishes");
+        }
+        writing.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Whatever is still waiting once every writer is done is drained by the
+        // readers, which stop at the first empty claim after that.
+        for reader in readers {
+            reader.join().expect("a reader finishes");
+        }
+
+        let queued = queued.lock().expect("the list").clone();
+        let claimed = claimed.lock().expect("the list").clone();
+        let mut ids: Vec<u64> = queued.iter().map(|surface| surface.id).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (0..(WRITERS * EACH) as u64).collect::<Vec<_>>(),
+            "an id was handed out twice or skipped"
+        );
+        let mut read: Vec<(u64, String)> = claimed
+            .iter()
+            .map(|surface| (surface.id, surface.message.clone()))
+            .collect();
+        read.sort();
+        let mut sent: Vec<(u64, String)> = queued
+            .iter()
+            .map(|surface| (surface.id, surface.message.clone()))
+            .collect();
+        sent.sort();
+        assert_eq!(read, sent, "a surface was lost or delivered twice");
+        let queue = ChannelState::new(&paths).queue();
+        assert!(queue.waiting.is_empty(), "{queue:?}");
+        assert_eq!(queue.next_id, (WRITERS * EACH) as u64);
+
+        // And the log alone accounts for both facts: every surface queued once
+        // and claimed once, under its own id.
+        let records: Vec<SurfaceRecord> =
+            crate::ledger::read_lines(&paths.channel("surfaces.jsonl"))
+                .iter()
+                .map(|line| serde_json::from_str(line).expect("a record this build wrote"))
+                .collect();
+        for id in 0..(WRITERS * EACH) as u64 {
+            for event in [SurfaceEvent::Queued, SurfaceEvent::Claimed] {
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|record| record.surface.id == id && record.event == Some(event))
+                        .count(),
+                    1,
+                    "surface {id} is not recorded {event:?} exactly once"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A second abandonment of the same surface is not a second record.
     #[test]
     fn abandoning_what_is_already_abandoned_records_nothing_further() {
@@ -2013,6 +2386,212 @@ mod tests {
             lines,
             "abandoning the same surface twice wrote a second record"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The queue is a projection of the log, and the log alone rebuilds it —
+    /// whatever became of the projection.
+    ///
+    /// Every transition a surface can make is driven here — queued, replaced as
+    /// a check-in, claimed, abandoned, attended, answered — and after each the
+    /// projection is lost three ways: deleted, replaced with something that is
+    /// not a queue, and overwritten with a copy taken earlier, which is the
+    /// stale write-back the lost update was. Each time the read answers exactly
+    /// what it answered before, and writes the repaired projection back so the
+    /// next read is one read again.
+    #[test]
+    fn the_queue_is_rebuilt_from_the_log_alone_whatever_became_of_the_projection() {
+        let root = std::env::temp_dir().join(format!("onepipeline-rebuilt-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "rebuilt");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        let queue_path = channel.queue_path();
+        let named = |name: &str| Asker::checked(name).expect("a name");
+
+        // What the projection said before the transition under test: the stale
+        // copy a racing reader would have written back over it.
+        let mut earlier = std::fs::read(&queue_path).ok();
+        let lost_three_ways = |channel: &ChannelState, earlier: &Option<Vec<u8>>, what: &str| {
+            let expected = channel.queue();
+            let stamped = expected
+                .accounted
+                .expect("this build stamps what it writes");
+            let current = std::fs::read(&queue_path).expect("the projection was written");
+            let placed: Vec<(&str, Option<Vec<u8>>)> = vec![
+                ("deleted", None),
+                (
+                    "replaced with something that is not a queue",
+                    Some(b"{\"waiting\": ".to_vec()),
+                ),
+                ("overwritten with a stale copy", earlier.clone()),
+            ];
+            for (how, bytes) in placed {
+                match bytes {
+                    Some(bytes) => {
+                        std::fs::write(&queue_path, bytes).expect("the projection is placed")
+                    }
+                    None => std::fs::remove_file(&queue_path).expect("the projection is removed"),
+                }
+                let rebuilt = channel.queue();
+                assert_eq!(rebuilt, expected, "after {what}, with the projection {how}");
+                assert_eq!(
+                    rebuilt.accounted,
+                    Some(stamped),
+                    "after {what}, with the projection {how}: the stamp moved"
+                );
+                assert_eq!(
+                    std::fs::read(&queue_path).expect("the projection is written back"),
+                    current,
+                    "after {what}, with the projection {how}: the repair was not written back"
+                );
+            }
+        };
+        let mut step = |what: &str, act: &dyn Fn(&ChannelState)| {
+            act(&channel);
+            lost_three_ways(&channel, &earlier, what);
+            earlier = std::fs::read(&queue_path).ok();
+        };
+
+        step("a question is queued", &|channel| {
+            channel
+                .push(Surface {
+                    asker: Some(named("dispatch-a")),
+                    ..surface(0, true)
+                })
+                .expect("queued");
+        });
+        step("narration is queued behind it", &|channel| {
+            channel.push(surface(0, false)).expect("queued");
+        });
+        step("a check-in is queued", &|channel| {
+            channel
+                .push(Surface {
+                    source: source::CHECK_IN.to_owned(),
+                    message: "first".to_owned(),
+                    ..surface(0, false)
+                })
+                .expect("queued");
+        });
+        step("a second check-in replaces it", &|channel| {
+            channel
+                .push(Surface {
+                    source: source::CHECK_IN.to_owned(),
+                    message: "second".to_owned(),
+                    ..surface(0, false)
+                })
+                .expect("queued");
+            let queue = channel.queue();
+            assert_eq!(
+                queue
+                    .waiting
+                    .iter()
+                    .filter(|surface| surface.source == source::CHECK_IN)
+                    .map(|surface| surface.message.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["second"]
+            );
+        });
+        step("the question is claimed", &|channel| {
+            let claimed = channel.claim().expect("a claim").expect("a surface");
+            assert_eq!(claimed.id, 0);
+            assert_eq!(channel.pending().map(|held| held.id), Some(0));
+        });
+        step("its listener leaves", &|channel| {
+            assert_eq!(channel.abandon(&[0, 1]).expect("marked").len(), 2);
+            assert_eq!(channel.pending(), None);
+        });
+        step("its asker comes back", &|channel| {
+            assert_eq!(
+                channel.attend(&named("dispatch-a")).expect("taken").len(),
+                1
+            );
+            assert_eq!(channel.pending().map(|held| held.id), Some(0));
+        });
+        step("it is answered", &|channel| {
+            channel.answer(&Reply::default()).expect("answered");
+            assert_eq!(channel.held(), None);
+        });
+        step("everything left is read", &|channel| {
+            while channel.claim().expect("a claim").is_some() {}
+            let queue = channel.queue();
+            assert!(queue.waiting.is_empty(), "{queue:?}");
+            assert_eq!(queue.next_id, 4);
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A log an older build wrote — no event on any line, and no line at all for
+    /// a claim or an answer — folds to what that build meant by it, and a
+    /// projection that build wrote is taken as it stands.
+    ///
+    /// The first line under an id is the surface being queued; every later line
+    /// under it is the surface being abandoned or taken back, which the flag it
+    /// carries tells apart. A projection with no stamp is one such a build kept
+    /// consistent by its own means and logged nothing this build could replay
+    /// over it, so it is trusted whole rather than rebuilt into every surface it
+    /// ever queued.
+    #[test]
+    fn a_log_and_a_projection_an_older_build_wrote_are_read_as_that_build_meant_them() {
+        let root = std::env::temp_dir().join(format!("onepipeline-legacy-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "legacy");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        let asked = Surface {
+            asker: Some(Asker::checked("dispatch-a").expect("a name")),
+            ..surface(0, true)
+        };
+        let gone = Surface {
+            abandoned: true,
+            ..asked.clone()
+        };
+        let narration = surface(1, false);
+        for line in [&asked, &narration, &gone, &asked] {
+            crate::ledger::append_line(
+                &paths.channel("surfaces.jsonl"),
+                &serde_json::to_string(line).expect("a line"),
+            )
+            .expect("the older build's line");
+        }
+
+        // No projection at all: folded from the log, as that build's lines mean.
+        let rebuilt = channel.queue();
+        assert_eq!(
+            rebuilt
+                .waiting
+                .iter()
+                .map(|surface| (surface.id, surface.abandoned))
+                .collect::<Vec<_>>(),
+            vec![(0, false), (1, false)],
+            "{rebuilt:?}"
+        );
+        assert_eq!(rebuilt.next_id, 2);
+        assert_eq!(rebuilt.waiting[0].asker, asked.asker);
+
+        // That build's own projection, which says the question was read and
+        // answered though its log never could: taken as it stands, and stamped
+        // by the first write this build makes.
+        crate::ledger::write_json(
+            &channel.queue_path(),
+            &serde_json::json!({"waiting": [narration], "pending": null, "next_id": 2}),
+        )
+        .expect("the older build's projection");
+        let trusted = channel.queue();
+        assert_eq!(
+            trusted
+                .waiting
+                .iter()
+                .map(|surface| surface.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(trusted.accounted, None);
+        let claimed = channel.claim().expect("a claim").expect("a surface");
+        assert_eq!(claimed.id, 1);
+        let stamped = channel.queue();
+        assert!(stamped.waiting.is_empty(), "{stamped:?}");
+        assert!(stamped.accounted.is_some(), "{stamped:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

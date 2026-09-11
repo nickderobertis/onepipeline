@@ -470,7 +470,11 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
     assert_eq!(read.json()["status"], "surface");
     assert_eq!(read.json()["surface"]["abandoned"], json!(true));
 
-    // And the run's own record says what became of each, under its own id.
+    // And the run's own record says what became of each, under its own id:
+    // one line per surface saying it was abandoned, carrying the surface as it
+    // then stood. The line is picked by what it says happened rather than by
+    // the flag it carries, because every later line about the surface — the
+    // claim above included — carries that flag too.
     let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
         .expect("the run recorded its surfaces");
     let abandoned: Vec<serde_json::Value> = record
@@ -483,11 +487,13 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
                 panic!("the run wrote a surface record that is not JSON ({e}): {line}")
             })
         })
-        .filter(|surface| surface["abandoned"] == json!(true))
+        .filter(|surface| surface["event"] == json!("abandoned"))
         .collect();
     assert_eq!(abandoned.len(), 2, "{record}");
     assert_eq!(abandoned[0]["id"], json!(0));
+    assert!(abandoned[0]["abandoned"] == json!(true), "{record}");
     assert_eq!(abandoned[1]["id"], json!(1));
+    assert!(abandoned[1]["abandoned"] == json!(true), "{record}");
 
     world.release("build.go");
 }
@@ -1338,6 +1344,142 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
     drop(silent);
     world.release("build.go");
 }
+/// A surface queued while a reader was reading the channel survives that
+/// reader's write-back of what it read.
+///
+/// The defect this holds against, as it was observed. The queue was one file,
+/// read, modified in memory, and written back whole — by the writer that queued
+/// a surface *and* by the reader that consumed one, with no lock anywhere and
+/// the reader's write unconditional. A push landing between a reader's read and
+/// its write-back was overwritten by the reader's stale copy, and the surface
+/// was gone for good: the run's files at that instant recorded the surface
+/// queued in the journal and appended to the surface log with id 0, while the
+/// queue file read `waiting: [], pending: null, next_id: 0` — an allocator
+/// that had never advanced past an id already allocated. The reader was the
+/// manager's own `next`, and the question it destroyed was a worker's blocking
+/// one, which the worker then waited its whole reply window on.
+///
+/// That write-back is reproduced here exactly, at the instant it landed: a
+/// reader's copy of the queue, taken before the question was queued, is placed
+/// over the queue after it — the very file the reader used to write. The
+/// question is still counted, still handed over under its own id, and the next
+/// surface takes an id nothing has used, because the surface log is what the
+/// queue is now derived from and the file beside it is a projection a stale
+/// write costs nothing but a fold.
+#[test]
+fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_back() {
+    use std::io::Write;
+
+    let world = World::new("channel-lost-update");
+    world.script("seed.wait", "hold");
+    let run = running(
+        &world,
+        "lostupdate",
+        vec![agent("seed", &[]), agent("after", &["seed"])],
+    );
+
+    // The reader's read of the channel, made before the question exists: what
+    // the manager's `next` read, and what it later wrote back.
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"], Value::Null);
+    let queue = world.run_file(&run, "channel/queue.json");
+    let stale = std::fs::read(&queue).expect("the reader left the queue it read");
+
+    // The worker's blocking question, queued while that read is in flight.
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"Which base should seed build on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to be queued", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // The reader's write-back lands: its stale copy over the queue the question
+    // was just written into. Renamed into place rather than written over, as the
+    // reader's own atomic write was.
+    let staged = queue.with_extension("staged");
+    std::fs::write(&staged, &stale).expect("the stale copy is staged");
+    std::fs::rename(&staged, &queue).expect("the stale copy lands");
+
+    // The question is still there: counted by the supervisory views, holding
+    // the subtree it named, and handed over under its own id.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should seed build on?");
+    assert_eq!(read.json()["status"], "surface");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    assert_eq!(read.json()["surface"]["blocking"], json!(true));
+    // Read is not answered: the run still awaits the verdict on it.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — Which base should seed build on?");
+
+    // And the id it was given is never handed out again: the next surface
+    // takes the one after it rather than the one the stale copy said was free.
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    // The verdict names the question the reader was handed, and reaches the
+    // worker that asked it.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"build on main"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("reason"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("build on main"), "{verdict}");
+
+    // The run's own record accounts for the question's whole life on its own:
+    // queued, claimed, and answered, each under its id.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let events: Vec<(Value, Value)> = record
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|e| {
+                panic!("the run wrote a surface record that is not JSON ({e}): {line}")
+            })
+        })
+        .map(|line| (line["id"].clone(), line["event"].clone()))
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            (json!(0), json!("queued")),
+            (json!(0), json!("claimed")),
+            (json!(1), json!("queued")),
+            (json!(0), json!("answered")),
+        ],
+        "{record}"
+    );
+
+    drop(stdin);
+    world.release("seed.go");
+    ended(serving);
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
