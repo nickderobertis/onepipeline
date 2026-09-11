@@ -408,7 +408,6 @@ index_versions() {
       DEPS[++NDEPS] = name " " kind " " req
       return i + 1
     }
-    # The `deps` array, entry by entry.
     function read_deps(s, i,   n, c) {
       n = length(s)
       i = skip_ws(s, i + 1)
