@@ -39,17 +39,16 @@ use onepipeline::filter::{
 };
 use onepipeline::note::{Addressee, Delivered, Note, Reached};
 use onepipeline::plan::{
-    adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, Resume, Step,
-    ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
-    DEFAULT_ADOPTION_INSTRUCTION, OBSERVED_STATE, PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION,
-    PLAN_SCHEMA_VERSIONS_READ,
+    adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
+    Resume, Step, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
+    CROSS_REPO_REFERENCES_HEADING, DEFAULT_ADOPTION_INSTRUCTION, OBSERVED_STATE,
+    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onepipeline::views::{NodeLanding, RunPaths, RunSummary, RunTelemetry, SUMMARY_SCHEMA_VERSION};
-use onevcs::registry::{RepoType, Workflow};
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
 

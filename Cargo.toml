@@ -372,12 +372,33 @@ resolver = "2"
 # holds both halves against the linked library. `onevcs-testing` 0.5.6 requires
 # `onevcs` 0.19.3, so the one resolution carries both.
 #
+# `onevcs` 0.21.0 carries a **session's own change request after it exists**:
+# `session_change`, `describe_change` and `ready_change`, the `SessionChange` and
+# `ChangeDescription` they speak in, and `DraftReason::Held` beside the release
+# reason — a draft the session that opened it is holding while its work is still
+# being made, which a later publication carrying no reason lifts. It is the
+# release cut from onevcs #138, and it is what `src/lifecycle.rs`'s closeout
+# **finishes a change request the worker opened as a draft** with: the drafted
+# description is written onto it and the same publication lifts it and lands,
+# where before this floor nothing could edit a change request once it existed and
+# an adopted one silently kept whatever body it had. A **requirement** and not a
+# lock floor, twice over: `^0.19` admits no 0.21.x, the breaking position pre-1.0,
+# and `DraftReason` became an enum on the way — `src/release.rs` matches it arm by
+# arm, so a pin below 0.21.0 does not compile. Between the two, 0.20.0 (onevcs
+# #136) **retired** the registry's inferred `workflow` and `repo_type` and stopped
+# `onevcs resolve` printing the first; `src/plan.rs` keeps both words as the
+# schema-3 vocabulary they still are, read by nothing, and `src/destination.rs`
+# reads the resolution without one. `tests/e2e/lifecycle.rs`'s draft-closeout
+# journeys and `tests/onevcs_seam.rs` drive the surface against the real sibling,
+# so a pin below the floor fails rather than reads differently. `onevcs-testing`
+# 0.6.0 requires exactly this `onevcs`, so the two floors move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.15"
-onevcs = "0.19.2"
+onevcs = "0.21.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -418,7 +439,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.5.5"
+onevcs-testing = "0.6.0"
 
 [package]
 name = "onepipeline"

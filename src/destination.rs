@@ -137,16 +137,17 @@ fn report_unchecked(node: &str, repo: &str, why: &str) {
     );
 }
 
-/// The three fields of `onevcs resolve`'s answer this loader reads, as the
+/// The two fields of `onevcs resolve`'s answer this loader reads, as the
 /// **shape** they arrive in rather than as keys probed off an untyped document.
 ///
 /// A subprocess's stdout is external input, so it is deserialized at the boundary
-/// and every field is typed: an absent key, a key of the wrong type, and a
-/// `workflow` outside the sibling's own enum are each refused by serde, in serde's
-/// own words, before anything downstream can read them. The verb prints more keys
-/// than these — an alias, a repo type, a gate — and they are ignored rather than
-/// refused, because a *newer* `onevcs` printing a fourth is one this build must go
-/// on reading.
+/// and every field is typed: an absent key and a key of the wrong type are each
+/// refused by serde, in serde's own words, before anything downstream can read
+/// them. The verb prints more keys than these — an alias, the policy, a gate —
+/// and they are ignored rather than refused, because a *newer* `onevcs` printing
+/// another is one this build must go on reading. It used to read a third,
+/// `workflow`, which `onevcs` 0.20.0 stopped printing when it retired the
+/// inferred classification; the policy line below is what names the same thing.
 #[derive(serde::Deserialize)]
 struct Resolved {
     // llmlint: ignore-block[invalid_states_unrepresentable] a repository identity is a
@@ -158,7 +159,6 @@ struct Resolved {
     // in that crate. What is checkable here is that the sibling stated one at all, and
     // `resolve` refuses a blank.
     identity: String, // llmlint: ignore-end[invalid_states_unrepresentable]
-    workflow: onevcs::registry::Workflow,
     /// Where this repository's own hooks are, which is the whole of what it is
     /// read for here.
     publication_checkout: PathBuf,
@@ -337,13 +337,12 @@ fn consumes_refusal(
             &node.id,
             format!(
                 "it consumes the release targets {consumed}, and its repository {identity} \
-                 (workflow: {workflow}) publishes with {publication}, which opens no change \
+                 publishes with {publication}, which opens no change \
                  request at all — so there is nothing for the draft that holds this node to a \
                  release to be a state of, and `onevcs` refuses the publication outright at \
                  the last step of the node. Publish it under a change-* policy, on this node \
                  or in that repository's own rules, or drop `consumes`",
                 identity = destination.resolved.identity,
-                workflow = spell(destination.resolved.workflow),
                 publication = spell(publication),
             ),
         )
@@ -726,7 +725,6 @@ mod tests {
     fn resolved() -> Resolved {
         Resolved {
             identity: "github.com/owner/service".to_owned(),
-            workflow: onevcs::registry::Workflow::Remote,
             publication_checkout: PathBuf::from("/tmp/service"),
         }
     }
@@ -762,7 +760,6 @@ mod tests {
             "node 'consumer'",
             "engine=crate",
             "github.com/owner/service",
-            "workflow: remote",
             "local-direct",
         ] {
             assert!(
