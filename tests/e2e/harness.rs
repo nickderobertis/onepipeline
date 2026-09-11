@@ -2601,6 +2601,10 @@ impl Arrival {
 /// settles after it — on a deadline that is the product's, for the settlement —
 /// is the release reaching the worker. What is not asserted is any clock
 /// between the two.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: the property is that the handshake holds and releases a real dispatch,
+// which no journey built on it can assert about itself without a clock. The journeys
+// built on it are `views.rs`'s two `host` takeover journeys, and those drive the binary.
 #[test]
 fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
     let world = World::new("rendezvous-held");
@@ -2622,7 +2626,7 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
     world.until("the released dispatch to settle the run", |world| {
         world.run_file("met", "result.json").is_file()
     });
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
