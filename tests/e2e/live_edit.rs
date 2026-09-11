@@ -595,6 +595,16 @@ fn a_node_parked_while_it_was_running_stays_parked_and_holds_its_dependents() {
         slow["status"], "parked",
         "the park did not survive the settlement that followed it: {slow}"
     );
+    // The `cancelled` its stopped dispatch settled is the park's own effect and
+    // not an outcome: a park is a decision the node idles under until a manager
+    // requeues or drops it, so a run holding one is waiting on that decision
+    // rather than complete — unlike a park a `done` or `failed` ends, which
+    // `a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete`
+    // holds.
+    assert_eq!(
+        result["state"], "waiting",
+        "a run holding a deliberately parked node reported itself complete: {result}"
+    );
 
     let redispatched: Vec<Value> = world
         .events_of(&run, "node-dispatched")

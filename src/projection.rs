@@ -1291,13 +1291,21 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
 /// Whether a node settling at this status ends the park it was under.
 ///
 /// A park is the planner's own idle, and [`graph::derive`] reads it ahead of every
-/// recorded status. That is right for the one settlement a park itself produces
-/// — `cancel` stops the dispatch, which settles `cancelled`, and `requeue` is the
-/// way back — and wrong for every other: a node whose outcome is recorded is
-/// idle by nobody's decision, and one left parked reads unfinished for the rest
-/// of the run. So the two outcomes a `settle` can name end the park, whichever
-/// path recorded them; `cancelled` keeps it, and a human step's `waiting` or a
-/// draft's `complete-but-draft` is not an outcome.
+/// recorded status. The two outcomes a `settle` can name end it, whichever path
+/// recorded them: a node whose outcome is recorded is idle by nobody's decision,
+/// and one left parked reads unfinished for the rest of the run.
+///
+/// `cancelled` is **not** an outcome here, and deliberately. `cancel` exists to
+/// park a node until its manager says otherwise, and `requeue` is that node's
+/// only exit; the `cancelled` a stopped dispatch settles is the park's own
+/// effect, not a decision anybody took about the node. Cleared on it, a parked
+/// node would un-park itself — the one thing a park must never do — and the
+/// cancel/requeue pair would be gone. The same holds one level up: a run holding
+/// a cancelled node is waiting on a decision, and it does not report itself
+/// complete until the manager requeues or drops the node. That is correct
+/// rather than a gap, and [`graph::state_of`] reads a park as `waiting` for it.
+/// A human step's `waiting` and a draft's `complete-but-draft` are not outcomes
+/// either.
 fn settlement_ends_the_park(status: NodeStatus) -> bool {
     matches!(status, NodeStatus::Done | NodeStatus::Failed)
 }
@@ -3397,6 +3405,22 @@ mod tests {
             parked_after(&state),
             (true, true, NodeStatus::Cancelled),
             "a cancellation ended the park that made it"
+        );
+        // And the run holding it is waiting on the manager, not complete: the
+        // derived status is the park, and a park is not a settled outcome.
+        let derived = crate::graph::derive(&state.graph, &state.settled(), &|_| None);
+        assert_eq!(derived["sweep"], NodeStatus::Parked);
+        assert_eq!(
+            crate::graph::state_of(&derived),
+            crate::graph::GraphState::Waiting,
+            "a run holding a deliberately parked node reported itself complete"
+        );
+        // Whereas the same run whose node settled done is complete.
+        let state = fold(&[started.clone(), park.clone(), settled_by_the_run("done")]);
+        let derived = crate::graph::derive(&state.graph, &state.settled(), &|_| None);
+        assert_eq!(
+            crate::graph::state_of(&derived),
+            crate::graph::GraphState::Complete
         );
         // And a human step held at `waiting` is not an outcome.
         let state = fold(&[started.clone(), park.clone(), settled_by_the_run("waiting")]);
