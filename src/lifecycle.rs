@@ -493,15 +493,16 @@ fn publish(
         }
         _ => (false, None),
     };
-    // One aside beside a publication's own words: a body that was not drafted,
-    // or one that was drafted and could not be written. Never both — the second
-    // needs a body the first says there is none of.
-    let undrafted = undrafted.or(undescribed);
+    // One aside beside a publication's own words, and **not** only an undrafted
+    // body: a body that was not drafted, or one that was drafted and could not
+    // be written onto the change request. Never both — the second needs a body
+    // the first says there is none of.
+    let body_aside = undrafted.or(undescribed);
     // Through the one composition, so every place a publication's own words and
-    // a drafting failure are put together agrees about the order and the
-    // punctuation — including the failure paths below, which compose the same
-    // two values from a different function.
-    let with_undrafted = |detail: String| compose(&detail, undrafted.as_deref());
+    // this aside are put together agrees about the order and the punctuation —
+    // including the failure paths below, which compose the same two values from
+    // a different function.
+    let with_aside = |detail: String| compose(&detail, body_aside.as_deref());
     // The residual: a publication this crate can say nothing more about than
     // that it failed. Every failure `onevcs` names a kind for goes through
     // `failed_publication` below instead, which is where the word and the routing
@@ -509,7 +510,7 @@ fn publish(
     let publication_failed = |detail: String| {
         Attempt::settled(Settlement {
             branch: branch.clone(),
-            detail: Some(with_undrafted(detail)),
+            detail: Some(with_aside(detail)),
             ..Settlement::plain(
                 &node.id,
                 NodeStatus::Failed,
@@ -563,7 +564,7 @@ fn publish(
                         branch.or_else(|| Some(published.branch.clone())),
                         reason,
                         publication.reads,
-                        undrafted.clone(),
+                        body_aside.clone(),
                     );
                 }
                 return failed_publication(
@@ -573,7 +574,7 @@ fn publish(
                     *kind,
                     reason,
                     retained.as_ref(),
-                    undrafted.clone(),
+                    body_aside.clone(),
                 );
             }
             let labels =
@@ -627,8 +628,8 @@ fn publish(
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
                 detail: (!detail.is_empty())
-                    .then(|| with_undrafted(detail.join(". ")))
-                    .or_else(|| undrafted.clone()),
+                    .then(|| with_aside(detail.join(". ")))
+                    .or_else(|| body_aside.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -832,7 +833,7 @@ fn unread_merge_path(
     branch: Option<String>,
     reason: &str,
     reads: std::num::NonZeroU32,
-    undrafted: Option<String>,
+    body_aside: Option<String>,
 ) -> Attempt {
     let how_many = format!(
         "the merge path was read {reads} time{} and never answered",
@@ -843,7 +844,7 @@ fn unread_merge_path(
         head: crate::vcs::branch_head_in(token),
         detail: Some(compose(
             &format!("onevcs: {reason}. {how_many}"),
-            undrafted.as_deref(),
+            body_aside.as_deref(),
         )),
         ..Settlement::plain(node, NodeStatus::Failed, Some(crate::vcs::Failure::UNREAD))
     })
@@ -884,10 +885,11 @@ struct Preserved {
     /// read back a line at a time.
     reason: String,
     evidence: Vec<crate::vcs::Evidence>,
-    /// A drafting ending this attempt also had, carried so that the settlement
-    /// a spent budget writes says it exactly as one that settled straight away
-    /// does.
-    undrafted: Option<String>,
+    /// What this attempt has to say about the change request's body beside the
+    /// publication's own words — that none was drafted, or that one was and the
+    /// host refused to write it — carried so that the settlement a spent budget
+    /// writes says it exactly as one that settled straight away does.
+    body_aside: Option<String>,
     /// Where the session left this branch, which is the tip that was published.
     ///
     /// Read off `onevcs`'s own record of the session — the library that made the
@@ -926,14 +928,14 @@ fn failed_publication(
     kind: onevcs::FailureKind,
     reason: &str,
     retained: Option<&onevcs::Retention>,
-    undrafted: Option<String>,
+    body_aside: Option<String>,
 ) -> Attempt {
     let failure = crate::vcs::failure_of(kind);
     let handed_back = matches!(retained, Some(onevcs::Retention::HandedBack(_)));
     let settled = || {
         Attempt::settled(Settlement {
             branch: branch.clone(),
-            detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
+            detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         })
     };
@@ -959,7 +961,7 @@ fn failed_publication(
                 outcome,
                 reason: engine::bounded(&crate::views::one_line(reason)),
                 evidence: crate::vcs::evidence_in(token),
-                undrafted,
+                body_aside,
                 tip: crate::vcs::session_tip(token),
             }))
         }
@@ -967,12 +969,13 @@ fn failed_publication(
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
-/// A publication's own words and a drafting ending, in that order.
+/// A publication's own words and what is to be said about the body, in that
+/// order.
 ///
 /// Written once because three settlements compose the pair, and three spellings
 /// of it would come to disagree about the order or the punctuation.
-fn compose(detail: &str, undrafted: Option<&str>) -> String {
-    match undrafted {
+fn compose(detail: &str, body_aside: Option<&str>) -> String {
+    match body_aside {
         Some(why) => format!("{detail}. {why}"),
         None => detail.to_owned(),
     }
@@ -1041,7 +1044,7 @@ fn republished_the_same_commit(
         head: Some(head.to_owned()),
         detail: Some(compose(
             &format!("onevcs: {}. {roll_up}", preserved.reason),
-            preserved.undrafted.as_deref(),
+            preserved.body_aside.as_deref(),
         )),
         ..Settlement::plain(
             node,
@@ -1081,7 +1084,7 @@ fn stopped_retrying(
         branch: Some(preserved.branch.clone()),
         detail: Some(compose(
             &format!("onevcs: {}. {roll_up}", preserved.reason),
-            preserved.undrafted.as_deref(),
+            preserved.body_aside.as_deref(),
         )),
         // **No step** is recorded as completed, and that is the same rule the
         // re-dispatch was made under seen from the other end. The branch carries
@@ -1185,8 +1188,6 @@ const HELD_AS_DRAFT_LINE: &str = "Held as a draft by the worker:";
 /// drafter as the worker left it, verbatim — or [`NO_DESCRIPTION`].
 const DESCRIPTION_HEADING: &str = "### Description as the worker left it";
 
-/// What stands under [`DESCRIPTION_HEADING`] for a change request the worker
-/// left no description on.
 const NO_DESCRIPTION: &str = "(the worker left no description)";
 
 /// The heading every drafting dispatch is told how to read the worker's

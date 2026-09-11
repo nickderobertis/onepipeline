@@ -370,7 +370,9 @@ fn session_of_worktree(worktree: &Path) -> Option<String> {
 ///
 /// [`Error::Ledger`] where the scratch directory cannot be made: a promised
 /// directory that is not there would fail the agent's writes one at a time, and
-/// those failures read as the agent's own work going wrong.
+/// those failures read as the agent's own work going wrong. And where the runs
+/// root cannot be resolved to an absolute path, for the reason stated at that
+/// call.
 fn prepare_dispatch_env(labels: &Labels, session: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id
@@ -379,9 +381,17 @@ fn prepare_dispatch_env(labels: &Labels, session: Option<&str>) -> Result<Vec<(S
         .collect();
     // Absolute, because the dispatch does not run where this process was
     // started: the default root is the relative `runs`, which from inside a
-    // worktree names a directory that is not there.
+    // worktree names a directory that is not there. A resolution that failed —
+    // this process's own working directory unreadable, which is what `absolute`
+    // consults for a relative root — is **refused** rather than fallen back
+    // from, because exporting the relative root anyway hands every dispatch a
+    // path the contract promises is absolute and that resolves, in the worktree,
+    // somewhere else or nowhere.
     let root = crate::ledger::runs_root();
-    let root = std::path::absolute(&root).unwrap_or(root);
+    let root = std::path::absolute(&root).map_err(|source| Error::Ledger {
+        path: root.clone(),
+        source,
+    })?;
     env.push((
         crate::agentgraph::RUNS_DIR_ENV.to_string(),
         root.display().to_string(),
@@ -815,6 +825,54 @@ mod tests {
 
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A runs root that cannot be made absolute refuses the dispatch.
+    ///
+    /// `ONEPIPELINE_RUNS_DIR` is promised absolute, and a dispatch reads it from
+    /// a worktree rather than from where this process started — so a relative
+    /// root exported anyway names a different directory there, or none. The one
+    /// way the resolution fails for a relative root is this process's own
+    /// working directory being unreadable, which is what `std::path::absolute`
+    /// consults; that is induced here by removing it.
+    ///
+    /// The working directory belongs to the whole process, so this holds the
+    /// same lock the root-setting tests do and puts it back before releasing it.
+    /// nextest gives each test its own process and pays nothing for either.
+    #[test]
+    #[cfg(unix)]
+    fn a_runs_root_that_cannot_be_made_absolute_refuses_the_dispatch() {
+        let _runs_dir = runs_dir_lock();
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            node: Some("build".into()),
+            ..Labels::default()
+        };
+        // Relative, which is the only kind whose resolution consults the working
+        // directory — and the shipped default is one.
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, "runs");
+        let here = std::env::current_dir().expect("this process has a working directory");
+        let gone = scratch_root("cwd-gone");
+        std::fs::create_dir_all(&gone).expect("the directory to stand in is made");
+        std::env::set_current_dir(&gone).expect("this process can stand in it");
+        std::fs::remove_dir(&gone).expect("and it can be taken away underneath");
+
+        let refused = prepare_dispatch_env(&labels, None);
+
+        std::env::set_current_dir(&here).expect("the working directory is put back");
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+
+        match refused {
+            Err(Error::Ledger { path, .. }) => assert_eq!(
+                path,
+                PathBuf::from("runs"),
+                "the refusal does not name the root that could not be resolved"
+            ),
+            other => panic!(
+                "a runs root that cannot be made absolute was accepted rather than refused: \
+                 {other:?}"
+            ),
+        }
     }
 
     #[test]
