@@ -1175,12 +1175,21 @@ reach none of the four places it is already made:
   content already landed included, so what used to be one silent case is the only
   case. `Session` reports the branch and its base and no comparison of the two.
 
-**What this crate does today.** Nothing new: a branch-pinned node dispatches as it
-always has, and a branch whose base already carries its content is discovered at
-publication and settles `no-changes`. Nothing here runs git — no path of this
-crate ever has — and a comparison written against a checkout it had to guess at
-would fail in the direction that matters, settling a node as already-landed
-because it looked at the wrong repository.
+**What this crate does today.** Nothing new *before* a dispatch: a branch-pinned
+node dispatches as it always has, and a branch whose base already carries its
+content is discovered at publication and settles `no-changes`. A comparison
+written against a checkout this crate had to guess at would fail in the direction
+that matters, settling a node as already-landed because it looked at the wrong
+repository, so none is made outside a session.
+
+*Inside* a session, where the second point above says the question is a different
+one, this crate now does read the branch against its base — `vcs::level_with_base`,
+asked of the worktree and the base the session's own record names, after the
+steps have run and before a drafting dispatch or a publication is spent. That is
+not the comparison this entry asks for: it answers nothing about a pinned branch
+before a dispatch, and it exists because the sibling's own `NothingToPublish` is
+reached only after a change-request body has been drafted for a branch with
+nothing on it. What it decides is recorded with `EMPTY_BRANCH` in `src/engine.rs`.
 
 ## 36. `attest` now also takes a node that settled `failed` — OPEN
 

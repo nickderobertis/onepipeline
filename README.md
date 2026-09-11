@@ -266,6 +266,22 @@ however many times they are asked. The loop is bounded by
 settles `failed` under the last failure's word, saying how many attempts were made
 and what each one ended with.
 
+A lifecycle node whose branch is **level with its base** — every commit on it one
+the base already carries, and nothing left in the worktree to commit — has no
+change-request body drafted and nothing published, and settles on whether this
+dispatch wrote a commit rather than on the ahead-count alone. A node that declared
+`expects_no_diff` settles `done` as `no-changes`, the success that word is
+documented for; a branch the base already carries — a worker that landed its
+commit on the base itself — settles the same way under either declaration; and a
+worker that was asked for a change and committed nothing settles `failed` as
+`empty-branch`, naming the branch and what it was compared against, so a manager
+decides: a retry carrying `expects_no_diff: true` accepts it as the declared
+success, and an amended task sends it back to produce a diff. Settled `done` as
+`no-changes`, as it used to be, a plan that omitted the declaration was invisible
+in every view. A branch that *is* ahead and whose tree the base already carries
+still reaches `onevcs`'s own `NothingToPublish` at publication and settles
+`no-changes` as it always did.
+
 A dispatch that ends for a reason that is **not the agent's verdict on its task**
 settles `dispatch-died` rather than `task-failed`: a rate limit twenty seconds after
 the final report, a harness that lost its credential, a run root deleted underneath
@@ -286,6 +302,17 @@ against the record of the turn it names before anything acts on it — a turn th
 opened, closed, and was billed says the dispatch produced what the death says it
 did not, and where the two disagree the record wins and the node is not settled as
 a provider death. Not in the approved contract yet: open divergence 49.
+
+A provider death the producer **could not classify** — the provider rule on a
+cause of `unclassified` — is where an identity chain stops: a candidate that
+refuses to run is stepped past, and the producer says so, but one that ran and
+produced no usable result stops the chain there and the identities behind it are
+never tried. That is raised on the planner channel as a non-blocking finding
+naming the candidate the chain stopped at, the candidates it stepped past with
+each one's reason, and what the death said — for a node's dispatch and for the
+run's observer graph alike, whether the run was launched attached or detached.
+It fails nothing: a node settles on the death exactly as above, and the observer
+is restarted as it always is.
 
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before

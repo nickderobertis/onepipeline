@@ -623,6 +623,10 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
                 frontier
                     .recorded
                     .insert(node.clone(), settled_status(*outcome));
+                // A settled node is no longer idle by anybody's decision, so a
+                // later `cancel` of it in the same envelope is judged against no
+                // park — exactly as the fold reads it. See [`apply`].
+                frontier.parks.remove(node);
             }
             _ => {}
         }
@@ -1675,12 +1679,14 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// Validate one `settle`: the operator is writing down what this run could not
 /// observe, so what there is to judge is whether the run can still be told.
 ///
-/// It mutates no edge and no node definition, which is the whole point of it
-/// existing: the alternative a planner had was replacing the node with a
-/// stand-in, which renames it in every downstream reference and forces a
-/// rewiring cascade through its dependents. So the graph is not touched here at
-/// all — only the record of what became of the node moves, and the node keeps
-/// its id and its lineage by construction rather than by care.
+/// It mutates no edge and nothing of the node's definition but its park, which
+/// is the whole point of it existing: the alternative a planner had was
+/// replacing the node with a stand-in, which renames it in every downstream
+/// reference and forces a rewiring cascade through its dependents. So the record
+/// of what became of the node moves, the node keeps its id and its lineage by
+/// construction rather than by care — and the park comes off, because a node
+/// whose outcome is recorded is idle by nobody's decision and `requeue`, the only
+/// other op that clears one, sends the node back for a redispatch.
 ///
 /// Five refusals, and each one is a different thing to do next. Blank evidence:
 /// the journal would record the reason for a state as nothing. A landing that is
@@ -1703,7 +1709,7 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// second one carrying the evidence — so what a reader sees is a record that was
 /// corrected rather than one that was rewritten.
 fn compile_settle(
-    graph: &Graph,
+    graph: &mut Graph,
     frontier: &Frontier,
     id: &str,
     outcome: SettleOutcome,
@@ -1750,6 +1756,12 @@ fn compile_settle(
         })?),
         None => None,
     };
+    // The one thing a settlement takes off the definition, here as `cancel` puts
+    // it on: a settled node is idle by nobody's decision, so the next command of
+    // the same envelope — and replay, through [`apply`] — sees no park.
+    if let Some(node) = graph.get_mut(id) {
+        node.parked = false;
+    }
     let mut operations = vec![Operation::SettledFromEvidence {
         node: id.to_string(),
         outcome,
@@ -1972,10 +1984,16 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
         }
         // A settlement from evidence is a fact about the run's *record*: the
-        // node keeps its id, its lineage, and its dependents' edges, so replay
-        // reconstructs it by changing nothing here, exactly as the reconciler
-        // did. What moves is folded where the recorded statuses are.
-        Operation::SettledFromEvidence { .. } => {}
+        // node keeps its id, its lineage, and its dependents' edges, and what
+        // moves is folded where the recorded statuses are. The one thing it
+        // takes off the definition is the park, which `graph::derive` reads
+        // ahead of every recorded status: a node whose outcome is recorded is
+        // idle by nobody's decision. See `compile_settle`.
+        Operation::SettledFromEvidence { node, .. } => {
+            if let Some(node) = graph.get_mut(node) {
+                node.parked = false;
+            }
+        }
         // Nor does the landing beside it: where a node's work *is* was never a
         // property of the graph, so replay reconstructs it by reading the record
         // rather than by moving a node.
@@ -3042,6 +3060,82 @@ mod tests {
             .to_string();
         assert!(
             message.contains("dispatch in flight") && message.contains("run-7"),
+            "{message}"
+        );
+    }
+
+    /// A settlement from evidence ends the park it was made under, on the graph
+    /// replay reconstructs and on the frontier the next command of the same
+    /// envelope is judged against.
+    ///
+    /// The case this exists for: a node one party parked and another settled read
+    /// *parked and settled at once*, and the only op that cleared the park was a
+    /// `requeue` — which returns the node for a redispatch and refuses across
+    /// authorship besides. So a monitor that parks a node and a planner that then
+    /// settles it must leave a node nobody's decision holds idle; and a `cancel`
+    /// of the same node afterwards is judged against its settlement rather than
+    /// refused as a second park.
+    #[test]
+    fn a_settlement_from_evidence_ends_the_park_on_the_graph_and_the_frontier() {
+        let mut graph = graph_of(vec![agent("publish", &[])]);
+        let mut frontier = Frontier::default();
+        let parked = compile(
+            &mut graph,
+            &frontier,
+            &Command::Cancel {
+                id: "publish".into(),
+                reason: Some("the comment is going up by hand".into()),
+            },
+        )
+        .expect("a pending node parks");
+        advance(&mut frontier, &parked);
+        assert!(graph.get("publish").expect("publish").parked);
+        assert!(frontier.parks.contains_key("publish"));
+
+        let settled = compile(
+            &mut graph,
+            &frontier,
+            &Command::Settle {
+                id: "publish".into(),
+                outcome: SettleOutcome::Done,
+                evidence: "the comment is on the issue".into(),
+                landing: None,
+            },
+        )
+        .expect("a parked node settles from evidence");
+        advance(&mut frontier, &settled);
+        // The reconciler's own graph moved through `apply`, exactly as replay
+        // reconstructs it from the record.
+        let mut replayed = graph_of(vec![agent("publish", &[])]);
+        for operation in parked.iter().chain(&settled) {
+            apply(&mut replayed, operation);
+        }
+        for (which, graph) in [("compiled", &graph), ("replayed", &replayed)] {
+            assert!(
+                !graph.get("publish").expect("publish").parked,
+                "the {which} graph still holds the settled node parked"
+            );
+        }
+        assert!(
+            !frontier.parks.contains_key("publish"),
+            "the frontier still carries the park the settlement ended"
+        );
+        assert_eq!(frontier.recorded.get("publish"), Some(&NodeStatus::Done));
+
+        // Judged against the settlement, not the park: a second `cancel` names
+        // what the node is rather than a park that is over.
+        let message = compile(
+            &mut graph,
+            &frontier,
+            &Command::Cancel {
+                id: "publish".into(),
+                reason: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("is done") && !message.contains("already parked"),
             "{message}"
         );
     }
