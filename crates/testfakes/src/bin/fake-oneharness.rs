@@ -235,37 +235,6 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
 }
 
-/// An `oneharness` config as this process needs to read it: which identity a turn
-/// run under it would be taken by.
-///
-/// Nothing else is read, because nothing else changes what this double does — but
-/// the document is *parsed*, so a config the sibling composed that is not TOML is
-/// refused here rather than answered around.
-// llmlint: ignore[boundary_inputs_validated] deliberately **not**
-// `deny_unknown_fields`, and it is the one place in this repository where that would be
-// wrong: this is oneharness's schema rather than this crate's, and every config the
-// suite writes carries keys that are none of this process's business — `run_mode`,
-// `schema_file`, an `[env]` table. Denying them would refuse every real config. The
-// invariant in `AGENTS.md` is about the documents *this crate* owns; a foreign one is
-// read for the field it needs and left alone.
-#[derive(serde::Deserialize)]
-struct Config {
-    /// The chain the config names, every candidate checked. Absent when the
-    /// config names none and leaves the selection to oneharness's own discovery.
-    harnesses: Option<Chain>,
-    /// The per-harness sections, read for the one field a turn here answers to:
-    /// the model a candidate was asked to run under, which is what a server's
-    /// own statement of the model is held against.
-    #[serde(default)]
-    harness: BTreeMap<String, HarnessSection>,
-}
-
-/// One `[harness.<id>]` section, as far as this process reads it.
-#[derive(serde::Deserialize)]
-struct HarnessSection {
-    model: Option<Model>,
-}
-
 /// A model name, from a config's `[harness.<id>].model` or a `harness.serves`
 /// script.
 ///
@@ -287,13 +256,6 @@ impl Model {
 
     fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Model {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::named(&raw).map_err(|reason| serde::de::Error::custom(format!("`model` {reason}")))
     }
 }
 
@@ -330,19 +292,15 @@ impl Identity {
 /// reason to wave it through. Non-empty by construction.
 struct Chain(Vec<Identity>);
 
-impl<'de> serde::Deserialize<'de> for Chain {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let candidates = Vec::<String>::deserialize(deserializer)?;
+impl Chain {
+    /// The chain `candidates` names, or the reason it names none.
+    fn of(candidates: &[String]) -> Result<Self, String> {
         let named = candidates
             .iter()
             .map(|candidate| Identity::named(candidate))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(D::Error::custom)?;
+            .collect::<Result<Vec<_>, _>>()?;
         if named.is_empty() {
-            return Err(D::Error::custom(
-                "its identity chain names no candidate to run the turn",
-            ));
+            return Err("its identity chain names no candidate to run the turn".to_string());
         }
         Ok(Self(named))
     }
@@ -380,23 +338,31 @@ impl Selection {
 
 /// What a turn under `config` selects.
 ///
-/// Read off the config rather than assumed, so a report names the identity the
-/// launch selected. What makes a chain resolvable at all is [`Chain`]'s — what
-/// is left here is the one case a chain cannot answer.
+/// Read through oneharness's **own** config reader, so a config the sibling
+/// composed that the real CLI would refuse — an unknown key, an unknown harness
+/// id — is refused here rather than answered around, and the `[harness.<id>]`
+/// section is that library's declaration rather than a copy of it. What makes a
+/// chain resolvable at all is [`Chain`]'s — what is left here is the one case a
+/// chain cannot answer.
 fn selection(config: &str) -> Result<Selection, String> {
-    let config: Config = toml::from_str(config)
+    let config = oneharness_core::domain::config::parse(config)
         .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
-    let chain = match config.harnesses {
-        Some(chain) => chain,
+    let chain = match &config.harnesses {
+        Some(candidates) => Chain::of(candidates)?,
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
         None => Chain(vec![Identity::named(DISCOVERED)?]),
     };
     let requested = config
         .harness
-        .into_iter()
-        .filter_map(|(id, section)| section.model.map(|model| (id, model)))
-        .collect();
+        .iter()
+        .filter_map(|(id, section)| section.model.as_deref().map(|model| (id, model)))
+        .map(|(id, model)| {
+            Model::named(model)
+                .map(|model| (id.clone(), model))
+                .map_err(|reason| format!("[harness.{id}].model {reason}"))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     Ok(Selection { chain, requested })
 }
 
