@@ -304,6 +304,10 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
 fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     let world = World::new("lifecycle-steps");
     published_locally(&world);
+    // The first step writes, so the workstream has a change to publish: a
+    // branch its steps left level with the base is a failed node, not a
+    // published one.
+    world.script("service.implement.work", "the engineer wrote this\n");
     let node = json!({
         "id": "service",
         "repo": "service",
@@ -2787,14 +2791,18 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
         why(&world, &run)
     );
 
-    // The run's own document reports it `parked`, because that is what the
-    // cancel made it and a parked node is one a planner can requeue. The failure
-    // is not lost to that: the outcome beside it is the publication's.
+    // The run's own document reports it `failed`, and not the `parked` the
+    // cancel made it: the publication's failure is a settled outcome, and a
+    // settled outcome ends the park — left on, the node read parked and failed
+    // at once and the run counted it unfinished for as long as it lasted. The
+    // failure is what a planner acts on, and the outcome beside it is the
+    // publication's.
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "parked", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "push-rejected", "{node}");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
     // And the work is on the branch the one attempt was made on, which is what
-    // a requeue would continue.
+    // a `retry` continues.
     let branch = node["branch"].as_str().expect("the node names its branch");
     assert!(
         repo.has_branch(&world, branch),
