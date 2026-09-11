@@ -2090,12 +2090,15 @@ mod tests {
     /// itself reported them**.
     ///
     /// Every level is a `powershell` running [`LEVEL_SCRIPT`]: it starts the
-    /// level under it — another of itself, or the `ping` leaf — writes that
+    /// level under it — another of itself, or the `ping` leaf — announces that
     /// child's pid on its own stdout, and waits for it. The root's stdout is a
-    /// pipe this reads `below` lines off, and each level beneath inherits the
-    /// same pipe, so the pids arrive top-down in one stream and each is named by
-    /// the process that started it — the same shape the Unix fixtures take with
-    /// `echo $$`.
+    /// pipe every level beneath inherits, so every announcement arrives on one
+    /// stream and each is made by the process that started the level it names
+    /// — the same shape the Unix fixtures take with `echo $$`. What the stream
+    /// does **not** promise is order: `Start-Process` returns with the child
+    /// already running, so a deeper level's announcement, or the leaf's own
+    /// output, can land ahead of the line naming the level above it.
+    /// [`reported_levels`] is what reads the stream, and it says how.
     ///
     /// Nothing here asks the operating system where the tree is — `tests/AGENTS.md`
     /// says why — so there is no image name to tell a level from the
@@ -2120,24 +2123,10 @@ mod tests {
         use std::io::BufRead;
         let mut lines =
             std::io::BufReader::new(root.stdout.take().expect("the tree reports itself")).lines();
-        let mut pids: Vec<u32> = Vec::new();
-        while pids.len() < below.get() {
-            let line = match lines.next() {
-                Some(Ok(line)) => line,
-                Some(Err(error)) => abandon(root, &format!("the tree stopped reporting: {error}")),
-                None => abandon(
-                    root,
-                    &format!(
-                        "the tree reported {} of its {below} levels and ended",
-                        pids.len()
-                    ),
-                ),
-            };
-            match line.trim().parse::<u32>() {
-                Ok(pid) => pids.push(pid),
-                Err(_) => abandon(root, &format!("the tree said {line:?} where a pid was due")),
-            }
-        }
+        let pids = match reported_levels(&mut lines, below) {
+            Ok(pids) => pids,
+            Err(why) => abandon(root, &why),
+        };
         // The leaf goes on writing — `ping` reports every reply — into the pipe
         // every level inherited, so the pipe is drained for as long as the tree
         // lasts rather than closed once the pids are in. A reader that went away
@@ -2152,9 +2141,13 @@ mod tests {
     ///
     /// Given how many levels are still to start under it, it starts one — the
     /// `ping` leaf when it is the last, another of itself otherwise — and says
-    /// which pid that is before it waits. A level that cannot start says why on
-    /// the same stream and exits, so the fixture reading pids fails quoting the
-    /// reason rather than blocking on a line that never comes. `-NoNewWindow` is
+    /// which pid that is before it waits, on a line that names the level saying
+    /// it: `level <n> started <pid>`, `n` being the count it was given, so the
+    /// reader can place the line whenever it arrives and tell it from anything
+    /// the leaf writes. A level that cannot start says why on the same stream,
+    /// under the same `level <n>` prefix, and exits, so the fixture reading pids
+    /// fails quoting the reason rather than blocking on a line that never comes.
+    /// `-NoNewWindow` is
     /// what keeps every level a console process on the one console with the
     /// pipe inherited down the tree, and `-PassThru` is what hands the pid back.
     /// The script's own path is quoted by hand, because `Start-Process` joins
@@ -2169,7 +2162,7 @@ try {
   } else {
     $child = Start-Process -FilePath 'ping' -ArgumentList @('-n', '120', '127.0.0.1') -PassThru -NoNewWindow
   }
-  [Console]::Out.WriteLine($child.Id)
+  [Console]::Out.WriteLine("level " + $below + " started " + $child.Id)
   [Console]::Out.Flush()
   $child.WaitForExit()
 } catch {
@@ -2177,6 +2170,164 @@ try {
   exit 1
 }
 "#;
+
+    /// The pid of each level under the root, top-down, read off the tree's own
+    /// announcements — or why they could not be.
+    ///
+    /// Placed by what each line says rather than by when it arrived: the level
+    /// given `below` announces the one directly under the root and the level
+    /// given `1` announces the leaf, and the stream carries them in whatever
+    /// order the scheduler ran the levels. Every line without the `level`
+    /// prefix is the leaf's — `ping` writes a blank line and a banner before
+    /// its first reply — and is passed over. A prefixed line that is not an
+    /// announcement is a level saying it could not start, or a stream this
+    /// cannot trust, and either is a failure quoted whole; so is a level heard
+    /// twice, and a stream that ends before every level has spoken.
+    ///
+    /// Not `#[cfg(windows)]`: the fixture that reads through it is, but what it
+    /// promises about order and about noise is held on every platform.
+    fn reported_levels(
+        lines: &mut dyn Iterator<Item = std::io::Result<String>>,
+        below: std::num::NonZeroUsize,
+    ) -> std::result::Result<Vec<u32>, String> {
+        let mut heard: Vec<Option<u32>> = vec![None; below.get()];
+        while heard.iter().any(Option::is_none) {
+            let line = match lines.next() {
+                Some(Ok(line)) => line,
+                Some(Err(error)) => return Err(format!("the tree stopped reporting: {error}")),
+                None => {
+                    return Err(format!(
+                        "the tree reported {} of its {below} levels and ended",
+                        heard.iter().flatten().count()
+                    ))
+                }
+            };
+            let Some(said) = line.trim().strip_prefix("level ") else {
+                continue;
+            };
+            let announced = said.split_once(" started ").and_then(|(level, pid)| {
+                Some((level.parse::<usize>().ok()?, pid.parse::<u32>().ok()?))
+            });
+            let Some((level, pid)) = announced else {
+                return Err(format!(
+                    "the tree said {line:?} where a level's pid was due"
+                ));
+            };
+            let Some(slot) = (1..=below.get())
+                .contains(&level)
+                .then(|| &mut heard[below.get() - level])
+            else {
+                return Err(format!(
+                    "the tree announced level {level}, which it has no such level of"
+                ));
+            };
+            if slot.is_some() {
+                return Err(format!("the tree announced level {level} twice: {line:?}"));
+            }
+            *slot = Some(pid);
+        }
+        Ok(heard.into_iter().flatten().collect())
+    }
+
+    /// A stream in the order the scheduler happens to produce, not the order
+    /// the tree is in.
+    fn a_stream_of(lines: &[&str]) -> Vec<std::io::Result<String>> {
+        lines.iter().map(|line| Ok((*line).to_owned())).collect()
+    }
+
+    /// The tree's levels are placed by what each announcement says, so the
+    /// leaf's own output arriving first and a deeper level announcing before
+    /// the one above it change nothing about the answer.
+    ///
+    /// The stream here is the one a root that dawdled before announcing
+    /// produces: the leaf's blank line and banner, then the middle level naming
+    /// the leaf, then the root naming the middle, then a reply. It is also what
+    /// the script produced under `pwsh` when its root was made to sleep before
+    /// its `WriteLine` — see the commit that added this.
+    #[test]
+    fn a_trees_levels_are_read_by_what_they_say_and_not_by_when_they_arrive() {
+        let mut stream = a_stream_of(&[
+            "",
+            "Pinging 127.0.0.1 with 32 bytes of data:",
+            "level 1 started 4242",
+            "level 2 started 1717",
+            "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128",
+        ])
+        .into_iter();
+        let levels = reported_levels(
+            &mut stream,
+            std::num::NonZeroUsize::new(2).expect("two levels"),
+        )
+        .expect("both levels were announced");
+        assert_eq!(
+            levels,
+            vec![1717, 4242],
+            "the levels were placed by arrival rather than by what they said"
+        );
+        assert!(
+            stream.next().is_some(),
+            "the reader went on past the last announcement it needed"
+        );
+    }
+
+    /// A line under the `level` prefix that is not an announcement is a failure
+    /// that quotes the line — the shape a level that could not start speaks in
+    /// — and so is a stream that ends before every level has spoken.
+    #[test]
+    fn a_tree_that_misreports_or_stops_reporting_a_level_is_a_named_failure() {
+        let two = std::num::NonZeroUsize::new(2).expect("two levels");
+        let refused = reported_levels(
+            &mut a_stream_of(&[
+                "level 2 started 1717",
+                "level 1 could not start the one below it: no such file",
+            ])
+            .into_iter(),
+            two,
+        )
+        .expect_err("a level that could not start was read as a pid");
+        assert!(
+            refused.contains("could not start the one below it: no such file"),
+            "the failure did not quote the level's own reason: {refused}"
+        );
+
+        let garbled = reported_levels(
+            &mut a_stream_of(&["level 2 started 17x17"]).into_iter(),
+            two,
+        )
+        .expect_err("a pid that is not one was accepted");
+        assert!(
+            garbled.contains("17x17"),
+            "the failure did not quote the garbled line: {garbled}"
+        );
+
+        let ended = reported_levels(
+            &mut a_stream_of(&["", "level 1 started 4242"]).into_iter(),
+            two,
+        )
+        .expect_err("a stream that ended with a level unheard was read as complete");
+        assert!(
+            ended.contains("reported 1 of its 2 levels"),
+            "the failure did not say how much of the tree had spoken: {ended}"
+        );
+
+        let elsewhere =
+            reported_levels(&mut a_stream_of(&["level 3 started 4242"]).into_iter(), two)
+                .expect_err("a level the tree does not have was accepted");
+        assert!(
+            elsewhere.contains("level 3"),
+            "the failure did not name the level: {elsewhere}"
+        );
+
+        let twice = reported_levels(
+            &mut a_stream_of(&["level 1 started 4242", "level 1 started 4243"]).into_iter(),
+            two,
+        )
+        .expect_err("a level heard twice was accepted");
+        assert!(
+            twice.contains("twice"),
+            "the failure did not say the level was heard twice: {twice}"
+        );
+    }
 
     /// Where [`LEVEL_SCRIPT`] is on disk, written once per test process.
     ///
