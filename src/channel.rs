@@ -1080,10 +1080,15 @@ impl Queue {
         self.seal = self.sealed();
     }
 
-    /// Whether a stamped projection is one a writer here sealed and nothing has
-    /// moved since. An unstamped one is an older build's, and is vouched for by
-    /// nothing — see [`ChannelState::current`].
-    fn is_sealed(&self) -> bool {
+    /// Whether this projection's claims are as a writer here left them.
+    ///
+    /// A stamped projection carries a seal over its claims, and is intact only
+    /// where that seal still matches them: one whose seal is missing or no longer
+    /// matches is a document nothing here wrote as it stands. An unstamped one is
+    /// an older build's and carries no seal to check, so there is nothing to find
+    /// moved; what it claims is checked against the log instead — see
+    /// [`ChannelState::current`].
+    fn is_intact(&self) -> bool {
         self.accounted.is_none() || self.seal.is_some() && self.seal == self.sealed()
     }
 
@@ -1402,7 +1407,7 @@ impl ChannelState {
         // A stamped document that does not seal is one nothing here wrote: read as
         // no document, so the whole log is folded rather than its claims trusted.
         let checkpoint: Option<Queue> =
-            crate::ledger::read_json_opt(&self.queue_path()).filter(Queue::is_sealed);
+            crate::ledger::read_json_opt(&self.queue_path()).filter(Queue::is_intact);
         // The id below which an older build's projection is taken at its word.
         let mut floor: Option<u64> = None;
         let (mut queue, from) = match checkpoint {
