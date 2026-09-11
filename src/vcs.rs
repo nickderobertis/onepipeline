@@ -752,13 +752,12 @@ pub fn branch_head_in(token: &SessionToken) -> Option<String> {
 ///
 /// Read off the worktree the session opened, *before* a publication is spent on
 /// it — the drafting dispatch and the push both — and split on the one fact the
-/// ahead-count alone cannot say: whether the branch has moved since the session
-/// opened it. Two situations are zero commits ahead and the two are opposite
-/// endings. A dispatch that wrote no commit left an empty branch, and a node that
-/// did not declare it expected that has a modelling error nobody would otherwise
-/// see; a dispatch that wrote a commit the base then took — an agent that pushed
-/// to the base itself, a continued branch whose earlier work the session's own
-/// integration found already landed — is the second reading `engine::NO_CHANGES`
+/// ahead-count alone cannot say: whether this dispatch **wrote** a commit the
+/// branch still carries. Two situations are zero commits ahead and the two are
+/// opposite endings. A dispatch that wrote no commit left an empty branch, and a
+/// node that did not declare it expected that has a modelling error nobody would
+/// otherwise see; a dispatch that wrote a commit the base then took — an agent
+/// that pushed to the base itself — is the second reading `engine::NO_CHANGES`
 /// documents, a legitimate success. `crate::lifecycle` settles the two apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LevelBranch {
@@ -768,10 +767,38 @@ pub struct LevelBranch {
     /// clone carries one, and the local base otherwise — the same ref the
     /// sibling's own publication compares against.
     pub base: String,
-    /// Whether the branch stands somewhere other than where this session opened
-    /// it. `true` is a commit put on it since — by the dispatch, or by the
-    /// session's own integration of the base — that the base now also carries.
-    pub moved: bool,
+    /// Whether a commit **this dispatch wrote** is on the branch — and so, the
+    /// branch being level, on the base. Movement alone is not that: a worker
+    /// that fast-forwarded or reset its branch onto a commit the base already
+    /// had moved HEAD and wrote nothing, and a report that the base carried what
+    /// it committed would be false. See [`level_with_base`] for the evidence.
+    pub committed: bool,
+}
+
+/// Whether one entry of the worktree's `HEAD` reflog records a commit being
+/// **written** there, read off the subject git itself stamps on the entry.
+///
+/// Git names the action that moved `HEAD` on every entry: `commit: …` and its
+/// `(amend)`, `(initial)` and `(merge)` forms, `cherry-pick: …`, `am: …`, a
+/// `rebase (pick): …` that replays one, and a `merge …`/`pull …` that was not a
+/// fast-forward — each of which created the commit the entry points at. A
+/// `reset`, a `checkout`, a fast-forward, and a `rebase (start)`/`(finish)` moved
+/// `HEAD` onto a commit that already existed, and are not that.
+fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
+    let subject = subject.trim();
+    if subject.starts_with("commit")
+        || subject.starts_with("cherry-pick")
+        || subject.starts_with("am:")
+    {
+        return true;
+    }
+    if let Some(rest) = subject.strip_prefix("rebase") {
+        return !["(start)", "(finish)", "(abort)"]
+            .iter()
+            .any(|phase| rest.trim_start().starts_with(phase));
+    }
+    (subject.starts_with("merge") || subject.starts_with("pull"))
+        && !subject.ends_with("Fast-forward")
 }
 
 /// Where a session's branch stands against its base, asked of the worktree
@@ -785,10 +812,13 @@ pub struct LevelBranch {
 /// not evidence about the branch, and settling a node on it either way would be
 /// a report nobody could stand behind.
 ///
-/// The commit the session opened the worktree at is the oldest entry of the
-/// worktree's own `HEAD` reflog, which git writes when the worktree is added and
-/// which nothing here has to guess at. `onevcs` cuts every session its own
-/// non-bare clone and adds the worktree fresh, so that entry is the open.
+/// The evidence that this dispatch wrote a commit is the worktree's own `HEAD`
+/// reflog, which git writes for every move of `HEAD` there and which names the
+/// action that made each — see [`reflog_entry_wrote_a_commit`]. `onevcs` cuts
+/// every session its own non-bare clone and adds the worktree fresh, so the
+/// reflog begins at the open and everything after it is this session's. A commit
+/// counts only while the branch still carries it: one written and then reset
+/// away is not on the base whatever the reflog says.
 ///
 /// This crate runs git itself here, which `docs/contract-divergences.md` entry 35
 /// records it otherwise does not, and for the reason that entry gives for the
@@ -844,16 +874,41 @@ pub fn level_with_base(worktree: &std::path::Path, base: &str) -> Option<LevelBr
     if ahead.parse::<u64>().ok()? != 0 {
         return None;
     }
-    let head = git(&["rev-parse", "HEAD"])?;
-    let opened_at = git(&["log", "-g", "--format=%H", "HEAD"])?
+    // Every commit the reflog says was written here, that the branch still
+    // carries. `%gs` is the entry's own subject — the action — beside the commit
+    // it moved `HEAD` to; the pair is split on the first space, which a commit
+    // name never contains.
+    let written: Vec<String> = git(&["log", "-g", "--format=%H %gs", "HEAD"])?
         .lines()
-        .last()
-        .map(str::to_owned)?;
+        .filter_map(|line| {
+            let (sha, subject) = line.split_once(' ')?;
+            reflog_entry_wrote_a_commit(subject).then(|| sha.to_owned())
+        })
+        .collect();
+    let mut committed = false;
+    for sha in &written {
+        // Exit 1 is git's answer "not an ancestor", which the closure reports as
+        // a refusal; only a refusal to answer at all leaves the read undecided,
+        // and that one exits higher than 1.
+        match std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(answered) if answered.status.success() => {
+                committed = true;
+                break;
+            }
+            Ok(answered) if answered.status.code() == Some(1) => {}
+            _ => return None,
+        }
+    }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     Some(LevelBranch {
         branch,
         base: compared,
-        moved: head != opened_at,
+        committed,
     })
 }
 
@@ -2270,6 +2325,196 @@ mod tests {
         assert!(!session_open_conflicted(&Error::Invalid(format!(
             "{SESSION_OPEN_CONFLICT}: sync conflict"
         ))));
+    }
+
+    /// A worktree cut the way `onevcs` cuts a session's: a base repository with
+    /// one commit, a shared non-checkout clone of it whose `origin` is that base,
+    /// and a worktree on a fresh branch from `origin/main`.
+    ///
+    /// Real git, because what [`level_with_base`] reads is git's own reflog and
+    /// its own ancestry, and a double for either would be an oracle for what
+    /// this test wants to know.
+    fn a_cut_worktree(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-level-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let base = root.join("base");
+        let clone = root.join("clone");
+        let worktree = root.join("worktree");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "base"]);
+        std::fs::write(base.join("README.md"), "seed\n").expect("the seed file");
+        git_in(&base, &["add", "-A"]);
+        git_in(&base, &["commit", "-q", "-m", "chore: seed"]);
+        // Taken as a push target below, which a checkout refuses for its own
+        // branch; the cut origin is a bare repository too.
+        git_in(
+            &base,
+            &["config", "receive.denyCurrentBranch", "updateInstead"],
+        );
+        git_in(
+            &root,
+            &["clone", "-q", "--shared", "--no-checkout", "base", "clone"],
+        );
+        git_in(
+            &clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work",
+                &worktree.to_string_lossy(),
+                "origin/main",
+            ],
+        );
+        (base, worktree)
+    }
+
+    /// Run git as the test's own actor, refusing anything but success.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let ran = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .expect("git runs");
+        assert!(
+            ran.status.success(),
+            "`git {}` in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    /// A commit written into the worktree, on the branch it has checked out.
+    fn commit_in(worktree: &std::path::Path, name: &str) {
+        std::fs::write(worktree.join(name), format!("{name}\n")).expect("the file");
+        git_in(worktree, &["add", "-A"]);
+        git_in(worktree, &["commit", "-q", "-m", &format!("feat: {name}")]);
+    }
+
+    /// A level branch is told apart by whether **this dispatch wrote a commit**
+    /// the branch carries, and movement alone is not that.
+    ///
+    /// Six worktrees, one per situation the read has to tell apart, over real
+    /// git: the reflog and the ancestry are git's own, and what the read claims
+    /// — "the base already carries what this dispatch committed" — is only true
+    /// where a commit was written here and is still on the branch. A worker that
+    /// fast-forwarded or reset onto a commit the base already had moved `HEAD`
+    /// and committed nothing, and used to be reported as the former.
+    #[test]
+    fn a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone() {
+        let level = |worktree: &std::path::Path| super::level_with_base(worktree, "main");
+
+        // Fresh: level, and nothing written.
+        let (_, fresh) = a_cut_worktree("fresh");
+        assert_eq!(
+            level(&fresh),
+            Some(LevelBranch {
+                branch: "work".into(),
+                base: "origin/main".into(),
+                committed: false,
+            })
+        );
+
+        // The base moved and the worker fast-forwarded onto it — and, in a
+        // second worktree, reset onto it. `HEAD` moved in both; neither wrote.
+        for (name, catch_up) in [
+            ("ff", vec!["merge", "-q", "--ff-only", "origin/main"]),
+            ("reset", vec!["reset", "-q", "--hard", "origin/main"]),
+        ] {
+            let (base, worktree) = a_cut_worktree(name);
+            commit_in(&base, "landed-by-somebody-else.md");
+            git_in(&worktree, &["fetch", "-q", "origin"]);
+            git_in(&worktree, &catch_up);
+            let read = level(&worktree).unwrap_or_else(|| panic!("{name}: not read as level"));
+            assert!(
+                !read.committed,
+                "{name}: a worker that moved onto a commit the base already had was read as \
+                 having committed it"
+            );
+        }
+
+        // The worker wrote a commit and landed it on the base itself: written
+        // here, still on the branch, and the base carries it.
+        let (_, landed) = a_cut_worktree("landed");
+        commit_in(&landed, "mine.md");
+        git_in(&landed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        git_in(&landed, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            level(&landed).map(|read| read.committed),
+            Some(true),
+            "a commit written here that the base took was not read as one"
+        );
+
+        // The worker wrote a commit and then reset it away: written here, but
+        // the branch no longer carries it, so the base does not either.
+        let (_, undone) = a_cut_worktree("undone");
+        commit_in(&undone, "undone.md");
+        git_in(&undone, &["reset", "-q", "--hard", "origin/main"]);
+        assert_eq!(
+            level(&undone).map(|read| read.committed),
+            Some(false),
+            "a commit reset off the branch was read as one the base carries"
+        );
+
+        // Not level at all: a commit the base does not have, and a dirty tree
+        // the sibling would commit at publication.
+        let (_, ahead) = a_cut_worktree("ahead");
+        commit_in(&ahead, "ahead.md");
+        assert_eq!(
+            level(&ahead),
+            None,
+            "a branch ahead of its base read as level"
+        );
+        let (_, dirty) = a_cut_worktree("dirty");
+        std::fs::write(dirty.join("dirty.md"), "uncommitted\n").expect("the file");
+        assert_eq!(level(&dirty), None, "a dirty worktree read as level");
+
+        for name in ["fresh", "ff", "reset", "landed", "undone", "ahead", "dirty"] {
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir()
+                    .join(format!("onepipeline-level-{name}-{}", std::process::id())),
+            );
+        }
+    }
+
+    /// The reflog subjects that record a commit being written, against the ones
+    /// git stamps for movement onto a commit that already existed.
+    #[test]
+    fn a_reflog_entry_that_wrote_a_commit_is_told_from_one_that_only_moved_head() {
+        for wrote in [
+            "commit: feat: one",
+            "commit (amend): feat: one",
+            "commit (initial): chore: seed",
+            "commit (merge): Merge branch 'x'",
+            "cherry-pick: feat: one",
+            "am: feat: one",
+            "rebase (pick): feat: one",
+            "rebase (continue): feat: one",
+            "merge origin/main: Merge made by the 'ort' strategy.",
+            "pull: Merge made by the 'ort' strategy.",
+        ] {
+            assert!(super::reflog_entry_wrote_a_commit(wrote), "{wrote}");
+        }
+        for moved in [
+            "",
+            "reset: moving to origin/main",
+            "reset: moving to HEAD",
+            "checkout: moving from main to work",
+            "merge origin/main: Fast-forward",
+            "pull: Fast-forward",
+            "rebase (start): checkout origin/main",
+            "rebase (finish): returning to refs/heads/work",
+            "rebase (abort): returning to refs/heads/work",
+        ] {
+            assert!(!super::reflog_entry_wrote_a_commit(moved), "{moved:?}");
+        }
     }
 
     /// The three answers [`session_tip`] gives, against three real streams.

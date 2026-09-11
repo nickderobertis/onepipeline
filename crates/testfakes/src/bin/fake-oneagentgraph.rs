@@ -586,6 +586,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         commit_and_land_on_base(args, &fake::segment(&key), base.trim());
     }
 
+    // A worker that brings its branch up to a base that moved under it and
+    // commits nothing: `HEAD` moves onto a commit the base already had, which is
+    // the shape a read that took movement for a commit mistook for the case
+    // above. Scripted `<key>.catches-up-with-base` holding the base branch's
+    // name.
+    if let Some(base) = fake::node_script(dir, &key, "catches-up-with-base") {
+        catch_up_with_base(args, base.trim());
+    }
+
     // The same, except that every dispatch writes something the one before it
     // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
     // one fixed body leaves a continued branch with nothing to commit, which is a
@@ -1051,6 +1060,35 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
         vec!["push", "origin", &onto],
         vec!["fetch", "origin"],
     ] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
+/// Fast-forward the session's branch onto its base as the origin now has it.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms,
+/// and deliberately **no commit**: the fetch brings the base's new commit into
+/// the clone, and the fast-forward moves `HEAD` onto it.
+fn catch_up_with_base(args: &[String], base: &str) {
+    let worktree = session_worktree(args, "catching a dispatch's branch up with its base");
+    let onto = format!("origin/{base}");
+    for argv in [vec!["fetch", "origin"], vec!["merge", "--ff-only", &onto]] {
         let ran = std::process::Command::new("git")
             .args(&argv)
             .current_dir(&worktree)

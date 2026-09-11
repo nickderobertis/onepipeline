@@ -590,10 +590,10 @@ fn publish(
 ///
 /// Three situations are zero commits ahead, and the ahead-count reads all three
 /// as one. The node **declared** it expects no diff: the success `engine::NO_CHANGES`
-/// is documented for, and the word it settles under. The branch **moved** since
-/// the session opened it and the base carries where it moved to: the second
-/// reading of that same word — a publication whose base already carried the
-/// branch — and a legitimate success, which is why the split is on the commit.
+/// is documented for, and the word it settles under. This dispatch **wrote a
+/// commit** the branch carries and the base already has it: the second reading
+/// of that same word — a publication whose base already carried the branch —
+/// and a legitimate success, which is why the split is on the commit.
 /// Split on the count alone, it would be reported as the third: the declaration
 /// absent and the dispatch having committed nothing, which is a worker asked for
 /// a change that produced none. That one settles `failed` under
@@ -617,8 +617,8 @@ fn level_branch_settlement(
         "compared against {}: {branch} carries nothing it does not",
         level.base
     );
-    if node.expects_no_diff || level.moved {
-        let detail = if level.moved {
+    if node.expects_no_diff || level.committed {
+        let detail = if level.committed {
             format!(
                 "{compared}; the base already carries what this dispatch committed to it, so \
                  there was nothing to draft or publish"
@@ -1708,10 +1708,10 @@ mod tests {
     /// `execute` can put one in front of this arm.
     #[test]
     fn a_level_branch_settles_on_the_commit_and_the_declaration_rather_than_the_count() {
-        let level = |moved: bool| crate::vcs::LevelBranch {
+        let level = |committed: bool| crate::vcs::LevelBranch {
             branch: "work/service".into(),
             base: "origin/main".into(),
-            moved,
+            committed,
         };
         let settled = |node: &Node, level: &crate::vcs::LevelBranch| match level_branch_settlement(
             node, level, None,
@@ -1737,7 +1737,7 @@ mod tests {
             assert!(detail.contains(claim), "{detail}");
         }
 
-        // The base already carries what the dispatch committed: the second
+        // The base already carries a commit the dispatch wrote: the second
         // reading of `no-changes`, and a success whatever the node declares.
         for declared in [false, true] {
             let node = Node {

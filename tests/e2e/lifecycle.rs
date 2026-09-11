@@ -3369,6 +3369,76 @@ fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
     assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
 }
 
+/// A worker that only caught its branch up with a base that moved under it
+/// wrote nothing, and the node fails as an empty branch — movement of `HEAD`
+/// is not a commit.
+///
+/// The read that decides a level branch used to take "`HEAD` is not where the
+/// session opened it" for "this dispatch wrote a commit", and settled this
+/// worker `done` claiming the base already carried what it committed. It
+/// committed nothing: the base gained a commit while the worker held, and the
+/// worker fast-forwarded onto it. The evidence is git's own record of what
+/// moved `HEAD` — see `vcs::level_with_base` — and a fast-forward is not a
+/// commit written here.
+#[test]
+fn a_worker_that_only_caught_up_with_a_moved_base_fails_as_an_empty_branch() {
+    let world = World::new("lifecycle-caughtup");
+    let repo = published_locally(&world);
+    world.script("service.wait", "hold");
+    world.script("service.catches-up-with-base", "main");
+    let path = world.plan(
+        "caughtup",
+        &plan_of("caughtup", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "caughtup".to_string();
+
+    // The base moves while the worker is held in its session: somebody else
+    // lands a commit on `main`.
+    world.until("the worker to be in its session", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+    });
+    std::fs::write(
+        repo.checkout.join("elsewhere.md"),
+        "landed by somebody else\n",
+    )
+    .expect("the other change");
+    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["commit", "-q", "-m", "feat: somebody else's change"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "-q", "origin", "main"]);
+    world.release("service.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("committed nothing"), "{detail}");
+    assert!(
+        !detail.contains("already carries what this dispatch committed"),
+        "a worker that wrote nothing was reported as having committed: {detail}"
+    );
+    let kinds = vcs_kinds(&world, &run);
+    for spent in ["push", "published", "change-opened"] {
+        assert!(
+            !kinds.iter().any(|kind| kind == spent),
+            "a level branch was published anyway ({spent}): {kinds:?}"
+        );
+    }
+}
+
 /// A worker that landed its commit on the base itself leaves a branch level with
 /// a base that already carries it, which is the no-change success and not the
 /// empty branch.
