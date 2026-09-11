@@ -1092,6 +1092,69 @@ fn the_release_note_carries_a_held_back_release_on_the_warning_of_an_engine_that
     );
 }
 
+/// Where the graph carries an engine twice **and** a release above both copies
+/// is held back, the notes carry every fact once and none of them on the wrong
+/// line.
+///
+/// The check mode refuses a split before the registry is asked, so only the
+/// notes ever compose over this tree. Both copies are inside the window; the
+/// older is behind the newer, and the held-back release is above both — so the
+/// held-back fact belongs on the behind copy's warning line, the split is its
+/// own warning, and no line calls either copy the newest this manifest admits.
+#[test]
+fn the_release_note_composes_over_a_split_lock_with_a_release_held_back_above_both_copies() {
+    let fixture = tree(
+        "notes-split-held-back",
+        &but(Engine {
+            name: "oneharness-core",
+            requirement: "1",
+            locked: &["1.2.3", "1.4.0"],
+            served: &["1.2.3", "1.4.0"],
+            requires: &[],
+        }),
+    );
+    let entry = repo_root()
+        .join(&fixture.index)
+        .join(index_path("oneharness-core"));
+    let served = fs::read_to_string(&entry).expect("the fixture index entry");
+    fs::write(
+        &entry,
+        format!(
+            "{served}{{\"name\":\"oneharness-core\",\"vers\":\"1.9.0\",\"deps\":[{{\"name\":\"onejudge\",\
+             \"req\":\"^5.0.0\",\"kind\":\"normal\",\"optional\":false,\"target\":null}}],\
+             \"yanked\":false}}\n"
+        ),
+    )
+    .expect("one more record in it");
+    let mut args = fixture.args();
+    args.extend(["--format", "notes"]);
+    let run = linked_engines(&args);
+    assert!(
+        run.status.success(),
+        "the note is composed for a split lock under a held-back release too:\n{}",
+        said(&run)
+    );
+    let notes = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        notes.contains(
+            "- `oneharness-core` links 1.2.3; the requirement already permitted 1.4.0 (1.9.0 is \
+             held back by `onejudge = \"0.0\"`: 1.9.0 requires onejudge ^5.0.0)."
+        ),
+        "the behind copy's warning does not carry the held-back release above it:\n{}",
+        said(&run)
+    );
+    assert!(
+        notes.contains("- `oneharness-core` links 1.2.3 1.4.0."),
+        "the split is not reported beside the held-back release:\n{}",
+        said(&run)
+    );
+    assert!(
+        !notes.contains("the newest its requirement permits that this manifest admits"),
+        "a copy of a split, behind engine was called the newest this manifest admits:\n{}",
+        said(&run)
+    );
+}
+
 /// Where the graph carries an engine twice, the notes say so rather than
 /// refusing to compose at all.
 ///
