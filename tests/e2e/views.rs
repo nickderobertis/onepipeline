@@ -2081,13 +2081,11 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     // that has attached to nothing yet, and an arrival counted rather than
     // identified could be the one the stop was aimed at.
     //
-    // What the handshake does **not** explain: this journey once waited out its
-    // whole deadline here on a Windows runner (run 34137622276) on a run whose
-    // held dispatch had settled `task-failed` on its own a quarter of a second
-    // in — before the stop, and before anything below ran — so the takeover had
-    // nothing left to dispatch and no arrival could come. Why a held double ended
-    // that way is not established. The check below makes a recurrence say so at
-    // once instead of after the deadline.
+    // A held dispatch that settles on its own before the stop leaves the
+    // takeover nothing to dispatch, so no arrival can come and the wait below
+    // would run out: a state this journey has met and the handshake does not
+    // explain, which is why it is failed at once, by name, rather than after
+    // the deadline.
     //
     // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
     // the same reason: the run's own records and the double's own announcement, because
