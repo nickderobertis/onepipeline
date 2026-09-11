@@ -1503,19 +1503,27 @@ fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() 
     let read = std::sync::Mutex::new(Vec::<Value>::new());
     let queued = std::sync::Mutex::new(Vec::<(u64, String)>::new());
     std::thread::scope(|scope| {
-        for writer in 0..WRITERS {
-            let (world, run, queued) = (&world, &run, &queued);
-            scope.spawn(move || {
-                for n in 0..EACH {
-                    let message = format!("writer {writer} finding {n}");
-                    let pushed =
-                        world.run(&["surface", run, "--kind", "finding", "--message", &message]);
-                    pushed.exited(0);
-                    let id = pushed.json()["surface"].as_u64().expect("the surface's id");
-                    queued.lock().expect("the list").push((id, message));
-                }
-            });
-        }
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let (world, run, queued) = (&world, &run, &queued);
+                scope.spawn(move || {
+                    for n in 0..EACH {
+                        let message = format!("writer {writer} finding {n}");
+                        let pushed = world.run(&[
+                            "surface",
+                            run,
+                            "--kind",
+                            "finding",
+                            "--message",
+                            &message,
+                        ]);
+                        pushed.exited(0);
+                        let id = pushed.json()["surface"].as_u64().expect("the surface's id");
+                        queued.lock().expect("the list").push((id, message));
+                    }
+                })
+            })
+            .collect();
         let readers: Vec<_> = (0..READERS)
             .map(|_| {
                 let (world, run, read, writing) = (&world, &run, &read, &writing);
@@ -1537,14 +1545,20 @@ fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() 
                 })
             })
             .collect();
-        // The writers are the scope's other threads; they are joined by the
-        // scope, but the readers' stop is what needs them done first.
-        while queued.lock().expect("the list").len() < WRITERS * EACH {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        // The writers are waited on by joining them, never by counting what
+        // they queued: a writer that failed would leave that count short for
+        // ever. And the readers are released **before** any writer's failure is
+        // raised — a scope joins every thread it spawned on the way out, so a
+        // panic here with the readers still looping on `writing` would wait on
+        // them for ever and the failure would never be reported.
+        let written: Vec<_> = writers.into_iter().map(|writer| writer.join()).collect();
         writing.store(false, std::sync::atomic::Ordering::SeqCst);
-        for reader in readers {
-            reader.join().expect("a reader finishes");
+        let read_out: Vec<_> = readers.into_iter().map(|reader| reader.join()).collect();
+        for writer in written {
+            writer.expect("a writer finishes");
+        }
+        for reader in read_out {
+            reader.expect("a reader finishes");
         }
     });
 

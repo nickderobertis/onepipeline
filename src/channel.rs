@@ -2441,14 +2441,19 @@ mod tests {
                 })
             })
             .collect();
-        for writer in writers {
-            writer.join().expect("a writer finishes");
-        }
+        // The readers are released before any writer's failure is raised, so a
+        // failed writer fails the test rather than leaving readers spinning on
+        // `writing` behind it. Whatever is still waiting once every writer is
+        // done is drained by the readers, which stop at the first empty claim
+        // after that.
+        let written: Vec<_> = writers.into_iter().map(|writer| writer.join()).collect();
         writing.store(false, std::sync::atomic::Ordering::SeqCst);
-        // Whatever is still waiting once every writer is done is drained by the
-        // readers, which stop at the first empty claim after that.
-        for reader in readers {
-            reader.join().expect("a reader finishes");
+        let read_out: Vec<_> = readers.into_iter().map(|reader| reader.join()).collect();
+        for writer in written {
+            writer.expect("a writer finishes");
+        }
+        for reader in read_out {
+            reader.expect("a reader finishes");
         }
 
         let queued = queued.lock().expect("the list").clone();
