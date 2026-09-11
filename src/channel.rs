@@ -969,16 +969,12 @@ pub(crate) struct Queue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SurfaceEvent {
-    /// It was queued, under the id this line carries.
     Queued,
-    /// A reader took it from the waiting ones; a blocking one went to the
-    /// pending slot to await its verdict.
+    /// A blocking one goes to the pending slot here; narration goes nowhere.
     Claimed,
-    /// A verdict answered it, releasing the pending slot.
+    /// Releases the pending slot.
     Answered,
-    /// The session serving it exited with nobody left waiting on its answer.
     Abandoned,
-    /// A later session of the same asker took it back over.
     Attended,
 }
 
