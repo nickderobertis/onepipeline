@@ -752,6 +752,45 @@ fn an_entry_naming_a_crate_outside_the_siblings_is_skipped_whatever_its_shape() 
     );
 }
 
+/// A renamed sibling requirement is read by the crate it names, not the alias.
+///
+/// Cargo's index spells a renamed dependency with `name` as the alias the
+/// requiring crate uses and `package` as the crate it actually requires. Read
+/// by `name` alone, a sibling required under another name is skipped as
+/// foreign, and a release it holds back is reported as one the lock is behind —
+/// with a fix that splits the graph.
+#[test]
+fn a_renamed_sibling_requirement_is_read_by_the_crate_it_names() {
+    let fixture = tree("renamed-dep", &CARET_SHAPES);
+    let entry = repo_root()
+        .join(&fixture.index)
+        .join(index_path("oneagentgraph"));
+    let served = fs::read_to_string(&entry).expect("the fixture index entry");
+    fs::write(
+        &entry,
+        format!(
+            "{served}{{\"name\":\"oneagentgraph\",\"vers\":\"2.9.9\",\"deps\":[{{\"name\":\"judge\",\
+             \"package\":\"onejudge\",\"req\":\"^9.0.0\",\"kind\":\"normal\",\"optional\":false,\
+             \"target\":null}}],\"yanked\":false}}\n"
+        ),
+    )
+    .expect("one more record in it");
+    let run = linked_engines(&fixture.args());
+    assert!(
+        run.status.success(),
+        "a release requiring a sibling under another name, at a window the manifest admits \
+         nothing of, is held back — but it was read as foreign and the lock called behind \
+         it:\n{}",
+        said(&run)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout)
+            .contains("2.9.9 is held back by onejudge = \"0.0\" (2.9.9 requires onejudge ^9.0.0)"),
+        "the held-back line does not name the sibling by the crate it is:\n{}",
+        said(&run)
+    );
+}
+
 /// This build resolves exactly one copy of every engine it links.
 ///
 /// The claim the refusal below exists to keep true, made about *this* tree and

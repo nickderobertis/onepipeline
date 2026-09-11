@@ -236,9 +236,11 @@ index_path() {
 #
 # What a release requires of the other siblings comes out *before* its own
 # line, one `requires <name> <kind> <active> <req>` per entry of its `deps` that
-# names an engine in SIBLINGS, so the caller has the whole record in hand when
-# the `release` line arrives. Three members decide, and only off a sibling's
-# entry: `name` because it is what says whose requirement this is, `req`
+# names an engine in SIBLINGS — by its `package` where the entry is a renamed
+# dependency, because `name` is then only the alias — so the caller has the
+# whole record in hand when the `release` line arrives. Three members decide,
+# and only off a sibling's entry: `name` because it is what says whose
+# requirement this is, `req`
 # because it is the requirement, and `kind` because a `dev` requirement of a
 # dependency is one cargo never resolves — `oneagentgraph` requires `onevcs` as
 # a dev-dependency at a window this manifest does not admit, and that holds
@@ -374,7 +376,7 @@ index_versions() {
     # closing brace, or 0 where it never closes. What it decides lands in
     # DEP_BAD and DEPS rather than in a return value, because the walk has to
     # go on past an entry this cannot read to find the end of the record.
-    function read_dep(s, i,   n, c, key, name, req, kind, active, saw_name, saw_req, saw_kind, ok_name, ok_req, ok_kind, name_twice, twice) {
+    function read_dep(s, i,   n, c, key, name, req, kind, active, pkg, saw_name, saw_req, saw_kind, saw_pkg, ok_name, ok_req, ok_kind, ok_pkg, name_twice, twice) {
       n = length(s)
       active = "always"
       i = skip_ws(s, i + 1)
@@ -392,6 +394,10 @@ index_versions() {
           if (key == "name")      { ok_name = 1; name = STR }
           else if (key == "req")  { ok_req = 1; req = STR }
           else if (key == "kind") { ok_kind = 1; kind = STR }
+          # A renamed dependency: `name` is then the alias the requiring crate
+          # uses and `package` the crate it actually requires, which is the one
+          # that could be a sibling.
+          else if (key == "package") { ok_pkg = 1; pkg = STR }
           # A requirement stated for one platform only. Whether this build is
           # that platform is a cfg question this cannot answer, so the caller
           # refuses it rather than counting it in or out.
@@ -404,8 +410,11 @@ index_versions() {
           # enables it, which is a question about every crate that requires
           # this one; refused by the caller for the same reason.
           if (key == "optional" && LIT == "true") active = "optional"
+          # `null` is how the registry spells "not renamed".
+          if (key == "package" && LIT == "null") ok_pkg = 1
         }
         if (key == "name")      { if (saw_name) name_twice = 1; saw_name = 1 }
+        else if (key == "package") { if (saw_pkg) name_twice = 1; saw_pkg = 1 }
         else if (key == "req")  { if (saw_req)  twice = 1; saw_req  = 1 }
         else if (key == "kind") { if (saw_kind) twice = 1; saw_kind = 1 }
         i = skip_ws(s, i)
@@ -417,7 +426,8 @@ index_versions() {
       # An entry whose name cannot be read, or that names two, is one this
       # cannot tell from a sibling, so it is refused; one that names some other
       # crate is skipped whole, whatever else is on it.
-      if (!ok_name || name_twice) { DEP_BAD = 1; return i + 1 }
+      if (!ok_name || name_twice || (saw_pkg && !ok_pkg)) { DEP_BAD = 1; return i + 1 }
+      if (pkg != "") name = pkg
       if (!(name in SIBLING)) return i + 1
       if (!ok_req || !ok_kind || twice) { DEP_BAD = 1; return i + 1 }
       if (kind != "normal" && kind != "build" && kind != "dev") { DEP_BAD = 1; return i + 1 }
