@@ -3432,6 +3432,50 @@ fn a_project_document_being_rewritten_underneath_the_rule_is_not_a_fixture_defec
 
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A board a **stopped** run left mid-write is the product's state, and the next
+/// fixture this world writes is not refused over it.
+///
+/// `stop` signals the whole tree, and nothing in it handles the signal — so a `project
+/// copy` ended between the truncate and the rewrite of one `fs::write` leaves the earlier
+/// run's board empty, and no wait settles it. [`World::plan`] once asked the fixture rule
+/// of every board in the store, and on the gate it read exactly that board while standing
+/// up the journey's *second* run: 5.5 s of asking, then `has no front matter` against a
+/// fixture that was sound. So the rule `plan` asks is of what it wrote, and the state is
+/// induced here by hand, because a signal landing inside one syscall's window is not a
+/// thing to wait for.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the fixture rule's scope,
+// and the state that motivates it cannot be produced on demand: it is a signal landing
+// between two halves of one write. The stop is driven through the real binary; the
+// half-written board is what that stop leaves when it lands there.
+#[test]
+fn a_board_a_stopped_run_left_mid_write_is_not_the_next_fixtures_defect() {
+    let world = World::new("store-fixture-rule-stopped");
+    world.script("work.wait", "hold");
+    let project = world.plan("first", &plan_of("first", vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of("first", "node-dispatched").is_empty()
+    });
+    world.run(&["stop", "first"]).exited(0);
+    let board = world.store().join("projects").join("first-board.md");
+    std::fs::write(&board, "").expect("the half a killed copy leaves behind");
+
+    // The next fixture stands up on the rule it is held to, and no other board's.
+    world.plan("second", &plan_of("second", vec![agent("work", &[])]));
+
+    // And the rule over the whole store still has its teeth, so a hand-authored store
+    // holding that same document is still refused by name.
+    let said = crate::harness::undiscriminating(&world.store())
+        .unwrap_or_else(|| panic!("an empty project document was accepted as a fixture"));
+    assert!(
+        said.contains("fixture 'first-board'") && said.contains("has no front matter"),
+        "the refusal does not name the empty board: {said}"
+    );
+    world.release("work.go");
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// One project document, written straight rather than through [`World::plan`]: what is
 /// being checked here is the rule, so the fixture has to be able to break it.
 fn author_project(store: &std::path::Path, identifier: &str, title: &str) {

@@ -22,9 +22,10 @@
 //! there is nowhere else it could live. The run prints the same three rows, so a reader
 //! who doubts it re-reads it rather than trusting the snapshot. -->
 //! Over the [`FIXTURE_NODES`]-node fixture below, on one developer host, each
-//! figure averaged over [`REPETITIONS`] renders of that view — every render a
-//! separate invocation of the binary, so the wall clock is the whole cost a
-//! supervisor pays at a terminal rather than the render alone:
+//! figure averaged over three renders of that view when the table was written
+//! (the journey now takes [`REPETITIONS`], and says so as it prints) — every
+//! render a separate invocation of the binary, so the wall clock is the whole
+//! cost a supervisor pays at a terminal rather than the render alone:
 //!
 //! | invocation | render | landing reads | repository asks | lines printed | wall clock |
 //! | --- | --- | --- | --- | --- | --- |
@@ -113,10 +114,16 @@ const RECORDED_LANDED: &str = "landed-at-settlement";
 
 /// How many times each render is performed where its cost is measured.
 ///
-/// Three, because the figure reported is a mean and one reading of a process
-/// start is mostly the host's page cache. Every *bound* is asserted of a single
-/// render, so repeating changes nothing about what is enforced.
-const REPETITIONS: usize = 3;
+/// One, after the warm-up render the measuring journey makes first. Every
+/// *bound* is asserted of a single render, so repeating changes nothing about
+/// what is enforced; what it changed was how close the journey sat to nextest's
+/// 360-second ceiling on the hosted Windows runner, where a render is a process
+/// start plus four or five landing reads that each start git, and cost 8–13 s
+/// against about 1 s here. At three repetitions the journey was measured at
+/// 282 s, 334 s and then killed at 360 s on four consecutive Windows legs; the
+/// ten renders this drops are 80–130 s of that. The figure reported is a single
+/// reading and says so.
+const REPETITIONS: usize = 1;
 
 /// The fixture run, the world it was driven in, and the branch each node left.
 struct Fixture {
@@ -869,8 +876,7 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
         ));
     }
     println!(
-        "what one render of each view cost, averaged over {REPETITIONS} renders \
-         each:\n{measured_cost}"
+        "what one render of each view cost, over {REPETITIONS} render(s) each:\n{measured_cost}"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]

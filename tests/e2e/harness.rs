@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{rendezvous_script, segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -1976,7 +1976,16 @@ impl World {
         for (node, file) in nodes.iter().zip(&files) {
             self.task(&identifier, node, file, &named);
         }
-        if let Some(missing) = undiscriminating(&self.store()) {
+        // Asked of the two documents this writer put there, not of the whole store.
+        // A board an earlier run of this world was projecting onto when it was
+        // stopped is whatever the store's writer had got to when the signal
+        // landed: `local-md` replaces a document with one `fs::write`, and a copy
+        // ended between its truncate and its rewrite leaves an empty file that no
+        // wait settles. That is the product's state, not this fixture's, and it
+        // failed a sound fixture on the gate as `has no front matter`.
+        if let Some(missing) =
+            undiscriminating_among(&self.store(), Some(&[identifier.as_str(), DECOY_PROJECT]))
+        {
             panic!("{missing}");
         }
         format!("{STORE_SOURCE}:{identifier}")
@@ -2172,6 +2181,21 @@ impl World {
         std::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
+    /// Stand where the dispatches scripted at `key` will meet this test.
+    ///
+    /// The test's half of the handshake `fake::meet` is the double's half of.
+    /// This listens on the loopback interface and writes the address into
+    /// `<key>.rendezvous`, which is what sends the double here instead of to a
+    /// file hold; [`Rendezvous::arrived`] then blocks until one connects. Called
+    /// before the run starts, since a dispatch reads its scripts as it begins.
+    pub fn rendezvous(&self, key: &str) -> Rendezvous {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let address = listener.local_addr().expect("the listener has an address");
+        std::fs::write(rendezvous_script(&self.fakes, key), address.to_string())
+            .expect("the rendezvous is scripted");
+        Rendezvous { listener }
+    }
+
     /// Wait until a predicate holds, or fail with what was seen instead.
     pub fn until(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
         if waited(|| ready(self)) {
@@ -2185,11 +2209,9 @@ impl World {
 
     /// Wait for a predicate that reads the store through a real sibling process.
     ///
-    /// A normal wait observes files and can poll cheaply. Each store observation
-    /// starts `onetaskgraph`, though, and polling that boundary every 20ms can
-    /// consume the process-start capacity the asynchronous copy itself needs on a
-    /// loaded cross-platform runner. The deadline and assertion stay identical;
-    /// only the expensive observer yields between reads.
+    /// Each store observation starts `onetaskgraph`, so this yields between
+    /// reads for the reason `tests/AGENTS.md` gives; the deadline and assertion
+    /// are [`until`](Self::until)'s.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
         self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
     }
@@ -2484,6 +2506,33 @@ impl World {
         found
     }
 
+    /// Whether the run's dispatch registry names `pid` as one of its dispatches.
+    ///
+    /// The engine's own record of where a dispatch is, written once the launch
+    /// has returned — which is after the process exists, so a double that has
+    /// arrived at its hold may be a moment ahead of its entry. A journey about
+    /// what a `stop` or a view makes of the registry waits for this as well as
+    /// for the arrival: the registry is what both read, and a stop that lands
+    /// before the entry does ends a dispatch the run never recorded.
+    ///
+    /// An entry this cannot read as JSON, or that names no `pid`, is a failure
+    /// rather than a non-match — and that refusal is the drift gate on the
+    /// field's name: the record's type is the engine's and private, so this
+    /// spells the field, and a rename lands here as every registry entry failing
+    /// to name a pid rather than as a wait that never ends.
+    pub fn registered(&self, run: &str, pid: u32) -> bool {
+        self.dispatch_records(run).iter().any(|record| {
+            let text = std::fs::read_to_string(record)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", record.display()));
+            let entry: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("{} is not JSON: {error}", record.display()));
+            let named = entry["pid"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{} names no pid: {entry}", record.display()));
+            named == u64::from(pid)
+        })
+    }
+
     /// A JSON document inside a run's directory.
     pub fn run_json(&self, run: &str, relative: &str) -> Value {
         let path = self.run_file(run, relative);
@@ -2494,6 +2543,99 @@ impl World {
         .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
     }
 }
+
+/// Where held dispatches meet the test: one listener, any number of arrivals.
+///
+/// Nothing about it counts or polls. [`arrived`](Self::arrived) is an `accept`
+/// and returns when a dispatch connects; releasing is a write on that
+/// connection; and a test that ends releases every arrival it held, because the
+/// operating system closes what the process owned. So the only bound on a wait
+/// here is the runner's own, which is the backstop for a dispatch that never
+/// comes — and a wait on the product's asynchrony that *should* have a deadline
+/// of its own, like the registry entry landing, still goes through
+/// [`World::until`].
+pub struct Rendezvous {
+    listener: std::net::TcpListener,
+}
+
+/// One dispatch inside its hold, and the connection holding it there.
+pub struct Arrival {
+    /// The pid the dispatch announced as it arrived.
+    pub pid: u32,
+    stream: std::net::TcpStream,
+}
+
+impl Rendezvous {
+    /// Block until the next dispatch arrives, and say which one.
+    ///
+    /// Once this returns, what the caller does next lands on a worker that is
+    /// inside its hold — which neither `node-dispatched`, the driver saying it
+    /// launched something, nor a beat relayed on the double's own cadence can
+    /// promise. Called again after a takeover, it answers with the fresh
+    /// driver's dispatch, since the stopped one is already held.
+    pub fn arrived(&self) -> Arrival {
+        use std::io::BufRead;
+        let (stream, _) = self.listener.accept().expect("a dispatch connects");
+        let mut announced = String::new();
+        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
+            .read_line(&mut announced)
+            .expect("the dispatch announces itself");
+        let pid = announced
+            .trim()
+            .parse::<u32>()
+            .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
+        Arrival { pid, stream }
+    }
+}
+
+impl Arrival {
+    /// Let the dispatch go.
+    ///
+    /// One byte, then the connection: a dispatch the run has already ended is
+    /// on the other side of a closed socket, so the write is allowed to fail —
+    /// the release of a hold nobody is inside is not a finding.
+    pub fn release(mut self) {
+        use std::io::Write;
+        let _ = self.stream.write_all(b"go");
+    }
+}
+
+/// A dispatch that met the test is inside its hold until the test lets it go,
+/// and the letting-go is what settles the run.
+///
+/// The handshake's own contract, driven through the real binary and the real
+/// double: [`Rendezvous::arrived`] returns only once the dispatch has connected,
+/// so a run that had settled by then would be a dispatch that never held; and
+/// [`Arrival::release`] is the one thing that ends the hold, so a run that
+/// settles after it — on a deadline that is the product's, for the settlement —
+/// is the release reaching the worker. What is not asserted is any clock
+/// between the two.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: the property is that the handshake holds and releases a real dispatch,
+// which no journey built on it can assert about itself without a clock. The journeys
+// built on it are `views.rs`'s two `host` takeover journeys, and those drive the binary.
+#[test]
+fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
+    let world = World::new("rendezvous-held");
+    let meeting = world.rendezvous("build");
+    let path = world.plan("met", &plan_of("met", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+
+    let held = meeting.arrived();
+    assert!(
+        !world.run_file("met", "result.json").is_file(),
+        "the run settled before its dispatch had been released, so the dispatch was never held"
+    );
+    assert!(
+        world.events_of("met", "node-settled").is_empty(),
+        "the node settled while its dispatch was held"
+    );
+
+    held.release();
+    world.until("the released dispatch to settle the run", |world| {
+        world.run_file("met", "result.json").is_file()
+    });
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
@@ -2595,6 +2737,8 @@ fn dirty_bytes() -> Option<u64> {
 /// the shape is always the same and the deadline is one number: what differs is
 /// the evidence a caller prints when it runs out, which is why this answers
 /// rather than panicking.
+///
+/// `ready` reads files and nothing else; `tests/AGENTS.md` says why.
 fn waited(ready: impl FnMut() -> bool) -> bool {
     waited_every(std::time::Duration::from_millis(20), ready)
 }
@@ -3287,6 +3431,16 @@ pub fn project_id(name: &str) -> String {
 /// or front matter it could not parse would pass exactly the fixtures nobody can
 /// check.
 pub fn undiscriminating(store: &Path) -> Option<String> {
+    undiscriminating_among(store, None)
+}
+
+/// The same rule, asked only of the projects `only` names when it names any.
+///
+/// [`World::plan`] asks it of what it wrote — the project and the decoy — so a
+/// board an earlier run of the same world was stopped over is left to the
+/// product; `undiscriminating` asks it of everything, which is what a whole
+/// store a journey authored by hand is held to.
+fn undiscriminating_among(store: &Path, only: Option<&[&str]>) -> Option<String> {
     let fixture = store
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -3317,6 +3471,9 @@ pub fn undiscriminating(store: &Path) -> Option<String> {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if only.is_some_and(|only| !only.contains(&identifier.as_str())) {
+            continue;
+        }
         let title = match settled_title(&path) {
             Ok(title) => title,
             Err(why) => return Some(format!("fixture '{identifier}': {why}")),

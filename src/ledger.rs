@@ -880,6 +880,18 @@ impl LaunchRecord {
         NonZeroU32::new(self.pid)
     }
 
+    /// The stamp that proves the pid this record names, when it carries one.
+    ///
+    /// The third of the claim [`driver_pid`](Self::driver_pid) is one third of,
+    /// served the way the other two are: an absent or unwritten stamp arrives
+    /// back as an empty string, and this is the one place that becomes "there
+    /// is none" again. What a reader does with `None` is its own affair — a
+    /// stop leaves the pid alone, a liveness reading resolves toward live —
+    /// but neither may read an empty stamp as agreeing with anything.
+    pub fn driver_stamp(&self) -> Option<&str> {
+        (!self.started.is_empty()).then_some(self.started.as_str())
+    }
+
     /// The host this record names, when it names one.
     ///
     /// The same reading [`observer_graph`](Self::observer_graph) has: an absent

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1](https://github.com/nickderobertis/onepipeline/compare/v0.27.0...v0.27.1) - 2026-09-11
+
+### Fixed
+
+- *(e2e)* have a spawned child announce itself instead of waiting on a fixed deadline ([#228](https://github.com/nickderobertis/onepipeline/pull/228))
+
 ## [0.27.0](https://github.com/nickderobertis/onepipeline/compare/v0.26.1...v0.27.0) - 2026-09-10
 
 ### Added

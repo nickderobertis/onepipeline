@@ -572,7 +572,7 @@ impl RunSummary {
             started_at: launch.launched_at().map(str::to_string),
             pid: launch.driver_pid(),
             host: launch.recorded_host().map(str::to_string),
-            started: (!launch.started.is_empty()).then(|| launch.started.clone()),
+            started: launch.driver_stamp().map(str::to_string),
             timing: timing.clone(),
             parked: with_status(graph::NodeStatus::Parked),
             // The same three records `views::rejected_by_a_judge` reads, taken

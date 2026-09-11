@@ -261,6 +261,53 @@ pub fn ignore_the_polite_ask() {
     }
 }
 
+/// The script that names where a dispatch meets its test: `<key>.rendezvous`
+/// holds the address the test is listening on.
+///
+/// The one spelling of that path, for the double that reads it and the
+/// harness that writes it.
+pub fn rendezvous_script(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!("{key}.rendezvous"))
+}
+
+/// Meet the test at `address`, and hold there until it lets go.
+///
+/// The clock-free half of a two-way handshake; `World::rendezvous` in
+/// `tests/e2e/harness.rs` is the other. Connecting **is** arriving — the test's
+/// `accept` returns the moment this connects and not before — and the pid sent
+/// as the first line says which dispatch arrived, because one dispatch after
+/// another may meet the test at the same key and a takeover has to tell the one
+/// it stopped from the one its fresh driver started. Then this blocks on a read
+/// that ends only when the test writes a byte or its end of the connection
+/// closes: nothing here polls, and nothing here counts.
+///
+/// **Unbounded on purpose**, where [`wait_for`] is bounded. That hold is a
+/// file the test writes, so a test that died leaves it unwritten for ever and
+/// the bound is what ends the dispatch; this one is a connection the test's
+/// process owns, and the operating system closes it when that process goes,
+/// which releases the hold the same instant. A test that never releases and
+/// never ends is the runner's to end, and that ends this too.
+pub fn meet(address: &str) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address)
+        .unwrap_or_else(|error| fail(&format!("cannot meet the test at {address}: {error}")));
+    if let Err(error) = stream.write_all(format!("{}\n", std::process::id()).as_bytes()) {
+        fail(&format!(
+            "cannot announce this dispatch at {address}: {error}"
+        ));
+    }
+    // A byte is the release and so is the end of the stream; what this must
+    // not do is return on a read *error* as though it had been released, since
+    // a hold that let go on a refused read would be the disguise [`wait_for`]
+    // exists to prevent.
+    let mut released = [0u8; 1];
+    if let Err(error) = stream.read(&mut released) {
+        fail(&format!(
+            "the hold at {address} ended on an error rather than a release: {error}"
+        ));
+    }
+}
+
 /// Wait until a rendezvous file appears, so a test can hold a dispatch open
 /// while it does something else — issue a live edit, kill a driver, read a
 /// surface.
