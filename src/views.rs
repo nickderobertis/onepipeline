@@ -309,23 +309,29 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
         state.stop_recorded(),
         launch.recorded_host(),
         launch.driver_pid(),
+        launch.driver_stamp(),
         state.last_write_at,
         state.awaiting_human_action(),
         paths,
     )
 }
 
-/// The same verdict, over the five things a record says and the run's own
+/// The same verdict, over the six things a record says and the run's own
 /// channel.
 ///
 /// Taken apart from the fold for the reason [`watching`] is: the bounded
-/// listing reads these five off a summary document rather than off a whole
+/// listing reads these six off a summary document rather than off a whole
 /// merged store, and a second implementation of this reading is a second run
 /// liveness to keep true.
+///
+/// The pid is read with the stamp beside it, through the same
+/// [`sys::claim_on`] a stop aims by; read alone it called a reissued pid a
+/// live driver.
 fn driver_liveness(
     stop_recorded: bool,
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
+    started: Option<&str>,
     last_write_at: Option<u64>,
     awaiting_human_action: bool,
     paths: &RunPaths,
@@ -334,7 +340,9 @@ fn driver_liveness(
         return DriverLiveness::DriverDead;
     }
     let ours = recorded_host == Some(sys::hostname().as_str());
-    if ours && pid.is_some_and(|pid| !sys::process_may_be_live(pid.get())) {
+    if ours
+        && pid.is_some_and(|pid| sys::claim_on(pid.get(), started.unwrap_or_default()).is_over())
+    {
         return DriverLiveness::DriverDead;
     }
     // A live pid is ownership, not progress.
@@ -1448,6 +1456,7 @@ impl<'a> Row<'a> {
             self.summary.stop_recorded,
             self.summary.host.as_deref(),
             self.summary.pid,
+            self.summary.started.as_deref(),
             self.summary.last_write_at,
             self.summary.awaiting_human_action,
             &self.paths,
@@ -3613,6 +3622,40 @@ mod tests {
         assert_eq!(view.liveness(), DriverLiveness::DriverDead);
         assert!(view.liveness().is_undriven());
         assert!(runs(&root, false, "session-a").contains("DRIVER DEAD"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A live pid the host has handed on since the driver recorded it is a
+    /// driver that is gone, on both readings a run has.
+    ///
+    /// The record names this test's own live process, stamped as a process it is
+    /// not — what a host that reissued a dead driver's pid leaves behind. Read on
+    /// the pid alone, that is a live driver, and it was: `adopt` refused a run
+    /// its own `start --attach` had settled as "still being driven" on Windows,
+    /// where a freed pid is handed on within moments. The stamp is what says
+    /// otherwise, and both the whole view and the bounded listing read it.
+    #[test]
+    fn a_live_pid_stamped_as_another_process_reads_as_driver_dead() {
+        let root = scratch("reissued");
+        let paths = write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        let mut record: LaunchRecord = ledger::read_json(&paths.launch()).expect("the record");
+        record.started = "the driver it named, which is not this process".into();
+        ledger::write_json(&paths.launch(), &record).expect("the record is rewritten");
+
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::DriverDead);
+        assert!(view.liveness().is_undriven());
+        let listed = runs(&root, false, "session-a");
+        assert!(listed.contains("DRIVER DEAD"), "{listed}");
         std::fs::remove_dir_all(&root).ok();
     }
 
