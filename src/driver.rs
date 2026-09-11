@@ -36,7 +36,7 @@ use crate::graph::{self, GraphState};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::plan::Plan;
-use crate::sys;
+use crate::sys::{self, Claim};
 use crate::telemetry;
 use crate::views::{self, RunView};
 
@@ -1546,7 +1546,15 @@ fn report_and_journal_adoption(
 /// be taken over is the **lock's** question, and a driver that outlasts this is
 /// answered by the lock's own refusal, which names the pid still holding it.
 fn displace_the_parked_driver(record: &LaunchRecord) {
-    if record.host != sys::hostname() || !sys::process_may_be_live(record.pid) {
+    if record.host != sys::hostname() {
+        return;
+    }
+    // Read with the stamp, the way a stop reads it: a live pid the host has
+    // since given to another process is a driver that is already gone, and the
+    // signal below would land on a stranger's work. An unstamped or undescribed
+    // live pid is still signalled, as it always was — the adoption's verdict
+    // called it parked, and that is the one case this displacement exists for.
+    if sys::claim_on(record.pid, &record.started).is_over() {
         return;
     }
     eprintln!(
@@ -1834,7 +1842,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         if roots.contains(&pid) || unproven.contains(&pid) {
             continue;
         }
-        match claim_on(pid, &started) {
+        match sys::claim_on(pid, &started) {
             Claim::Proved => roots.push(pid),
             Claim::Gone => {}
             Claim::Reissued => {
@@ -1896,45 +1904,6 @@ const RECORDED_DRIVER: &str = "launch record";
 const LOCK_HOLDER: &str = "ownership lock";
 /// The claim that outlives the driver that wrote it.
 const REGISTERED_DISPATCH: &str = "dispatch registry";
-
-/// What one record says about one pid on this host.
-#[derive(Debug, PartialEq, Eq)]
-enum Claim {
-    /// Still the process the record was written for: its stamp says so.
-    Proved,
-    /// Not a process this teardown has anything to end — the pid is gone.
-    Gone,
-    /// A live process this host says is **not** the one the record named. The
-    /// recorded process is over and its pid has been handed on, so there is
-    /// nothing here to stop and nothing unresolved either.
-    Reissued,
-    /// A live process whose record carries no stamp to compare — every record a
-    /// build before the field existed wrote.
-    Unstamped,
-    /// A live process this host would not describe, so there was nothing to
-    /// compare its record against.
-    HostSilent,
-}
-
-/// Whether `pid` is still the process a record stamped `started` was written
-/// for.
-///
-/// The order of the answers is the point. A stamp that matches is the only
-/// proof, and everything else is read against whether the pid is a process at
-/// all: one that is gone ends the question, and one that is live is either
-/// somebody else's — the host answered with a different stamp — or a pid this
-/// build has nothing to compare, which is *cannot say* rather than *nothing is
-/// running there*.
-fn claim_on(pid: u32, started: &str) -> Claim {
-    let reading = sys::process_start_token(pid);
-    match reading {
-        Some(ref token) if token.matches(started) => Claim::Proved,
-        _ if !sys::process_may_be_live(pid) => Claim::Gone,
-        Some(_) if !started.is_empty() => Claim::Reissued,
-        Some(_) => Claim::Unstamped,
-        None => Claim::HostSilent,
-    }
-}
 
 /// The run's ownership lock, as a record, when there is one this build can read.
 ///

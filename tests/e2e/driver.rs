@@ -2158,6 +2158,23 @@ fn started_at_of(pid: u32) -> String {
         .to_string()
 }
 
+/// The Windows stand-in for the stranger below.
+///
+/// No oracle is needed here: the crate reads a process's start on Windows as its
+/// creation `FILETIME`, at hundred-nanosecond resolution, so any process this
+/// test starts after the one a stamp names is a stranger by construction. `ping`
+/// against loopback is what the crate's own process-tree tests hold open, and it
+/// outlives every assertion made about it.
+#[cfg(windows)]
+fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
+    std::process::Command::new("ping")
+        .args(["-n", "300", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("this host starts a process of its own")
+}
+
 /// A live process this run never started, standing in for whatever the host gave
 /// a reissued pid to — and one this host describes differently from **every**
 /// `stamp` a record it is about to be planted into carries.
@@ -2700,6 +2717,95 @@ fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
     });
     world.release("build.go");
 }
+
+/// A pid the host has given to another process is not a driver: a run whose
+/// record still names it reads `DRIVER DEAD`, is adoptable, and the stranger is
+/// left alone.
+///
+/// The other readers of the launch record's pid — the run's own view, the
+/// bounded listing, and the adoption, whose displacement of a driver it has
+/// decided is not working would signal the stranger if aimed on the pid alone.
+/// The state is the one `sys::claim_on` documents, and the one the Windows gate
+/// met: `adopt` refusing a run `start --attach` had already settled.
+///
+/// The run is left open on a human action nobody has taken, because a settled
+/// run renders `SETTLED` in place of any liveness word: the driver exits either
+/// way, and this is the shape in which the two views have a verdict to show. The
+/// record is edited for the reason the stop journey above edits one, and the
+/// stamp is left exactly as the driver wrote it.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
+// launch record names, and no product surface sets it: the verbs that write that field —
+// `start`, `drive-run`, `adopt` — write their own pid and their own stamp together, so a
+// record whose pid the host has reissued is a state a user reaches by having a driver exit
+// and the host reuse its pid, not by typing anything. The rest of the journey is the real
+// binary end to end, and the assertions are about processes on this host.
+#[test]
+fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
+    let world = World::new("driver-reissued-pid");
+    let plan = world.plan(
+        "reissued",
+        &plan_of("reissued", vec![human("approve", &[])]),
+    );
+    let run = "reissued".to_string();
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // The stranger the host handed the pid to: a real process, started by this
+    // test after the driver exited, so it is one this host describes
+    // differently from the stamp the driver recorded. The pid is handed on in
+    // both documents the driver wrote it to — the launch record the run's own
+    // view reads, and the summary the bounded listing reads instead of it —
+    // because a reissue changes nothing on disk: the same pid stays written in
+    // both, and it is the host that changes what answers to it.
+    let mut stranger = None;
+    for document in ["launch.json", "summary.json"] {
+        let path = world.run_file(&run, document);
+        let mut named = world.run_json(&run, document);
+        let recorded = named["started"]
+            .as_str()
+            .expect("a driver records the stamp that proves its pid")
+            .to_string();
+        let taken = stranger
+            .get_or_insert_with(|| stranger_started_after(std::slice::from_ref(&recorded)))
+            .id();
+        named["pid"] = json!(taken);
+        std::fs::write(&path, named.to_string()).expect("the document is rewritten");
+    }
+    let mut stranger = stranger.expect("the stranger was started");
+    let taken = stranger.id();
+
+    // Both views read the stamp: the driver that exited is dead, whoever holds
+    // its pid now — where the pid alone said a live driver was waiting on the
+    // person.
+    world.run(&["runs"]).exited(0).out_has("DRIVER DEAD");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("DRIVER DEAD")
+        .out_lacks("ACTIVE");
+
+    // And the way back a dead driver offers is open: the run is adopted rather
+    // than refused, and nothing was signalled to make it so.
+    let adopted = world.run(&["adopt", &run]);
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about this test's own process")
+            .is_none(),
+        "an adoption ended pid {taken}, which the host had given to a process this run never \
+         started"
+    );
+    adopted
+        .exited(0)
+        .err_lacks("still being driven")
+        .err_lacks("ending it to adopt the run");
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("it is reaped");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A Linux run launched by the former `ps lstart` implementation remains
 /// stoppable after upgrading to procfs tokens.

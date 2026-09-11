@@ -1996,12 +1996,27 @@ fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_rea
 #[test]
 fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     let world = World::new("views-stopped");
-    world.script("build.wait", "hold");
+    let meeting = world.rendezvous("build");
     let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch to be in flight", |world| {
-        !world.events_of("halted", "node-dispatched").is_empty()
+    // Waited for at the worker and in the registry, not at `node-dispatched`:
+    // that event is the driver saying it launched something, and a stop landing
+    // before the executor records where the work is ends a dispatch the run
+    // never registered — leaving the view below no stale entry to ignore. The
+    // worker's arrival has no clock: it is the dispatch connecting.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the precondition is "the registry
+    // holds this dispatch", and the only user-facing surfaces that would say so are `host`
+    // and `status` — the views under test, which decide liveness off this same registry
+    // through the code the defect was in. A journey polling either for its precondition
+    // would pass at the instant its assertion would. So the precondition is read off the
+    // engine's own record and the double's own announcement, and every claim afterwards
+    // is read off the CLI.
+    let worker = meeting.arrived();
+    world.until("the dispatch to record its place", |world| {
+        world.registered("halted", worker.pid)
     });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["host"]).exited(0).out_has("build");
 
     world.run(&["stop", "halted"]).exited(0);
@@ -2012,22 +2027,7 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
         .out_has("1 stale registry entry ignored")
         .out_has("halted/build")
         .out_has("is gone");
-    world.release("build.go");
-}
-
-/// Every agentgraph stream that has beaten for a run, which is one per dispatched
-/// process: the double stamps its own pid into the stream it publishes on, so a
-/// beat on a stream a run has not seen before is a beat from a dispatch it has not
-/// had before.
-fn beating(world: &World, run: &str) -> Vec<String> {
-    let mut streams: Vec<String> = world
-        .events_of(run, "member-heartbeat")
-        .iter()
-        .filter_map(|event| event["stream"].as_str().map(str::to_string))
-        .collect();
-    streams.sort();
-    streams.dedup();
-    streams
+    worker.release();
 }
 
 /// And a run stopped and then **adopted** is running what its fresh driver
@@ -2043,36 +2043,29 @@ fn beating(world: &World, run: &str) -> Vec<String> {
 #[test]
 fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted() {
     let world = World::new("views-stopped-adopted");
-    world.script("build.wait", "hold");
-    // A worker that beats while it holds, which is what makes this takeover
-    // observable from outside the product's own files: a held dispatch otherwise
-    // announces nothing between being dispatched and being released, and the only
-    // record that it reached its worker is one the crate wrote for itself.
-    world.script("build.heartbeat", "50");
+    let meeting = world.rendezvous("build");
     let path = world.plan("retaken", &plan_of("retaken", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    // Both waits are on the worker's own beat, which is what an operator watching
-    // a takeover watches, and neither is the view under test: `host` is read once,
-    // below, and never polled. A journey that waited on the command it asserts
-    // would pass at the instant the assertion would, which is a test that can only
-    // succeed — and `status` is no better, deciding liveness from the same
-    // registry through the same code the defect was in.
+    // Waited for at the worker's own arrival — a dispatch connecting, with no
+    // clock — and in the registry, and neither is the view under test: `host`
+    // is read once, below, and never polled — a journey that waited on the
+    // command it asserts could only succeed. The registry entry matters because
+    // a `stop` landing before it ends a dispatch that never recorded its place,
+    // and the adoption's entry would then be the only one this run ever held.
     //
-    // A beat is also the one signal that carries the registration with it, which
-    // is what makes the second wait able to end at all. `node-dispatched` is the
-    // driver saying it dispatched; the executor records *where* the work is after
-    // that, and a `stop` landing between the two ends a dispatch that never
-    // recorded its place — so the adoption's entry would be the only one this run
-    // ever held, and a wait for a second one waits until it times out. That is not
-    // hypothetical: it is how this journey failed on a loaded Windows runner,
-    // where the 413ms between the event and the stop was not enough. A beat cannot
-    // arrive before that record exists, because a dispatch that fails to register
-    // is taken back down and never runs (`executor.rs`), and the beat comes from
-    // inside one that did.
-    world.until("the worker to beat", |world| {
-        !beating(world, "retaken").is_empty()
+    // llmlint: ignore-block[tests_mirror_real_usage] both preconditions here and the pair
+    // after the adoption are "the registry holds this dispatch" and "the run recorded the
+    // adoption", and the only user-facing surfaces that say either are `host` and `status`
+    // — the views under test, deciding liveness off this same registry through the code
+    // the defect was in. A journey polling either for its precondition would pass at the
+    // instant its assertion would. So the preconditions are read off the engine's own
+    // records and the double's own announcement, and every claim afterwards is read off
+    // the CLI.
+    let stopped = meeting.arrived();
+    world.until("the dispatch to record its place", |world| {
+        world.registered("retaken", stopped.pid)
     });
-    let stopped = beating(&world, "retaken");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["stop", "retaken"]).exited(0);
 
     // An adoption attaches, so the adopting driver is left running: it is the
@@ -2084,19 +2077,39 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
         .spawn()
         .expect("the adopting driver starts");
     // The takeover has reached the worker when the run has recorded the adoption
-    // *and* a beat has arrived on a stream the stopped run never produced. The
-    // pair is the claim: an adoption alone is a driver that has attached to
-    // nothing yet, and a beat counted rather than identified could be one the
-    // dying dispatch had already written.
-    world.until(
-        "the adopted driver's dispatch to reach its worker",
-        |world| {
-            !world.events_of("retaken", "driver-adopted").is_empty()
-                && beating(world, "retaken")
-                    .iter()
-                    .any(|stream| !stopped.contains(stream))
-        },
+    // *and* a second dispatch has arrived at the meeting and recorded its place.
+    // The pair is the claim: an adoption alone is a driver that has attached to
+    // nothing yet, and the stopped dispatch is already held on its own
+    // connection, so the next arrival is the fresh driver's.
+    //
+    // A held dispatch that settles on its own before the stop leaves the
+    // takeover nothing to dispatch, so no arrival can come and the wait below
+    // would run out: a state this journey has met and the handshake does not
+    // explain, which is why it is failed at once, by name, rather than after
+    // the deadline.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
+    // the same reason: the run's own records and the double's own announcement, because
+    // the surfaces that would say the same are the ones under test.
+    world.until("the adoption to be recorded", |world| {
+        !world.events_of("retaken", "driver-adopted").is_empty()
+    });
+    assert!(
+        !world.run_file("retaken", "result.json").is_file(),
+        "the run settled before the takeover reached a worker, so no dispatch is coming — the \
+         held dispatch ended on its own, which nothing here explains; the runs root held:\n{}",
+        world.dump()
     );
+    let retaken = meeting.arrived();
+    assert_ne!(
+        retaken.pid, stopped.pid,
+        "the takeover's arrival is the dispatch the stop was aimed at"
+    );
+    world.until(
+        "the adopted driver's dispatch to record its place",
+        |world| world.registered("retaken", retaken.pid),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["host"]);
     rendered.exited(0).out_has("retaken").out_has("build");
@@ -2109,7 +2122,8 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
 
     let _ = adopting.kill();
     let _ = adopting.wait();
-    world.release("build.go");
+    stopped.release();
+    retaken.release();
 }
 
 // llmlint: ignore-block[tests_mirror_real_usage] every state below is one registry entry
