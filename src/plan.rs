@@ -113,7 +113,12 @@ pub(crate) const MANAGER_NOTES_HEADING: &str = "## Manager notes";
 /// continuation that demoted it to observed state would be the incident this
 /// section exists to end: a worker obeying a manager ruling and its judge failing
 /// it for exactly that, having never been shown the ruling.
-const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this node during an      earlier dispatch of it, and this dispatch continues that node's work: each stands here      exactly as it stood there, for the worker and for the supervisor alike. A note that      states a criterion is part of the bar this node is judged against.";
+const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this node during an \
+                                       earlier dispatch of it, and this dispatch continues that \
+                                       node's work: each stands here exactly as it stood there, \
+                                       for the worker and for the supervisor alike. A note that \
+                                       states a criterion is part of the bar this node is judged \
+                                       against.";
 
 /// The task section an amendment is rendered immediately above, when the task
 /// has one.
@@ -1212,7 +1217,20 @@ mod tests {
                 && at("## Additional info") < at(PLANNER_CONTEXT_HEADING),
             "the notes are not between the amendment and the operational notes:\n{rendered}"
         );
-        // The authority is the amendment's, stated once per section.
+        // The authority is the amendment's, stated once per section — and the
+        // section's head is asserted whole, so a run of spaces a wrapped literal
+        // leaves behind cannot pass as prose.
+        assert!(
+            rendered.contains(
+                "## Manager notes\nWhere this section and the operational notes below disagree, \
+                 this section wins.\n\nThe manager delivered these notes to this node during an \
+                 earlier dispatch of it, and this dispatch continues that node's work: each \
+                 stands here exactly as it stood there, for the worker and for the supervisor \
+                 alike. A note that states a criterion is part of the bar this node is judged \
+                 against.\n\n1. Addressed to both parties"
+            ),
+            "the section's head is not rendered as one paragraph of prose:\n{rendered}"
+        );
         assert_eq!(
             rendered.matches(AMENDMENT_PRECEDENCE).count(),
             2,

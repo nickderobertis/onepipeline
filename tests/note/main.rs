@@ -1691,9 +1691,11 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         .first()
         .unwrap_or_else(|| panic!("the second dispatch opened no turn:\n{dispatched:#?}"));
     for said in [
-        "## Manager notes",
-        "Where this section and the operational notes below disagree, this section wins.",
-        "Addressed to both parties",
+        "## Manager notes\nWhere this section and the operational notes below disagree, this \
+         section wins.\n\nThe manager delivered these notes to this node during an earlier \
+         dispatch of it, and this dispatch continues that node's work: each stands here exactly \
+         as it stood there, for the worker and for the supervisor alike. A note that states a \
+         criterion is part of the bar this node is judged against.\n\n1. Addressed to both parties",
         NOTE,
         CRITERION,
         // And the diagnosis is still there beside it: carrying the note did not
