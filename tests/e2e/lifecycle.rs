@@ -5318,6 +5318,115 @@ fn the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft() {
         .out_has("marked it ready for review");
 }
 
+/// The **planner's** body finishes a worker's draft, spending no dispatch.
+///
+/// The two halves of this change meet here and nowhere else: a node that carries
+/// its own `body` skips the drafting dispatch outright — the planner has already
+/// done that drafting — and a session that already holds a change request has a
+/// description written onto it rather than a second change request opened. Both
+/// journeys above hold one half each with the other absent, so the path where a
+/// plan's own body is what reaches an adopted change request was reachable and
+/// untested: a closeout that only wrote a *drafted* body would leave the
+/// worker's half-written description standing under a plan that had said
+/// exactly what the change request should say.
+///
+/// The graph *is* named, so the only reason no dispatch runs is the body the
+/// node already carries.
+#[test]
+fn a_node_that_states_its_own_body_writes_it_onto_the_change_request_the_worker_drafted() {
+    let world = World::new("lifecycle-body-onto-draft");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // The worker opens its session's change request as a draft and starts the
+    // description — which the plan's own body is about to replace.
+    world.script("service.drafts", "wip: what the worker called it");
+    world.script(
+        "service.drafts-body",
+        "## What\nHalf written by the worker.\n",
+    );
+    let mut node = titled(
+        lifecycle("service", &[]),
+        "feat: land what the planner asked for",
+    );
+    node["body"] = json!("## What\nThe planner wrote this.");
+    let path = world.plan("bodied-draft", &plan_of("bodied-draft", vec![node]));
+    let drafting = world.pr_author_graph();
+    world
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
+        .settled();
+    let run = "bodied-draft";
+
+    // The worker's change request, opened as a draft, and never a second one.
+    let created = gh_pr_calls(&world, "create");
+    assert_eq!(created.len(), 1, "{created:?}\n{}", why(&world, run));
+    assert!(
+        created[0].iter().any(|arg| arg == "--draft"),
+        "the worker's change request was not opened as a draft: {:?}",
+        created[0]
+    );
+    let opened = world.changes_opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "a second change request was opened: {opened:?}"
+    );
+
+    // It carries the **planner's** words and the plan's title, not the worker's.
+    assert_eq!(
+        opened[0]["body"],
+        "## What\nThe planner wrote this.",
+        "the plan's own body did not reach the change request the worker drafted: \
+         {opened:?}\n{}",
+        why(&world, run)
+    );
+    assert_eq!(opened[0]["title"], "feat: land what the planner asked for");
+    assert_eq!(
+        gh_pr_calls(&world, "edit").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    // And the same publication lifted the draft.
+    assert_eq!(
+        gh_pr_calls(&world, "ready").len(),
+        1,
+        "{:?}",
+        gh_calls(&world)
+    );
+
+    // No dispatch was spent on a body the planner had already written.
+    assert!(
+        !world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
+        "a body the planner wrote still spent a drafting dispatch"
+    );
+    assert!(
+        world.events_of(run, "body-not-drafted").is_empty(),
+        "a node that wrote its own body was reported as an undrafted one"
+    );
+
+    // And it settles exactly as the drafted-body journey does: the publication's
+    // own word, with the detail that tells an adopted draft apart from a fresh
+    // publication.
+    let settled = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(settled["status"], "done", "{settled}\n{}", why(&world, run));
+    assert_eq!(settled["outcome"], "change-open", "{settled}");
+    let events = world.events_of(run, "node-settled");
+    assert_eq!(
+        events[0]["payload"]["detail"],
+        "the worker opened the change request as a draft; the closeout wrote the drafted \
+         description onto it and marked it ready for review",
+        "{}",
+        events[0]
+    );
+    assert_eq!(
+        world.events_of(run, "change-described")[0]["payload"]["title"],
+        "feat: land what the planner asked for"
+    );
+}
+
 /// A node declared `draft: true` leaves its change request as a draft for a
 /// person, and settles **done** — its dependents proceed, because nothing in the
 /// run will ever lift it.
