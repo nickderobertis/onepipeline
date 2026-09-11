@@ -1025,7 +1025,9 @@ pub(crate) struct SurfaceRecord {
     /// What happened. Always written; read leniently for the reason above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<SurfaceEvent>,
-    /// The surface as it was when this happened.
+    /// Flattened so a line is the surface's own fields with the event beside
+    /// them — the shape an older build wrote, which is what lets its lines still
+    /// be read by the same struct.
     #[serde(flatten)]
     pub surface: Surface,
 }
@@ -1075,7 +1077,6 @@ impl Queue {
         ))
     }
 
-    /// Seal this projection so a reader can check it.
     fn seal(&mut self) {
         self.seal = self.sealed();
     }
