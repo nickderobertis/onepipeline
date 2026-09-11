@@ -3182,6 +3182,16 @@ fn start_ready(
         // reading the node's history can tell a ruling that survived from one
         // that has to be re-issued. Only what a conversation **read**: a note
         // no turn took rides in as the node's own context, and is not spent.
+        //
+        // llmlint: ignore[changed_behavior_has_e2e] the `?` is the refusal of a
+        // record this build cannot read, and no invocation a user can type
+        // reaches it: the records the fold refuses are this crate's own and
+        // their writers check what they write, so reaching it means a journal
+        // edited by hand, which would prove the fixture rather than the code.
+        // The refusal itself is held by `note::tests`, over exactly such a
+        // record; what this site adds is that the pass ends on it rather than
+        // announcing a dispatch as having spent nothing — the same answer the
+        // lifecycle continuation gives, for the same reason, at its own site.
         let spent = spent_by(paths, state, &node.id)?;
         if !spent.is_empty() {
             payload.insert(
