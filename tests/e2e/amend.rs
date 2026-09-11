@@ -380,6 +380,9 @@ fn an_amendment_nothing_will_read_is_refused_by_the_reason_it_was() {
 fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it() {
     let world = World::new("amend-in-plan");
     world.repository("local-direct", &[]);
+    // The first step writes, so the workstream publishes rather than failing on
+    // a branch its steps left level with the base.
+    world.script("service.implement.work", "the engineer wrote this\n");
 
     let node = json!({
         "id": "service",
