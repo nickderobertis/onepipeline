@@ -771,7 +771,9 @@ pub struct LevelBranch {
     /// branch being level, on the base. Movement alone is not that: a worker
     /// that fast-forwarded or reset its branch onto a commit the base already
     /// had moved HEAD and wrote nothing, and a report that the base carried what
-    /// it committed would be false. See [`level_with_base`] for the evidence.
+    /// it committed would be false. Nor is a commit an earlier dispatch wrote in
+    /// the same worktree, which a session taken up again still remembers. See
+    /// [`level_with_base`] for the evidence.
     pub committed: bool,
 }
 
@@ -813,12 +815,14 @@ fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
 /// a report nobody could stand behind.
 ///
 /// The evidence that this dispatch wrote a commit is the worktree's own `HEAD`
-/// reflog, which git writes for every move of `HEAD` there and which names the
-/// action that made each — see [`reflog_entry_wrote_a_commit`]. `onevcs` cuts
-/// every session its own non-bare clone and adds the worktree fresh, so the
-/// reflog begins at the open and everything after it is this session's. A commit
-/// counts only while the branch still carries it: one written and then reset
-/// away is not on the base whatever the reflog says.
+/// reflog, which git writes for every move of `HEAD` there, stamps with the
+/// clock, and names the action that made — see [`reflog_entry_wrote_a_commit`].
+/// Only the entries stamped at or after `began` are this dispatch's: `onevcs`
+/// cuts every session its own non-bare clone and adds the worktree fresh, but a
+/// session it takes up again for a later dispatch keeps the worktree and its
+/// reflog, and what an earlier dispatch wrote there is not what this one did. A
+/// commit counts only while the branch still carries it: one written and then
+/// reset away is not on the base whatever the reflog says.
 ///
 /// This crate runs git itself here, which `docs/contract-divergences.md` entry 35
 /// records it otherwise does not, and for the reason that entry gives for the
@@ -827,7 +831,11 @@ fn reflog_entry_wrote_a_commit(subject: &str) -> bool {
 /// at. What the sibling offers is the same comparison at publication, answered as
 /// `PublishOutcome::NothingToPublish` after a drafting dispatch has been spent
 /// reaching it — and no read of a session's standing before that.
-pub fn level_with_base(worktree: &std::path::Path, base: &str) -> Option<LevelBranch> {
+pub fn level_with_base(
+    worktree: &std::path::Path,
+    base: &str,
+    began: std::time::SystemTime,
+) -> Option<LevelBranch> {
     let git = |args: &[&str]| -> Option<String> {
         let output = std::process::Command::new("git")
             .args(args)
@@ -874,15 +882,27 @@ pub fn level_with_base(worktree: &std::path::Path, base: &str) -> Option<LevelBr
     if ahead.parse::<u64>().ok()? != 0 {
         return None;
     }
-    // Every commit the reflog says was written here, that the branch still
-    // carries. `%gs` is the entry's own subject — the action — beside the commit
-    // it moved `HEAD` to; the pair is split on the first space, which a commit
-    // name never contains.
-    let written: Vec<String> = git(&["log", "-g", "--format=%H %gs", "HEAD"])?
+    // Every commit the reflog says was written here since this dispatch began,
+    // that the branch still carries. Each line is the entry's stamp as seconds
+    // — `%gd` under `--date=unix` is `HEAD@{<seconds>}` — the commit it moved
+    // `HEAD` to, and the entry's own subject, which is the action; the three are
+    // split on spaces a stamp and a commit name never contain. A stamp this
+    // build cannot read leaves the entry out: it is not evidence either way.
+    let began = began
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let written: Vec<String> = git(&["log", "-g", "--date=unix", "--format=%gd %H %gs", "HEAD"])?
         .lines()
         .filter_map(|line| {
-            let (sha, subject) = line.split_once(' ')?;
-            reflog_entry_wrote_a_commit(subject).then(|| sha.to_owned())
+            let (stamp, rest) = line.split_once(' ')?;
+            let (sha, subject) = rest.split_once(' ')?;
+            let stamped: u64 = stamp
+                .strip_prefix("HEAD@{")?
+                .strip_suffix('}')?
+                .parse()
+                .ok()?;
+            (stamped >= began && reflog_entry_wrote_a_commit(subject)).then(|| sha.to_owned())
         })
         .collect();
     let mut committed = false;
@@ -2409,7 +2429,11 @@ mod tests {
     /// and committed nothing, and used to be reported as the former.
     #[test]
     fn a_level_branch_is_told_by_a_commit_written_here_and_not_by_movement_alone() {
-        let level = |worktree: &std::path::Path| super::level_with_base(worktree, "main");
+        // Begun at the epoch: every entry the worktree's reflog holds is this
+        // dispatch's, which is what a fresh cut gives.
+        let level = |worktree: &std::path::Path| {
+            super::level_with_base(worktree, "main", std::time::UNIX_EPOCH)
+        };
 
         // Fresh: level, and nothing written.
         let (_, fresh) = a_cut_worktree("fresh");
@@ -2463,6 +2487,48 @@ mod tests {
             "a commit reset off the branch was read as one the base carries"
         );
 
+        // A worktree taken up again: an earlier dispatch wrote a commit here
+        // that the base then took, and this dispatch — begun after it — wrote
+        // nothing. The reflog still holds the earlier commit; it is not this
+        // dispatch's. Stamped a day earlier through git's own clock rather
+        // than waited for.
+        let (_, resumed) = a_cut_worktree("resumed");
+        std::fs::write(resumed.join("earlier.md"), "earlier\n").expect("the file");
+        git_in(&resumed, &["add", "-A"]);
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let stamp = format!(
+            "@{} +0000",
+            earlier
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_secs()
+        );
+        let dated = std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "feat: earlier"])
+            .current_dir(&resumed)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .env("GIT_AUTHOR_DATE", &stamp)
+            .env("GIT_COMMITTER_DATE", &stamp)
+            .status()
+            .expect("git runs");
+        assert!(dated.success());
+        git_in(&resumed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        git_in(&resumed, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            level(&resumed).map(|read| read.committed),
+            Some(true),
+            "read as the dispatch that wrote it, the commit counts"
+        );
+        let later = earlier + std::time::Duration::from_secs(3_600);
+        assert_eq!(
+            super::level_with_base(&resumed, "main", later).map(|read| read.committed),
+            Some(false),
+            "a commit an earlier dispatch wrote in this worktree was read as this one's"
+        );
+
         // Not level at all: a commit the base does not have, and a dirty tree
         // the sibling would commit at publication.
         let (_, ahead) = a_cut_worktree("ahead");
@@ -2476,7 +2542,9 @@ mod tests {
         std::fs::write(dirty.join("dirty.md"), "uncommitted\n").expect("the file");
         assert_eq!(level(&dirty), None, "a dirty worktree read as level");
 
-        for name in ["fresh", "ff", "reset", "landed", "undone", "ahead", "dirty"] {
+        for name in [
+            "fresh", "ff", "reset", "landed", "undone", "resumed", "ahead", "dirty",
+        ] {
             let _ = std::fs::remove_dir_all(
                 std::env::temp_dir()
                     .join(format!("onepipeline-level-{name}-{}", std::process::id())),

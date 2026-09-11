@@ -183,6 +183,9 @@ fn attempt_once(
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    // When this dispatch began, which is what tells its commits from ones an
+    // earlier dispatch left in a worktree the session took up again.
+    let began = std::time::SystemTime::now();
     let mut session: Option<onevcs::SessionToken> = None;
     // The session's own stream, followed from the moment there is a token to
     // follow, so the publication that comes after the steps is visible while it
@@ -323,6 +326,7 @@ fn attempt_once(
         references,
         worktree.as_deref(),
         base.as_deref(),
+        began,
         cancel,
         tx,
         &token,
@@ -374,9 +378,10 @@ fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<M
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, the run's paths, what its \
               launch decided, the node, cancellation, and the event stream) as well as what \
-              the steps left behind (the session token, its branch, and the worktree and base \
-              its record named); the first six are the node's own dispatch identity and \
-              bundling them would only move the same list one indirection away"
+              the steps left behind (the session token, its branch, the worktree and base \
+              its record named, and when the dispatch began); the first six are the node's \
+              own dispatch identity and bundling them would only move the same list one \
+              indirection away"
 )]
 fn publish(
     executor: &dyn Executor,
@@ -386,6 +391,7 @@ fn publish(
     references: &[crate::plan::CrossRepoReference],
     worktree: Option<&std::path::Path>,
     base: Option<&str>,
+    began: std::time::SystemTime,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     token: &onevcs::SessionToken,
@@ -399,7 +405,7 @@ fn publish(
     // dispatch has run, which is what this read exists to get ahead of.
     if let Some(level) = worktree
         .zip(base)
-        .and_then(|(worktree, base)| crate::vcs::level_with_base(worktree, base))
+        .and_then(|(worktree, base)| crate::vcs::level_with_base(worktree, base, began))
     {
         return level_branch_settlement(node, &level, branch);
     }
