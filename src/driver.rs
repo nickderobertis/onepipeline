@@ -1333,6 +1333,10 @@ fn attach(
             engine.join().map_err(|_| {
                 Error::Invalid(format!("the engine loop for '{}' panicked", paths.run))
             })??;
+            // The authoritative final summary write, with the engine joined above
+            // and the observer relay drained before it — so every appender has made
+            // its last append. See [`crate::summary::seal`].
+            crate::summary::seal(paths);
             let settlement = settlement_of(&view);
             println!(
                 "{}",

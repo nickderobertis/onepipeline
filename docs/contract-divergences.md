@@ -4388,6 +4388,27 @@ per-watch record it decides from to the shipped surface —
 `views::Watchers`, `views::WATCHER_SCHEMA_VERSION`, and
 `error::EXIT_RUNS_UNWATCHED`.**
 
+**Amendment (this change): two additions to the rule below, and no change to the
+surface.** A settled `onepipeline start` was found to hand back a run this verb
+then reported at exit `6`: the measured run `unwatched-stop-hook-fixes` completed
+at 14:10:42Z and ten minutes later `unwatched` printed it and exited `6`, while
+`status`, `runs` and `results` each reported it `SETTLED` / `complete`. Its
+summary document recorded `graph_complete: true` **and** `stop_recorded: true`,
+and `src/unwatched.rs::decide` has exactly one path by which such a document
+reaches `6` — a stamp stale against the journal, falling through to the reported
+set. So (1) **the engine's guarantee**: a run this engine drove to settlement
+leaves a document that satisfies the exclusion rule by construction, without any
+reader refreshing it — the driver's closeout writes the document *after* the last
+append of every appender it holds (the engine loop, the observer relay, the
+lifecycle relay; observer teardown and an adopted driver included), so handing
+back at settlement never leaves a settled run this verb reports. And (2) **the
+undecidable set grows one case**: a document that *records* settlement while
+**behind its journal** — `stop_recorded` or `graph_complete` true with a stamp
+that does not match — is undecidable, named on standard error and blocking
+nothing, never reported at `6`, because a stale stamp is no proof of what the
+document says and `6` means *proven* unwatched. This is left OPEN, as the entry
+is.
+
 Entry 58 added the verb a supervisor puts in a wake loop. It did not add a way to
 ask whether anybody ran it: `src/watch.rs` said outright that a watch "consumes no
 surface and records nothing", so a watched run and an unwatched one were the same
@@ -4504,11 +4525,28 @@ person.
   run nothing — while a document behind its journal is what a run *still
   recording* looks like, and treating that as proof of settlement is how the one
   run this verb exists to find would be dropped.
+- **The engine's guarantee (this change).** A run this engine drove to settlement
+  — the graph converged, or a stop was recorded — leaves a document that satisfies
+  the exclusion rule above **by construction**, without any reader having to
+  refresh it. The driver's closeout writes the document *after* the last append of
+  every appender it holds — the engine loop's, the observer relay's, and the
+  lifecycle relay's, observer teardown and an adopted driver included — so
+  `onepipeline start` handing back at settlement never leaves a settled run this
+  verb reports. An adopted driver inherits the same guarantee.
 - **A run whose settlement cannot be decided at all** — no document, one that
-  cannot be read, one at a schema version **ahead** of this build, or one that is
-  another run's — is **not reported**. It is named on standard error with that
+  cannot be read, one at a schema version **ahead** of this build, one that is
+  another run's, or (**this change**) one that **records settlement but is behind
+  its journal** — is **not reported**. It is named on standard error with that
   reason and changes no exit status: such a run is most often an old settled run
-  whose document is gone, and blocking on it would never clear by watching it.
+  whose document is gone, and blocking on it would never clear by watching it. The
+  last case is the new one and it is not the same as the exclusion above: a
+  document with `stop_recorded` or `graph_complete` true whose stamp does **not**
+  match the journal proves nothing it says — a stale stamp is proof in neither
+  direction, and `6` means *proven* unwatched — so it is named `its settlement
+  cannot be decided: its document records that it settled but is behind its
+  journal` and blocks nothing. A document behind its journal recording **no**
+  settlement is the opposite case and stays **reported**, because that is exactly
+  what a run still recording looks like.
 - **A document at a schema version this build has moved *past* is decided, not
   undecidable**, and the distinction is between an answer and the absence of one.
   Such a document is there, is well-formed, and says outright that its fields are
@@ -4532,15 +4570,14 @@ person.
   Everything unresolved goes on standard error, never on standard output, and
   nothing at all is written on either stream when there is nothing to say.
 - **The standing word is the listing's own**, reached rather than reimplemented —
-  `views`' `Standing::of_row`, which is what `runs` prints for the same run. For
-  every run this verb reports that is `ACTIVE`, `PARKED`, `DRIVER DEAD` or
-  `UNDRIVEN`, because a run whose document says its graph is complete is excluded.
-  The one exception is the run whose document says so while being **behind its
-  journal**: its exclusion is refused because the stamp is stale, and the word is
-  then read from those same counts, so such a run can be reported `SETTLED`. That
-  is the honest reading of an untrustworthy document rather than a fifth verdict,
-  and it is named here because it is the one place the four words are not the whole
-  set.
+  `views`' `Standing::of_row`, which is what `runs` prints for the same run. Every
+  run this verb reports is `ACTIVE`, `PARKED`, `DRIVER DEAD` or `UNDRIVEN`: a run
+  whose document says its graph is complete or its stop was recorded is either
+  excluded (its stamp is current) or **undecidable** (its stamp is stale, **this
+  change**), so a document recording settlement never reaches the reported line at
+  all. Before this change such a stale-stamped document was reported `SETTLED`;
+  under the amended rule it is named on standard error instead, and the four words
+  above are the whole set a reported run carries.
 - **Exit statuses.** `0` when no run is reported, and `EXIT_RUNS_UNWATCHED` when at
   least one is — a status of its own rather than the refused `2`, because a caller
   has to tell "runs are unwatched" from "this verb could not answer". Its value is
@@ -4600,8 +4637,13 @@ same run reported once that watch returns; a watch killed and **left unreaped**
 read as gone on the very next invocation, with nothing having cleaned up and no
 interval having elapsed; five records that are not live watches, each refused for
 its own reason; three concurrent watches recorded apart, holding the run watched
-until the last of them ends; a settled run never reported and the same run reported
-once its document falls behind its journal; the four undecidable documents named
+until the last of them ends; a settled run never reported, and the same run — its
+document still recording that settlement — named on standard error rather than
+reported once its stamp falls behind its journal (**this change**), while a
+document recording **no** settlement and behind its journal *is* reported; a run
+this engine drove to settlement leaving a document current for its journal so it
+is excluded without any view refreshing it, proven for an attached driver and an
+adopted one (**this change**); the five undecidable documents named
 on standard error and changing no status; a run whose only watcher record cannot be
 read reported all the same; the superseded-schema document decided the other way
 — reported on standard output and counted toward the status, from a fixture whose

@@ -239,10 +239,13 @@ enum Decided {
     Settled,
     /// Nothing **proved** it settled, which is not the same as proving it is
     /// still going and is deliberately not named as though it were: a document
-    /// that says a run stopped while standing behind its journal is in here too,
-    /// because a stale document is not proof of anything it says — and so is one
-    /// declaring a schema this build has moved past, whose fields say nothing this
-    /// build may read either way.
+    /// that records **no** settlement is in here whether its stamp is fresh or
+    /// stale, because a run still recording is exactly what a document behind its
+    /// journal recording no settlement looks like — and so is one declaring a
+    /// schema this build has moved past, whose fields say nothing this build may
+    /// read either way. A document that **does** record settlement while standing
+    /// behind its journal is *not* here: its own record says it settled, so a
+    /// stale stamp leaves that undecidable rather than reported — see [`decide`].
     ///
     /// Boxed because the document is the largest thing here by two orders of
     /// magnitude, and this value is built once per owned run: an unboxed variant
@@ -262,6 +265,16 @@ enum Decided {
 /// behind its journal is exactly what a run *still recording* looks like, and
 /// treating that as proof of settlement is how the one run this verb exists to
 /// find would be dropped.
+///
+/// A document whose own record says it settled and whose stamp is **stale** is a
+/// third answer, not the second: it is neither excluded (a stale stamp is no
+/// proof of settlement) nor reported (`6` means *proven* unwatched, and a
+/// document that records settlement is not that proof either). It is named on
+/// standard error as undecidable and changes no exit status — the same terms a
+/// document this build cannot read is passed over on. Only a document recording
+/// **no** settlement reaches the reported path, and it reaches it whether its
+/// stamp is fresh or stale, because that is what a run still recording looks
+/// like.
 ///
 /// The other asymmetry is between the two ways a document can fail to be read.
 /// **An answer that could not be obtained is not an answer**, and on this path it
@@ -310,8 +323,18 @@ fn decide(paths: &RunPaths, launch: &LaunchRecord) -> Decided {
             summary.run_id
         ));
     }
-    if (summary.stop_recorded || summary.graph_complete) && stamped(paths, &summary) {
-        return Decided::Settled;
+    // Its own record says it settled: excluded when its stamp is current,
+    // undecidable when it is stale. The docstring says why the stale case is not
+    // reported.
+    if summary.stop_recorded || summary.graph_complete {
+        if stamped(paths, &summary) {
+            return Decided::Settled;
+        }
+        return Decided::Undecidable(
+            "its settlement cannot be decided: its document records that it settled but is \
+             behind its journal"
+                .to_string(),
+        );
     }
     Decided::NotProvenSettled(Box::new(summary))
 }

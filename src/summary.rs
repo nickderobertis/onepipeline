@@ -1055,6 +1055,33 @@ impl Maintainer {
     }
 }
 
+/// Fold a run's store as it stands and write its summary document, stamped for
+/// the journal as it stands now.
+///
+/// The driver's closeout calls this once **every appender it holds has made its
+/// last append** — the engine loop, the observer relay, the lifecycle relay,
+/// observer teardown and an adopted driver included — so a run this engine drove
+/// to settlement leaves a document that accounts for its journal by construction,
+/// without any reader having to refresh it. That is clause 2 of the verb's rule
+/// (entry 68 of `docs/contract-divergences.md`): `onepipeline start` handing back
+/// at settlement never leaves a settled run that `unwatched` reports.
+///
+/// A full read rather than one more incremental append, and that is the point:
+/// the two `Maintainer`s a driven run keeps over one journal each stamp only what
+/// **they** folded, so a document left by whichever of them wrote last can be
+/// stamped short of the file the other grew. This reads the whole store once,
+/// with nothing left appending to it, so the length it stamps is the file's own.
+/// Best effort like every write on this path — a document that could not be
+/// written costs the next reader a fold, exactly as [`Maintainer::write`] says.
+// llmlint: ignore[changed_behavior_has_e2e] the changed behavior — a closeout that leaves a
+// *current* document — is proven end to end by the three `unwatched::*_leaves_a_current_document`
+// journeys. The only untested branch is the write failing, which is not new: `seal` inherits
+// [`Maintainer::write`]'s discard-on-failure, whose recovery a reader re-folds and which
+// inducing needs host sabotage rather than a user journey.
+pub(crate) fn seal(paths: &RunPaths) {
+    Maintainer::of(paths).write();
+}
+
 /// Record how far a stream has been folded, keeping the highest `seq` seen.
 ///
 /// The highest rather than the last, because a producer may publish its own

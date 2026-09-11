@@ -734,6 +734,10 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
             }
         }
     }
+    // The authoritative summary write on the detached path, whose only journal
+    // appender is this loop; the attached path's observer relay seals again after
+    // its own drain. See [`crate::summary::seal`].
+    crate::summary::seal(paths);
     Ok(outcome)
 }
 
