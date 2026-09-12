@@ -2224,6 +2224,14 @@ fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
 ///
 /// The observer's held turn is released by the caller (`observer.go`), after
 /// whatever it asks with the run in this state.
+///
+/// **Unix**, and so are the two journeys over it, because the shape needs a
+/// first driver ended by pid for the adoption to recover from, and
+/// `harness::end_process` has no Windows spelling — the same terms
+/// `driver.rs`'s adoption journeys are gated on. What each proves off Unix is
+/// then deliberately absent rather than skipped: the attached driver's clause-2
+/// guarantee still runs everywhere, and the adopted one is its own journey here.
+#[cfg(unix)]
 fn settled_over_the_measured_shape(world: &World, run: &str) -> RunPaths {
     world.write_graphs();
     world.repository("local-direct", &[]);
@@ -2278,7 +2286,8 @@ fn settled_over_the_measured_shape(world: &World, run: &str) -> RunPaths {
 }
 
 /// The clause-2 guarantee for an **adopted** driver, over
-/// [`settled_over_the_measured_shape`].
+/// [`settled_over_the_measured_shape`] — and `#[cfg(unix)]` on that helper's terms.
+#[cfg(unix)]
 #[test]
 fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_excluded() {
     let world = World::new("unwatched-adopted");
@@ -2326,6 +2335,7 @@ fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_exclude
 // back is this build's own document with that one field moved, on the terms
 // `a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run` states.
 // Every claim afterwards is read off the compiled binary's own streams and the files.
+#[cfg(unix)]
 #[test]
 fn a_run_the_previous_release_settled_is_refreshed_and_excluded_rather_than_reported() {
     let world = World::new("unwatched-previous-release");
