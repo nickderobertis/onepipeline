@@ -287,16 +287,19 @@ fn decide(paths: &RunPaths) -> Decided {
             if crate::summary::version_this_build_moved_past(&text).is_some() {
                 return match RunSummary::of(paths) {
                     Ok(refreshed) => decided_from(paths, refreshed),
-                    // The one refusal that reader gives an owned run: its root gone
-                    // between discovery and this read. Named rather than dropped,
-                    // because a run this verb never saw is not a run it decided.
-                    // llmlint: ignore[changed_behavior_has_e2e] reachable only by a run
-                    // root removed between two reads of one invocation, which no journey
-                    // can stage without racing the verb it drives.
+                    // The one refusal that reader gives an owned run: its root, or
+                    // the launch record discovery just read, gone between that read
+                    // and this one. Named rather than dropped, because a run this
+                    // verb never saw is not a run it decided.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] reachable only by a
+                    // run root or launch record removed between two reads of one
+                    // invocation, which no journey can stage without racing the verb it
+                    // drives.
                     Err(error) => Decided::Undecidable(format!(
                         "its settlement cannot be decided: its summary document is at a \
                          schema this build has moved past, and refreshing it failed: {error}"
                     )),
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                 };
             }
             return Decided::Undecidable(format!(

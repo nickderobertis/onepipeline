@@ -4141,13 +4141,14 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
 /// record that is not coming.
 ///
 /// Unix only, because a FIFO is.
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what a passing run spends beyond
-// the observer journey above is the one-second window and the product's own five-second bound,
-// which the second half exists to spend; the ten-second drain is what a *failing* run stops
-// at, never spent on a passing one. Measured in one invocation on a host at load 16-21 of 14
-// cores, before the bound was added to the journey: 19.4s here against 18.3s for the observer
-// journey and 16.3s for `a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run`,
-// the plainest attached dispatch in this target — so those two waits are the whole cost.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what a passing run spends
+// beyond the observer journey above is the one-second window and the product's own
+// five-second bound, which the second half exists to spend; the ten-second drain is what a
+// *failing* run stops at, never spent on a passing one. Measured in one invocation on a host
+// at load 16-21 of 14 cores, before the bound was added to the journey: 19.4s here against
+// 18.3s for the observer journey and 16.3s for
+// `a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run`, the plainest
+// attached dispatch in this target — so those two waits are the whole cost.
 #[cfg(unix)]
 #[test]
 fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
@@ -4184,12 +4185,13 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
         .graph_state()
         .join(&graph_run)
         .join(oneagentgraph::run::RECORD_FILE);
-    // llmlint: ignore[tests_mirror_real_usage] the interval this journey is about is the one
-    // between the graph's announcement and its own write of the record, and no user-facing
+    // llmlint: ignore-block[tests_mirror_real_usage] the interval this journey is about is the
+    // one between the graph's announcement and its own write of the record, and no user-facing
     // surface can hold a write still: standing a FIFO in the path's place is the kernel's own
     // rendezvous, met by the real `fs::write` any host would meet, and it is the only way a
     // machine that wins the race every time can observe the state the hosted runner lost.
     interpose_a_fifo(&record);
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("turn.go");
     world.release("turn.settle");
@@ -4290,7 +4292,7 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
         history.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&history.stderr).trim(),
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Stand a **FIFO** in a file's place, so the next writer of that path blocks at
 /// `open` until the caller opens the other end.
