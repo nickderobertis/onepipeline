@@ -783,6 +783,9 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     let undecided = settled(&world, "unwatchedalongside");
     let undecided_paths = paths_of(&world, &undecided);
     world.script("build.wait", "hold");
+    // Beating while held, so the run goes on recording between this build's
+    // reads — which is what the previous release's writer does beside it.
+    world.script("build.heartbeat", "1500");
     let recording = held(&world, "unwatchedrecording");
     let recording_paths = paths_of(&world, &recording);
     let mut older = document(&recording_paths);
@@ -808,6 +811,47 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     assert_eq!(
         document(&recording_paths)["schema_version"],
         json!(SUMMARY_SCHEMA_VERSION)
+    );
+
+    // The previous release's writer keeps going while this build asks: each
+    // append it makes rewrites the document at *its* schema, current for the
+    // journal as it then stands, over the one this build just left — so the two
+    // alternate for as long as both are running, and this build meets a document
+    // at the old schema over a store that has **grown** since it last refreshed.
+    // Staged as that writer leaves it — the document the run's own writer
+    // maintains, once a beat has landed and it has accounted for it, put at the
+    // old schema — and asked again: decided the same way, refreshed the same way,
+    // and from the store as it now stands rather than from anything remembered.
+    let refreshed_len = document(&recording_paths)["journal_len"].as_u64();
+    world.until("the recording run's writer to account for a beat", |_| {
+        document(&recording_paths)["journal_len"].as_u64() > refreshed_len
+    });
+    let mut older = document(&recording_paths);
+    assert_eq!(
+        older["schema_version"],
+        json!(SUMMARY_SCHEMA_VERSION),
+        "the run's own writer did not keep its document at this build's schema: {older}"
+    );
+    let grown = older["journal_len"].as_u64();
+    older["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
+    std::fs::write(recording_paths.summary(), older.to_string()).expect("the document");
+    let asked = world.run(&["unwatched"]);
+    asked
+        .exited(RUNS_UNWATCHED)
+        .out_has(&recording)
+        .out_has("ACTIVE")
+        .out_has("nothing has recorded a watch on it");
+    assert!(
+        asked.stderr.is_empty(),
+        "a run refreshed for the second time was named as one that could not be decided: {}",
+        asked.stderr
+    );
+    let again = document(&recording_paths);
+    assert_eq!(again["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
+    assert!(
+        again["journal_len"].as_u64() >= grown,
+        "the second refresh accounted for less than the store held when the old schema was \
+         put back over it: {again}"
     );
 
     // And beside a run nothing could be decided about, each answer lands where it

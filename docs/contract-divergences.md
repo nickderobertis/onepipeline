@@ -4565,6 +4565,15 @@ lock and the launch record.
 
 ### The verb
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this rule list *is*
+the verb's one source, by the ruling that dispatched it: `src/unwatched.rs` restates none of
+it and points here, and `tests/e2e/unwatched.rs` holds every clause below by driving the
+compiled binary — the exclusion, the engine's guarantee, each undecidable state and its
+standard-error reason, the reported set and its four standing words, and the mixed root's
+status — so a clause the code stops honouring fails `just check` rather than drifting. The
+JSON block at the end of this entry is the part `tests/contract.rs` reconciles against the
+types; a generated rendering of the prose would put the rule in two places, which is the
+duplication this rule is about. -->
 `onepipeline unwatched [--session <ID>]`, written for a **hook** rather than for a
 person.
 
@@ -4666,6 +4675,7 @@ person.
   the document that fold leaves is current, so it is a cost paid once per owned
   run per schema bump and never again. That is the rule entry 56 states for a
   listing, held here by a verb that runs at the end of every turn.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 ```json
 {
