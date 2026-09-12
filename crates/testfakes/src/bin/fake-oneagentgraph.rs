@@ -645,6 +645,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         publish_session(args, &title);
     }
 
+    // A worker that opens its session's change request as a **draft** while its
+    // work is still being made — the shape `onevcs publish --draft` exists for —
+    // and, scripted beside it, starts the description. Scripted here for the
+    // reason `<key>.publishes` is: it is the agent's behaviour, and the closeout
+    // under test is what finishes the change request such a worker leaves.
+    // `<key>.drafts` is the title; `<key>.drafts-body`, where present, the body.
+    // The **worker's** behaviour and nobody else's: the drafting dispatch runs
+    // under the same node key, and a drafter that published would be the
+    // closeout under test doing its own work twice.
+    if persona.as_deref() != Some("pr-author") {
+        if let Some(title) = fake::node_script(dir, &key, "drafts") {
+            draft_session(args, &title, fake::node_script(dir, &key, "drafts-body"));
+        }
+    }
+
     // Every candidate this dispatch's identity chains stepped past, published
     // one per candidate exactly as the real CLI publishes them. Scripted
     // `<key>.refused`, one `ROLE TURN IDENTITY REASON` per line, with `-` for
@@ -1010,6 +1025,62 @@ fn publish_session(args: &[String], title: &str) {
     }
 }
 
+/// Open the session's change request as a draft, through the real `onevcs`.
+///
+/// The token is taken from the dispatch's **own environment** — `ONEVCS_SESSION`,
+/// which is what the engine hands every dispatch that works in a session — and
+/// the process fails where it is unset: a worker scripted to address its own
+/// session with no token in hand is the engine not having kept its promise, and
+/// a double that walked the token out of `--dir` instead would keep the suite
+/// green over exactly that.
+///
+/// The body, where one is scripted, goes over as a file, because that is the
+/// form the sibling's own command line takes prose in.
+fn draft_session(args: &[String], title: &str, body: Option<String>) {
+    let worktree = session_worktree(args, "drafting a dispatch's change request");
+    let token = match std::env::var(SESSION_ENV) {
+        Ok(token) if !token.is_empty() => token,
+        _ => fake::fail(&format!(
+            "a dispatch scripted to draft its session's change request has no {SESSION_ENV} \
+             in its environment"
+        )),
+    };
+    let mut argv = vec![
+        "publish".to_owned(),
+        token.clone(),
+        "--draft".to_owned(),
+        "--title".to_owned(),
+        title.to_owned(),
+    ];
+    if let Some(body) = body {
+        let file = use_the_scratch_dir("drafts-body").join("body.md");
+        if let Err(error) = std::fs::write(&file, body) {
+            fake::fail(&format!("cannot write {}: {error}", file.display()));
+        }
+        argv.push("--body-file".to_owned());
+        argv.push(file.display().to_string());
+    }
+    let published = std::process::Command::new("onevcs")
+        .args(&argv)
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let published = match published {
+        Ok(published) => published,
+        Err(error) => fake::fail(&format!(
+            "cannot run `onevcs publish {token} --draft`: {error}"
+        )),
+    };
+    fake::record(&fake::script_dir(), "onevcs", &argv);
+    if !published.status.success() {
+        fake::fail(&format!(
+            "`onevcs publish {token} --draft` exited {}: {}",
+            published.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&published.stderr).trim()
+        ));
+    }
+}
+
 /// Cut a branch inside the session worktree and commit onto it.
 ///
 /// The other incident this stack loses work to: `git checkout -b fix/…` is one
@@ -1330,6 +1401,12 @@ fn use_the_scratch_dir(key: &str) -> std::path::PathBuf {
 /// documentation. A double that imported the constant would go on agreeing with
 /// the engine through a rename no agent could have followed.
 const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
+
+/// The variable the engine names the `onevcs` session a dispatch works in, and
+/// the one it names the runs root in — both spelled here for
+/// [`SCRATCH_DIR_ENV`]'s reason: an agent reads them out of the documentation.
+const SESSION_ENV: &str = "ONEVCS_SESSION";
+const RUNS_DIR_ENV: &str = "ONEPIPELINE_RUNS_DIR";
 
 /// The variable naming who this dispatch's channel sessions listen for.
 ///
@@ -1794,6 +1871,11 @@ fn emit(
             // environment, on the run's own record: a journey asserts the
             // promise from the store rather than from this program's files.
             "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+            // The session whose worktree this dispatch runs in, and the runs
+            // root, each as this dispatch read them out of its own environment
+            // — absent where the engine handed none, for `scratch_dir`'s reason.
+            "session": std::env::var(SESSION_ENV).ok(),
+            "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
             // And who this dispatch asks its manager as, so a journey can assert
             // from the store that a real dispatch is given one and that no two
             // share it.
@@ -2404,6 +2486,13 @@ fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<Drafted> {
     }
     if dir.join("pr-author.bodyless").exists() {
         return Some(Drafted::Bodyless);
+    }
+    // `pr-author.body-anew` is a body that differs every time it is drafted, for
+    // the journey about a closeout that runs twice on one branch: a fixed body
+    // rewritten onto a change request is indistinguishable from one left alone.
+    if let Some(body) = fake::node_script(dir, "pr-author", "body-anew") {
+        let nth = fake::count(dir, "pr-author.body-anew");
+        return Some(Drafted::Body(format!("{body}\ndraft {nth}\n")));
     }
     Some(Drafted::Body(
         fake::node_script(dir, "pr-author", "body")

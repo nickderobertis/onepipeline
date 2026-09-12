@@ -157,6 +157,28 @@ fn oneharness_bin(env: &BTreeMap<String, String>) -> String {
 /// The environment variable the dag-scope graph substitutes the run id into.
 pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 
+/// The environment variable every dispatch of every node carries, naming the
+/// **absolute** runs root this run reads and writes, beside [`RUN_ID_ENV`].
+///
+/// The pair is what `onepipeline transcript <RUN> <NODE>` reads, so a dispatch
+/// that runs it — a drafter reading the worker's transcript for the evidence it
+/// left — reaches this run's store from wherever it is working rather than from
+/// a `runs` directory beside its own worktree. The observer graph already gets
+/// both; this is the node-scope half. One spelling: the name is the ledger's own,
+/// declared here beside the other name a dispatch's environment is read against.
+pub const RUNS_DIR_ENV: &str = crate::ledger::RUNS_DIR_ENV;
+
+/// The environment variable a lifecycle node's dispatches carry, naming the
+/// `onevcs` session token whose worktree the dispatch runs in.
+///
+/// Every agent step of a lifecycle node, first and later, and its drafting
+/// dispatch: each works in one session's worktree, and this is the token a
+/// worker hands `onevcs publish --draft`, `onevcs change describe`, or any other
+/// verb that addresses its own session. A direct node's dispatch runs in no
+/// session and carries none. Under `onevcs`'s own prefix, because the value is
+/// that library's handle and the verbs that take it are that library's.
+pub const SESSION_ENV: &str = "ONEVCS_SESSION";
+
 /// The member of the shipped dag-scope graph that paces planner updates.
 pub const CHECK_IN_MEMBER: &str = "check-in";
 

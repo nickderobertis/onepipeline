@@ -645,6 +645,16 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                  "body": "what it landed"}]}),
             "node 'publish': `body` is a schema 3 field",
         ),
+        // `draft` is held to the version `body` is, in the same words, for the
+        // same reason: a planner who asked for a draft and had the ask dropped
+        // would find out from a change request that landed.
+        (
+            "earlydraft",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "draft": true}]}),
+            "node 'publish': `draft` is a schema 3 field",
+        ),
     ];
 
     for (name, plan, expected) in cases {

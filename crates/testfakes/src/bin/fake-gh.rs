@@ -121,6 +121,7 @@ fn main() -> ExitCode {
         (Some("pr"), Some("checks")) => checks(&args, &dir),
         (Some("pr"), Some("merge")) => merge(&args, &dir),
         (Some("pr"), Some("ready")) => ready(&args, &dir),
+        (Some("pr"), Some("edit")) => edit(&args, &dir),
         (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
@@ -694,6 +695,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // draft" — so a host that answered every other field would land work
         // somebody had held.
         Some("isDraft") => "isDraft",
+        // The description as the host holds it, which `onevcs` 0.21.0 reads for
+        // `change show` and after every `change describe`: what a drafter is
+        // shown of the worker's own description, and what a journey reads back
+        // to hold the description the closeout wrote to the one the host has.
+        Some("title,body") => "title,body",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -718,6 +724,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         "{}",
         serde_json::json!({
             "number": opened.number,
+            // As `pr create` recorded them and `pr edit` rewrote them: the two
+            // fields `onevcs` reads a description out of, answered from the
+            // record rather than from anything this invocation was given.
+            "title": opened.title,
+            "body": opened.body,
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
@@ -1012,6 +1023,75 @@ fn ready(args: &[String], dir: &Path) -> ExitCode {
     if state_of_opened(dir, &opened) == Change::Draft {
         record(dir, &opened.number.to_string(), Change::Open);
     }
+    ExitCode::SUCCESS
+}
+
+/// `gh pr edit ID --repo R --body-file PATH [--title T]`
+///
+/// Replaces the change request's description: the body from the file `onevcs`
+/// wrote it to — a body is prose of unbounded size, so that library never puts
+/// one on an argument vector — and the title where one is given. The record
+/// `pr create` wrote is rewritten in place, so `pr view --json title,body` and a
+/// journey reading `opened.jsonl` both see what the edit left rather than what
+/// the change request opened with. A body file that cannot be read is a broken
+/// fixture rather than a scenario, for [`read_if_present`]'s reason.
+fn edit(args: &[String], dir: &Path) -> ExitCode {
+    let titled = args.iter().any(|arg| arg == "--title");
+    let flags: &[(&str, Shape)] = if titled {
+        &[
+            ("--repo", Shape::Named),
+            ("--body-file", Shape::Named),
+            ("--title", Shape::Named),
+        ]
+    } else {
+        &[("--repo", Shape::Named), ("--body-file", Shape::Named)]
+    };
+    if let Err(refusal) = shaped(args, "pr edit", 3, flags, &[]) {
+        return refusal;
+    }
+    let opened = match addressed(args, dir) {
+        Ok(opened) => opened,
+        Err(refusal) => return refusal,
+    };
+    // `gh.edit-refused` is a host that takes every other call and will not take
+    // this one — a description a permission or a lock keeps from being written —
+    // which is the one refusal a closeout meets after the body is drafted and
+    // before the publication. Scripted apart from `gh.outage`, because an outage
+    // refuses the publication too and this is about a host that lands the change
+    // and keeps the description the worker left.
+    if let Some(reason) = fake::node_script(dir, "gh", "edit-refused") {
+        eprintln!("{}", reason.trim());
+        return ExitCode::from(1);
+    }
+    let file = PathBuf::from(fake::flag(args, "--body-file").unwrap_or_default());
+    let body = std::fs::read_to_string(&file).unwrap_or_else(|error| {
+        fake::fail(&format!("{} could not be read: {error}", file.display()))
+    });
+    let edited = Opened {
+        title: fake::flag(args, "--title").unwrap_or(opened.title),
+        body,
+        ..opened
+    };
+    let path = dir.join("gh").join("opened.jsonl");
+    let rewritten: Vec<String> = opened_changes(dir)
+        .into_iter()
+        .map(|change| {
+            if change.number == edited.number && change.repo == edited.repo {
+                edited.clone()
+            } else {
+                change
+            }
+        })
+        .map(|change| {
+            serde_json::to_string(&change).unwrap_or_else(|error| {
+                fake::fail(&format!("the record does not serialise: {error}"))
+            })
+        })
+        .collect();
+    if let Err(error) = std::fs::write(&path, format!("{}\n", rewritten.join("\n"))) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    println!("{}", url_of(&edited));
     ExitCode::SUCCESS
 }
 

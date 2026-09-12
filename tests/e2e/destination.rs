@@ -168,8 +168,8 @@ fn a_repository_with_no_commit_msg_hook_refuses_no_title() {
 }
 
 /// A non-empty `consumes` on an identity that opens no change request is refused
-/// where the plan is read — naming the node, the identity, the workflow, the
-/// policy and the targets — and nothing is dispatched.
+/// where the plan is read — naming the node, the identity, the policy and the
+/// targets — and nothing is dispatched.
 ///
 /// The structural one: the draft that holds this node to the release it consumes
 /// is a state of a change request, and a `local-direct` publication opens none, so
@@ -189,7 +189,6 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any
         .exited(REFUSED)
         .err_has("node 'consumer'")
         .err_has("github.com/owner/service")
-        .err_has("workflow: remote")
         .err_has("local-direct")
         .err_has("engine=crate");
     assert!(
@@ -213,8 +212,8 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any
 /// decides *when* a node starts; whether its publication opens a change request
 /// for a draft to be a state of is the repository's own answer, and where none is
 /// opened there is nothing to hold this node to the release it consumes. So the
-/// pair is refused however the node adopts — and the refusal names the same four
-/// things, because a planner correcting it acts on the same four.
+/// pair is refused however the node adopts — and the refusal names the same
+/// things, because a planner correcting it acts on the same ones.
 #[test]
 fn a_published_node_consuming_on_that_same_repository_is_refused_in_the_same_words() {
     let world = World::new("destination-consumes-published");
@@ -229,7 +228,6 @@ fn a_published_node_consuming_on_that_same_repository_is_refused_in_the_same_wor
         .exited(REFUSED)
         .err_has("node 'consumer'")
         .err_has("github.com/owner/service")
-        .err_has("workflow: remote")
         .err_has("local-direct")
         .err_has("engine=crate");
     assert!(
@@ -258,6 +256,50 @@ fn a_consumes_on_a_repository_that_opens_a_change_request_loads() {
         "consuming",
         &plan_of("consuming", vec![engine(), consumer(None)]),
     );
+    world.run(&["plan", "check", &project]).exited(0);
+}
+
+/// A `draft: true` on an identity that opens no change request is refused where
+/// the plan is read, naming the field — and nothing is dispatched.
+///
+/// The condition `consumes` is refused on, for the same reason: a draft is a
+/// state of a change request, and a `local-direct` publication opens none, so
+/// there is nothing to leave as one. A node that names a change-* policy of its
+/// own opens a change request to draft, and loads on that same repository.
+#[test]
+fn a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
+    let world = World::new("destination-draft");
+    world.repository("local-direct", &[]);
+    let mut held = lifecycle("held", &[]);
+    held["draft"] = json!(true);
+    let project = world.plan("drafting", &plan_of("drafting", vec![held.clone()]));
+
+    let refused = world.run(&["start", &project, "--detach"]);
+    refused
+        .exited(REFUSED)
+        .err_has("node 'held'")
+        .err_has("`draft: true`")
+        .err_has("github.com/owner/service")
+        .err_has("local-direct")
+        .err_has("drop `draft`");
+    assert!(
+        world.invocations().is_empty(),
+        "a plan refused at load dispatched something anyway: {:?}",
+        world.invocations()
+    );
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answered = answer(&checked);
+    let refusals = engine_refusals(&answered);
+    assert_eq!(refusals.len(), 1, "{answered}");
+    assert_eq!(refusals[0]["node"], json!("held"), "{answered}");
+    assert_eq!(refusals[0]["field"], json!("draft"), "{answered}");
+
+    // The node's own policy decides whichever way it points: one that opens a
+    // change request has one to leave as a draft.
+    held["merge_policy"] = json!("change-open");
+    let project = world.plan("drafting-open", &plan_of("drafting-open", vec![held]));
     world.run(&["plan", "check", &project]).exited(0);
 }
 
@@ -406,9 +448,12 @@ fn script_the_answers(world: &World, resolve: &str, rules_check: &str) {
 /// without this tree changing: `onevcs resolve`'s answer is external input, and
 /// the loader reads it into a typed shape rather than probing keys off it. An
 /// answer that is not JSON, one missing a field this build reads, one whose
-/// `workflow` is outside the sibling's own enum, and one whose identity is there
-/// and blank are each a node reported as not checked — never a node waved through
-/// — and each says which of them it was.
+/// field is of the wrong type, and one whose identity is there and blank are
+/// each a node reported as not checked — never a node waved through — and each
+/// says which of them it was. A key this build does not read — `workflow` here,
+/// which `onevcs` printed until 0.20.0 — is ignored rather than refused, because
+/// a resolution printing one more key than this build reads is one it must go
+/// on reading.
 ///
 /// The plan is the one the `consumes` journey above refuses, so what a wrong
 /// answer costs here is exactly a refusal that would otherwise have been made.
@@ -436,9 +481,9 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
             "publication_checkout",
         ),
         (
-            "a workflow outside the sibling's own enum",
-            r#"{"identity": "i", "workflow": "sideways", "publication_checkout": "/tmp/x"}"#,
-            "sideways",
+            "a field of the wrong type",
+            r#"{"identity": "i", "workflow": "remote", "publication_checkout": 7}"#,
+            "expected path string",
         ),
         (
             "an identity that is there and blank",
