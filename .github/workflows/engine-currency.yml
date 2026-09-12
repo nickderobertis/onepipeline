@@ -12,7 +12,10 @@ name: Engine currency
 # protection requires this check, so a release nobody here made cannot stop an
 # unrelated change from merging. One `cargo update -p <spec>` and a commit, on any
 # branch, closes it; `just engines-current` prints the spec and says where to
-# record a floor if the gap holds one.
+# record a floor if the gap holds one. A newer release that one of this
+# manifest's own pins holds back — it requires a sibling outside that pin's
+# window — is reported on its own line and is not red: no `cargo update` takes
+# it without resolving the sibling twice, and only a pin move lifts it.
 #
 # llmlint: ignore-file[changed_behavior_has_e2e] the subject of this workflow is the
 # crates.io index, which a test cannot stand in for without the stand-in becoming what
