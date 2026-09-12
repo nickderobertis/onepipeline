@@ -3313,6 +3313,73 @@ mod tests {
         );
     }
 
+    /// The linked `oneagentgraph` accepts a **paced** two-party member — a
+    /// `kind: onejudge` member on a `schedule` — under graph schema version 9.
+    /// The floor, and why the lock rather than the requirement carries it, are
+    /// with the pin in `Cargo.toml`.
+    ///
+    /// Below the floor the version-9 half fails at **parse** — `OnejudgeMember`
+    /// denies unknown fields and has no `schedule` — so the refusal names the
+    /// field rather than the version. The version-8 half is asserted in the
+    /// wording the `paced-conversations` contract states.
+    #[test]
+    fn the_linked_oneagentgraph_accepts_a_paced_two_party_member() {
+        fn document(version: u32) -> String {
+            format!(
+                "version: {version}\n\
+                 name: paced\n\
+                 members:\n\
+                 \x20 monitor:\n\
+                 \x20   kind: onejudge\n\
+                 \x20   base_config: ./onejudge.base.yaml\n\
+                 \x20   agent:\n\
+                 \x20     oneharness_config: ./oneharness.toml\n\
+                 \x20   judge:\n\
+                 \x20     oneharness_config: ./oneharness.judge.toml\n\
+                 \x20   mode: bypass\n\
+                 \x20   schedule:\n\
+                 \x20     every: 300\n\
+                 \x20     start_after: 0\n\
+                 \x20   background: false\n\
+                 \x20 reporter:\n\
+                 \x20   kind: oneharness\n\
+                 \x20   oneharness_config: ./oneharness.toml\n\
+                 \x20   schedule:\n\
+                 \x20     every: 1800\n"
+            )
+        }
+
+        fn read(version: u32) -> std::result::Result<(), String> {
+            let graph: oneagentgraph::config::GraphConfig =
+                serde_norway::from_str(&document(version)).map_err(|error| error.to_string())?;
+            oneagentgraph::config::validate(&graph).map_err(|refusal| refusal.to_string())
+        }
+
+        if let Err(refusal) = read(9) {
+            panic!(
+                "the linked oneagentgraph refuses a `kind: onejudge` member on a `schedule` under \
+                 graph schema version 9, so the observer graph this crate is launched with on \
+                 its operator's host cannot run at all: the paced two-party member ships in \
+                 0.3.19, and `Cargo.toml` requires the newest release, which is above that \
+                 floor — so `Cargo.lock` is behind the manifest too and `cargo update -p \
+                 oneagentgraph` is the whole of the fix; `just engines-current` names it \
+                 without running the suite:\n{refusal}"
+            );
+        }
+
+        let refusal = read(8).expect_err(
+            "the linked oneagentgraph accepts a `kind: onejudge` member on a `schedule` under \
+             graph schema version 8, which never declared one, so a document is run under a \
+             capability its own version does not state",
+        );
+        assert!(
+            refusal.contains("member \"monitor\" uses onejudge `schedule`, which requires graph schema version 9"),
+            "the linked oneagentgraph refuses the version-8 document without naming the field \
+             and the version it needs, which is the wording the `paced-conversations` contract \
+             states:\n{refusal}"
+        );
+    }
+
     /// An envelope is the same value whichever way it crossed.
     ///
     /// This is the *content* half of the streaming promise: the subprocess path

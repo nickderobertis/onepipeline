@@ -321,6 +321,15 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
+# `oneagentgraph` 0.3.19 carries **graph schema version 9** — `schedule` and
+# `dir` on a `kind: onejudge` member, one paced conversation whose firing is a
+# turn — beside schema 8's `background` field and its liveness rule. The observer
+# graph this crate is launched with on its operator's host declares that schema,
+# and is read by the `oneagentgraph` this crate *links*, so a resolution beneath
+# the floor refuses it by name and no run starts there. `^0.3.17` already admits
+# the release, so only the lock moved. `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_accepts_a_paced_two_party_member` holds it.
+#
 # `oneagentgraph` 0.3.17 requires `oneharness-core 0.13` and `onejudge 0.8.1`,
 # and the `onejudge` pin below is the release *that* requirement resolves to.
 # 0.8.1 requires the same `oneharness-core 0.13`, so the pins below let the graph
