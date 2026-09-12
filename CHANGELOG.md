@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1](https://github.com/nickderobertis/onepipeline/compare/v0.28.0...v0.28.1) - 2026-09-12
+
+### Added
+
+- *(dispatch)* tell a manager note from a supervisor turn, and carry one across a re-dispatch ([#231](https://github.com/nickderobertis/onepipeline/pull/231))
+
+### Fixed
+
+- *(unwatched)* prove a driven run settled from its own record, and name a document behind its journal as undecided ([#232](https://github.com/nickderobertis/onepipeline/pull/232))
+
 ## [0.28.0](https://github.com/nickderobertis/onepipeline/compare/v0.27.2...v0.28.0) - 2026-09-12
 
 ### Added
