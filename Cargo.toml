@@ -321,6 +321,28 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
+# `oneagentgraph` 0.3.19 carries **graph schema version 9**, in which a two-party
+# (`kind: onejudge`) member may carry its own `schedule` and `dir` — one paced,
+# long-lived conversation whose firing is one *turn* rather than a conversation
+# run to settlement, held `every` seconds from the judge's last instruction —
+# together with schema 8's `background` field on a member of either kind and
+# the liveness rule beneath it: from 8 on, whether a member holds the run open is
+# a declaration the document makes, defaulting to *background exactly when
+# scheduled*, rather than a reading inferred from the graph's shape. It is a
+# floor the requirement below already admits, so only the lock moved — and the
+# lock is the whole of it, because the observer graph this crate is launched
+# with on its operator's host (`ai-orchestrator`'s `graphs/dag-scope.yaml`, read
+# by the `oneagentgraph` *this crate links* and never by a CLI beside it)
+# declares that schema so its monitor takes one turn every five minutes instead
+# of one per event. Every resolution beneath the floor refuses that document by
+# name before a run starts — `unknown field `schedule`` at 0.3.17, and the
+# schema gate above it — so beneath it no run this crate drives on that host
+# starts at all. `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_accepts_a_paced_two_party_member` holds it against the
+# linked library's own reader: the version-9 document accepted, and the same
+# document at version 8 refused naming the field and the version it needs. It
+# fails naming the lock at 0.3.17 rather than reading differently.
+#
 # `oneagentgraph` 0.3.17 requires `oneharness-core 0.13` and `onejudge 0.8.1`,
 # and the `onejudge` pin below is the release *that* requirement resolves to.
 # 0.8.1 requires the same `oneharness-core 0.13`, so the pins below let the graph
