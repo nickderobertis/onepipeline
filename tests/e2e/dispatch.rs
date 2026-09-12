@@ -4126,9 +4126,9 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
 /// launch is waiting for. An observer waits for the sibling's own wait, reap
 /// included; a dispatch may not — the outliving process in the reaper journey
 /// has to still be there when its node settles — so it is held on the record
-/// itself, read back with its ending on it, and read **only where the path is
-/// a regular file**: the FIFO is never opened from inside the product, because
-/// opening it would be what releases the write.
+/// itself, read back with its ending on it, and the FIFO standing at the path
+/// is never opened from inside the product: opening its reading end is itself
+/// what would release the write.
 ///
 /// So the sequence is: the graph announces, the launch is *not* seen to settle
 /// its node inside the window, this journey then opens the FIFO's reading end,

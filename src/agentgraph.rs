@@ -844,19 +844,19 @@ const RECORD_WRITE_BOUND: Duration = Duration::from_secs(5);
 /// The ending is what the sibling writes onto its record after announcing
 /// `graph-settled` and before its final reap, by replacing the file in place —
 /// a truncation and then the bytes. What releases this is the record **read
-/// back whole with `finished_ms` on it**, the way the sibling's own `history`
-/// reads it: a record that is still empty, or still being written, does not
-/// parse, so a launch released here cannot exit inside the write and leave
-/// a record `history` skips.
+/// back whole with `finished_ms` on it**, as the sibling's own `Record`: one
+/// that is still empty, or still being written, does not parse, so a launch
+/// released here cannot exit inside the write and leave a record `history`
+/// skips.
 ///
-/// Read only where the path is a regular file. A path that is anything else
-/// is never opened: a FIFO would hold the reader until a writer came, and the
-/// interval this closes is the one
+/// Every poll is a read that **cannot block** and that never opens what is not
+/// a regular file — see [`ending_recorded`] for both and why each is needed —
+/// so the bound is the bound whatever stands at the path. The interval this
+/// closes is the one
 /// `dispatch::a_dispatch_records_its_ending_before_its_launch_can_exit` widens
-/// by standing exactly that in the record's place — a hold that opened it
-/// would be the reader that releases the write it is waiting on. That journey
-/// also keeps the record away past the bound, and holds that the launch is
-/// released on it.
+/// by standing a FIFO in the record's place, and a poll that opened it would be
+/// what releases the write it is waiting on. That journey also keeps the record
+/// away past the bound, and holds that the launch is released on it.
 ///
 /// Not the sibling's own `wait`, which returns only after its final reap — the
 /// boundary `a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_
@@ -867,14 +867,51 @@ fn hold_until_ending_recorded(state_dir: &Path, run_id: &GraphRunId) {
     let record = state_dir.join(run_id).join(oneagentgraph::run::RECORD_FILE);
     let until = Instant::now() + RECORD_WRITE_BOUND;
     while Instant::now() < until {
-        let recorded = std::fs::metadata(&record).is_ok_and(|shape| shape.is_file())
-            && oneagentgraph::history::show(state_dir, run_id.as_str())
-                .is_ok_and(|record| record.finished_ms.is_some());
-        if recorded {
+        if ending_recorded(&record) {
             return;
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Whether the sibling's run record at `record` parses and carries its ending,
+/// read without ever blocking on the path.
+///
+/// Two readings of what stands there, because each closes a hole the other
+/// leaves. The **path** is asked first, and one that is not a regular file is
+/// not opened at all: opening a FIFO's reading end is itself what releases a
+/// writer held at its other end — before a byte is read — so a poll that
+/// opened one would spring the very interval the journey named above holds.
+/// Then the open is **non-blocking** and judged by the **handle**: a path
+/// answered by one call and opened by the next can be replaced between them,
+/// and what is read here is only ever what was opened, through an open that
+/// returns at once whatever it met — so the bound above is the bound whatever
+/// the path becomes.
+fn ending_recorded(record: &Path) -> bool {
+    use std::io::Read as _;
+
+    if !std::fs::metadata(record).is_ok_and(|shape| shape.is_file()) {
+        return false;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let Ok(mut opened) = options.open(record) else {
+        return false;
+    };
+    if !opened.metadata().is_ok_and(|shape| shape.is_file()) {
+        return false;
+    }
+    let mut text = String::new();
+    if opened.read_to_string(&mut text).is_err() {
+        return false;
+    }
+    serde_json::from_str::<oneagentgraph::run::Record>(&text)
+        .is_ok_and(|record| record.finished_ms.is_some())
 }
 
 /// One in-process graph launch, as [`GraphRun::in_library`] receives it.
