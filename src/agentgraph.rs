@@ -3317,28 +3317,20 @@ mod tests {
     /// `kind: onejudge` member on a `schedule`, under graph schema version 9.
     ///
     /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
-    /// the requirement, are with the pin in `Cargo.toml`. The observer graph
-    /// this crate is launched with on its operator's host declares that schema
-    /// so its monitor takes one turn every five minutes rather than one per
-    /// event, and every resolution below the floor refuses the document by
-    /// name before a run starts.
+    /// the requirement, are with the pin in `Cargo.toml`.
     ///
-    /// Both halves are driven through the linked library's **own reader** —
-    /// its `GraphConfig` deserializer and `config::validate`, the pair the
-    /// `crates/testfakes` double reads a graph through — rather than a binary,
-    /// so the answer is the one the in-process dispatch path gets. Below the
-    /// floor the first half fails at *parse*: `OnejudgeMember` denies unknown
-    /// fields and has no `schedule` or `background`, so the refusal names the
-    /// field rather than the version. The second half is the release's own
-    /// rule: the same document one schema older is refused naming the field and
-    /// the version it needs, in the wording the `paced-conversations` contract
-    /// states — so a resolution that accepted a scheduled two-party member
-    /// under a schema that never declared one fails here too.
+    /// What is not obvious here is *where* each half fails. Both are driven
+    /// through the linked library's own reader — its `GraphConfig`
+    /// deserializer and `config::validate`, the pair the `crates/testfakes`
+    /// double reads a graph through — so below the floor the version-9 half
+    /// fails at **parse**: `OnejudgeMember` denies unknown fields and has no
+    /// `schedule`, so the refusal names the field rather than the version. The
+    /// version-8 half is the release's own schema gate, asserted in the wording
+    /// the `paced-conversations` contract states, so a resolution that accepted
+    /// a scheduled two-party member under a schema that never declared one
+    /// fails here too.
     #[test]
     fn the_linked_oneagentgraph_accepts_a_paced_two_party_member() {
-        /// A graph whose monitor is a two-party member on a five-minute clock,
-        /// beside the scheduled single-sided member every observer graph
-        /// carries, at the schema `version` declares.
         fn document(version: u32) -> String {
             format!(
                 "version: {version}\n\
@@ -3364,7 +3356,6 @@ mod tests {
             )
         }
 
-        /// What the linked reader says of `document`, parse and validate both.
         fn read(version: u32) -> std::result::Result<(), String> {
             let graph: oneagentgraph::config::GraphConfig =
                 serde_norway::from_str(&document(version)).map_err(|error| error.to_string())?;
