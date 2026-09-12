@@ -34,6 +34,12 @@ use serde_json::{json, Value};
 /// which an idle run records nothing, and sixty in which a paced read happens on
 /// its own interval rather than on the loop's. The tree before this change
 /// performed about 2,400 passes in it.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this is the interval the
+// three minute-long journeys below sleep, each of which carries this same suppression
+// with its reason: the minute is the bound's own interval rather than a knob, and what
+// it measures is the whole crate's reconcile loop, which any change under `src/` can
+// put the sink back into — so no project edged narrower than the crate could honestly
+// run them, and a constant they share cannot be edged narrower than they are.
 const WINDOW: Duration = Duration::from_secs(60);
 
 /// A world whose driver counts its own work, and whose held dispatches outlast
