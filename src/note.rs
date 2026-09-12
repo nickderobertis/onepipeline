@@ -1516,7 +1516,7 @@ mod tests {
             .is_empty());
     }
 
-    /// The names this module writes are the ones divergence entry 69 states, so
+    /// The names this module writes are the ones divergence entry 70 states, so
     /// the record and the document cannot drift apart: the two payload keys, the
     /// field a delivery is stamped with, and the heading a re-dispatch renders
     /// the notes under.
@@ -1533,23 +1533,23 @@ mod tests {
         .expect("the divergence record ships");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("69."))
-            .expect("the record carries entry 69");
+            .find(|entry| entry.starts_with("70."))
+            .expect("the record carries entry 70");
         let block: Value = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 69's block is JSON"))
-            .expect("entry 69 carries the json block this test drives");
+            .map(|block| serde_json::from_str(block).expect("entry 70's block is JSON"))
+            .expect("entry 70 carries the json block this test drives");
         assert_eq!(
             block["node_dispatched_keys"],
             json!([CARRIED_KEY, SPENT_KEY]),
-            "the keys a `node-dispatched` carries are not the ones entry 69 names"
+            "the keys a `node-dispatched` carries are not the ones entry 70 names"
         );
         assert_eq!(
             block["heading"],
             json!(crate::plan::MANAGER_NOTES_HEADING),
-            "the heading a re-dispatch renders the notes under is not the one entry 69 names"
+            "the heading a re-dispatch renders the notes under is not the one entry 70 names"
         );
         // The field name is read off what the operation really writes rather
         // than off a constant, because serde's attribute is the one source of it.
@@ -1564,17 +1564,17 @@ mod tests {
         })
         .expect("it serializes");
         let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
-            .expect("entry 69 names the fields");
+            .expect("entry 70 names the fields");
         for field in &fields {
             assert!(
                 written.get(field).is_some(),
-                "a delivery is not stamped under the field entry 69 names (`{field}`): {written}"
+                "a delivery is not stamped under the field entry 70 names (`{field}`): {written}"
             );
         }
         assert_eq!(
             block["event_kinds"],
             json!([crate::event::PipelineKind::NoteShown.as_str()]),
-            "the kind a presentation is recorded under is not the one entry 69 names"
+            "the kind a presentation is recorded under is not the one entry 70 names"
         );
         // Every kind of evidence a presentation is decided from, spelled as the
         // record writes it, and no other: a match rather than a list, so a
@@ -1593,7 +1593,7 @@ mod tests {
                 every(Evidence::InstructionText),
                 every(Evidence::AnsweringTurn),
             ]),
-            "the evidence a `note-shown` can name is not what entry 69 states"
+            "the evidence a `note-shown` can name is not what entry 70 states"
         );
     }
 

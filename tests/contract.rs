@@ -2981,7 +2981,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "69."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -5159,11 +5159,11 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     }
 
     // And what each disposition confirms at the acknowledgement and what it
-    // only routes onward, as entry 69 tabulates them — the two facts a reader
+    // only routes onward, as entry 70 tabulates them — the two facts a reader
     // of the record no longer has to tell apart by inference. Keyed by the
     // disposition's own word, and exhaustive both ways: a disposition a table
     // does not name, or a row naming no disposition, fails here.
-    let tabulated_by = divergence_block("69.");
+    let tabulated_by = divergence_block("70.");
     let words = |party: &Party| -> String {
         serde_json::to_value(party)
             .expect("a party serializes")
@@ -5183,7 +5183,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     ] {
         let tabulated: std::collections::BTreeMap<String, Vec<String>> =
             serde_json::from_value(tabulated_by[table].clone())
-                .unwrap_or_else(|e| panic!("entry 69 tabulates `{table}` per disposition: {e}"));
+                .unwrap_or_else(|e| panic!("entry 70 tabulates `{table}` per disposition: {e}"));
         assert_eq!(
             tabulated.keys().cloned().collect::<Vec<_>>(),
             {
@@ -5191,13 +5191,13 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
                 named.sort();
                 named
             },
-            "entry 69's `{table}` table and entry 60's dispositions are not one set"
+            "entry 70's `{table}` table and entry 60's dispositions are not one set"
         );
         for one in &carried {
             assert_eq!(
                 &answer(one).iter().map(words).collect::<Vec<_>>(),
                 &tabulated[one.as_str()],
-                "`{}`'s `{table}` is not what entry 69 says",
+                "`{}`'s `{table}` is not what entry 70 says",
                 one.as_str()
             );
         }
