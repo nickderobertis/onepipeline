@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2](https://github.com/nickderobertis/onepipeline/compare/v0.28.1...v0.28.2) - 2026-09-12
+
+### Fixed
+
+- *(deps)* link the oneagentgraph release that paces a two-party member ([#240](https://github.com/nickderobertis/onepipeline/pull/240))
+
 ## [0.28.1](https://github.com/nickderobertis/onepipeline/compare/v0.28.0...v0.28.1) - 2026-09-12
 
 ### Added
