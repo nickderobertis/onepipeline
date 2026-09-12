@@ -270,6 +270,12 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         let pid_file = dir.join("harness.outlives-graph.pid");
         let exe = std::env::current_exe()
             .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
+        // Not waited on, and that is the whole point: this child is stamped to
+        // the graph-run root so it is still alive when the member's teardown
+        // runs, and the graph's own final teardown is the first reaper that owns
+        // it. Waiting here would reap it in this process and the fixture would
+        // assert about a process that had already gone.
+        #[allow(clippy::zombie_processes)]
         std::process::Command::new(exe)
             .args(["outlive-the-graph", &pid_file.to_string_lossy()])
             .env("ONEAGENTGRAPH_SCRATCH_DIR", run_root)

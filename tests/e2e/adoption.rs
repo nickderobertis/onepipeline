@@ -3056,6 +3056,11 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     packager["repo"] = json!("tool");
     let mut waiting = consumer(Some("fast"));
     waiting["deps"] = json!([ENGINE, "packager"]);
+    // And declared `draft: true` besides. Where a node asks for a draft *and*
+    // awaits a release, the release reason wins: the draft a release will lift
+    // holds the run, and the one the plan asked for holds nothing, so the node
+    // settles `complete-but-draft` exactly as it would without the field.
+    waiting["draft"] = json!(true);
     // A node downstream of the draft. Its dependency is complete and its work
     // cannot land, so starting it would build on a change nobody can merge.
     let follower = crate::harness::agent("follower", &["consumer"]);
@@ -3140,6 +3145,8 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     let drafted = world.events_of(&run, "change-drafted");
     assert_eq!(drafted.len(), 1, "{drafted:?}");
     assert_eq!(drafted[0]["labels"]["node"], json!("consumer"));
+    // The release's reason and not the plan's: the field above lost to it.
+    assert_eq!(drafted[0]["payload"]["kind"], json!("awaiting-release"));
     assert_eq!(
         drafted[0]["payload"]["awaiting"],
         json!("github.com/owner/engine")
@@ -3339,6 +3346,19 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
     let settled = settlement_of(&world, &run, "consumer");
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
+    // And its detail says whose draft the closeout lifted: the first
+    // publication's, not the second worker's — that worker drafted nothing, and
+    // a settlement that said it had would send a reader to a transcript for a
+    // decision nobody in it made. No drafting graph was named, so the
+    // description stands as it was.
+    assert_eq!(
+        settled["payload"]["detail"],
+        json!(
+            "an earlier publication of this branch left the change request as a draft; the \
+             closeout left the description as the worker left it and marked it ready for review"
+        ),
+        "{settled}"
+    );
     assert_eq!(
         world.events_of(&run, "node-settled").len(),
         3,
