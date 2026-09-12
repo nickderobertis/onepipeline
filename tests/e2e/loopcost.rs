@@ -45,18 +45,14 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// A world whose driver counts its own work, and whose held dispatches outlast
 /// the journey holding them.
 ///
-/// The harness's own hold patience is set above one `until` deadline, which is
-/// what every other journey holds a dispatch across. The journeys here hold one
-/// across *several* — the dispatches of a second run, the settlement of a
-/// hundred nodes, then the whole of [`WINDOW`] — and a hold that gives up inside
-/// the window does not read as the timeout it is: the double exits, the engine
-/// dispatches the node again, and that re-dispatch's own reads land in the
-/// minute that was supposed to record nothing, reported as an idle pass reading
-/// the store. That is exactly what the Windows leg did at 180 seconds, on a
-/// journey whose setup had taken 130. So the patience here is the sum of what
-/// the longest journey can wait — three `until` deadlines and the window, four
-/// hundred and twenty seconds — with room, and a hold nobody releases still
-/// fails first, as an `until` timeout with its evidence.
+/// The harness's default hold patience is set above one `until` deadline, which
+/// is what every other journey holds a dispatch across. The journeys here hold
+/// one across several — three `until` deadlines and then the whole of
+/// [`WINDOW`], four hundred and twenty seconds — and a hold that expires inside
+/// the window is not reported as the expiry it is: the double exits, the engine
+/// dispatches the node again, and that re-dispatch's reads land in the minute
+/// that was supposed to record nothing. So the patience is that sum with room,
+/// and a hold nobody releases still fails first, as an `until` timeout.
 fn measured(name: &str) -> World {
     World::new(name)
         .with_env(LOOP_STATS_ENV, "1")

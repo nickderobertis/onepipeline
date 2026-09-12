@@ -1014,21 +1014,15 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
 /// A note recorded `carried` whose text a turn of the **same** dispatch then
 /// opens on is recorded as shown — from the words, since nothing routed it.
 ///
-/// This happened to the node this journey was written in. A manager's
-/// correction was recorded `reached: carried`; the manager believed the record
-/// and told their operator it had not arrived; nineteen minutes later the
-/// correction's text opened the worker's turn 2, read in by a lever outside the
-/// note seam. The record a manager reads said nobody had taken it, and the
-/// presentation that demonstrably happened was recorded nowhere: not a receipt
-/// written too early, but a presentation with no receipt at all.
-///
-/// The lever there was an `interrupt` issued by hand into the harness process,
-/// which this suite has no double for. What it produced is what is driven here
-/// against the real conversation: a note the seam never took — `deliver: next`
-/// asks for no live attempt, so it is `carried` while the dispatch is live — and
-/// the supervising side then reading that text into the worker's next turn.
-/// The stream shows a worker turn opening on the note's whole text, stamped as
-/// the supervisor's own, and the record says the worker was shown it, from the
+/// A carried note can reach a live turn by a lever outside the note seam (an
+/// interrupt issued by hand into the harness process, which this suite has no
+/// double for), and a record that then still says nobody took it is a
+/// presentation with no receipt at all. What is driven here against the real
+/// conversation is that lever's effect: `deliver: next` asks for no live
+/// attempt, so the note is `carried` while the dispatch is live, and the
+/// supervising side then reads its text into the worker's next turn. The
+/// stream shows a worker turn opening on the note's whole text, stamped as the
+/// supervisor's own, and the record says the worker was shown it, from the
 /// text, and the judge with the turn that answered.
 #[test]
 fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown() {
@@ -1571,14 +1565,10 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
 /// it, both parties of the new conversation read it, and the run's record names
 /// it as carried.
 ///
-/// The incident this stands against inverted the note's durability. A manager
-/// ruled during a live dispatch; the worker's turn was reopened carrying the
-/// ruling and the worker obeyed it; the node's publication then failed on a check
-/// the host reported red, and the engine dispatched the node again on its branch
-/// with a task recomposed from the plan — which the ruling was not part of. The
-/// judge of that second conversation failed the node for exactly its compliance,
-/// and the manager's receipt for the ruling read `worker` throughout, which looks
-/// like success. A note that landed was destroyed by a retry nobody issued.
+/// The regression: a re-dispatch recomposes the task from the plan, which a
+/// note delivered mid-dispatch is not part of, so a ruling the worker obeyed
+/// was absent from the conversation whose judge ruled on that compliance —
+/// while the manager's receipt still read `worker`.
 ///
 /// The publication fails **checks-failed**, which is preserving: the host reports
 /// a required check red, the branch is handed back, and the node is asked again
