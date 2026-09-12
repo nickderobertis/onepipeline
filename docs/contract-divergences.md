@@ -4397,8 +4397,19 @@ per-watch record it decides from to the shipped surface —
 `views::Watchers`, `views::WATCHER_SCHEMA_VERSION`, and
 `error::EXIT_RUNS_UNWATCHED`.**
 
-**Amendment (this change): three changes to the rule below, and no change to the
-surface.** A settled `onepipeline start` was found to hand back a run this verb
+**Amendment — ruled: three changes to the rule below, and no change to the
+surface.** The manager who owns this workstream ruled on change (1) below, over
+the ask seam on 2026-09-12 — the third delivery of a ruling first recorded to the
+run's journal at 21:31:14Z on 2026-09-11, the first two of which never reached
+the dispatch — and **approved it outright**: a document at a schema this build
+has moved past is refreshed and then decided under clauses 1, 3 and 4; exit
+statuses, field set and stamp meaning are unchanged; the alternative that keeps
+reporting such a document from the launch record is refused, because it is a
+guard that refuses the manager's turn after every successful run at every schema
+bump. The ruling carried one condition, met and recorded under (1). The entry
+stays OPEN as every entry here does until the contract owner carries it into
+`docs/contract.md`; the clause itself is no longer a proposal. A settled
+`onepipeline start` was found to hand back a run this verb
 then reported at exit `6`: the measured run `unwatched-stop-hook-fixes` completed
 at 14:10:42Z on 2026-09-11 and ten minutes later `unwatched` printed it —
 `unwatched-stop-hook-fixes  DRIVER DEAD  nothing has recorded a watch on it` —
@@ -4431,7 +4442,27 @@ session owns rather than by the root. This replaces the rule that reported such 
 document unread, which was the measured defect, and keeps that rule's one sound
 half: an answer nobody could take must never *silence* a run, and a run still
 being driven by the previous release's binary — there is one on the host now —
-is decided from its store rather than passed over. (2) **The engine's
+is decided from its store rather than passed over. **The ruling's condition, and
+its observation.** The condition: a document an *older build is maintaining
+right now* interleaved with this refresh is to be observed, not assumed — the run
+stays decidable on the next read, and neither writer leaves a document the other
+cannot read. Observed on 2026-09-12 with the real `v0.26.1` binary built from its
+tag, driving a run through the real `start --detach` under a held, heartbeating
+dispatch, against this build: the 0.26.1 driver wrote its document at schema 1;
+this build's `unwatched` reported the live run at `6` with the listing's word
+`ACTIVE` and left the document at schema 2, current; the old driver's next
+heartbeat append overwrote it at schema 1, current, from its own in-memory
+account — it never reads the document back; `unwatched` again answered `6` and
+refreshed again; the old build's own `runs` and `status`, read over this build's
+schema-2 document, rendered the run `ACTIVE  NO OBSERVER  0/1 done` at exit 0;
+`unwatched` again `6`; the old driver then settled the run and left
+`graph_complete: true` at schema 1, current; `unwatched` answered `0` with
+nothing on either stream and left it at schema 2; the old build's `runs` over
+that rendered `1/1 done  SETTLED`; `unwatched` again `0`. Five reads, five
+decisions, and no document either build could not read. Not a journey in the
+offline tier, because it needs a previous release's binary that tier does not
+carry; the instrument was a temporary journey over the e2e harness, driven once
+and not kept. (2) **The engine's
 guarantee**: a run this engine drove to settlement leaves a document that
 satisfies the exclusion rule by construction, without any reader refreshing it —
 the driver's closeout writes the document *after* the last append of every
