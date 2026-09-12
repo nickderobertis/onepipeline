@@ -1379,6 +1379,16 @@ fn attach(
             engine.join().map_err(|_| {
                 Error::Invalid(format!("the engine loop for '{}' panicked", paths.run))
             })??;
+            // The authoritative final summary write, with the engine joined above
+            // and the observer relay drained before it — so every appender has made
+            // its last append. See [`crate::summary::seal`].
+            // llmlint: ignore[changed_behavior_has_e2e] what the seal writes is held by
+            // `summary::tests::the_seal_leaves_a_document_current_for_the_journal_as_it_stands`,
+            // which fails without it; that no offline closeout leaves a document for it to
+            // repair is what twenty-three driven settlements across the measured shape
+            // showed, so no journey can fail on this call — it covers the write-ordering race
+            // between two maintainers over one journal, which nothing can stage on purpose.
+            crate::summary::seal(paths);
             let settlement = settlement_of(&view);
             println!(
                 "{}",

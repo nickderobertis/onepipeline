@@ -464,38 +464,6 @@ impl RunSummary {
         self
     }
 
-    /// The row this build can honestly render for a run whose own document it may
-    /// **not** read: the launch record, and no records at all.
-    ///
-    /// Not a document, and never written as one. `unwatched` builds one to reach
-    /// the listing's own standing word for a run whose summary declares a schema
-    /// this build has moved past — a run it must report rather than fold, so the
-    /// word has to come from what this build actually read. Everything a store
-    /// would have contributed is what a run that has recorded nothing carries,
-    /// because nothing is what was read; the launch record supplies the rest, and
-    /// it is the record every reader of a run already takes the driver's host and
-    /// pid from.
-    ///
-    /// The consequence is stated rather than hidden: with no `last_write_at` to
-    /// measure quiet against, such a run reads `ACTIVE` or `DRIVER DEAD` and never
-    /// `PARKED`. That is what the evidence supports, and the alternative — taking
-    /// a number out of a document whose own version says it means something else —
-    /// is exactly what that version exists to refuse.
-    pub(crate) fn of_launch_alone(paths: &RunPaths, launch: &LaunchRecord) -> Self {
-        Self::derive(
-            &paths.run,
-            launch,
-            &Store {
-                state: &RunState::default(),
-                event_count: 0,
-                last_event_kind: None,
-                timing: &telemetry::of_run(paths, &[]),
-                judged: &BTreeSet::new(),
-            },
-            (0, 0),
-        )
-    }
-
     /// The same summary, always by folding the whole store.
     ///
     /// What the fallback runs, and what the writer's own account is held equal
@@ -1053,6 +1021,35 @@ impl Maintainer {
             filters: crate::filter::Filters::default(),
         })
     }
+}
+
+/// Fold a run's store as it stands and write its summary document, stamped for
+/// the journal as it stands now.
+///
+/// The driver's closeout calls this once **every appender it holds has made its
+/// last append** — the engine loop, the observer relay, the lifecycle relay,
+/// observer teardown and an adopted driver included — so a run this engine drove
+/// to settlement leaves a document that accounts for its journal by construction,
+/// without any reader having to refresh it. That is clause 2 of the verb's rule
+/// (entry 68 of `docs/contract-divergences.md`): `onepipeline start` handing back
+/// at settlement never leaves a settled run that `unwatched` reports.
+///
+/// A full read rather than one more incremental append, and that is the point:
+/// the two `Maintainer`s a driven run keeps over one journal each stamp only what
+/// **they** folded, so a document left by whichever of them wrote last can be
+/// stamped short of the file the other grew. This reads the whole store once,
+/// with nothing left appending to it, so the length it stamps is the file's own.
+/// Best effort like every write on this path — a document that could not be
+/// written costs the next reader a fold, exactly as [`Maintainer::write`] says.
+// llmlint: ignore[changed_behavior_has_e2e] a closeout that leaves a *current* document is
+// read off the files by the three `unwatched::*_leaves_a_current_document` journeys, and what
+// this write does to a document left behind its journal — the state no offline closeout
+// reaches — is held by `the_seal_leaves_a_document_current_for_the_journal_as_it_stands`
+// below. The only untested branch is the write failing, which is not new: `seal` inherits
+// [`Maintainer::write`]'s discard-on-failure, whose recovery a reader re-folds and which
+// inducing needs host sabotage rather than a user journey.
+pub(crate) fn seal(paths: &RunPaths) {
+    Maintainer::of(paths).write();
 }
 
 /// Record how far a stream has been folded, keeping the highest `seq` seen.
@@ -1730,6 +1727,64 @@ mod tests {
         let served = RunSummary::of(&paths).expect("the run reads");
         assert_eq!(served.schema_version, SUMMARY_SCHEMA_VERSION);
         assert_eq!(served.event_count, 6);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The closeout seal writes a document that accounts for the journal as it
+    /// stands, whatever the incremental writers left.
+    ///
+    /// The state staged is the one the seal exists for and no offline journey
+    /// can reach: a record on the file that no document followed — what one of
+    /// two maintainers over one journal leaves when its write lands after the
+    /// other's append. Before the seal the document is behind the journal; after
+    /// it the document is current and records the settlement, and the listing
+    /// serves it without a fold.
+    #[test]
+    fn the_seal_leaves_a_document_current_for_the_journal_as_it_stands() {
+        let root = scratch("sealed");
+        let paths = recorded(&root, "demo", 2);
+        let mut journal = Journal::open(&paths);
+        emit(
+            &mut journal,
+            PipelineKind::NodeSettled,
+            Some("build"),
+            "demo",
+        );
+        emit(
+            &mut journal,
+            PipelineKind::NodeSettled,
+            Some("ship"),
+            "demo",
+        );
+        let stray = event(PipelineKind::PlannerSurfaced, "demo", "another-writer", 0);
+        let line = serde_json::to_string(&stray).expect("a record");
+        ledger::append_line_healed(&paths.journal(), &line).expect("appended");
+        let behind: RunSummary =
+            serde_json::from_str(&std::fs::read_to_string(paths.summary()).expect("the document"))
+                .expect("a summary");
+        assert_ne!(
+            (behind.journal_len, behind.journal_mtime_ms),
+            journal_stamp(&paths),
+            "the staged document is not behind its journal, so the seal has nothing to prove"
+        );
+
+        seal(&paths);
+
+        let sealed: RunSummary =
+            serde_json::from_str(&std::fs::read_to_string(paths.summary()).expect("the document"))
+                .expect("a summary");
+        assert_eq!(
+            (sealed.journal_len, sealed.journal_mtime_ms),
+            journal_stamp(&paths)
+        );
+        assert!(sealed.graph_complete, "{sealed:?}");
+        assert_eq!(sealed.event_count, 6);
+        let (served, bytes) = cost_of(&paths);
+        assert_eq!(served, sealed);
+        assert!(
+            bytes < sealed.journal_len,
+            "the sealed document was folded rather than served: {bytes} bytes read"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -557,16 +557,22 @@ fn concurrent_watches_are_recorded_apart_and_hold_the_run_watched_until_the_last
 }
 
 /// A run whose stop is recorded and a run whose graph is complete are never
-/// reported, however long they have been unwatched — and a document **behind** its
-/// journal is reported all the same.
+/// reported, however long they have been unwatched. A document that **records
+/// settlement while behind its journal** is named on standard error as
+/// undecidable rather than reported (clause 3), and a document recording **no**
+/// settlement while behind its journal *is* reported (clause 4).
 ///
-/// The asymmetry is the whole freshness rule. The stamp is required only for
-/// exclusion: a run that has stopped writing has a current document, so requiring
-/// it costs a settled run nothing — while a document behind its journal is what a
-/// run *still recording* looks like, and treating that as proof of settlement is
-/// how the one run this verb exists to find would be dropped.
+/// The asymmetry is the whole freshness rule, and the stamp decides two different
+/// questions on the two sides of it. For **exclusion** the stamp must be current:
+/// a run that has stopped writing has a current document, so requiring it costs a
+/// settled run nothing. But a stale stamp is not proof the run is *unwatched*
+/// either — `6` means *proven* unwatched — so a document that records settlement
+/// while behind its journal proves nothing in either direction and is undecidable,
+/// while one recording no settlement is exactly what a run *still recording* looks
+/// like and stays the one run this verb exists to find.
 #[test]
-fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
+fn a_settled_run_is_excluded_and_a_document_recording_settlement_behind_its_journal_is_undecidable()
+{
     let world = World::new("unwatched-settled");
     world.script("build.work", "the worker wrote this\n");
     let complete = settled(&world, "unwatchedcomplete");
@@ -630,7 +636,11 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
         asked.stderr
     );
 
-    // And the same run, with its document behind its journal.
+    // Clause 3: the stopped run, its document still recording that stop but now
+    // **behind its journal**. Its own record says it settled, so a stale stamp
+    // leaves that undecidable rather than proving the run unwatched — it is named
+    // on standard error with the reason and changes no status, and with nothing
+    // else to report the verb answers `0`.
     //
     // llmlint: ignore-block[tests_mirror_real_usage] what this stages is a writer that
     // appended and died before writing the document beside it — a killed process rather than
@@ -643,53 +653,81 @@ fn a_settled_run_is_never_reported_and_a_document_behind_its_journal_is() {
     std::fs::write(paths.summary(), behind.to_string()).expect("the document");
     // llmlint: ignore-end[tests_mirror_real_usage]
     let asked = world.run(&["unwatched"]);
-    asked.exited(RUNS_UNWATCHED).out_has(&stopped);
+    asked.exited(SUCCESS);
     assert!(
-        !asked.stdout.contains(&complete),
-        "the run whose document is current was reported beside the one that is not: {}",
+        asked.stdout.is_empty(),
+        "a document recording settlement while behind its journal was reported: {}",
         asked.stdout
     );
+    asked
+        .err_has(&stopped)
+        .err_has("records that it settled but is behind its journal");
+
+    // Clause 4: a document recording **no** settlement while behind its journal is
+    // the opposite case — that is exactly what a run still recording looks like, so
+    // with nothing watching it, it is reported at `6`. The same stopped run whose
+    // driver is gone, its settlement fields now cleared and its stamp still behind
+    // the journal that is really there beside it, so nothing rewrites it underneath
+    // the assertion.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the same killed-mid-write writer as
+    // above, its document now recording no settlement — the run this verb exists to find.
+    // What is put back is this build's own document with its settlement fields and one
+    // recorded length moved, and every claim afterwards is read off the compiled binary.
+    let mut recording = document(&paths);
+    recording["graph_complete"] = json!(false);
+    recording["stop_recorded"] = json!(false);
+    recording["journal_len"] = json!(1);
+    std::fs::write(paths.summary(), recording.to_string()).expect("the document");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let asked = world.run(&["unwatched"]);
+    asked.exited(RUNS_UNWATCHED).out_has(&stopped);
 }
 
 /// The four words a reported run's line can carry, as entry 68 states them.
 ///
-/// Named as a set because two journeys here assert the word without being able to
-/// predict which of the four they will get, for different reasons. The one below
-/// reads it from the launch record alone, and what that record says about the
-/// driver is what the host says about a pid now. The scale journey asserts it as
-/// the guard its whole bound rests on: a fixture can go degenerate — a clone that
-/// carried no run state would be excluded or refused, every other assertion would
-/// pass, and the bound would be met over rows with nothing in them.
+/// Named as a set because the scale journey asserts the word without being able
+/// to predict which of the four it will get: it is the guard its whole bound rests
+/// on, since a fixture can go degenerate — a clone that carried no run state would
+/// be excluded or refused, every other assertion would pass, and the bound would
+/// be met over rows with nothing in them.
 const STANDING_WORDS: [&str; 4] = ["ACTIVE", "PARKED", "DRIVER DEAD", "UNDRIVEN"];
 
-/// A document at a schema this build has **moved past** is *decided*: the run is
-/// reported when nothing is watching it, and it counts toward the non-zero exit.
+/// A document at a schema this build has **moved past** is *refreshed* — folded
+/// once and rewritten at this build's schema, as `runs` refreshes the same run —
+/// and then decided from the run's own record: a settled run is excluded, a run
+/// still recording is reported, and the document each leaves behind is this
+/// build's own and current for its journal.
 ///
-/// The distinction this journey exists for is between an answer and the absence of
-/// one, and it is the whole of why the two are not one arm. A document that is
-/// absent, half-written, or another run's leaves this build with nothing to say
-/// about the run — that is named on standard error and changes no status. A
-/// document at a superseded schema is *there*, is well-formed, and says outright
-/// that its fields are an earlier build's to mean: which settles the only question
-/// this verb asks of it, in the negative. It proves nothing, so the run is not
-/// excluded — and a run this verb exists to find must never be silenced by a
-/// reading nobody could take.
+/// Such a document is what **every run the previous release settled** carries
+/// until something refreshes it, and the rule this replaces reported each of them
+/// at `6` on the first turn after an upgrade: that is the measured report
+/// `a_run_the_previous_release_settled_is_refreshed_and_excluded_rather_than_reported`
+/// reproduces over the measured shape. The half kept from that rule is that an
+/// answer nobody could take must never *silence* a run: a run still being driven by
+/// the previous release's binary carries the same document, and it is reported here
+/// from what its store really says rather than passed over. The only cost is the
+/// one fold, paid once per run per schema bump, which is why each half reads the
+/// document the verb left back and holds it current for the journal.
 ///
-/// The fixture is chosen so that the two readings **disagree**: the document says
-/// the run stopped and its graph completed, so read by this build's own meaning it
-/// would be excluded outright, and the version is exactly what says this build may
-/// not read it that way. A run whose writer has finished is used for the same
-/// reason a settled run is used everywhere the document is edited by hand — it is
-/// the one state in which nothing is going to rewrite the file underneath the
-/// assertion.
+/// The settled fixture is chosen so that the two readings **agree** only after the
+/// fold: the document says the run settled, and at the superseded version this
+/// build may not read it that way — so an answer of `0` proves the run was decided
+/// from its store rather than from those fields. A run whose writer has finished is
+/// used for that half for the same reason a settled run is used everywhere the
+/// document is edited by hand — nothing is going to rewrite the file underneath the
+/// assertion. The still-recording half holds a dispatch open instead, and asserts
+/// only what is true whether or not its driver rewrote the document first: it is
+/// reported, with the word the listing gives it, and the document is this build's.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] no verb writes a document at a schema
 // this build has moved past, and none could: the writer stamps its own version. The state
-// is left by a run recorded under an earlier build and read under this one, and what is put
+// is left by a run recorded under an earlier build and read under this one — measured on
+// the host as the previous release's document, current for its journal — and what is put
 // back is this build's own document with that one field moved. Every claim afterwards is
-// read off the compiled binary's own streams.
+// read off the compiled binary's own streams and the files it leaves.
 #[test]
-fn a_document_at_a_superseded_schema_is_decided_rather_than_passed_over() {
+fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     let world = World::new("unwatched-superseded");
     world.script("build.work", "the worker wrote this\n");
     let run = settled(&world, "unwatchedsuperseded");
@@ -716,38 +754,121 @@ fn a_document_at_a_superseded_schema_is_decided_rather_than_passed_over() {
     older["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
     std::fs::write(paths.summary(), older.to_string()).expect("the document");
 
+    // Refreshed and excluded: nothing on either stream, and the document left
+    // behind is this build's own, current for the journal.
+    let asked = world.run(&["unwatched"]);
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a settled run the previous release recorded was written about: stdout {:?}, \
+         stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+    let refreshed = document(&paths);
+    assert_eq!(refreshed["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
+    assert_eq!(
+        (
+            refreshed["journal_len"].as_u64(),
+            refreshed["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the refreshed document is behind its journal: {refreshed}"
+    );
+
+    // The other half of the rule: a run still recording under the previous
+    // release's document is reported from what its store says, never silenced.
+    // The run the mixed-root half below leaves undecidable is settled first, while
+    // the worker script still runs to completion.
+    let undecided = settled(&world, "unwatchedalongside");
+    let undecided_paths = paths_of(&world, &undecided);
+    world.script("build.wait", "hold");
+    // Beating while held, so the run goes on recording between this build's
+    // reads — which is what the previous release's writer does beside it.
+    world.script("build.heartbeat", "1500");
+    let recording = held(&world, "unwatchedrecording");
+    let recording_paths = paths_of(&world, &recording);
+    let mut older = document(&recording_paths);
+    older["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
+    std::fs::write(recording_paths.summary(), older.to_string()).expect("the document");
     let asked = world.run(&["unwatched"]);
     asked
         .exited(RUNS_UNWATCHED)
-        .out_has(&run)
+        .out_has(&recording)
+        .out_has("ACTIVE")
         .out_has("nothing has recorded a watch on it")
-        .out_has(&format!("onepipeline watch {run}"));
+        .out_has(&format!("onepipeline watch {recording}"));
+    assert!(
+        !asked.stdout.contains(&run),
+        "the settled run reached standard output beside the recording one: {}",
+        asked.stdout
+    );
     assert!(
         asked.stderr.is_empty(),
         "a run this verb decided about was also named as one it could not: {}",
         asked.stderr
     );
-    let reported = asked.stdout.lines().next().unwrap_or_default().to_string();
-    assert!(
-        STANDING_WORDS.iter().any(|word| reported.contains(word)),
-        "the line carries none of the words entry 68 states: {reported}"
+    assert_eq!(
+        document(&recording_paths)["schema_version"],
+        json!(SUMMARY_SCHEMA_VERSION)
     );
 
-    // And beside a run nothing could be decided about, each answer lands where it
-    // belongs: the superseded one is on standard output and in the status, the
-    // undecided one is on standard error and in neither.
-    let undecided = settled(&world, "unwatchedalongside");
-    std::fs::remove_file(paths_of(&world, &undecided).summary()).expect("the document");
+    // The previous release's writer keeps going while this build asks: each
+    // append it makes rewrites the document at *its* schema, current for the
+    // journal as it then stands, over the one this build just left — so the two
+    // alternate for as long as both are running, and this build meets a document
+    // at the old schema over a store that has **grown** since it last refreshed.
+    // Staged as that writer leaves it — the document the run's own writer
+    // maintains, once a beat has landed and it has accounted for it, put at the
+    // old schema — and asked again: decided the same way, refreshed the same way,
+    // and from the store as it now stands rather than from anything remembered.
+    let refreshed_len = document(&recording_paths)["journal_len"].as_u64();
+    world.until("the recording run's writer to account for a beat", |_| {
+        document(&recording_paths)["journal_len"].as_u64() > refreshed_len
+    });
+    let mut older = document(&recording_paths);
+    assert_eq!(
+        older["schema_version"],
+        json!(SUMMARY_SCHEMA_VERSION),
+        "the run's own writer did not keep its document at this build's schema: {older}"
+    );
+    let grown = older["journal_len"].as_u64();
+    older["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
+    std::fs::write(recording_paths.summary(), older.to_string()).expect("the document");
     let asked = world.run(&["unwatched"]);
     asked
         .exited(RUNS_UNWATCHED)
-        .out_has(&run)
+        .out_has(&recording)
+        .out_has("ACTIVE")
+        .out_has("nothing has recorded a watch on it");
+    assert!(
+        asked.stderr.is_empty(),
+        "a run refreshed for the second time was named as one that could not be decided: {}",
+        asked.stderr
+    );
+    let again = document(&recording_paths);
+    assert_eq!(again["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
+    assert!(
+        again["journal_len"].as_u64() >= grown,
+        "the second refresh accounted for less than the store held when the old schema was \
+         put back over it: {again}"
+    );
+
+    // And beside a run nothing could be decided about, each answer lands where it
+    // belongs: the recording one on standard output and in the status, the
+    // undecided one on standard error and in neither.
+    std::fs::remove_file(undecided_paths.summary()).expect("the document");
+    let asked = world.run(&["unwatched"]);
+    asked
+        .exited(RUNS_UNWATCHED)
+        .out_has(&recording)
         .err_has(&undecided);
     assert!(
         !asked.stdout.contains(&undecided),
         "the undecided run reached standard output: {}",
         asked.stdout
     );
+    world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -755,32 +876,40 @@ fn a_document_at_a_superseded_schema_is_decided_rather_than_passed_over() {
 /// is called, and what to do to the file to put it there.
 type Undecidable = (&'static str, fn(&std::path::Path, &Value));
 
-/// The four states a run's summary document can be in that leave its settlement
+/// The five states a run's summary document can be in that leave its settlement
 /// undecidable, each with the way that state is reached.
 ///
 /// Function pointers rather than a table of data, because what distinguishes them
-/// is what is done to the file: a build that never wrote a document, a writer
+/// is what is done to the file: a build that never wrote a document, a writer that
+/// recorded a settlement and died before its stamp caught the journal up, a writer
 /// killed mid-write, a build that knows more than this one, and a run root copied
 /// from another run's.
 ///
-/// **A schema this build has moved past is deliberately not here.** It is an
-/// answer rather than the absence of one — the file is there, it is well-formed,
-/// and it says outright that its fields are an earlier build's to mean, which
-/// settles the only question asked of it: it proves nothing, so the run is not
-/// excluded. `a_document_at_a_superseded_schema_is_decided_rather_than_passed_over`
-/// is that half. A version *ahead* of this build is the one that stays here, and it
+/// **A schema this build has moved past is deliberately not here.** It is the
+/// previous release's document, which this build refreshes — folds once and
+/// rewrites at its own schema — and then decides from the run's own record;
+/// `a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run` is
+/// that half. A version *ahead* of this build is the one that stays here, and it
 /// is a different fact: a document written by a build that knows things this one
 /// does not, which this one has no reading of at all.
 ///
 // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or corrupts the document
-// its run's journal writer maintains, and none could — each of the four is left by a
+// its run's journal writer maintains, and none could — each of the five is left by a
 // build, a crash, or a copied run root rather than by an interface. What is put back is
 // this build's own document, edited only where the state under test is the edit, and every
 // claim afterwards is read off the compiled binary's own streams.
-const UNDECIDABLE: [Undecidable; 4] = [
+const UNDECIDABLE: [Undecidable; 5] = [
     ("no document at all", |path, _written| {
         std::fs::remove_file(path).expect("the document");
     }),
+    (
+        "a document recording settlement while behind its journal",
+        |path, written| {
+            let mut behind = written.clone();
+            behind["journal_len"] = json!(0);
+            std::fs::write(path, behind.to_string()).expect("the document");
+        },
+    ),
     ("a document a writer left half-written", |path, _written| {
         std::fs::write(path, "{\"schema_ver").expect("the document");
     }),
@@ -900,16 +1029,18 @@ fn store_unreadable(paths: &RunPaths) {
 /// A run whose settlement cannot be decided at all is named on **standard error**
 /// with the reason, is absent from standard output, and changes no exit status.
 ///
-/// Four ways to reach it, because they are one fact to a reader and four different
-/// things on disk: no document, one that cannot be read, one at a schema version
-/// **ahead** of this build, and one that is *another run's* — which is what a copied
-/// run root leaves, and is no more a description of this run than a document nobody
-/// wrote. Such a run is most often an old settled run
-/// whose document is gone, and blocking on it would never clear by watching it —
-/// so it is said out loud and passed over.
+/// Five ways to reach it, because they are one fact to a reader and five different
+/// things on disk: no document, one that cannot be read, one that **records
+/// settlement while behind its journal** — its own record says it settled but a
+/// stale stamp proves nothing it says — one at a schema version **ahead** of this
+/// build, and one that is *another run's* — which is what a copied run root
+/// leaves, and is no more a description of this run than a document nobody wrote.
+/// Such a run is most often an old settled run whose document is gone, and
+/// blocking on it would never clear by watching it — so it is said out loud and
+/// passed over.
 ///
-/// A schema this build has **moved past** is not one of the four, and the reason it
-/// is not is stated where the four are.
+/// A schema this build has **moved past** is not one of the five, and the reason it
+/// is not is stated where the five are.
 #[test]
 fn a_run_whose_settlement_cannot_be_decided_is_named_on_standard_error_and_changes_no_status() {
     let world = World::new("unwatched-undecidable");
@@ -1975,3 +2106,280 @@ fn binary_in_cache() {
     let read = std::fs::read(crate::harness::binary()).expect("the binary under test");
     assert!(!read.is_empty(), "the binary under test is empty");
 }
+
+/// A run this engine drove to settlement under a real observer graph — its monitor
+/// turn held **in flight** (`observer.wait`) as the graph settles — leaves a
+/// document current for its journal, read off the files before any view, so
+/// `unwatched` excludes it. Clause 2 of the verb's rule, for an **attached** driver.
+#[test]
+fn a_run_settled_under_an_observer_mid_turn_leaves_a_current_document_and_is_excluded() {
+    let world = World::new("unwatched-observed");
+    world.write_graphs();
+    world.script("observer.wait", "");
+    world.script("turn.hold", "hold");
+    world.script("build.work", "the worker wrote this\n");
+    let run = "unwatchedobserved";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    let driver = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the driver starts");
+    // The monitor's turn is in flight when the graph settles: it has begun (its
+    // first act is to read the run's ledger, which the sighting below records) and
+    // is held on `observer.wait` while the worker runs to completion and the graph
+    // settles under it — released only after `unwatched` is asked.
+    world.until("the observer's turn to be in flight", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.release("turn.go");
+    world.release("turn.settle");
+    driver
+        .wait_with_output()
+        .expect("the driver exits at settlement");
+
+    // The document the driver left, off the files before any view touches the run.
+    let paths = paths_of(&world, run);
+    let left = document(&paths);
+    assert_eq!(left["graph_complete"], json!(true), "{left}");
+    assert_eq!(
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the driver left a document behind its journal at handback: {left}"
+    );
+
+    let asked = world.run(&["unwatched"]);
+    world.release("observer.go");
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a run its own driver settled was reported: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+}
+
+/// The same clause-2 guarantee for a **detached** driver, whose only journal
+/// appender is the engine loop: a run started detached that the retained driver
+/// drives to settlement leaves a document current for its journal, read off the
+/// files before any view, so `unwatched` excludes it — the documented happy path
+/// `onepipeline start --detach` returns on, with no observer relay beside the
+/// engine loop.
+#[test]
+fn a_detached_driver_that_settles_leaves_a_current_document_and_is_excluded() {
+    let world = World::new("unwatched-detached");
+    world.script("build.work", "the worker wrote this\n");
+    let run = "unwatcheddetached";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    // Detached, with the shipped default `--dag-graph off`: no observer, so the
+    // engine loop is the only writer of this run's journal.
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // The retained driver settles the run on its own. `result.json` is a direct
+    // file check rather than a view, so nothing refreshes the summary document
+    // between the driver writing it and this journey reading it — the engine loop
+    // wrote the document at its last append, before this file exists.
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let paths = paths_of(&world, run);
+    let left = document(&paths);
+    assert_eq!(left["graph_complete"], json!(true), "{left}");
+    assert_eq!(
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the detached driver left a document behind its journal at handback: {left}"
+    );
+
+    let asked = world.run(&["unwatched"]);
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a detached run its own driver settled was reported: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+}
+
+/// The **measured shape**, driven to settlement and handed back: a first driver
+/// with a real observer graph, killed mid-turn and recovered by a real `adopt`
+/// that settles the run under a fresh observer whose monitor turn is in flight
+/// (`observer.wait`) as the graph settles, over a lifecycle node publishing
+/// through the real `onevcs` seam. Answers the run's paths once the adopting
+/// driver has exited, with **no view having touched the run since**: what the
+/// document then holds is what the driver left.
+///
+/// The observer's held turn is released by the caller (`observer.go`), after
+/// whatever it asks with the run in this state.
+///
+/// **Unix**, and so are the two journeys over it, because the shape needs a
+/// first driver ended by pid for the adoption to recover from, and
+/// `harness::end_process` has no Windows spelling — the same terms
+/// `driver.rs`'s adoption journeys are gated on. What each proves off Unix is
+/// then deliberately absent rather than skipped: the attached driver's clause-2
+/// guarantee still runs everywhere, and the adopted one is its own journey here.
+#[cfg(unix)]
+fn settled_over_the_measured_shape(world: &World, run: &str) -> RunPaths {
+    world.write_graphs();
+    world.repository("local-direct", &[]);
+    world.script("observer.wait", "");
+    world.script("turn.hold", "hold");
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![crate::harness::lifecycle("service", &[])]),
+    );
+    // A detached first driver with a real observer, its worker turn held so the run
+    // keeps a driver to kill.
+    world
+        .run_on(
+            world.agentgraph_cmd(&[
+                "start",
+                &path,
+                "--detach",
+                "--dag-graph",
+                &world.dag_graph(),
+            ]),
+            "start adopted",
+        )
+        .exited(0);
+    world.until("the observer to record itself", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("the worker to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    // Kill the first driver, leaving the run for adoption.
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .expect("the launch record names a pid") as u32;
+    crate::harness::end_process(pid);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", run]).stdout.contains("DRIVER DEAD")
+    });
+    // Let the held turn go, then adopt attached: the adopting driver records the
+    // settlement and is the one whose closeout leaves the document.
+    world.release("turn.go");
+    world.release("turn.settle");
+    world
+        .agentgraph_cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts")
+        .wait_with_output()
+        .expect("the adopting driver exits at settlement");
+    paths_of(world, run)
+}
+
+/// The clause-2 guarantee for an **adopted** driver, over
+/// [`settled_over_the_measured_shape`] — and `#[cfg(unix)]` on that helper's terms.
+#[cfg(unix)]
+#[test]
+fn an_adopted_run_over_a_lifecycle_node_leaves_a_current_document_and_is_excluded() {
+    let world = World::new("unwatched-adopted");
+    let run = "unwatchedadopted";
+    let paths = settled_over_the_measured_shape(&world, run);
+
+    let left = document(&paths);
+    assert_eq!(left["graph_complete"], json!(true), "{left}");
+    assert_eq!(
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the adopted driver left a document behind its journal at handback: {left}"
+    );
+
+    let asked = world.run(&["unwatched"]);
+    world.release("observer.go");
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "an adopted run its own driver settled was reported: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+}
+
+/// The measured report, reproduced: a run the **previous release** drove to
+/// settlement is not reported by this one. Entry 68 records the measurement.
+///
+/// The fixture is what that run's driver left — a document current for its
+/// journal, recording `graph_complete: true`, at the schema this build has moved
+/// past — reached by driving [`settled_over_the_measured_shape`], putting the
+/// document where the previous release's writer leaves it, and asking the verb
+/// with no view between. The observer, the adoption and the lifecycle streams are
+/// driven because the measured run had them; none is necessary to reach the
+/// report. The verb refreshes the document and excludes the run, and what it
+/// leaves behind is this build's own document, current for the journal.
+///
+// llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a document
+// at a schema it has moved past, and none could: the writer stamps its own version. The
+// state is left by the previous release's driver — measured on the host, a 22-field
+// document at `schema_version: 1` beside a journal it is current for — and what is put
+// back is this build's own document with that one field moved, on the terms
+// `a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run` states.
+// Every claim afterwards is read off the compiled binary's own streams and the files.
+#[cfg(unix)]
+#[test]
+fn a_run_the_previous_release_settled_is_refreshed_and_excluded_rather_than_reported() {
+    let world = World::new("unwatched-previous-release");
+    let run = "unwatchedprevious";
+    let paths = settled_over_the_measured_shape(&world, run);
+
+    // What the driver left: current for its journal and recording settlement, which
+    // is what the previous release's driver left too. Established first, so that the
+    // report below cannot be the stale-document or still-recording case.
+    let left = document(&paths);
+    assert_eq!(left["graph_complete"], json!(true), "{left}");
+    assert_eq!(
+        (
+            left["journal_len"].as_u64(),
+            left["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the adopted driver left a document behind its journal at handback: {left}"
+    );
+    let mut previous = left.clone();
+    previous["schema_version"] = json!(SUMMARY_SCHEMA_VERSION - 1);
+    std::fs::write(paths.summary(), previous.to_string()).expect("the document");
+
+    let asked = world.run(&["unwatched"]);
+    world.release("observer.go");
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a run the previous release settled was written about: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+    // And the document is now this build's own, current for the journal: the
+    // question was answered from the run's record, and asking again reads nothing.
+    let refreshed = document(&paths);
+    assert_eq!(refreshed["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
+    assert_eq!(refreshed["graph_complete"], json!(true), "{refreshed}");
+    assert_eq!(
+        (
+            refreshed["journal_len"].as_u64(),
+            refreshed["journal_mtime_ms"].as_u64()
+        ),
+        stamp_of(&paths),
+        "the refreshed document is behind its journal: {refreshed}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]

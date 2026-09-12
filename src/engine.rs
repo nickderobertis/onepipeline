@@ -746,6 +746,14 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
             }
         }
     }
+    // The authoritative summary write on the detached path, whose only journal
+    // appender is this loop; the attached path's observer relay seals again after
+    // its own drain. See [`crate::summary::seal`].
+    // llmlint: ignore[changed_behavior_has_e2e] held by
+    // `summary::tests::the_seal_leaves_a_document_current_for_the_journal_as_it_stands`,
+    // which fails without the seal; no offline closeout leaves a document for this call
+    // to repair — `src/driver.rs` says why beside its own call.
+    crate::summary::seal(paths);
     Ok(outcome)
 }
 
