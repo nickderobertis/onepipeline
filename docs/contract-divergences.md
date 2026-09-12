@@ -4621,7 +4621,161 @@ refusals; and — over four hundred run roots holding a gibibyte of journals, an
 then ten — the bound this verb has to meet to be asked at the end of every turn,
 with the kernel asked what the process opened.
 
-## 69. A note a dispatch read is destroyed by a re-dispatch nobody issued, and the record cannot say who was shown it — OPEN
+## 69. A change request the worker opened as a draft was published beside, never finished — OPEN
+
+**Proposal (for the planner who owns the contract): state the closeout in
+order — steps, then the session's own change request read, then the drafting
+dispatch, then the description written onto a change request the session
+already holds, then one publication that lifts and lands — and with it the
+composed drafting task's sections, the `draft` node field, and the two
+environment names every dispatch carries.**
+
+The approved contract's pr-author paragraph said the drafting dispatch runs
+"before the change request is opened", and the code took that literally: the
+drafter saw the task and the diff, its body was handed to `publish`, and a
+publication that *adopted* a change request the branch already had — a draft the
+worker opened with `onevcs publish --draft`, or the change request an earlier
+attempt of the node opened — wrote that body nowhere, because `onevcs` writes a
+body only where it opens the change request. Nothing could edit one afterwards,
+and a second plan node could not be used because the first's description was
+already written by the time the second ran. The concrete case is a change whose
+right proof is a demonstration change request stacked on it — the comment a
+workflow posts, linked from the description — which only the worker knows to
+make and only after the change exists. The first attempt at that change was
+landed by hand with a `## Why` that read "the branch's commit message does not
+state the broader motivation", which is what a drafter with no evidence produces.
+
+**The closeout, in order.** The rule is about the **branch** and not about who
+opened the change request: wherever `onevcs::session_change` answers an open
+change request from the session's branch into its base at closeout, the closeout
+takes this path, and a session with none takes the path it always took.
+
+1. The steps run and settle exactly as before. Nothing moves before verification.
+2. The session's own change request is read — `onevcs change show`, never an
+   open — before anything is drafted. A host that could not be asked has not
+   said the session holds nothing: that is said on standard error and the
+   closeout publishes as it always has.
+3. The drafting dispatch runs when the launch named a `--pr-author-graph` and the
+   node carries no `body`, in the node's own worktree, with the composed task
+   below.
+4. Where it drafted a body and the session holds a change request, the body is
+   written onto that change request — `onevcs change describe`, under the
+   node's own `title` on every write, so the change request carries the plan's
+   subject whatever the worker opened it under — and `change-described` reaches
+   the run's journal through the session follow. Where it drafted none,
+   `body-not-drafted` is recorded exactly as before and the description stays
+   as the worker left it. A write the host refused is said on the settlement
+   beside the publication's own words, as a drafting failure is.
+5. One publication — `onevcs publish` with no body where the session holds the
+   change request, and with the drafted body where it opens one — under the
+   release reason `release::draft_reason` composes, or `DraftReason::Held`
+   where the node says `draft: true`, or none. With none, the adopted draft is
+   lifted (`draft-lifted`) and the change lands under the resolved policy; the
+   node settles on the publication's own words — `merged`, `queued`,
+   `change-open`, or a named failure — with the same routing and retry budget
+   every publication has. Its settlement detail says, in one sentence, that the
+   worker opened the change request as a draft — or that an earlier publication
+   of the branch left it as one, or open, which the session's own stream tells
+   apart: a worker's draft records `change-drafted` there before the closeout —
+   that the closeout wrote the drafted description onto it, and that it was
+   marked ready for review — or left as a draft — which is what tells such a
+   node from one that published afresh in `results` and `status`; the outcome
+   word is deliberately the same.
+
+**The composed drafting task.** One composition, sections in this order, every
+heading a `##` so it sits beside the headings the rendered task already carries:
+the opening sentence, byte for byte what it has always been; the node's rendered
+task; a `## Change request` section **only where the session holds one** — the
+URL, one line saying whether the worker holds it as a draft, and the description
+verbatim under `### Description as the worker left it`, or one line saying the
+worker left none; and, **always**, a `## Worker transcript` section naming
+`onepipeline transcript <RUN> <NODE>` with this run's and this node's ids, saying
+it renders every tool call the worker made and what each returned, that
+`ONEPIPELINE_RUN_ID` and `ONEPIPELINE_RUNS_DIR` in the dispatch's environment are
+what that command reads, and that the drafter may read it to find evidence the
+worker produced. The literals are each a constant on a line of its own beside
+`DRAFTING_TASK`, because the consumer host reads them out of this binary to hold
+its out-of-band drafter to the same prompt.
+
+**The `draft` node field.** `draft: bool` on a lifecycle node — `onepipeline.draft`
+in a task's metadata — default `false`, omitted when false: the change request
+this node publishes is left as a draft at closeout for a person to lift, opened
+as one where the session holds none and held as one where the worker opened it.
+The node settles `done` with outcome `change-draft` and no landing, and its
+dependents proceed; it is **not** `complete-but-draft`, because nothing in the
+run will ever lift it — that status is for a draft a release arrives to lift, and
+it holds the run. Where the node also awaits a release, the release reason wins
+and the node settles `complete-but-draft` as before. Refused by the loader,
+before anything dispatches, on a node whose resolved publication opens no change
+request, in the shape `consumes` is refused on a `local-direct` identity.
+Reserved in the schema's metadata-key list and readable at every schema version
+this build reads, refused by its own name below the version that adds it,
+exactly as `body` is.
+
+**The dispatch environment.** Every dispatch of a lifecycle node's agent steps,
+first and later, and its drafting dispatch, carries `ONEVCS_SESSION` naming the
+session token whose worktree the dispatch runs in — the executor that opened the
+session is what remembers which one, since `WorkspaceSpec::Path` is a directory
+and the contract fixes it as one — and a direct node's dispatch carries none.
+Every dispatch of every node carries `ONEPIPELINE_RUNS_DIR`, the absolute runs
+root this run reads and writes, beside `ONEPIPELINE_RUN_ID`; the observer graph
+already got both.
+
+**One consequence stated rather than hidden.** A retry that continues a
+preserved branch whose earlier attempt opened a change request reaches the new
+path too: its closeout now rewrites the description from the final tree, where
+before the re-drafted body was silently ignored for an adopted change request.
+That is the description following the diff, and it is intended; the drafter sees
+the previous description in its task and keeps what is still true.
+
+**The block below is the source.** `tests/contract.rs` parses it out of this
+file and holds the field to the plan schema and the contract's own key list, and
+`src/lifecycle.rs` holds the section literals and the environment names to the
+constants this build composes with.
+
+```json
+{
+  "node_fields": ["draft"],
+  "environment": ["ONEVCS_SESSION", "ONEPIPELINE_RUNS_DIR"],
+  "drafting_task": {
+    "opening": "Read this branch's diff and write the change request's body, following the repository's own template. The task this branch delivered:",
+    "change_request_heading": "## Change request",
+    "held_as_draft_line": "Held as a draft by the worker:",
+    "description_heading": "### Description as the worker left it",
+    "no_description": "(the worker left no description)",
+    "worker_transcript_heading": "## Worker transcript"
+  }
+}
+```
+
+Driven end to end, against the real linked `onevcs` over a doubled `gh`, by
+`lifecycle::the_closeout_finishes_a_change_request_the_worker_opened_as_a_draft`
+— one change request and never a second, the description and title the host
+carries afterwards, the lift, the composed task's sections in order, the three
+session records in the journal, and the settlement's word and detail; by
+`lifecycle::a_node_declared_draft_leaves_its_change_request_as_a_draft_and_settles_done`,
+both ways a draft comes to be left, with a dependent that runs; by
+`adoption::a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_merges_it`,
+where the release reason wins over the field; by
+`lifecycle::a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description`,
+the stated consequence; by
+`lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement`,
+the one refusal between the draft and the publication; by
+`adoption::a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_draft`,
+a draft an earlier publication left, named as such; by
+`lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change`
+and
+`lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change`,
+a settlement without a publication naming where the work is; by
+`lifecycle::every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_runs_root`,
+the environment read out of each dispatch's own turn record and the transcript
+verb run on those two variables alone from elsewhere; by
+`destination::a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch`
+and the `earlydraft` case of `plan::`'s refusals, the loader; and by
+`store::a_project_reads_as_the_plan_document_of_the_same_content`, the metadata
+round-trip.
+
+## 70. A note a dispatch read is destroyed by a re-dispatch nobody issued, and the record cannot say who was shown it — OPEN
 
 **Proposal (for the planner who owns the contract): compose an engine-initiated
 re-dispatch of a node — the continuation on a preserved branch the

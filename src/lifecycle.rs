@@ -351,10 +351,22 @@ fn attempt_once(
             // The node is settling on this, so the branch it settles on is read
             // against its own criteria before the session that holds it goes.
             check_criteria(node, worktree.as_deref(), tx);
+            // Where a human reads the change request the worker opened, on a node
+            // that settles without publishing — a task that failed, a dispatch
+            // that was cancelled or died — so `results` shows where the work is.
+            // The engine names it where the dispatch handed a session back; a
+            // later step's dispatch runs in a worktree and hands back none, so
+            // the session this node holds is asked here.
+            let change_url = drained
+                .settlement
+                .change_url
+                .clone()
+                .or_else(|| session.as_ref().and_then(crate::vcs::change_opened_in));
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
             return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
+                change_url,
                 ..drained.settlement
             });
         }
@@ -427,7 +439,10 @@ fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<M
     }
 }
 
-/// Draft the change request's body, then publish through `onevcs`.
+/// Draft the change request's body, write it onto the change request the
+/// session already holds, and publish through `onevcs`.
+///
+/// The order is divergence entry 69's, and the steps below run in it.
 #[allow(
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, the run's paths, what its \
@@ -463,13 +478,48 @@ fn publish(
     {
         return level_branch_settlement(node, &level, branch);
     }
+    // A level branch is answered above before the host is asked anything, because
+    // there is nothing to publish whatever the session holds: a change request the
+    // worker opened from a branch that never diverged carries no diff for this
+    // closeout to describe, and it is left exactly as the worker left it.
+    // Asked next, because the answer decides which closeout this is. The rule
+    // is about the **branch**: any change request open from the session's branch
+    // into its base is finished here, whether the worker opened it as a draft or
+    // an earlier attempt of this node opened it and this attempt is continuing.
+    //
+    // A host that could not be asked has not said the session holds nothing, so
+    // that is said out loud rather than read as `None`: the publication below
+    // asks the same host again and settles on its own words.
+    let held = match crate::vcs::session_change(token) {
+        Ok(held) => held,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: node '{}': onevcs could not say whether session {} holds a change \
+                 request, so the closeout publishes as it always has: {error}",
+                node.id, token.0
+            );
+            None
+        }
+    };
+    // Whether it was this session's worker that drafted it, read before this
+    // closeout writes anything of its own onto the same stream.
+    let worker_drafted = held.is_some() && crate::vcs::change_drafted_in(token);
     // The plan's own body wins outright and spends no dispatch: a planner who
     // wrote the change request has already done the drafting.
     let (body, undrafted) = match node.body.clone() {
         Some(body) => (Some(body), None),
         // `None` is a launch that named no drafting graph, which drafts nothing
         // and is not a failure: this crate ships the flag, not the document.
-        None => match drafted(executor, paths, launch, node, worktree, cancel, tx) {
+        None => match drafted(
+            executor,
+            paths,
+            launch,
+            node,
+            worktree,
+            held.as_ref(),
+            cancel,
+            tx,
+        ) {
             None => (None, None),
             Some(Drafted::Body(body)) => (Some(body), None),
             Some(Drafted::Undrafted(ending)) => (None, Some(ending)),
@@ -495,11 +545,40 @@ fn publish(
         })));
         why
     });
+    // Written **onto** the change request the session holds, under the node's
+    // own title, before the publication adopts it: a body handed to `publish` is
+    // written only where the publication opens the change request, which here
+    // it never does. `true` is a description the host now carries. A write the
+    // host refused leaves the description as the worker left it, and the
+    // settlement says so beside the publication's own words, exactly as a
+    // drafting failure is said — the body exists, and the reader is owed the
+    // reason it is not on the change request.
+    let (described, undescribed) = match (&held, &body) {
+        (Some(change), Some(body)) => {
+            match crate::vcs::describe_change(token, node.title.as_deref(), body) {
+                Ok(_) => (true, None),
+                Err(error) => {
+                    let why = format!(
+                        "the drafted description was not written onto {}: {error}",
+                        change.url
+                    );
+                    eprintln!("onepipeline: node '{}': {why}", node.id);
+                    (false, Some(why))
+                }
+            }
+        }
+        _ => (false, None),
+    };
+    // One aside beside a publication's own words, and **not** only an undrafted
+    // body: a body that was not drafted, or one that was drafted and could not
+    // be written onto the change request. Never both — the second needs a body
+    // the first says there is none of.
+    let body_aside = undrafted.or(undescribed);
     // Through the one composition, so every place a publication's own words and
-    // a drafting failure are put together agrees about the order and the
-    // punctuation — including the failure paths below, which compose the same
-    // two values from a different function.
-    let with_undrafted = |detail: String| compose(&detail, undrafted.as_deref());
+    // this aside are put together agrees about the order and the punctuation —
+    // including the failure paths below, which compose the same two values from
+    // a different function.
+    let with_aside = |detail: String| compose(&detail, body_aside.as_deref());
     // The residual: a publication this crate can say nothing more about than
     // that it failed. Every failure `onevcs` names a kind for goes through
     // `failed_publication` below instead, which is where the word and the routing
@@ -507,7 +586,7 @@ fn publish(
     let publication_failed = |detail: String| {
         Attempt::settled(Settlement {
             branch: branch.clone(),
-            detail: Some(with_undrafted(detail)),
+            detail: Some(with_aside(detail)),
             ..Settlement::plain(
                 &node.id,
                 NodeStatus::Failed,
@@ -520,10 +599,21 @@ fn publish(
     // moment it decides anything. A node with no reference block — every node that
     // is not fast-adoption, and every fast one whose dependencies land where it
     // does — has nothing to ask about and gets `None`, which is the publication
-    // this crate has always made.
-    let draft = crate::release::draft_reason(references);
+    // this crate has always made. The release reason wins over the plan's own
+    // `draft`: a draft a release will lift holds the run, and one the plan asked
+    // for holds nothing, so where both apply the node settles on the first.
+    let draft = crate::release::draft_reason(references)
+        .or_else(|| node.draft.then(|| crate::release::held_reason(&node.id)));
+    // No body where the session already holds the change request: the
+    // description was written above, and a publication writes a body only where
+    // it opens the change request.
+    let opening_body = if held.is_some() {
+        None
+    } else {
+        body.as_deref()
+    };
     let publication =
-        publish_rereading_the_merge_path(node, token, body.as_deref(), draft.as_ref(), cancel);
+        publish_rereading_the_merge_path(node, token, opening_body, draft.as_ref(), cancel);
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
@@ -550,7 +640,7 @@ fn publish(
                         branch.or_else(|| Some(published.branch.clone())),
                         reason,
                         publication.reads,
-                        undrafted.clone(),
+                        body_aside.clone(),
                     );
                 }
                 return failed_publication(
@@ -560,7 +650,7 @@ fn publish(
                     *kind,
                     reason,
                     retained.as_ref(),
-                    undrafted.clone(),
+                    body_aside.clone(),
                 );
             }
             let labels =
@@ -595,16 +685,27 @@ fn publish(
             // settlement is read back on. It leads whatever else the settlement
             // had to say for the reason a publication's own reason leads a
             // drafting failure: this is what the node settled as.
-            let drafted = matches!(published.outcome, onevcs::PublishOutcome::ChangeDraft(_))
+            let left_as_draft = matches!(published.outcome, onevcs::PublishOutcome::ChangeDraft(_));
+            let drafted = left_as_draft
                 .then(|| draft.as_ref().map(crate::release::drafted_detail))
                 .flatten();
+            // And a change request the session already held says what the
+            // closeout did to it — the one sentence that tells such a node from
+            // one that published afresh, since the outcome word is deliberately
+            // the same.
+            let finished = held
+                .as_ref()
+                .map(|change| finished_detail(change, worker_drafted, described, left_as_draft));
+            let detail: Vec<String> = [drafted, finished, compared]
+                .into_iter()
+                .flatten()
+                .collect();
             Attempt::settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
-                detail: drafted
-                    .or(compared)
-                    .map(&with_undrafted)
-                    .or_else(|| undrafted.clone()),
+                detail: (!detail.is_empty())
+                    .then(|| with_aside(detail.join(". ")))
+                    .or_else(|| body_aside.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -629,7 +730,11 @@ fn publish(
                 // cannot land and the run would report finished with the git pin
                 // it launched against sitting in an open change — which is the
                 // one ending fast adoption must not have.
-                ..Settlement::plain(&node.id, drafted_status(&published.outcome), None)
+                ..Settlement::plain(
+                    &node.id,
+                    drafted_status(&published.outcome, draft.as_ref()),
+                    None,
+                )
             })
         }
         // llmlint: ignore[changed_behavior_has_e2e] this arm is `onevcs` refusing the
@@ -710,12 +815,56 @@ fn level_branch_settlement(
 /// Read off what the publication **answered** rather than off the reason that was
 /// asked for, because the two can differ: a host that would not draft the change
 /// is a change that can land, and reporting it as held back would leave a landable
-/// pin reported as safe.
-fn drafted_status(outcome: &onevcs::PublishOutcome) -> NodeStatus {
-    match outcome {
-        onevcs::PublishOutcome::ChangeDraft(_) => NodeStatus::CompleteDraft,
+/// pin reported as safe. The reason decides only *which* draft a drafted change
+/// is: one a release will arrive to lift holds the run, and one the plan asked
+/// to leave for a person holds nothing — nothing in the run will ever lift it,
+/// so the node is `done` and its dependents proceed.
+fn drafted_status(
+    outcome: &onevcs::PublishOutcome,
+    reason: Option<&onevcs::DraftReason>,
+) -> NodeStatus {
+    match (outcome, reason) {
+        (
+            onevcs::PublishOutcome::ChangeDraft(_),
+            Some(onevcs::DraftReason::AwaitingRelease { .. }),
+        ) => NodeStatus::CompleteDraft,
         _ => NodeStatus::Done,
     }
+}
+
+/// What the closeout did to a change request the session already held, in the
+/// one sentence a settlement carries about it.
+///
+/// Three facts and no more, each read off what happened rather than off what was
+/// asked: who opened it — this session's worker, as a draft; an earlier
+/// publication of this same branch that left it as one; or one that left it
+/// open — whether the drafted description reached it, and whether it was marked
+/// ready for review or left as the draft the plan asked for. Written once so
+/// `results` and `status` read the same words.
+fn finished_detail(
+    change: &onevcs::SessionChange,
+    worker_drafted: bool,
+    described: bool,
+    left_as_draft: bool,
+) -> String {
+    let opened = match (change.draft, worker_drafted) {
+        (true, true) => "the worker opened the change request as a draft",
+        (true, false) => "an earlier publication of this branch left the change request as a draft",
+        (false, _) => {
+            "the change request was already open from an earlier publication of this branch"
+        }
+    };
+    let description = if described {
+        "the closeout wrote the drafted description onto it"
+    } else {
+        "the closeout left the description as the worker left it"
+    };
+    let lifted = match (change.draft, left_as_draft) {
+        (true, false) => " and marked it ready for review",
+        (true, true) => " and left it as a draft",
+        (false, _) => "",
+    };
+    format!("{opened}; {description}{lifted}")
 }
 
 /// One publication, and how many reads of the merge path it took to answer.
@@ -820,7 +969,7 @@ fn unread_merge_path(
     branch: Option<String>,
     reason: &str,
     reads: std::num::NonZeroU32,
-    undrafted: Option<String>,
+    body_aside: Option<String>,
 ) -> Attempt {
     let how_many = format!(
         "the merge path was read {reads} time{} and never answered",
@@ -831,7 +980,7 @@ fn unread_merge_path(
         head: crate::vcs::branch_head_in(token),
         detail: Some(compose(
             &format!("onevcs: {reason}. {how_many}"),
-            undrafted.as_deref(),
+            body_aside.as_deref(),
         )),
         ..Settlement::plain(node, NodeStatus::Failed, Some(crate::vcs::Failure::UNREAD))
     })
@@ -872,10 +1021,11 @@ struct Preserved {
     /// read back a line at a time.
     reason: String,
     evidence: Vec<crate::vcs::Evidence>,
-    /// A drafting ending this attempt also had, carried so that the settlement
-    /// a spent budget writes says it exactly as one that settled straight away
-    /// does.
-    undrafted: Option<String>,
+    /// What this attempt has to say about the change request's body beside the
+    /// publication's own words — that none was drafted, or that one was and the
+    /// host refused to write it — carried so that the settlement a spent budget
+    /// writes says it exactly as one that settled straight away does.
+    body_aside: Option<String>,
     /// Where the session left this branch, which is the tip that was published.
     ///
     /// Read off `onevcs`'s own record of the session — the library that made the
@@ -914,14 +1064,14 @@ fn failed_publication(
     kind: onevcs::FailureKind,
     reason: &str,
     retained: Option<&onevcs::Retention>,
-    undrafted: Option<String>,
+    body_aside: Option<String>,
 ) -> Attempt {
     let failure = crate::vcs::failure_of(kind);
     let handed_back = matches!(retained, Some(onevcs::Retention::HandedBack(_)));
     let settled = || {
         Attempt::settled(Settlement {
             branch: branch.clone(),
-            detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
+            detail: Some(compose(&format!("onevcs: {reason}"), body_aside.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         })
     };
@@ -947,7 +1097,7 @@ fn failed_publication(
                 outcome,
                 reason: engine::bounded(&crate::views::one_line(reason)),
                 evidence: crate::vcs::evidence_in(token),
-                undrafted,
+                body_aside,
                 tip: crate::vcs::session_tip(token),
             }))
         }
@@ -955,12 +1105,13 @@ fn failed_publication(
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
-/// A publication's own words and a drafting ending, in that order.
+/// A publication's own words and what is to be said about the body, in that
+/// order.
 ///
 /// Written once because three settlements compose the pair, and three spellings
 /// of it would come to disagree about the order or the punctuation.
-fn compose(detail: &str, undrafted: Option<&str>) -> String {
-    match undrafted {
+fn compose(detail: &str, body_aside: Option<&str>) -> String {
+    match body_aside {
         Some(why) => format!("{detail}. {why}"),
         None => detail.to_owned(),
     }
@@ -1029,7 +1180,7 @@ fn republished_the_same_commit(
         head: Some(head.to_owned()),
         detail: Some(compose(
             &format!("onevcs: {}. {roll_up}", preserved.reason),
-            preserved.undrafted.as_deref(),
+            preserved.body_aside.as_deref(),
         )),
         ..Settlement::plain(
             node,
@@ -1069,7 +1220,7 @@ fn stopped_retrying(
         branch: Some(preserved.branch.clone()),
         detail: Some(compose(
             &format!("onevcs: {}. {roll_up}", preserved.reason),
-            preserved.undrafted.as_deref(),
+            preserved.body_aside.as_deref(),
         )),
         // **No step** is recorded as completed, and that is the same rule the
         // re-dispatch was made under seen from the other end. The branch carries
@@ -1163,8 +1314,71 @@ fn diagnosis(
 }
 
 /// The task a drafting dispatch is given, ahead of the node's own.
+///
+/// Byte for byte what it has always been: the consumer host reads it out of this
+/// binary to hold its own out-of-band drafter to the same prompt, and so does it
+/// read each of the four literals below, which is why every one of them is a
+/// constant on a line of its own rather than a piece of a format string.
 const DRAFTING_TASK: &str = "Read this branch's diff and write the change request's body, \
      following the repository's own template. The task this branch delivered:";
+
+/// The heading under which a drafting dispatch is shown the change request its
+/// session already holds. Only there: a session holding none gets no section.
+const CHANGE_REQUEST_HEADING: &str = "## Change request";
+
+/// The line under that heading saying whether the worker is holding the change
+/// request as a draft, followed by `yes` or `no`.
+const HELD_AS_DRAFT_LINE: &str = "Held as a draft by the worker:";
+
+/// The heading under which the change request's description is shown to the
+/// drafter as the worker left it, verbatim — or [`NO_DESCRIPTION`].
+const DESCRIPTION_HEADING: &str = "### Description as the worker left it";
+
+const NO_DESCRIPTION: &str = "(the worker left no description)";
+
+/// The heading every drafting dispatch is told how to read the worker's
+/// transcript under: the verb, with this run's and this node's ids substituted,
+/// and the two environment variables that verb reads.
+const WORKER_TRANSCRIPT_HEADING: &str = "## Worker transcript";
+
+/// The whole task one drafting dispatch is given.
+///
+/// One composition, in a fixed order, every heading a `##` so it sits beside the
+/// headings the rendered task already carries: the opening sentence, the node's
+/// task as every drafting dispatch already gets it, the change request the
+/// session holds — only where it holds one — and how to read the worker's
+/// transcript. The last is always there, because what evidence the worker
+/// produced, and when, is the worker's to decide and the drafter's to find: a
+/// demonstration change request it opened, a comment a bot posted, a check it
+/// triggered.
+fn drafting_task(node: &Node, run: &str, held: Option<&onevcs::SessionChange>) -> String {
+    let mut task = format!("{DRAFTING_TASK}\n\n{}", node.rendered_task());
+    if let Some(change) = held {
+        let description = if change.body.trim().is_empty() {
+            NO_DESCRIPTION
+        } else {
+            change.body.as_str()
+        };
+        task.push_str(&format!(
+            "\n\n{CHANGE_REQUEST_HEADING}\n{url}\n{HELD_AS_DRAFT_LINE} {held}\n\n\
+             {DESCRIPTION_HEADING}\n{description}",
+            url = change.url,
+            held = if change.draft { "yes" } else { "no" },
+        ));
+    }
+    task.push_str(&format!(
+        "\n\n{WORKER_TRANSCRIPT_HEADING}\n\
+         `onepipeline transcript {run} {node}` renders every tool call the worker made on this \
+         branch and what each returned; `{run_env}` and `{runs_dir_env}` in this dispatch's \
+         environment are what that command reads. Read it to find evidence the worker \
+         produced that belongs in the description — a demonstration change request it opened, \
+         a comment a bot posted, a check it triggered.",
+        node = node.id,
+        run_env = crate::agentgraph::RUN_ID_ENV,
+        runs_dir_env = crate::agentgraph::RUNS_DIR_ENV,
+    ));
+    task
+}
 
 /// What one drafting dispatch ended as.
 ///
@@ -1258,7 +1472,8 @@ impl Undrafted {
     clippy::too_many_arguments,
     reason = "the draft is a dispatch inside one lifecycle execution and needs that \
               execution's executor, the run's own paths, what its launch decided, the node, \
-              the workspace, cancellation, and the event stream"
+              the workspace, the change request the session holds, cancellation, and the \
+              event stream"
 )]
 fn drafted(
     executor: &dyn Executor,
@@ -1266,6 +1481,7 @@ fn drafted(
     launch: &Launch,
     node: &Node,
     worktree: Option<&std::path::Path>,
+    held: Option<&onevcs::SessionChange>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Option<Drafted> {
@@ -1284,7 +1500,7 @@ fn drafted(
     };
     let dispatch = executor.dispatch(DispatchRequest {
         graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-        task: format!("{DRAFTING_TASK}\n\n{}", node.rendered_task()),
+        task: drafting_task(node, &paths.run, held),
         labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
         // None of the node's own: the drafting dispatch is not the node's work,
         // and a turn budget written for that work would be spent twice — once on
@@ -1861,6 +2077,118 @@ mod tests {
             .collect::<Vec<&'static str>>(),
             "the README's endings are not the ones this module emits"
         );
+    }
+
+    /// The literals the drafting task is composed from, and the environment
+    /// names every dispatch carries, are exactly what divergence entry 69 names.
+    ///
+    /// Private vocabulary, so `tests/contract.rs` cannot reach it and the entry
+    /// is the only place it is written down beside the code — and the consumer
+    /// host reads each literal out of this binary to hold its own drafter to the
+    /// same prompt, so one reworded here without the record moving is a prompt
+    /// two hosts no longer share. Held both ways: the entry's words are the
+    /// constants, and the composed task carries each of them where the entry
+    /// says it does.
+    #[test]
+    fn the_drafting_task_and_the_dispatch_environment_are_what_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("69."))
+            .expect("the record still carries entry 69");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 69 carries the json block this test drives");
+
+        let task = &block["drafting_task"];
+        for (key, constant) in [
+            ("opening", DRAFTING_TASK),
+            ("change_request_heading", CHANGE_REQUEST_HEADING),
+            ("held_as_draft_line", HELD_AS_DRAFT_LINE),
+            ("description_heading", DESCRIPTION_HEADING),
+            ("no_description", NO_DESCRIPTION),
+            ("worker_transcript_heading", WORKER_TRANSCRIPT_HEADING),
+        ] {
+            assert_eq!(
+                task[key].as_str(),
+                Some(constant),
+                "entry 69's `{key}` is not the literal this build composes with"
+            );
+        }
+        let environment: Vec<String> =
+            serde_json::from_value(block["environment"].clone()).expect("entry 69 names the names");
+        assert_eq!(
+            environment,
+            vec![
+                crate::agentgraph::SESSION_ENV.to_string(),
+                crate::agentgraph::RUNS_DIR_ENV.to_string()
+            ],
+            "entry 69 names environment variables this build does not compose"
+        );
+
+        // And the composition itself, in the order the entry states: a session
+        // holding a change request gets every section, and one holding none
+        // gets the opening, the task, and the transcript alone.
+        let node = lifecycle(None);
+        let held = onevcs::SessionChange {
+            url: onevcs::Url::parse("https://github.com/owner/service/pull/7").expect("a url"),
+            id: onevcs::ChangeId("7".to_owned()),
+            base: "main".to_owned(),
+            draft: true,
+            title: "wip: the worker's".to_owned(),
+            body: String::new(),
+        };
+        let with = drafting_task(&node, "run-1", Some(&held));
+        let without = drafting_task(&node, "run-1", None);
+        assert!(with.starts_with(DRAFTING_TASK) && without.starts_with(DRAFTING_TASK));
+        let positions: Vec<usize> = [
+            DRAFTING_TASK,
+            CHANGE_REQUEST_HEADING,
+            HELD_AS_DRAFT_LINE,
+            DESCRIPTION_HEADING,
+            NO_DESCRIPTION,
+            WORKER_TRANSCRIPT_HEADING,
+        ]
+        .iter()
+        .map(|literal| {
+            with.find(literal)
+                .unwrap_or_else(|| panic!("the composed task lacks {literal:?}:\n{with}"))
+        })
+        .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "the sections are out of order:\n{with}"
+        );
+        assert!(with.contains(&format!(
+            "{CHANGE_REQUEST_HEADING}\n{}\n{HELD_AS_DRAFT_LINE} yes",
+            held.url
+        )));
+        assert!(with.contains("`onepipeline transcript run-1 service`"));
+        assert!(
+            !without.contains(CHANGE_REQUEST_HEADING)
+                && without.contains(WORKER_TRANSCRIPT_HEADING),
+            "a session holding no change request was shown one:\n{without}"
+        );
+        // The described body goes in verbatim, and a worker that left one is not
+        // told it left none.
+        let described = drafting_task(
+            &node,
+            "run-1",
+            Some(&onevcs::SessionChange {
+                body: "## What\nHalf written.".to_owned(),
+                draft: false,
+                ..held
+            }),
+        );
+        assert!(described.contains(&format!("{DESCRIPTION_HEADING}\n## What\nHalf written.")));
+        assert!(described.contains(&format!("{HELD_AS_DRAFT_LINE} no")));
+        assert!(!described.contains(NO_DESCRIPTION));
     }
 
     /// A branch level with its base settles on whether this dispatch wrote a

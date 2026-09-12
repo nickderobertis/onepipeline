@@ -1158,8 +1158,23 @@ pub fn append_line_healed(path: &Path, line: &str) -> Result<u64> {
 /// fragment and then failed on a disk that is still full has still discarded the
 /// fragment.
 fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>) {
-    use std::io::{Seek, SeekFrom, Write};
+    let (torn, opened) = open_healed(path);
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(e) => return (torn, Err(e)),
+    };
+    let appended = write_record(path, &mut file, line);
+    (torn, appended)
+}
 
+/// Open an append-only file as its only appender, healed of any fragment a dead
+/// writer left: what was healed, and the handle.
+///
+/// Two answers rather than one, because a heal and a failed open happen on the
+/// same call and the loss must be reported either way — an open that healed a
+/// fragment and then could not read the file's own tail has still discarded the
+/// fragment.
+fn open_healed(path: &Path) -> (Option<TornTail>, Result<fs::File>) {
     let ledger = |e: io::Error| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
@@ -1173,24 +1188,32 @@ fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>)
         Ok(file) => file,
         Err(e) => return (None, Err(ledger(e))),
     };
-    let torn = match heal_tail(&mut file) {
-        Ok(torn) => torn,
-        Err(e) => return (None, Err(ledger(e))),
+    match heal_tail(&mut file) {
+        Ok(torn) => (torn, Ok(file)),
+        Err(e) => (None, Err(ledger(e))),
+    }
+}
+
+/// Write one record at the end of a healed, locked handle, or leave the file on
+/// the boundary the write started on.
+fn write_record(path: &Path, file: &mut fs::File, line: &str) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let ledger = |e: io::Error| Error::Ledger {
+        path: path.to_path_buf(),
+        source: e,
     };
     // To the end explicitly rather than on the strength of the open mode: one of
     // the two platforms hands back a plain write handle, because an append-only
     // one cannot be truncated and truncating is half of what happens above. The
     // answer is the boundary this append starts on, which is what a failure
     // restores.
-    let boundary = match file.seek(SeekFrom::End(0)) {
-        Ok(length) => length,
-        Err(e) => return (torn, Err(ledger(e))),
-    };
+    let boundary = file.seek(SeekFrom::End(0)).map_err(ledger)?;
     let written = file
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|()| file.flush());
     match written {
-        Ok(()) => (torn, Ok(())),
+        Ok(()) => Ok(()),
         Err(e) => {
             // Whatever of the record reached the file goes back off it. A
             // failure to undo leaves the original failure as the one reported:
@@ -1202,8 +1225,78 @@ fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>)
             let _ = file.set_len(boundary);
             // llmlint: ignore-end[changed_behavior_has_e2e]
             // llmlint: ignore-end[no_panics_on_recoverable_errors]
-            (torn, Err(ledger(e)))
+            Err(ledger(e))
         }
+    }
+}
+
+/// An append-only file held open as its **only** appender, for the one caller
+/// that derives what it appends from what the file already holds.
+///
+/// [`append_line`] takes the lock, appends, and lets go; a record whose content
+/// depends on the records before it — an id allocated as the next one the file
+/// has not used — cannot be derived outside that lock without two writers
+/// deriving the same one. So this holds the lock open across the read and the
+/// append, healed exactly as `append_line` heals: the file ends on a record
+/// boundary from the moment it is opened until the handle is dropped, and
+/// nothing else appends in between. Every write goes through the same
+/// [`write_record`] as every other append, roll-back included.
+///
+/// The lock is released when the value is dropped, so a holder that dies
+/// releases it too.
+pub(crate) struct Appender {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl Appender {
+    /// Take the file's append lock and heal its tail, reporting what was healed
+    /// exactly as [`append_line`] does.
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        let (healed, opened) = open_healed(path);
+        if let Some(torn) = &healed {
+            report_torn_tail(path, torn);
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: opened?,
+        })
+    }
+
+    /// The file's length, which under this lock is the boundary the next
+    /// append starts on.
+    pub(crate) fn len(&self) -> Result<u64> {
+        self.file
+            .metadata()
+            .map(|metadata| metadata.len())
+            .map_err(|e| Error::Ledger {
+                path: self.path.clone(),
+                source: e,
+            })
+    }
+
+    /// Every record the file holds from its first `from` bytes, read through
+    /// this handle. `from` must be a record boundary, as [`read_records_from`]
+    /// requires; the file cannot change under this lock, so the answer is exactly
+    /// what it holds.
+    pub(crate) fn records_from(&mut self, from: u64) -> Result<Vec<Record>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let ledger = |e: io::Error| Error::Ledger {
+            path: self.path.clone(),
+            source: e,
+        };
+        self.file.seek(SeekFrom::Start(from)).map_err(ledger)?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes).map_err(ledger)?;
+        counted(bytes.len(), ());
+        Ok(records_of(&bytes, from))
+    }
+
+    /// Append one record, leaving the file on the boundary it started on when
+    /// the write fails.
+    pub(crate) fn append(&mut self, line: &str) -> Result<()> {
+        write_record(&self.path, &mut self.file, line)
     }
 }
 

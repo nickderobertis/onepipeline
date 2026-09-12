@@ -645,6 +645,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         publish_session(args, &title);
     }
 
+    // A worker that opens its session's change request as a **draft** while its
+    // work is still being made — the shape `onevcs publish --draft` exists for —
+    // and, scripted beside it, starts the description. Scripted here for the
+    // reason `<key>.publishes` is: it is the agent's behaviour, and the closeout
+    // under test is what finishes the change request such a worker leaves.
+    // `<key>.drafts` is the title; `<key>.drafts-body`, where present, the body.
+    // The **worker's** behaviour and nobody else's: the drafting dispatch runs
+    // under the same node key, and a drafter that published would be the
+    // closeout under test doing its own work twice.
+    if persona.as_deref() != Some("pr-author") {
+        if let Some(title) = fake::node_script(dir, &key, "drafts") {
+            draft_session(args, &title, fake::node_script(dir, &key, "drafts-body"));
+        }
+    }
+
     // Every candidate this dispatch's identity chains stepped past, published
     // one per candidate exactly as the real CLI publishes them. Scripted
     // `<key>.refused`, one `ROLE TURN IDENTITY REASON` per line, with `-` for
@@ -892,9 +907,21 @@ fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, 
                  without a side: a member stamps both or neither"
             ));
         }
+        // The reason is oneharness's: the real library writes a candidate's
+        // `FallThroughReason` here in that library's own spelling, so the script's
+        // word is read through that closed enum rather than copied onto the
+        // wire. A journey that wrote `rate_limit` — a *failure kind's* spelling,
+        // not a reason's — would otherwise render a token no producer publishes.
+        let reason: oneharness_core::domain::fallback::FallThroughReason =
+            serde_json::from_value(reason.into()).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "a `.refused` line names the reason {reason:?}, which is not one oneharness \
+                     falls through for: {error}"
+                ))
+            });
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
-            reason: reason.to_string(),
+            reason: reason.as_str().to_string(),
             // `-` is a single-sided member: one chain, so no side to name and no
             // per-side turn to attribute it to — the real library leaves both
             // absent there, and a double that filled either in would be an
@@ -992,6 +1019,62 @@ fn publish_session(args: &[String], title: &str) {
     if !published.status.success() {
         fake::fail(&format!(
             "`onevcs publish {token}` exited {}: {}",
+            published.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&published.stderr).trim()
+        ));
+    }
+}
+
+/// Open the session's change request as a draft, through the real `onevcs`.
+///
+/// The token is taken from the dispatch's **own environment** — `ONEVCS_SESSION`,
+/// which is what the engine hands every dispatch that works in a session — and
+/// the process fails where it is unset: a worker scripted to address its own
+/// session with no token in hand is the engine not having kept its promise, and
+/// a double that walked the token out of `--dir` instead would keep the suite
+/// green over exactly that.
+///
+/// The body, where one is scripted, goes over as a file, because that is the
+/// form the sibling's own command line takes prose in.
+fn draft_session(args: &[String], title: &str, body: Option<String>) {
+    let worktree = session_worktree(args, "drafting a dispatch's change request");
+    let token = match std::env::var(SESSION_ENV) {
+        Ok(token) if !token.is_empty() => token,
+        _ => fake::fail(&format!(
+            "a dispatch scripted to draft its session's change request has no {SESSION_ENV} \
+             in its environment"
+        )),
+    };
+    let mut argv = vec![
+        "publish".to_owned(),
+        token.clone(),
+        "--draft".to_owned(),
+        "--title".to_owned(),
+        title.to_owned(),
+    ];
+    if let Some(body) = body {
+        let file = use_the_scratch_dir("drafts-body").join("body.md");
+        if let Err(error) = std::fs::write(&file, body) {
+            fake::fail(&format!("cannot write {}: {error}", file.display()));
+        }
+        argv.push("--body-file".to_owned());
+        argv.push(file.display().to_string());
+    }
+    let published = std::process::Command::new("onevcs")
+        .args(&argv)
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let published = match published {
+        Ok(published) => published,
+        Err(error) => fake::fail(&format!(
+            "cannot run `onevcs publish {token} --draft`: {error}"
+        )),
+    };
+    fake::record(&fake::script_dir(), "onevcs", &argv);
+    if !published.status.success() {
+        fake::fail(&format!(
+            "`onevcs publish {token} --draft` exited {}: {}",
             published.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&published.stderr).trim()
         ));
@@ -1319,6 +1402,12 @@ fn use_the_scratch_dir(key: &str) -> std::path::PathBuf {
 /// the engine through a rename no agent could have followed.
 const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
+/// The variable the engine names the `onevcs` session a dispatch works in, and
+/// the one it names the runs root in — both spelled here for
+/// [`SCRATCH_DIR_ENV`]'s reason: an agent reads them out of the documentation.
+const SESSION_ENV: &str = "ONEVCS_SESSION";
+const RUNS_DIR_ENV: &str = "ONEPIPELINE_RUNS_DIR";
+
 /// The variable naming who this dispatch's channel sessions listen for.
 ///
 /// Spelled here rather than taken from the crate under test, for the reason
@@ -1407,8 +1496,8 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
         instruction,
         instruction_truncated: false,
         started_at: fake::now(),
-        // A single-sided member's one turn opens on the composed task and on
-        // nothing else, which is what the real producer stamps it as.
+        // The first turn's instruction is the composed task, which is the one
+        // authorship the sibling's own rule stamps on it.
         origin: Some(oneagentgraph::event::Origin::Task),
     }) {
         Ok(payload) => Some(payload),
@@ -1782,6 +1871,11 @@ fn emit(
             // environment, on the run's own record: a journey asserts the
             // promise from the store rather than from this program's files.
             "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+            // The session whose worktree this dispatch runs in, and the runs
+            // root, each as this dispatch read them out of its own environment
+            // — absent where the engine handed none, for `scratch_dir`'s reason.
+            "session": std::env::var(SESSION_ENV).ok(),
+            "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
             // And who this dispatch asks its manager as, so a journey can assert
             // from the store that a real dispatch is given one and that no two
             // share it.
@@ -1843,8 +1937,8 @@ fn emit(
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
             text: said,
             truncated: false,
-            // The agent's own words are the agent's: none of the three origins
-            // names them, and the real producer leaves them unattributed.
+            // The agent's own words: none of the sibling's three origins names
+            // them, so the sibling stamps nothing and so does this double.
             origin: None,
         }) {
             Ok(payload) => payload,
@@ -2392,6 +2486,13 @@ fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<Drafted> {
     }
     if dir.join("pr-author.bodyless").exists() {
         return Some(Drafted::Bodyless);
+    }
+    // `pr-author.body-anew` is a body that differs every time it is drafted, for
+    // the journey about a closeout that runs twice on one branch: a fixed body
+    // rewritten onto a change request is indistinguishable from one left alone.
+    if let Some(body) = fake::node_script(dir, "pr-author", "body-anew") {
+        let nth = fake::count(dir, "pr-author.body-anew");
+        return Some(Drafted::Body(format!("{body}\ndraft {nth}\n")));
     }
     Some(Drafted::Body(
         fake::node_script(dir, "pr-author", "body")

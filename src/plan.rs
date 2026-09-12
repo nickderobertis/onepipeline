@@ -25,7 +25,6 @@
 use std::collections::BTreeMap;
 
 use oneagentgraph::config::ConfigRef;
-use onevcs::registry::{RepoType, Workflow};
 use onevcs::releases::TargetName;
 use onevcs::{Adoption, InstructionTemplate, MergePolicy};
 use serde::{Deserialize, Serialize};
@@ -68,6 +67,16 @@ pub(crate) const TITLE_IS_REQUIRED: &str = "a lifecycle node states the title it
 pub(crate) fn body_is_newer(declared: u32) -> String {
     format!(
         "`body` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
+         {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
+    )
+}
+
+/// What a plan below [`PLAN_SCHEMA_VERSION`] naming `draft` is told, for
+/// [`body_is_newer`]'s reason: a planner who asked for a draft and had the ask
+/// ignored would find that out from a change request that landed.
+pub(crate) fn draft_is_newer(declared: u32) -> String {
+    format!(
+        "`draft` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
          {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
     )
 }
@@ -743,10 +752,16 @@ pub struct Node {
     /// presence is what makes the node a lifecycle node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    /// Overrides the identity's stored type for this run.
+    /// The identity's repository type, in the vocabulary `onevcs` retired.
+    ///
+    /// A schema-3 field, so a plan carrying one still loads and still round-trips
+    /// through a task's metadata; nothing reads it. See [`RepoType`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_type: Option<RepoType>,
-    /// Overrides the identity's stored workflow for this run.
+    /// The identity's publication workflow, in the vocabulary `onevcs` retired.
+    ///
+    /// A schema-3 field for the reason [`repo_type`](Self::repo_type) is, and
+    /// read by nothing for the same one. See [`Workflow`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<Workflow>,
     /// How the finished branch is published.
@@ -799,6 +814,19 @@ pub struct Node {
     // so an e2e for it would pin a promise the other six do not make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Leave the change request this node publishes as a **draft** at closeout,
+    /// for a person to lift: opened as one where the session holds none, and
+    /// held as one where the worker opened it.
+    ///
+    /// The node settles `done` with outcome `change-draft` and no landing, and
+    /// its dependents proceed — it is not `complete-but-draft`, because nothing
+    /// in the run will ever lift it; that status is for a draft a release arrives
+    /// to lift, and it holds the run. Where the node also awaits a release, the
+    /// release reason wins and the node settles `complete-but-draft` as it would
+    /// have. Refused at load on a node whose resolved publication opens no change
+    /// request, since a draft is a state of one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,
@@ -830,6 +858,38 @@ pub struct Node {
     /// target only where the default is not what it wants.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumes: BTreeMap<String, TargetName>,
+}
+
+/// Whether a repository is one person's or a team's — the vocabulary a schema-3
+/// plan's `repo_type` is written in.
+///
+/// Declared here, and not re-exported from the sibling, because `onevcs` 0.20.0
+/// **retired** it: an identity records no publication classification any more,
+/// every decision the two inferred fields made is the resolved publication
+/// policy's, and its registry drops both keys on the next write. The plan schema
+/// still names the field, so a plan that wrote one is still a legal document —
+/// which means its two spellings have to be refused and accepted exactly as they
+/// were, and that is the whole of what this type is for. Nothing reads a value of
+/// it, and a node carrying one publishes exactly as one carrying none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepoType {
+    /// One owner, who may integrate their own work.
+    SingleOwner,
+    /// A team, whose work is reviewed before it lands.
+    Team,
+}
+
+/// Whether an identity's work publishes locally or through the remote host — the
+/// vocabulary a schema-3 plan's `workflow` is written in, kept for the reason
+/// [`RepoType`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Workflow {
+    /// Merged in a local checkout and pushed.
+    Local,
+    /// Published as a change request on the remote host.
+    Remote,
 }
 
 /// One step of a lifecycle node, sharing that node's branch.

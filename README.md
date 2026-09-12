@@ -230,8 +230,20 @@ does not hold the session supervising the others.
 A lifecycle node states the `title` its change request opens under, and may state
 its `body` too. `--pr-author-graph REF` names an agent graph that drafts that body
 instead, from the branch's own diff, once the branch is verified and before the
-change request is opened; naming none is the default, and a drafting dispatch that
-does not get there costs the change request its body and nothing else. It costs no
+change request is published; naming none is the default, and a drafting dispatch that
+does not get there costs the change request its body and nothing else. A worker may
+open its session's change request itself, as a draft, while it works — `onevcs
+publish $ONEVCS_SESSION --draft`, the token every dispatch in a session carries —
+and the closeout then **finishes** that change request rather than opening another:
+the drafter is shown it and told how to read the worker's transcript
+(`onepipeline transcript RUN NODE`, which every dispatch's `ONEPIPELINE_RUN_ID` and
+`ONEPIPELINE_RUNS_DIR` serve), the drafted description is written onto it under the
+plan's `title`, and the same publication lifts the draft and lands under the
+resolved policy. The node settles on the publication's own word, and its detail
+says the worker opened the change request as a draft and the closeout marked it
+ready. A node declared `draft: true` leaves its change request as a draft for a
+person instead — opened as one, or held as one — and settles `done` with outcome
+`change-draft`; its dependents proceed. It costs no
 visibility either: a drafting dispatch that was configured, attempted, and produced
 no body is recorded against the node under one of three endings — `dispatch-failed`
 for one that could not be run or ran without succeeding, `schema-refused` for one

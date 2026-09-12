@@ -1556,7 +1556,7 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
     // One reason names one dependency, because [`onevcs::DraftReason`] carries one
     // target — so how many are being waited on is said in the sentence a person
     // reads rather than left for them to count.
-    Some(onevcs::DraftReason {
+    Some(onevcs::DraftReason::AwaitingRelease {
         because: format!(
             "this node adopted {identity} early and is pinned to {reference} rather than to a \
              released version; it is one of {count} release(s) this node adopted early, and \
@@ -1572,22 +1572,53 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
 
 /// What a draft reason names a settlement by, on the one line a settlement holds.
 ///
-/// Three of the reason's four fields — the target, the repository, and the
-/// reference — read off the value the publication was made with, so the settlement
-/// cannot come to name a different release from the one the host is holding the
-/// change for. `because` is not among them: it is the sentence composed for a
-/// person reading the change request's own record, and a settlement's detail is
-/// read on one line beside an outcome word that has already said the node is a
-/// draft. Rendered here rather than in `src/lifecycle.rs` so there is one
-/// spelling of it.
+/// For a release that is awaited, three of the reason's four fields — the target,
+/// the repository, and the reference — read off the value the publication was
+/// made with, so the settlement cannot come to name a different release from the
+/// one the host is holding the change for. `because` is not among them: it is the
+/// sentence composed for a person reading the change request's own record, and a
+/// settlement's detail is read on one line beside an outcome word that has
+/// already said the node is a draft. A draft the **plan** asked for has no
+/// release to name and says only that it is one, and whose to lift. Rendered here
+/// rather than in `src/lifecycle.rs` so there is one spelling of each.
 pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
-    format!(
-        "complete, and held as a draft: awaiting the {target} release of {awaiting}, pinned \
-         to {reference} until it arrives",
-        target = reason.target,
-        awaiting = reason.awaiting,
-        reference = reason.reference,
-    )
+    match reason {
+        onevcs::DraftReason::AwaitingRelease {
+            target,
+            awaiting,
+            reference,
+            ..
+        } => format!(
+            "complete, and held as a draft: awaiting the {target} release of {awaiting}, \
+             pinned to {reference} until it arrives"
+        ),
+        onevcs::DraftReason::Held { .. } => HELD_DETAIL.to_owned(),
+    }
+}
+
+/// The one line a node that was asked to leave its change request as a draft
+/// settles with.
+///
+/// Said once, because the settlement composes it beside what the worker did to
+/// the change request and the two have to agree about the words: a person reads
+/// this to learn why a `done` node's change did not land, and the answer is that
+/// the plan said so and that lifting it is theirs.
+pub(crate) const HELD_DETAIL: &str =
+    "complete, and left as a draft as the plan asked, for a person to mark ready for review";
+
+/// Why a change request the plan asked to leave as a draft is one, in the words
+/// `onevcs` records on the change request's own stream.
+///
+/// The sentence a person reads off `change-drafted`, so it says whose decision
+/// the draft is: the plan's, and not a release's. Composed here beside the other
+/// reason this crate hands that library so both are spelled in one module.
+pub(crate) fn held_reason(node: &str) -> onevcs::DraftReason {
+    onevcs::DraftReason::Held {
+        because: format!(
+            "node '{node}' is declared `draft: true`, so its change request is left as a draft \
+             for a person to mark ready for review"
+        ),
+    }
 }
 
 /// The pair a reference row can be asked about: what the sibling resolves the

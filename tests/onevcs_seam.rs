@@ -34,7 +34,7 @@
 //!
 //! Offline and hermetic: the providers touch nothing but a scratch state root.
 
-use onevcs::registry::{Identity, RepoType, Workflow};
+use onevcs::registry::Identity;
 use onevcs::{
     EventStream, Lifecycle, MergePolicy, Providers, PublishOutcome, PublishRequest, SessionRequest,
     Vcs,
@@ -57,8 +57,6 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
     let vcs = MemoryVcs::seeded(VcsState {
         identities: vec![Identity {
             origin: "github.com/owner/repo".to_owned(),
-            workflow: Workflow::Remote,
-            repo_type: RepoType::SingleOwner,
             gate: "true".to_owned(),
         }],
         // `change-auto` is the repository's own, so section 5's draft is held
@@ -202,7 +200,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             execution_checkout: None,
         })
         .expect("the seam opens a second session");
-    let reason = onevcs::DraftReason {
+    let reason = onevcs::DraftReason::AwaitingRelease {
         awaiting: "github.com/owner/engine".to_owned(),
         target: "crate".parse().expect("a target name"),
         reference: "onevcs/s-1".to_owned(),

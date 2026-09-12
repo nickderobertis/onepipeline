@@ -90,20 +90,15 @@ resolver = "2"
 #   `src/note.rs` exists to end. `tests/note/` drives it against the real
 #   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
 #   than reads differently.
-# - `oneagentgraph` 0.3.16 stamps **who authored** a turn: `TurnStarted` and
-#   `TurnMessage` carry an optional `origin` — the composed task, the member's
-#   own supervising side, or text a caller handed the graph to deliver — absent by
-#   default and read as unknown when absent. Below it a manager's delivered note
-#   and the simulated supervisor's improvisation reach the merged stream as the
-#   same `user` turn, which is what let a monitor cancel a live dispatch on a stop
-#   order nobody issued. This crate relays the payload untouched; what it owes is
-#   that its note delivery goes through `oneagentgraph::control::note`, the path
-#   that release stamps as `delivered`, and `src/agentgraph.rs` holds the field
-#   against the linked library so a pin below 0.3.16 fails rather than reads
-#   differently. Written as the **requirement** as well as the resolution —
-#   `^0.3.15` would have admitted it — because the note seam this crate publishes
-#   now promises a stamped delivery, and a manifest that still said 0.3.15 would
-#   be stating a floor below what that promise needs.
+# - `oneagentgraph` 0.3.16 stamps a turn announcement and a turn message with who
+#   authored it — an optional `origin` naming the composed task, the member's own
+#   simulated supervisor, or text a caller delivered. A floor the requirement
+#   below already stands past — `oneagentgraph = "0.3.17"` admits nothing below
+#   it — and `src/agentgraph.rs` relays the payload whole, so the stamp reaches
+#   the journal with no reader here changing. Below it a stop order a simulated supervisor
+#   generated and one the manager delivered are the same record, and
+#   `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
+#   fails naming the lock rather than reading differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -326,14 +321,32 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.15 requires `oneharness-core 0.12.1` and `onejudge 0.7.0`,
+# `oneagentgraph` 0.3.17 requires `oneharness-core 0.13` and `onejudge 0.8.1`,
 # and the `onejudge` pin below is the release *that* requirement resolves to.
-# 0.7.0 still requires `oneharness-core 0.12.0`, whose caret requirement admits
-# 0.12.2, so the pins below let the graph resolve **one** turn engine. A split one
-# is invisible to a currency check, which reads each copy separately and calls
-# both current. The `onejudge` pin moved with the graph rather than lagging it:
-# pre-1.0 the minor is the breaking position, so `^0.6.2` admitted no 0.7.x and
-# the two copies could only be ended by moving the pin.
+# 0.8.1 requires the same `oneharness-core 0.13`, so the pins below let the graph
+# resolve **one** turn engine. A split one is invisible to a currency check,
+# which reads each copy separately and calls both current. The `onejudge` pin
+# moved with the graph rather than lagging it: pre-1.0 the minor is the breaking
+# position, so `^0.7.0` admitted no 0.8.x and the two copies could only be ended
+# by moving the pin — which is how the graph came to carry two copies of the turn
+# engine once before, when `^0.6.2` admitted no 0.7.x.
+#
+# `oneharness-core` 0.13 runs a **controlled codex turn under the model the
+# candidate's config names**. Below it a `--control` turn let `codex app-server`
+# pick the thread's model, and nothing in the chain noticed. The release carries
+# the server's own statement of that model as `observed_model` on the result and
+# the history record, refuses a statement that differs from the requested model
+# as the ninth `FailureKind`, `model_mismatch`, before any token is spent, and
+# steps a fallback chain past that refusal as `model-mismatch`. A **requirement**
+# and not a lock floor for the reason 0.8.0, 0.11.0 and 0.12.0 of `onevcs` were:
+# `^0.12` excludes it. `oneagentgraph` 0.3.17 and `onejudge` 0.8.1 are the
+# releases whose requirements resolve that core, so the three floors move
+# together or the graph carries two turn engines — and the lock is the whole of
+# the fix, because a dispatched node runs the engines *this* crate links, never
+# the CLI pins beside them. `tests/e2e/dispatch.rs`'s
+# `a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record`
+# drives a misrouted candidate through the linked releases to the settled node's
+# record and its rendered line.
 #
 # **0.3.14 and 0.3.15 are both floors**, for two separate things this crate reads.
 #
@@ -358,7 +371,11 @@ resolver = "2"
 # seam that op exists to end. `tests/note/`, the `note` test binary declared below,
 # drives the delivery against the real sibling and a real two-party conversation.
 #
-# Both are recorded in the floors list at the top of this file.
+# 0.3.16 is a floor the requirement below already stands past: what that release
+# adds — the `origin` stamp — reaches the journal through `relayed` unchanged, and
+# its test holds the lock at or past it.
+#
+# All three are recorded in the floors list at the top of this file.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -386,12 +403,29 @@ resolver = "2"
 # holds both halves against the linked library. `onevcs-testing` 0.5.6 requires
 # `onevcs` 0.19.3, so the one resolution carries both.
 #
+# `onevcs` 0.21.0 carries a **session's own change request after it exists** —
+# `session_change`, `describe_change`, `ready_change`, and `DraftReason::Held`
+# beside the release reason — which is what `src/lifecycle.rs`'s closeout
+# finishes a worker's draft with. A **requirement** and not a lock floor, twice
+# over: `^0.19` admits no 0.21.x, the breaking position pre-1.0, and
+# `DraftReason` became an enum on the way, which `src/release.rs` matches arm by
+# arm. Its 0.20.0 predecessor retired the registry's inferred `workflow` and
+# `repo_type`, which is why `src/plan.rs` keeps both words as schema-3 vocabulary
+# read by nothing and `src/destination.rs` reads a resolution without one.
+# `tests/e2e/lifecycle.rs`'s draft-closeout journeys drive the surface against
+# the real sibling. `onevcs-testing` 0.6.0 requires exactly this `onevcs`, so the
+# two floors move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
-# second with no registry at all.
+# second with no registry at all. A newer release one of these pins **holds back**
+# — `onevcs-testing` 0.5.7 requires `onevcs ^0.20.0`, which the `onevcs` pin
+# admits no version of — is neither: the check names it and the pin holding it,
+# prints no update (the one that takes it resolves `onevcs` twice), and passes.
+# Only moving the pin lifts it, and that is a host-wide move another plan owns.
 [workspace.dependencies]
-oneagentgraph = "0.3.16"
-onevcs = "0.19.2"
+oneagentgraph = "0.3.17"
+onevcs = "0.21.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -405,23 +439,30 @@ onevcs = "0.19.2"
 # `src/note.rs` re-exports them through `oneagentgraph::note` rather than
 # restating them — a second declaration is a shape that drifts, and a note that
 # satisfied the copy would still be refused by the conversation it was written
-# for. `oneagentgraph` 0.3.15 requires the same release, so the one resolution
-# rule above already holds the pair together.
-onejudge = "0.7.0"
+# for.
+#
+# 0.8.1 is the release that reads `oneharness-core` 0.13's report: it attributes
+# a candidate refused as `model_mismatch` with both models the refusal names,
+# and classifies the `model-mismatch` reason a chain fell through — a total
+# match over that library's closed enum, so a pin beside a 0.13 core that lagged
+# it would not compile. `oneagentgraph` 0.3.17 requires exactly this release, so
+# the one resolution rule above already holds the pair together.
+onejudge = "0.8.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.7.0 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.15 requires
-# 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
-# double writes the one its consumer parses. If onejudge's pin moves and this
-# one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
-# — which names the drift rather than hiding it. Nothing this crate publishes
-# links it.
-oneharness-core = "0.12"
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.8.1 it
+# requires `oneharness-core 0.13`, as `oneagentgraph` 0.3.17 does, so the shared
+# requirement resolves one compatible copy and the double writes the one its
+# consumer parses — at 0.13 a `RunResult` with `observed_model` on it, which is
+# the field the double reports a misrouted candidate's served model in. If
+# onejudge's pin moves and this one does not, `tests/e2e/turns.rs` fails on a
+# report shape onejudge cannot read — which names the drift rather than hiding
+# it. Nothing this crate publishes links it.
+oneharness-core = "0.13.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -432,11 +473,11 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.5.5"
+onevcs-testing = "0.6.0"
 
 [package]
 name = "onepipeline"
-version = "0.27.1"
+version = "0.28.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -546,7 +587,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# Four dev-dependencies, and none is a test framework. The e2e suite drives the
+# Five dev-dependencies, and none is a test framework. The e2e suite drives the
 # compiled binary as a subprocess with `std::process` and reads what it wrote, so
 # it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of it.
 #
@@ -573,8 +614,17 @@ windows-sys = { version = "0.61", features = [
 # the lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
 # uses) and `sha2` spells the name. Both are already in the graph through the
 # siblings, so neither adds anything to what this build resolves.
+#
+# `oneharness-core` is here for its **types**, at the one copy the workspace pin
+# resolves: `tests/e2e/dispatch.rs` reads the history record a dispatch's
+# `oneharness-session` points at through that library's own reader, and holds
+# `observed_model`, the `model_mismatch` kind and the `model-mismatch` reason to
+# that library's own spellings rather than to strings restated here. Already in
+# the graph — `onejudge` builds it — so it adds nothing to what this build
+# resolves, and nothing this crate publishes links it.
 [dev-dependencies]
 fs4 = "0.13"
+oneharness-core = { workspace = true }
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 sha2 = "0.10"

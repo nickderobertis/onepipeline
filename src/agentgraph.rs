@@ -157,6 +157,28 @@ fn oneharness_bin(env: &BTreeMap<String, String>) -> String {
 /// The environment variable the dag-scope graph substitutes the run id into.
 pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 
+/// The environment variable every dispatch of every node carries, naming the
+/// **absolute** runs root this run reads and writes, beside [`RUN_ID_ENV`].
+///
+/// The pair is what `onepipeline transcript <RUN> <NODE>` reads, so a dispatch
+/// that runs it — a drafter reading the worker's transcript for the evidence it
+/// left — reaches this run's store from wherever it is working rather than from
+/// a `runs` directory beside its own worktree. The observer graph already gets
+/// both; this is the node-scope half. One spelling: the name is the ledger's own,
+/// declared here beside the other name a dispatch's environment is read against.
+pub const RUNS_DIR_ENV: &str = crate::ledger::RUNS_DIR_ENV;
+
+/// The environment variable a lifecycle node's dispatches carry, naming the
+/// `onevcs` session token whose worktree the dispatch runs in.
+///
+/// Every agent step of a lifecycle node, first and later, and its drafting
+/// dispatch: each works in one session's worktree, and this is the token a
+/// worker hands `onevcs publish --draft`, `onevcs change describe`, or any other
+/// verb that addresses its own session. A direct node's dispatch runs in no
+/// session and carries none. Under `onevcs`'s own prefix, because the value is
+/// that library's handle and the verbs that take it are that library's.
+pub const SESSION_ENV: &str = "ONEVCS_SESSION";
+
 /// The member of the shipped dag-scope graph that paces planner updates.
 pub const CHECK_IN_MEMBER: &str = "check-in";
 
@@ -2622,109 +2644,189 @@ mod tests {
         });
     }
 
-    /// The linked `oneagentgraph` says **who authored** the turn this crate
-    /// relays.
+    /// The linked `oneagentgraph` stamps a turn with **who authored it**, and
+    /// the ordinary relay carries that stamp to the journal intact.
     ///
     /// The third floor carried by `Cargo.lock`; what it holds is with the pin.
-    /// It is held *here*, in the crate that only relays the payload, because the
-    /// consumer that needs the field is reading a stream this engine composed:
-    /// the relay would pass a resolution without it through just as untouched,
-    /// and nothing downstream could tell the field was never there.
+    /// It is the one floor that is as much about this crate as about the
+    /// sibling: [`relayed`] promises that a field the sibling adds crosses
+    /// whole, and `origin` is exactly the field that promise was made for — a
+    /// consumer cannot tell a member's own simulated supervisor from a note its
+    /// manager delivered by any other means, and the stamp is no use to it if
+    /// the relay drops it on the way to the store. Both halves are driven here:
+    /// a payload the linked producer stamped reaches the journal with the stamp,
+    /// and one it did not is written as before, without the field.
     ///
-    /// Written in items the older resolution also has — the two payload types,
-    /// which carry `deny_unknown_fields` and refuse the key below the floor — and
-    /// the values are asserted through a round trip rather than through the
-    /// producer's `Origin` type, which would be a compile error there. The shape
-    /// itself is *not* restated: the assertions read it back out of the
-    /// producer's own type, which is its one authoritative source.
+    /// The **spelling** is this test's own concern, as it is the two siblings'
+    /// above: every assertion is written in items the older resolution also has
+    /// — [`TurnMessage`], [`TurnStarted`] and the [`Emitter`] — and the stamp is
+    /// spelled as the wire string, never as the release's new `Origin` type.
+    /// Both payload types carry `deny_unknown_fields`, so below the floor the
+    /// sibling's own reader **refuses** the stamped payload and the panic names
+    /// the lock; naming the type instead would make this a compile error that
+    /// says a symbol was added, not that the provenance a reader needs is
+    /// missing.
     ///
-    /// [`TurnStarted`]: oneagentgraph::event::TurnStarted
+    /// [`Emitter`]: oneagentgraph::event::Emitter
     /// [`TurnMessage`]: oneagentgraph::event::TurnMessage
+    /// [`TurnStarted`]: oneagentgraph::event::TurnStarted
     #[test]
-    fn the_linked_oneagentgraph_says_who_authored_the_turn_this_crate_relays() {
-        /// What every assertion here has to say, because it is the only thing
-        /// that fixes any of them.
+    fn the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it() {
         const MOVE_THE_LOCK: &str = "`Cargo.toml` requires the newest release, which is \
              above this floor, so a resolution that fails here is behind the manifest too and \
              `cargo update -p oneagentgraph` is the whole of the fix; `just engines-current` \
              names it without running the suite";
 
-        // The three values the producer states, on the opening a turn answers.
-        // `delivered` first: it is the one this crate's own note seam depends on
-        // being stamped, and the one whose absence caused the incident.
-        //
-        // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the three
-        // spellings are deliberately literal rather than derived from the
-        // producer's `Origin`: naming that type here is a compile error below
-        // the floor, and a compile error says a symbol is missing rather than
-        // that the lock is stale, which is the whole reason this test is written
-        // in items the older resolution also has. Exhaustiveness is not this
-        // crate's to hold — it relays the payload opaquely and reads no variant
-        // by name — and `tests/note/main.rs` reads the values back through the
-        // producer's own type against a real conversation, so a renamed one
-        // fails there.
-        for origin in ["delivered", "supervisor", "task"] {
-            let opened =
-                serde_json::from_value::<oneagentgraph::event::TurnStarted>(serde_json::json!({
-                    "turn": 2,
-                    "role": "assistant",
-                    "instruction": "stop editing src/old.rs",
-                    "started_at": "2026-09-10T09:15:02.847Z",
-                    "origin": origin,
-                }))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "the linked oneagentgraph does not say who authored a turn's opening \
-                     (`origin: {origin}`), so a reader of a run this engine drives cannot tell \
-                     a manager's delivered note from the supervisor's own words: {error}. \
-                     {MOVE_THE_LOCK}"
-                    )
-                });
-            let relayed = serde_json::to_value(&opened).expect("the payload serializes");
-            assert_eq!(
-                relayed["origin"],
-                serde_json::json!(origin),
-                "the origin a turn's opening was read with is not the one it is written \
-                 back with"
-            );
-        }
-        // And on a party's own words, which is where the supervising side's
-        // improvisation is stamped as its own.
+        // What the linked producer stamps. Read through the sibling's own
+        // types so the stamp is that library's and not a key this test put in
+        // a map: below the floor both of these are unknown fields and refused.
+        let announced =
+            serde_json::from_value::<oneagentgraph::event::TurnStarted>(serde_json::json!({
+                "turn": 2,
+                "role": "user",
+                "instruction": "Wrap up and report.",
+                "started_at": "2026-09-11T09:15:02.847Z",
+                "origin": "supervisor",
+            }))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the linked oneagentgraph does not say who authored a turn's instruction, so \
+                 a reader of this crate's journal cannot tell a member's own simulated \
+                 supervisor from a note its manager delivered: {error}. The stamp ships in \
+                 0.3.16 and the resolution predates it. {MOVE_THE_LOCK}"
+                )
+            });
         let said = serde_json::from_value::<oneagentgraph::event::TurnMessage>(serde_json::json!({
             "turn": 2,
             "role": "user",
-            "text": "Stop. The manager has cancelled this dispatch.",
-            "origin": "supervisor",
+            "text": "Stop and hand the branch back.",
+            "origin": "delivered",
         }))
         .unwrap_or_else(|error| {
             panic!(
-                "the linked oneagentgraph does not say who authored a party's words, so the \
-                 supervising side's improvisation reaches a consumer as an unattributed `user` \
-                 turn: {error}. {MOVE_THE_LOCK}"
+                "the linked oneagentgraph does not say who authored a turn's words, so a \
+                 stop order a manager really delivered and one a simulated supervisor \
+                 generated reach this crate's journal as the same thing: {error}. The stamp \
+                 ships in 0.3.16 and the resolution predates it. {MOVE_THE_LOCK}"
             )
         });
-        assert_eq!(
-            serde_json::to_value(&said).expect("the payload serializes")["origin"],
-            serde_json::json!("supervisor")
-        );
-        // Absent is not a fourth value: a producer that says nothing writes no
-        // key, so an envelope from before the field is byte-identical to one
-        // from a producer that stayed silent, and a consumer reads either as
-        // unknown.
-        let silent =
+        // And what a producer that says nothing writes: no stamp, spelled the
+        // way every release below the floor spelled the same turn.
+        let unstamped =
             serde_json::from_value::<oneagentgraph::event::TurnMessage>(serde_json::json!({
                 "turn": 1,
                 "role": "assistant",
-                "text": "done",
+                "text": "Reading the task.",
             }))
-            .expect("a payload carrying no origin still reads");
-        assert!(
-            serde_json::to_value(&silent)
-                .expect("the payload serializes")
+            .expect("the linked oneagentgraph reads a turn message nobody stamped");
+
+        // Published by the linked producer's own emitter, which is the process
+        // boundary the subprocess path reads across and the value the library
+        // path hands over. Both relays are driven, and both must carry the stamp.
+        let sink = Captured::new();
+        let emitter = oneagentgraph::event::Emitter::new(
+            format!("node-scope-1786304152340-19-{}", std::process::id()),
+            Box::new(sink.clone()),
+        )
+        .with_labels(oneagentgraph::event::Labels {
+            run_id: Some("node-scope-1786304152340-19".into()),
+            member: Some("worker".into()),
+            ..oneagentgraph::event::Labels::default()
+        });
+        let produced: Vec<oneagentgraph::event::Envelope> = [
+            (
+                oneagentgraph::event::EventKind::TurnStarted,
+                serde_json::to_value(&announced),
+            ),
+            (
+                oneagentgraph::event::EventKind::TurnMessage,
+                serde_json::to_value(&said),
+            ),
+            (
+                oneagentgraph::event::EventKind::TurnMessage,
+                serde_json::to_value(&unstamped),
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, payload)| match payload {
+            Ok(serde_json::Value::Object(map)) => emitter.emit(kind, map),
+            other => panic!("the sibling's turn payload serialises as an object: {other:?}"),
+        })
+        .collect();
+
+        let off_the_wire: Vec<Envelope> = read_envelopes(&sink.written())
+            .into_iter()
+            .map(|mut envelope| {
+                adopt_labels(&mut envelope.labels);
+                envelope
+            })
+            .collect();
+        let in_process: Vec<Envelope> = produced
+            .into_iter()
+            .map(|envelope| relayed(envelope).expect("the library path relays a stamped turn"))
+            .collect();
+        assert_eq!(
+            in_process, off_the_wire,
+            "a stamped turn reaches the merged stream differently depending on which path \
+             relayed it"
+        );
+
+        // Through the journal, which is where a reader meets it: the store's
+        // own writer and its own reader, over a run root of this test's making.
+        let root = std::env::temp_dir().join(format!(
+            "op-origin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+        ));
+        let paths = crate::ledger::RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = crate::journal::Journal::open(&paths);
+        for envelope in &in_process {
+            journal
+                .relay(envelope)
+                .expect("the journal appends a relayed turn");
+        }
+        let [announcement, delivered, silent] = &crate::journal::read(&paths.journal())[..] else {
+            panic!("the journal read back a different number of records than it was handed");
+        };
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            announcement
+                .payload
                 .get("origin")
-                .is_none(),
-            "a turn whose producer said nothing about its author was written back with an \
-             origin it did not carry"
+                .and_then(serde_json::Value::as_str),
+            Some("supervisor"),
+            "the relay dropped the stamp the linked producer put on a turn announcement, so \
+             the journal says which role spoke and never who authored it: {announcement:?}"
+        );
+        assert_eq!(
+            delivered
+                .payload
+                .get("origin")
+                .and_then(serde_json::Value::as_str),
+            Some("delivered"),
+            "the relay dropped the stamp the linked producer put on a turn message, so a \
+             reader of the journal cannot tell a delivered note from supervision: \
+             {delivered:?}"
+        );
+        assert!(
+            !silent.payload.contains_key("origin"),
+            "a turn nobody stamped reached the journal carrying an `origin`, so the relay \
+             is inventing provenance the producer never claimed: {silent:?}"
+        );
+        // And the unstamped turn is what it always was — the field is absent
+        // rather than null, so a store written before the stamp existed and one
+        // written after it spell the same turn the same way.
+        assert_eq!(
+            silent.payload,
+            match serde_json::to_value(&unstamped) {
+                Ok(serde_json::Value::Object(map)) => map,
+                other => panic!("the sibling's turn payload serialises as an object: {other:?}"),
+            },
+            "a turn nobody stamped is not relayed exactly as the producer wrote it"
         );
     }
 

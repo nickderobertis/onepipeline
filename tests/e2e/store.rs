@@ -2288,6 +2288,7 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
                 "branch": "topic/publish",
                 "title": "feat: publish it",
                 "body": "## What\nIt publishes.",
+                "draft": true,
                 "persona": "engineer",
                 "task": "## What\nPublish it.\n\n## Why\nUsers need it.",
                 "max_turns": 12,

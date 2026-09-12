@@ -18,14 +18,19 @@
 //! library that declares it rather than copied — at the copy **onejudge** links,
 //! which is the pin the workspace manifest explains.
 
+use oneharness_core::domain::dialogue::DialogueRefusal;
 use oneharness_core::domain::events::ActionEvent;
-use oneharness_core::domain::fallback::RunWork;
+use oneharness_core::domain::fallback::{startup_failure_reason, RunWork};
+use oneharness_core::domain::history::HistoryLabels;
 use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
-    OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status, SCHEMA_VERSION,
+    FallThrough, FallbackReport, OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status,
+    SCHEMA_VERSION,
 };
 use oneharness_core::domain::signals::{FailureKind, Usage};
+use oneharness_core::io::history::HistoryWriter;
 use onepipeline_testfakes as fake;
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 /// What a scripted `harness.work` turn writes into the worktree it was given.
@@ -72,7 +77,7 @@ enum Occurs {
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes, Occurs); 13] = [
+const FLAGS: [(&str, Takes, Occurs); 14] = [
     ("--compact", Takes::Nothing, Occurs::Once),
     ("--events", Takes::Nothing, Occurs::Once),
     ("--history", Takes::Nothing, Occurs::Once),
@@ -88,6 +93,9 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
     ("--prompt-file", Takes::AValue, Occurs::Once),
     ("--history-name", Takes::AValue, Occurs::Once),
     ("--session", Takes::AValue, Occurs::Once),
+    // onejudge 0.8.1 pins the evaluator's worktree read-only through it; the
+    // value is read through oneharness's own parser below.
+    ("--mode", Takes::AValue, Occurs::Once),
 ];
 
 /// Refuses an argv the real `oneharness run` would not take.
@@ -180,8 +188,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
     };
-    let identity = match ran(&config_text) {
-        Ok(identity) => identity,
+    let selection = match selection(&config_text) {
+        Ok(selection) => selection,
         Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
     };
     fake::record(dir, "oneharness-config", &[prompt.clone(), config_text]);
@@ -199,34 +207,56 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // Whether onejudge asked this run to write its history record, and the name
+    // it asked for it under. Read off the argv rather than assumed: the record a
+    // journey reads back is one this process was *asked* to write.
+    let history = args
+        .iter()
+        .any(|arg| arg == "--history")
+        .then(|| fake::flag(args, "--history-name").unwrap_or_else(|| "turn".to_string()));
+    // The permission mode the turn was asked to run under, held to oneharness's
+    // own spectrum by that library's parser: a word it does not spell is a launch
+    // the real CLI refuses, and a double that ran anyway would settle a member on
+    // it. Absent, the turn runs as this suite's configs select — unattended.
+    let mode = match fake::flag(args, "--mode") {
+        Some(word) => match PermissionMode::parse(&word) {
+            Ok(mode) => mode,
+            Err(refusal) => return fake::refuse(&format!("--mode {refusal}")),
+        },
+        None => PermissionMode::Bypass,
+    };
+
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir, &identity),
+            Some(cwd) => agent_turn(&prompt, &cwd, dir, &selection, history.as_deref(), mode),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
-        Side::Judge => judge_turn(&prompt, dir, &identity),
+        Side::Judge => judge_turn(&prompt, dir, selection.first(), mode),
     }
 }
 
-/// An `oneharness` config as this process needs to read it: which identity a turn
-/// run under it would be taken by.
+/// A model name, from a config's `[harness.<id>].model` or a `harness.serves`
+/// script.
 ///
-/// Nothing else is read, because nothing else changes what this double does — but
-/// the document is *parsed*, so a config the sibling composed that is not TOML is
-/// refused here rather than answered around.
-// llmlint: ignore[boundary_inputs_validated] deliberately **not**
-// `deny_unknown_fields`, and it is the one place in this repository where that would be
-// wrong: this is oneharness's schema rather than this crate's, and every config the
-// suite writes carries keys that are none of this process's business — `run_mode`,
-// `schema_file`, an `[env]` table. Denying them would refuse every real config. The
-// invariant in `AGENTS.md` is about the documents *this crate* owns; a foreign one is
-// read for the field it needs and left alone.
-#[derive(serde::Deserialize)]
-struct Config {
-    /// The chain the config names, already resolved to the identity it would run
-    /// as. Absent when the config names none and leaves the selection to
-    /// oneharness's own discovery.
-    harnesses: Option<Chain>,
+/// A type for the reason [`Identity`] is one: a blank is not a model, and a
+/// result carrying `model: ""` would be a candidate asked for nothing and
+/// refused for serving something else. Constructed only by [`Model::named`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Model(String);
+
+impl Model {
+    /// The model `raw` names, or the reason it names none.
+    fn named(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("names no model".to_string());
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// One harness identity, which is a name.
@@ -253,44 +283,87 @@ impl Identity {
     }
 }
 
-/// A config's identity chain, as the identity it would run the turn as: the
-/// first candidate, which is the one a run that stepped past nothing reports.
+/// A config's identity chain, in the order a run tries it: the first candidate is
+/// the one a run that stepped past nothing reports, and the next is where a
+/// refusal the chain steps past lands.
 ///
-/// Every candidate is checked, not only that one — a nameless entry anywhere is a
-/// config a real `oneharness` would refuse, and this turn not reaching it is no
-/// reason to wave it through.
-struct Chain(Identity);
+/// Every candidate is checked, not only the first — a nameless entry anywhere is
+/// a config a real `oneharness` would refuse, and this turn not reaching it is no
+/// reason to wave it through. Non-empty by construction.
+struct Chain(Vec<Identity>);
 
-impl<'de> serde::Deserialize<'de> for Chain {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let candidates = Vec::<String>::deserialize(deserializer)?;
-        let mut named = candidates
+impl Chain {
+    /// The chain `candidates` names, or the reason it names none.
+    fn of(candidates: &[String]) -> Result<Self, String> {
+        let named = candidates
             .iter()
             .map(|candidate| Identity::named(candidate))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(D::Error::custom)?
-            .into_iter();
-        named.next().map(Self).ok_or_else(|| {
-            D::Error::custom("its identity chain names no candidate to run the turn")
-        })
+            .collect::<Result<Vec<_>, _>>()?;
+        if named.is_empty() {
+            return Err("its identity chain names no candidate to run the turn".to_string());
+        }
+        Ok(Self(named))
     }
 }
 
-/// The identity a turn under `config` ran as.
+/// What a config selects: the chain a turn under it is tried down, and the model
+/// each candidate was asked for.
+struct Selection {
+    chain: Chain,
+    /// The `model` of each `[harness.<id>]` section that states one, by id.
+    requested: BTreeMap<String, Model>,
+}
+
+impl Selection {
+    /// The candidate a run that steps past nothing runs as.
+    fn first(&self) -> &Identity {
+        &self.chain.0[0]
+    }
+
+    /// The candidate after `identity`, if the chain names one.
+    fn after(&self, identity: &Identity) -> Option<&Identity> {
+        let at = self
+            .chain
+            .0
+            .iter()
+            .position(|candidate| candidate.as_str() == identity.as_str())?;
+        self.chain.0.get(at + 1)
+    }
+
+    /// The model `identity` was asked to run under, where its section states one.
+    fn requested(&self, identity: &Identity) -> Option<&Model> {
+        self.requested.get(identity.as_str())
+    }
+}
+
+/// What a turn under `config` selects.
 ///
-/// Read off the config rather than assumed, so a report names the identity the
-/// launch selected. Which candidate that is, and what makes a chain resolvable at
-/// all, is [`Chain`]'s — what is left here is the one case a chain cannot answer.
-fn ran(config: &str) -> Result<Identity, String> {
-    let config: Config = toml::from_str(config)
+/// Read through oneharness's **own** config reader, so a config the sibling
+/// composed that the real CLI would refuse — an unknown key, an unknown harness
+/// id — is refused here rather than answered around, and the `[harness.<id>]`
+/// section is that library's declaration rather than a copy of it. What makes a
+/// chain resolvable at all is [`Chain`]'s — what is left here is the one case a
+/// chain cannot answer.
+fn selection(config: &str) -> Result<Selection, String> {
+    let config = oneharness_core::domain::config::parse(config)
         .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
-    match config.harnesses {
-        Some(chain) => Ok(chain.0),
+    let chain = match &config.harnesses {
+        Some(candidates) => Chain::of(candidates)?,
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
-        None => Identity::named(DISCOVERED),
-    }
+        None => Chain(vec![Identity::named(DISCOVERED)?]),
+    };
+    let requested = config
+        .harness
+        .iter()
+        .filter_map(|(id, section)| section.model.as_deref().map(|model| (id, model)))
+        .map(|(id, model)| {
+            Model::named(model)
+                .map(|model| (id.clone(), model))
+                .map_err(|reason| format!("[harness.{id}].model {reason}"))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(Selection { chain, requested })
 }
 
 /// The identity oneharness discovers when a config names no chain — the only one
@@ -320,8 +393,15 @@ fn prompt(args: &[String]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
-    match work(prompt, cwd, dir, identity) {
+fn agent_turn(
+    prompt: &str,
+    cwd: &str,
+    dir: &std::path::Path,
+    selection: &Selection,
+    history: Option<&str>,
+    mode: PermissionMode,
+) -> ExitCode {
+    match work(prompt, cwd, dir, selection, history, mode) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -335,8 +415,11 @@ fn work(
     prompt: &str,
     cwd: &str,
     dir: &std::path::Path,
-    identity: &Identity,
+    selection: &Selection,
+    history: Option<&str>,
+    mode: PermissionMode,
 ) -> Result<Outcome, String> {
+    let ran = chain_step(dir, selection)?;
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -422,10 +505,198 @@ fn work(
         }
     }
 
-    stream(&RunStreamEnvelope::Result {
-        report: report(outcome.text(), Some(events), outcome, identity),
-    })?;
+    let mut report = report(outcome.text(), Some(events), outcome, &ran.identity, mode);
+    report.results[0].observed_model = ran
+        .observed_model
+        .as_ref()
+        .map(|model| model.as_str().to_string());
+    if let Some(refused) = ran.refused {
+        // The candidate stepped past goes first, as oneharness orders a chain's
+        // attempts, and the fallback block says which one ran — with the reason
+        // read through oneharness's own rule rather than restated beside it.
+        let reason = startup_failure_reason(
+            refused.status,
+            refused.failure_kind,
+            false,
+            refused.work.unwrap_or(RunWork::None),
+        )
+        .ok_or_else(|| {
+            format!(
+                "a chain does not step past a candidate refused as {:?}",
+                refused.failure_kind
+            )
+        })?;
+        report.fallback = Some(FallbackReport {
+            ran: Some(ran.identity.as_str().to_string()),
+            fell_through: vec![FallThrough {
+                harness: refused.harness.clone(),
+                reason,
+                detail: refused.error.clone(),
+            }],
+            stopped_without_work: false,
+        });
+        report.results.insert(0, refused);
+    }
+    if let Some(name) = history {
+        report.history_file = Some(write_history(
+            dir,
+            cwd,
+            name,
+            prompt,
+            mode,
+            &report.results,
+        )?);
+    }
+    stream(&RunStreamEnvelope::Result { report })?;
     Ok(outcome)
+}
+
+/// How this turn's chain resolved: the candidate that ran the turn, what its
+/// server said the turn would run under, and the candidate stepped past on the
+/// way, if any.
+struct Ran {
+    identity: Identity,
+    /// The model the candidate's server reported the turn would run under —
+    /// only where the harness stand-in reports one, which is where a journey
+    /// scripted `harness.serves`. `None` is the honest answer on every other
+    /// path, exactly as it is on every oneharness path but codex's app-server.
+    observed_model: Option<Model>,
+    /// The first candidate, refused before any token was spent, in oneharness's
+    /// own result shape — the one a supervisor attributes and a chain steps past.
+    refused: Option<RunResult>,
+}
+
+/// Resolve the chain: which candidate runs this turn, and whether the first was
+/// stepped past.
+///
+/// `harness.serves` scripts what the first candidate's server says the thread
+/// would run under — codex's `thread/start` statement, made before any token is
+/// spent — and it is held against that candidate's own `model` the way
+/// oneharness holds it. A chain with nothing after a refused candidate is a
+/// scenario nobody wrote here, and is refused rather than acted out as exhausted.
+fn chain_step(dir: &std::path::Path, selection: &Selection) -> Result<Ran, String> {
+    let first = selection.first();
+    let Some(served) = fake::node_script(dir, "harness", "serves") else {
+        return Ok(Ran {
+            identity: Identity::named(first.as_str())?,
+            observed_model: None,
+            refused: None,
+        });
+    };
+    let served = Model::named(&served).map_err(|reason| format!("harness.serves {reason}"))?;
+    match selection.requested(first) {
+        Some(requested) if *requested != served => {
+            let next = selection.after(first).ok_or_else(|| {
+                format!(
+                    "the chain names nothing after '{}', which was refused for serving {:?} \
+                     where {:?} was requested; a chain this double steps past has a next \
+                     candidate",
+                    first.as_str(),
+                    served.as_str(),
+                    requested.as_str()
+                )
+            })?;
+            Ok(Ran {
+                identity: Identity::named(next.as_str())?,
+                observed_model: None,
+                refused: Some(refused(first, requested, &served)),
+            })
+        }
+        _ => Ok(Ran {
+            identity: Identity::named(first.as_str())?,
+            observed_model: Some(served),
+            refused: None,
+        }),
+    }
+}
+
+/// The result oneharness writes for a candidate refused before its turn started
+/// because the server named a model other than the requested one: no exit code,
+/// because the server was torn down rather than exited, and the `error` composed
+/// by that library's [`DialogueRefusal`] so the sentence is oneharness's.
+fn refused(identity: &Identity, requested: &Model, served: &Model) -> RunResult {
+    let refusal = DialogueRefusal::ModelMismatch {
+        requested: requested.as_str().to_string(),
+        observed: served.as_str().to_string(),
+    };
+    RunResult {
+        harness: identity.as_str().into(),
+        variant: None,
+        harness_id: identity.as_str().into(),
+        bin: identity.as_str().into(),
+        available: true,
+        status: Status::Nonzero,
+        prompt: None,
+        model: Some(requested.as_str().to_string()),
+        observed_model: Some(served.as_str().to_string()),
+        exit_code: None,
+        duration_ms: Some(1),
+        telemetry: None,
+        command: vec![identity.as_str().into(), "app-server".into()],
+        output_format: OutputFormat::StreamJson,
+        text: None,
+        text_source: None,
+        usage: Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_usd: None,
+        },
+        usage_source: None,
+        session_id: None,
+        events: None,
+        events_source: None,
+        structured: None,
+        schema_valid: None,
+        schema_attempts: None,
+        schema_error: None,
+        failure_kind: Some(FailureKind::ModelMismatch),
+        failure_kind_source: Some("app-server".into()),
+        work: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        error: Some(refusal.error(identity.as_str())),
+    }
+}
+
+/// Write this run's history records — one per attempted candidate, in result
+/// order — through oneharness's **own** writer, which chooses each record's
+/// schema version from what it carries, and answer with the session file's path
+/// for the report's `history_file`. The store is inside the script directory,
+/// so nothing here reaches an operator's own history.
+fn write_history(
+    dir: &std::path::Path,
+    cwd: &str,
+    name: &str,
+    prompt: &str,
+    mode: PermissionMode,
+    results: &[RunResult],
+) -> Result<String, String> {
+    let store = dir.join("oneharness-history");
+    let writer = HistoryWriter::open(
+        &store,
+        std::path::Path::new(cwd),
+        name,
+        HistoryLabels::default(),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot open a history session under {}: {error}",
+            store.display()
+        )
+    })?;
+    for result in results {
+        writer
+            .append(mode, result.model.as_deref(), prompt, result)
+            .map_err(|error| {
+                format!(
+                    "cannot write the history record for '{}': {error}",
+                    result.harness_id
+                )
+            })?;
+    }
+    Ok(writer.path().display().to_string())
 }
 
 /// The side that supervises: one buffered document carrying the answer.
@@ -434,11 +705,16 @@ fn work(
 /// so the prompt is the only thing that tells them apart. A third is refused
 /// rather than guessed at: onejudge reads each answer strictly, and one given to
 /// the wrong question is a protocol failure it reports as the *member* dying.
-fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
+fn judge_turn(
+    prompt: &str,
+    dir: &std::path::Path,
+    identity: &Identity,
+    mode: PermissionMode,
+) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
     } else if prompt.contains(EVALUATOR_OPENING) {
-        Ok(CRITERION_MET.to_string())
+        verdict(dir)
     } else {
         Err(format!(
             "the judge side was asked something this double does not answer; it speaks the \
@@ -449,7 +725,9 @@ fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitC
     // A judgement is `Answered` whatever it decided: the turn that reached the
     // decision succeeded, and a supervisor saying the work is not done is not a
     // harness that failed to run.
-    match answer.and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity))) {
+    match answer
+        .and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity, mode)))
+    {
         Ok(document) => {
             print!("{document}");
             ExitCode::SUCCESS
@@ -573,6 +851,23 @@ const SUPERVISED_COMPLETE: &str =
 // `SUPERVISOR_OPENING` above, gated the same way.
 const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 
+/// The evaluator's verdict over the finished conversation: the criterion holds,
+/// unless a journey scripted `judge.unmet` with the reason it does not.
+///
+/// The one way a member fails its **own** bar through the real supervisor: a
+/// conversation the supervisor called complete and the evaluator then refused
+/// settles `completed: false` on its verdict, where every other failure this
+/// double can act out is a harness that refused, died, or contradicted itself.
+fn verdict(dir: &std::path::Path) -> Result<String, String> {
+    match fake::node_script(dir, "judge", "unmet") {
+        Some(reason) if !reason.trim().is_empty() => {
+            document(&serde_json::json!({"value": false, "reason": reason.trim()}))
+        }
+        Some(_) => Err("judge.unmet names no reason the criterion is unmet".to_string()),
+        None => Ok(CRITERION_MET.to_string()),
+    }
+}
+
 /// What the evaluator answers: the criterion is satisfied.
 ///
 /// onejudge's own verdict shape — a `value` of the type the query asked for, and
@@ -645,11 +940,15 @@ impl Outcome {
     }
 
     /// The problem the result names, which is `null` on a turn that had none.
+    ///
+    /// `null` on the rejection as well: oneharness's record holds a failure text
+    /// only where the status reported a failure, and this one says `ok` — so a
+    /// text beside it is a record that library's own writer refuses, not the
+    /// contradiction it writes. The classification alone is the contradiction.
     fn error(self) -> Option<String> {
         match self {
-            Self::Answered => None,
+            Self::Answered | Self::ProviderRejected => None,
             Self::TurnFailed => Some(self.text().to_string()),
-            Self::ProviderRejected => Some("API Error: 429 rate limit exceeded".to_string()),
         }
     }
 
@@ -777,14 +1076,16 @@ fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
 /// same way: the agent's words *are* its outcome, and the supervisor's are a
 /// decision it reached over a turn that succeeded.
 ///
-/// `fallback` is absent, which is what says this run had one candidate rather than
-/// a chain — a report with a chain and no `ran` is an exhausted chain, and this
-/// turn ran.
+/// `fallback` is absent, which is what says this run stepped past nothing — a
+/// report with a chain and no `ran` is an exhausted chain, and this turn ran.
+/// [`work`] adds the block, and the candidate it stepped past, where the chain
+/// did step.
 fn report(
     said: &str,
     events: Option<Vec<ActionEvent>>,
     outcome: Outcome,
     identity: &Identity,
+    mode: PermissionMode,
 ) -> RunReport {
     RunReport {
         schema_version: SCHEMA_VERSION.into(),
@@ -795,8 +1096,8 @@ fn report(
         resume: None,
         fork: false,
         session: None,
-        permission_mode: PermissionMode::Bypass,
-        bypass_permissions: true,
+        permission_mode: mode,
+        bypass_permissions: mode == PermissionMode::Bypass,
         dry_run: false,
         schema: None,
         schema_max_retries: None,
@@ -816,6 +1117,7 @@ fn report(
             status: outcome.status(),
             prompt: None,
             model: None,
+            observed_model: None,
             exit_code: Some(outcome.code()),
             duration_ms: Some(1),
             telemetry: None,

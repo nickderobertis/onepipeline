@@ -879,9 +879,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88383242cab7d52c72a817261caaf9f0c59edf3c8b81736aa30a44c957abfb61"
+checksum = "0d724decdf3b4621e4bf2a4802c74afc2430af8c18a393d8318776a19b512f87"
 dependencies = [
  "clap",
  "libc",
@@ -899,9 +899,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.12.2"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d84324dd21e51347276be30e2439017537daaea65dbc3a00a5871c9ebdf201b0"
+checksum = "6a4159f7c7e34adfb8c6c441da0c9185163d33c0a3e1b61240f637563537bd65"
 dependencies = [
  "fs2",
  "jsonschema",
@@ -920,9 +920,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c0bcac1c62a16eec9709dd09a4eba570aa3039548651c522bd55b3d5e240823"
+checksum = "52d62c793bb046cdf8ca7ad6940b9b7d8718d3172cd8ad43b01051f0cc25e41e"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -935,13 +935,14 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "clap",
  "fs4",
  "libc",
  "minijinja",
  "oneagentgraph",
+ "oneharness-core",
  "onejudge",
  "onepipeline-testfakes",
  "onevcs",
@@ -968,14 +969,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
- "toml",
 ]
 
 [[package]]
 name = "onevcs"
-version = "0.19.3"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc9b275069c1b02d3cd7045a829ba1b2a41d0946d4341a22a2d7592db4bd9c1a"
+checksum = "88d1835126bdc0358c3fa5517775d786e1a091fe9e41b042f033237766f6bbec"
 dependencies = [
  "clap",
  "dunce",
@@ -999,9 +999,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.5.6"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a27229898e924f305acaab6c188376ce3f36436450b5b9180d98be49e4f962f8"
+checksum = "5b2523caa38f9f4744e3713865cae525128a28aabd3f574890a51dfab8ce074c"
 dependencies = [
  "onevcs",
  "serde",
