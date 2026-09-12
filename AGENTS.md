@@ -95,10 +95,13 @@ consuming `project.json` — an undeclared one silently drops that project out o
   engine once.** A pin in `[workspace.dependencies]` is a floor, written at the
   newest release the registry carried then; a sibling releasing inside that caret
   moves the lock and not the requirement, and `just engines-current` fails on
-  either departure. Neither a tag, a changelog, nor a requirement says what a build
-  contains; only the lock does — and where it carries an engine twice it does not
-  say that either, because each copy is separately the newest its own requirement
-  permits.
+  either departure. A newer release that one of this manifest's *other* pins holds
+  back — it requires a sibling outside that pin's window, so taking it resolves
+  the sibling twice — is neither: the check names it and the pin, prints no
+  update, and passes. Neither a tag, a changelog, nor a requirement says what a
+  build contains; only the lock does — and where it carries an engine twice it
+  does not say that either, because each copy is separately the newest its own
+  requirement permits.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 
