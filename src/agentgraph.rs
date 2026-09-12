@@ -798,29 +798,83 @@ pub enum Environment {
 /// How this launch's **caller** learns that the graph has stopped.
 ///
 /// Not a preference: it decides what the launch has to hold on to. The sibling
-/// emits `graph-settled` and only *then* stamps `finished_ms` onto its run
-/// record and writes it, so a launch released by the announcement alone is
-/// released inside that interval — and where the launch is a retained process,
-/// what is released reaches its own exit and takes the scheduler thread's
-/// unfinished write with it. A caller reading the record in there meets a graph
-/// that has said it is done and a record that does not say so; a caller reading
-/// it after such a teardown meets a record that never will.
+/// emits `graph-settled`, *then* stamps `finished_ms` onto its run record and
+/// writes it, and only then reaps whatever its members left running — three
+/// steps on one scheduler thread, and a launch released by the announcement
+/// alone is released inside them. Where the launch is a retained process, what
+/// is released reaches its own exit and takes that thread with it, wherever it
+/// was: a caller reading the record in there meets a graph that has said it is
+/// done and a record that does not say so, and one reading it after such a
+/// teardown meets a record that never will — or, when the exit landed between
+/// the write's truncation and its bytes, no record at all, which is a run the
+/// sibling's own `history` no longer lists.
 ///
-/// So the launch that will be *read off its record* holds until that record is
-/// written, and the one whose caller settles on the envelope it relayed does
-/// not — which is what keeps a dispatch settling on its terminal event rather
-/// than on the graph's final teardown.
+/// So neither launch exits inside the **write**. What the two differ on is the
+/// reap: the launch that will be *read off its record* holds until the sibling's
+/// own wait returns, reap included, and the one whose caller settles on the
+/// envelope it relayed holds only until the record carries its ending — see
+/// [`hold_until_ending_recorded`] — which is what keeps a dispatch settling on
+/// its terminal event rather than on the graph's final teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ending {
     /// The terminal envelope this launch relays. The caller is reading the
     /// stream — every dispatch — and it has the graph's answer the moment the
-    /// graph gives it.
+    /// graph gives it, held only for the record's write and never for the reap.
     Announced,
     /// The graph's own run record, and the process holding it. The observer's
     /// launcher is the one caller that never waits for what it started: it
     /// probes whether the graph is gone and reads the ending off the record, so
     /// neither may say so before that record carries one.
     Recorded,
+}
+
+/// How long an announced launch is held for the sibling's write of its ending
+/// before it is released without one.
+///
+/// Nothing sits between the announcement and that write on the sibling's
+/// scheduler thread, so on any host that is running it the write lands within
+/// the relay's next few polls; the bound is only for a thread that died or
+/// blocked between the two, and it caps what a settled node's dispatch can be
+/// held for a record nobody will read.
+const RECORD_WRITE_BOUND: Duration = Duration::from_secs(5);
+
+/// Hold until the sibling's run record carries its ending, or
+/// [`RECORD_WRITE_BOUND`] has passed — whichever comes first.
+///
+/// The ending is what the sibling writes onto its record after announcing
+/// `graph-settled` and before its final reap, by replacing the file in place —
+/// a truncation and then the bytes. What releases this is the record **read
+/// back whole with `finished_ms` on it**, the way the sibling's own `history`
+/// reads it: a record that is still empty, or still being written, does not
+/// parse, so a launch released here cannot exit inside the write and leave
+/// a record `history` skips.
+///
+/// Read only where the path is a regular file. A path that is anything else
+/// is never opened: a FIFO would hold the reader until a writer came, and the
+/// interval this closes is the one
+/// `dispatch::a_dispatch_records_its_ending_before_its_launch_can_exit` widens
+/// by standing exactly that in the record's place — a hold that opened it
+/// would be the reader that releases the write it is waiting on. That journey
+/// also keeps the record away past the bound, and holds that the launch is
+/// released on it.
+///
+/// Not the sibling's own `wait`, which returns only after its final reap — the
+/// boundary `a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_
+/// reaper_runs` keeps a dispatch's settlement ahead of: a release on the bound
+/// rather than on the record would let that reap's kill land first, so the
+/// same journey is what holds that this releases on the record.
+fn hold_until_ending_recorded(state_dir: &Path, run_id: &GraphRunId) {
+    let record = state_dir.join(run_id).join(oneagentgraph::run::RECORD_FILE);
+    let until = Instant::now() + RECORD_WRITE_BOUND;
+    while Instant::now() < until {
+        let recorded = std::fs::metadata(&record).is_ok_and(|shape| shape.is_file())
+            && oneagentgraph::history::show(state_dir, run_id.as_str())
+                .is_ok_and(|record| record.finished_ms.is_some());
+        if recorded {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// One in-process graph launch, as [`GraphRun::in_library`] receives it.
@@ -1012,11 +1066,11 @@ fn retained_command(
             )?;
             let mut command = Command::new(exe);
             command.arg(DRIVE_VERB).arg(graph);
-            // A launch read off its record is one this process must not outlive
-            // its own write of. The sibling's `run` already blocks until it has
-            // written one, so the flag is this build's own `drive` and nothing
-            // is spelled onto an overridden binary's command line that it has
-            // never heard of.
+            // A launch read off its record is one this process must not exit
+            // ahead of the sibling's own wait for, reap included. The sibling's
+            // `run` already blocks until it has written one, so the flag is this
+            // build's own `drive` and nothing is spelled onto an overridden
+            // binary's command line that it has never heard of.
             if ending == Ending::Recorded {
                 command.arg(AWAIT_ENDING_FLAG);
             }
@@ -1604,6 +1658,10 @@ impl GraphRun {
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
         let run_id = running.started().run_id.clone();
+        // Where the sibling keeps the record the relay below holds for. See
+        // [`hold_until_ending_recorded`].
+        let recorded_under = request.state_dir.clone();
+        let recorded_as = run_id.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let (settled_tx, settled_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -1645,12 +1703,17 @@ impl GraphRun {
                 }
                 // The ordering [`Ending`] describes, applied: a launch read
                 // off its record waits for the sibling's own `wait`, which
-                // returns after that record is written, and one settled on its
-                // announcement answers now. The announcement still supplies the
-                // answer where there was one — the wait adds the ordering, not a
-                // second opinion about how the run ended.
+                // returns after that record is written and its members reaped,
+                // and one settled on its announcement answers once the record
+                // carries the ending — without waiting for the reap. The
+                // announcement still supplies the answer where there was one —
+                // the wait adds the ordering, not a second opinion about how the
+                // run ended.
                 let settled = match (graph_settled, ending) {
-                    (Some(announced), Ending::Announced) => announced,
+                    (Some(announced), Ending::Announced) => {
+                        hold_until_ending_recorded(&recorded_under, &recorded_as);
+                        announced
+                    }
                     (announced, _) => {
                         let ended = settled_by(running.wait());
                         announced.unwrap_or(ended)

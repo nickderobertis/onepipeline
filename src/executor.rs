@@ -256,7 +256,8 @@ impl Executor for LocalExecutor {
             output: GraphOutput::Relayed,
             // The dispatch settles on the terminal envelope this launch relays,
             // which is the answer the graph gives before its own final teardown
-            // — so the launch is not held for the record nobody here reads.
+            // — so the launch is held for the sibling's write of its record,
+            // which its `history` lists the run by, and not for the reap after.
             ending: Ending::Announced,
         })?;
         // The run's registry of what it is running, and where. Recorded here
