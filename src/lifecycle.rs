@@ -1912,7 +1912,7 @@ mod tests {
             outcome: crate::vcs::Preserving::ChecksFailed,
             reason: reason.into(),
             evidence: Vec::new(),
-            undrafted: None,
+            body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
