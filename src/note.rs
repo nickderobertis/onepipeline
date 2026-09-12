@@ -903,10 +903,11 @@ pub(crate) struct Presentations {
 }
 
 impl Presentations {
-    /// A note the run delivered — routed onward by the conversation, as
-    /// [`Reached::routed_to`] says, or recorded `carried` and watched all the
-    /// same, because a lever outside the seam can still read it into a turn.
-    pub(crate) fn routed_by_the_conversation(&mut self, note: RecordedNote, at: u64) {
+    /// A note the run delivered while this dispatch was live, whatever the
+    /// conversation answered: routed onward by it, as [`Reached::routed_to`]
+    /// says, or recorded `carried` and watched all the same, because a lever
+    /// outside the seam can still read it into a turn.
+    pub(crate) fn delivered_while_live(&mut self, note: RecordedNote, at: u64) {
         let Some(routing) = Routing::of(&note.reached) else {
             return;
         };
@@ -1267,7 +1268,7 @@ mod tests {
     #[test]
     fn a_presentation_is_recorded_when_the_stream_shows_it_and_in_the_producers_order() {
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(recorded("stop", Reached::Worker), 1_000);
+        watch.delivered_while_live(recorded("stop", Reached::Worker), 1_000);
 
         // A supervisor turn that opened before the note was offered, and a
         // worker turn that opened before it too, confirm nothing — whatever
@@ -1325,7 +1326,7 @@ mod tests {
         // delivery and owed only to the worker, by the delivered turn that rides
         // the decision.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(recorded("ruling", Reached::Supervisor), 2_000);
+        watch.delivered_while_live(recorded("ruling", Reached::Supervisor), 2_000);
         assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
         let shown = watch.observe(&turn_on(
             9,
@@ -1356,7 +1357,7 @@ mod tests {
         // predict, the judge's answer follows, and each says what it was read
         // from. A turn cut short of the text, or carrying other words, is not.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(
+        watch.delivered_while_live(
             recorded("stop re-running the tier", Reached::Carried),
             5_000,
         );
@@ -1400,8 +1401,8 @@ mod tests {
         // apart — are each recorded on the turn that opened on them, and a
         // supervisor turn answering the first's turn is shown the first alone.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(recorded("first ruling", Reached::Worker), 6_000);
-        watch.routed_by_the_conversation(recorded("second ruling", Reached::Worker), 6_000);
+        watch.delivered_while_live(recorded("first ruling", Reached::Worker), 6_000);
+        watch.delivered_while_live(recorded("second ruling", Reached::Worker), 6_000);
         let shown = watch.observe(&turn_on(
             17,
             6_100,
@@ -1449,7 +1450,7 @@ mod tests {
         // worker turn the producer did not stamp as a delivery confirms nothing,
         // and once both have been shown a further turn confirms nothing more.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(recorded("queued ruling", Reached::Queued), 7_000);
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 7_000);
         assert!(watch.observe(&turn(20, 6_900, "user", 1, None)).is_empty());
         assert!(watch
             .observe(&turn(21, 7_050, "assistant", 2, Some("supervisor")))
@@ -1474,7 +1475,7 @@ mod tests {
 
         // And the judge first, where the supervisor's turn is the one to open.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(recorded("queued ruling", Reached::Queued), 8_000);
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 8_000);
         let shown = watch.observe(&turn(25, 8_100, "user", 5, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert_eq!(shown[0].evidence.party(), Party::Supervisor);
@@ -1501,7 +1502,7 @@ mod tests {
 
         // Nothing the conversation routes nowhere is watched at all.
         let mut watch = Presentations::default();
-        watch.routed_by_the_conversation(
+        watch.delivered_while_live(
             recorded(
                 "passed",
                 Reached::JudgedWith {

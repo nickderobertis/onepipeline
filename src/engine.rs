@@ -2603,9 +2603,10 @@ fn commit_command(
             dispatch.cancel.cancel();
         }
     }
-    // A note the conversation acknowledged and routed onward is now owed a
-    // presentation the stream has to show: handed to the dispatch's own watch,
-    // which records each as it happens and nothing before.
+    // A note delivered while the dispatch is live is now owed a presentation
+    // the stream has to show — routed onward by the conversation, or carried
+    // and still readable into a turn by a lever outside the seam: handed to the
+    // dispatch's own watch, which records each as it happens and nothing before.
     for operation in operations {
         if let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
             (operation, crate::note::RecordedNote::of_delivery(operation))
@@ -2613,7 +2614,7 @@ fn commit_command(
             if let Some(dispatch) = in_flight.get_mut(node) {
                 dispatch
                     .presentations
-                    .routed_by_the_conversation(note, offered_at);
+                    .delivered_while_live(note, offered_at);
             }
         }
     }
