@@ -90,6 +90,15 @@ resolver = "2"
 #   `src/note.rs` exists to end. `tests/note/` drives it against the real
 #   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
 #   than reads differently.
+# - `oneagentgraph` 0.3.16 stamps a turn announcement and a turn message with who
+#   authored it — an optional `origin` naming the composed task, the member's own
+#   simulated supervisor, or text a caller delivered. A floor the requirement
+#   below already stands past — `oneagentgraph = "0.3.17"` admits nothing below
+#   it — and `src/agentgraph.rs` relays the payload whole, so the stamp reaches
+#   the journal with no reader here changing. Below it a stop order a simulated supervisor
+#   generated and one the manager delivered are the same record, and
+#   `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
+#   fails naming the lock rather than reading differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -362,7 +371,11 @@ resolver = "2"
 # seam that op exists to end. `tests/note/`, the `note` test binary declared below,
 # drives the delivery against the real sibling and a real two-party conversation.
 #
-# Both are recorded in the floors list at the top of this file.
+# 0.3.16 is a floor the requirement below already stands past: what that release
+# adds — the `origin` stamp — reaches the journal through `relayed` unchanged, and
+# its test holds the lock at or past it.
+#
+# All three are recorded in the floors list at the top of this file.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -405,7 +418,11 @@ resolver = "2"
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
-# second with no registry at all.
+# second with no registry at all. A newer release one of these pins **holds back**
+# — `onevcs-testing` 0.5.7 requires `onevcs ^0.20.0`, which the `onevcs` pin
+# admits no version of — is neither: the check names it and the pin holding it,
+# prints no update (the one that takes it resolves `onevcs` twice), and passes.
+# Only moving the pin lifts it, and that is a host-wide move another plan owns.
 [workspace.dependencies]
 oneagentgraph = "0.3.17"
 onevcs = "0.21.0"

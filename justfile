@@ -324,7 +324,7 @@ deps-check:
 # crates.io index, and the deterministic gate stays offline. The split half of
 # this check needs no index and `tests/linked_engines.rs` reaches it there, so
 # `check` covers that rule without the network.
-# Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits, or twice.
+# Fail when Cargo.lock resolves a sibling engine older than Cargo.toml admits, or twice; say which newer release a pin holds back.
 engines-current:
     @bash scripts/linked-engines.sh --format check
 
