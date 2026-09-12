@@ -176,7 +176,7 @@ pub(crate) struct Coverage {
 }
 
 /// FNV-1a's 128-bit offset basis: the digest of no bytes at all.
-const NOTHING_DIGESTED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+pub(crate) const NOTHING_DIGESTED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
 
 /// FNV-1a's 128-bit prime, `2^88 + 0x13b`, written as the arithmetic rather than
 /// as a constant nobody can check by eye.
@@ -203,7 +203,7 @@ const FNV_PRIME: u128 = (1 << 88) | 0x13b;
 /// boundary because the journal is the authoritative record and this is a discardable
 /// cache of a prefix of it: the fallback either way is the whole-store fold every
 /// reader did before this document existed.
-fn digested(from: u128, bytes: &[u8]) -> u128 {
+pub(crate) fn digested(from: u128, bytes: &[u8]) -> u128 {
     bytes.iter().fold(from, |digest, byte| {
         (digest ^ u128::from(*byte)).wrapping_mul(FNV_PRIME)
     })
@@ -215,11 +215,14 @@ fn digest_of_prefix(journal: &std::path::Path, bytes: u64) -> Option<u128> {
     ledger::read_range(journal, 0, bytes).map(|prefix| digested(NOTHING_DIGESTED, &prefix))
 }
 
-fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Error> {
     writer.serialize_str(&format!("{digest:032x}"))
 }
 
 /// Read a digest, refusing anything [`as_hex`] would not have written.
+///
+/// Shared with the channel's queue projection, which seals its own claims the
+/// same way and for the same reason.
 ///
 /// The shape is checked here rather than left to `from_str_radix`, which takes a
 /// leading sign, an upper-case digit, and any number of digits at all: each of
@@ -227,10 +230,9 @@ fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Er
 /// it is one nothing on this side wrote — a truncated value most of all, which
 /// `from_str_radix` would otherwise hand back as a smaller number that seals to
 /// nothing.
-fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
+pub(crate) fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
     let written = String::deserialize(reader)?;
-    let refuse =
-        |why: &str| serde::de::Error::custom(format!("checkpoint digest '{written}': {why}"));
+    let refuse = |why: &str| serde::de::Error::custom(format!("digest '{written}': {why}"));
     let a_digit = |digit: &u8| matches!(digit, b'0'..=b'9' | b'a'..=b'f');
     if written.len() != 32 || !written.as_bytes().iter().all(a_digit) {
         return Err(refuse("not 32 lower-case hex digits"));

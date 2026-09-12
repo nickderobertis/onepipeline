@@ -470,7 +470,11 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
     assert_eq!(read.json()["status"], "surface");
     assert_eq!(read.json()["surface"]["abandoned"], json!(true));
 
-    // And the run's own record says what became of each, under its own id.
+    // And the run's own record says what became of each, under its own id:
+    // one line per surface saying it was abandoned, carrying the surface as it
+    // then stood. The line is picked by what it says happened rather than by
+    // the flag it carries, because every later line about the surface — the
+    // claim above included — carries that flag too.
     let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
         .expect("the run recorded its surfaces");
     let abandoned: Vec<serde_json::Value> = record
@@ -483,11 +487,13 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
                 panic!("the run wrote a surface record that is not JSON ({e}): {line}")
             })
         })
-        .filter(|surface| surface["abandoned"] == json!(true))
+        .filter(|surface| surface["event"] == json!("abandoned"))
         .collect();
     assert_eq!(abandoned.len(), 2, "{record}");
     assert_eq!(abandoned[0]["id"], json!(0));
+    assert!(abandoned[0]["abandoned"] == json!(true), "{record}");
     assert_eq!(abandoned[1]["id"], json!(1));
+    assert!(abandoned[1]["abandoned"] == json!(true), "{record}");
 
     world.release("build.go");
 }
@@ -738,6 +744,33 @@ fn a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_a
         .exited(0)
         .out_lacks("nobody is waiting on")
         .out_has("2 planner update(s) waiting (1 blocker, 1 planner-question)");
+    // And the run's own record carries the correction under the question's
+    // id, beside the line that said nobody was waiting on it: the record ends
+    // on the question being attended rather than on a statement that stopped
+    // being true, and the surface it carries is no longer marked — the flag is
+    // omitted where it is false, so its absence is what the attended line
+    // shows.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let of_question: Vec<(Value, Value)> = record
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|e| {
+                panic!("the run wrote a surface record that is not JSON ({e}): {line}")
+            })
+        })
+        .filter(|line| line["id"] == json!(0))
+        .map(|line| (line["event"].clone(), line["abandoned"].clone()))
+        .collect();
+    assert_eq!(
+        of_question,
+        vec![
+            (json!("queued"), Value::Null),
+            (json!("abandoned"), json!(true)),
+            (json!("attended"), Value::Null),
+        ],
+        "{record}"
+    );
     ended(rearmed);
 
     // The manager reads it, which is what puts a question where a verdict can
@@ -1338,6 +1371,746 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
     drop(silent);
     world.release("build.go");
 }
+/// A surface queued while a reader was reading the channel survives that
+/// reader's write-back of what it read.
+///
+/// The queue used to be one file, read, modified, and written back whole by
+/// writer and reader alike with no lock, so a push landing inside a reader's
+/// read-modify-write was overwritten by the reader's stale copy and gone for
+/// good — with the queue file left saying `waiting: [], next_id: 0` beside a log
+/// carrying the surface under id 0. That write-back is reproduced here at the
+/// instant it landed, and the question is still counted, still handed over under
+/// its id, and the next surface takes an id nothing has used.
+#[test]
+fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_back() {
+    use std::io::Write;
+
+    let world = World::new("channel-lost-update");
+    world.script("seed.wait", "hold");
+    let run = running(
+        &world,
+        "lostupdate",
+        vec![agent("seed", &[]), agent("after", &["seed"])],
+    );
+
+    // The reader's read of the channel, made before the question exists: what
+    // the manager's `next` read, and what it later wrote back.
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"], Value::Null);
+    let queue = world.run_file(&run, "channel/queue.json");
+    let stale = std::fs::read(&queue).expect("the reader left the queue it read");
+
+    // The worker's blocking question, queued while that read is in flight.
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"Which base should seed build on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to be queued", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // The reader's write-back lands: its stale copy over the queue the question
+    // was just written into. Renamed into place rather than written over, as the
+    // reader's own atomic write was.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] the write-back is placed
+    // because nothing user-facing can hold a reader between its read and its
+    // write-back: the window is microseconds inside one `next`, and a journey
+    // that raced real invocations against it would report the defect on the
+    // runs it happened to hit. The bytes placed are exactly what that reader
+    // wrote, taken from the reader itself, and everything before and after them
+    // is driven through the CLI.
+    // `surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once`
+    // is the concurrent journey over real invocations.
+    let staged = queue.with_extension("staged");
+    std::fs::write(&staged, &stale).expect("the stale copy is staged");
+    std::fs::rename(&staged, &queue).expect("the stale copy lands");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // The question is still there: counted by the supervisory views, holding
+    // the subtree it named, and handed over under its own id.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should seed build on?");
+    assert_eq!(read.json()["status"], "surface");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    assert_eq!(read.json()["surface"]["blocking"], json!(true));
+    // Read is not answered: the run still awaits the verdict on it.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — Which base should seed build on?");
+
+    // And the id it was given is never handed out again: the next surface
+    // takes the one after it rather than the one the stale copy said was free.
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    // The verdict names the question the reader was handed, and reaches the
+    // worker that asked it.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"build on main"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("reason"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("build on main"), "{verdict}");
+
+    // The run's own record accounts for the question's whole life on its own:
+    // queued, claimed, and answered, each under its id.
+    let record = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let events: Vec<(Value, Value)> = record
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|e| {
+                panic!("the run wrote a surface record that is not JSON ({e}): {line}")
+            })
+        })
+        .map(|line| (line["id"].clone(), line["event"].clone()))
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            (json!(0), json!("queued")),
+            (json!(0), json!("claimed")),
+            (json!(1), json!("queued")),
+            (json!(0), json!("answered")),
+        ],
+        "{record}"
+    );
+
+    drop(stdin);
+    world.release("seed.go");
+    ended(serving);
+}
+
+/// Surfaces queued by several writers while several readers read the channel
+/// are each read exactly once, under distinct ids.
+///
+/// Real invocations, contending for real: every push is its own `surface`
+/// process and every read its own `next`, with nothing between them but the
+/// channel's own lock. What is asserted is the whole invariant the queue
+/// promises — nothing queued is lost, nothing is delivered twice, and no id is
+/// handed out twice. Sized to the invocations an ordinary journey here makes:
+/// a dozen pushes and the reads that drain them, which is enough for the
+/// writers to overlap each other and the readers.
+#[test]
+fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() {
+    const WRITERS: usize = 3;
+    const EACH: usize = 4;
+    const READERS: usize = 2;
+
+    let world = World::new("channel-contended");
+    world.script("build.wait", "hold");
+    let run = running(&world, "contended", vec![agent("build", &[])]);
+
+    let writing = std::sync::atomic::AtomicBool::new(true);
+    let read = std::sync::Mutex::new(Vec::<Value>::new());
+    let queued = std::sync::Mutex::new(Vec::<(u64, String)>::new());
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let (world, run, queued) = (&world, &run, &queued);
+                scope.spawn(move || {
+                    for n in 0..EACH {
+                        let message = format!("writer {writer} finding {n}");
+                        let pushed = world.run(&[
+                            "surface",
+                            run,
+                            "--kind",
+                            "finding",
+                            "--message",
+                            &message,
+                        ]);
+                        pushed.exited(0);
+                        let id = pushed.json()["surface"].as_u64().expect("the surface's id");
+                        queued.lock().expect("the list").push((id, message));
+                    }
+                })
+            })
+            .collect();
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let (world, run, read, writing) = (&world, &run, &read, &writing);
+                scope.spawn(move || loop {
+                    let next = world.run(&["next", run]);
+                    next.exited(0);
+                    let surface = next.json()["surface"].clone();
+                    if !surface.is_null() {
+                        read.lock().expect("the list").push(surface);
+                        continue;
+                    }
+                    // A reader stops at the first empty read once every writer
+                    // is done, so a surface the queue lost is a shortfall in
+                    // what was read rather than a reader waiting for ever.
+                    if !writing.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                })
+            })
+            .collect();
+        // The writers are waited on by joining them, never by counting what
+        // they queued: a writer that failed would leave that count short for
+        // ever. And the readers are released **before** any writer's failure is
+        // raised — a scope joins every thread it spawned on the way out, so a
+        // panic here with the readers still looping on `writing` would wait on
+        // them for ever and the failure would never be reported.
+        let written: Vec<_> = writers.into_iter().map(|writer| writer.join()).collect();
+        writing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let read_out: Vec<_> = readers.into_iter().map(|reader| reader.join()).collect();
+        for writer in written {
+            writer.expect("a writer finishes");
+        }
+        for reader in read_out {
+            reader.expect("a reader finishes");
+        }
+    });
+
+    let mut sent = queued.into_inner().expect("the list");
+    sent.sort();
+    let mut ids: Vec<u64> = sent.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        (0..(WRITERS * EACH) as u64).collect::<Vec<_>>(),
+        "an id was handed out twice or skipped: {sent:?}"
+    );
+    let mut got: Vec<(u64, String)> = read
+        .into_inner()
+        .expect("the list")
+        .iter()
+        .map(|surface| {
+            (
+                surface["id"].as_u64().expect("an id"),
+                surface["message"].as_str().expect("a message").to_owned(),
+            )
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, sent, "a surface was lost or delivered twice");
+    assert_eq!(
+        world.events_of(&run, "planner-surfaced").len(),
+        WRITERS * EACH,
+        "the journal does not record one read per surface"
+    );
+
+    world.release("build.go");
+}
+
+/// A projection that is not a queue is rebuilt from the log, and a reader that
+/// cannot write the rebuilt one back still answers.
+///
+/// A read that finds the projection unreadable or behind the log repairs it,
+/// and the repair is a cache write — a run root the reader may not write into
+/// is still a run whose record is intact, and a view that refused over it would
+/// be the supervisory verb going dark on exactly the run it is asked about.
+#[cfg(unix)]
+#[test]
+fn a_read_still_answers_from_the_log_when_it_cannot_write_the_projection_back() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("channel-unwritable");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unwritable", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "still here",
+        ])
+        .exited(0);
+
+    // The projection is not a queue any more — a write that died halfway —
+    // and the directory it would be repaired into is one this reader may not
+    // write.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] both halves of this state
+    // are placed because nothing user-facing produces either: the projection is
+    // written atomically, so only a writer dying between its temporary file and
+    // its rename leaves a torn one, and a run root the reader may not write
+    // into is the host's doing rather than the CLI's. What is under test is
+    // driven through the CLI — whether `status` and `next` still answer for a
+    // run whose record is intact.
+    let queue = world.run_file(&run, "channel/queue.json");
+    std::fs::write(&queue, b"{\"waiting\": [").expect("the projection is torn");
+    let channel = queue.parent().expect("the channel directory").to_path_buf();
+    let writable = std::fs::metadata(&channel)
+        .expect("the channel directory")
+        .permissions();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory is made read-only");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let status = world.run(&["status", &run]);
+    std::fs::set_permissions(&channel, writable).expect("the directory is writable again");
+    status.exited(0).out_has("1 planner update(s) waiting");
+    assert_eq!(
+        std::fs::read(&queue).expect("the projection"),
+        b"{\"waiting\": [",
+        "the projection was written into a directory the reader may not write"
+    );
+
+    // Writable again, the next read repairs it and hands the surface over.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("still here");
+    let repaired: Value = serde_json::from_slice(&std::fs::read(&queue).expect("the projection"))
+        .expect("the projection was repaired");
+    assert_eq!(repaired["waiting"], json!([]), "{repaired}");
+
+    world.release("build.go");
+}
+
+/// A run an older build left after the lost update — its queue saying nothing
+/// was ever queued, beside a log carrying the question under id 0 — is brought
+/// over with the question restored and the id never handed out again.
+///
+/// These are the files the observed failure left: `waiting: [], pending: null,
+/// next_id: 0` while the log and the journal both carried the surface with id 0.
+/// A projection with no stamp is an older build's, and that build logged a
+/// surface only when it queued it, so the one thing its log can prove is a loss:
+/// an id at or past the counter the projection holds is a write-back that was
+/// overwritten. That question is what the supervising manager most needs back,
+/// and it comes back through the same verbs that lost it.
+#[test]
+fn a_question_an_older_build_lost_from_its_queue_is_restored_from_its_log() {
+    let world = World::new("channel-older-build");
+    world.script("build.wait", "hold");
+    let run = running(&world, "olderbuild", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the files are those of a
+    // build this binary is not: it stamps every projection it writes and marks
+    // every line it logs, so nothing it does can leave an unstamped projection
+    // beside an unmarked log. What is under test is driven through the CLI —
+    // whether the run answers for the question those files hold.
+    let stale_read = concat!(
+        r#"{"id":0,"kind":"blocker","message":"Which base should build target?","#,
+        r#""source":"proposal","blocking":true,"queued_at":0,"asker":"dispatch-build"}"#,
+    );
+    std::fs::write(
+        world.run_file(&run, "channel/surfaces.jsonl"),
+        format!("{stale_read}\n"),
+    )
+    .expect("the older build's log is placed");
+    let queue = world.run_file(&run, "channel/queue.json");
+    let staged = queue.with_extension("staged");
+    std::fs::write(&staged, r#"{"waiting":[],"pending":null,"next_id":0}"#)
+        .expect("the older build's queue is staged");
+    std::fs::rename(&staged, &queue).expect("the older build's queue is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Counted, held on, and handed over under the id the log allocated.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should build target?");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — Which base should build target?");
+
+    // And the id is not allocated a second time.
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    world
+        .run_with_stdin(&["reply", &run], r#"{"completion":false,"reason":"main"}"#)
+        .exited(0);
+    world.release("build.go");
+}
+
+/// A projection whose claims moved under an intact stamp is rebuilt from the
+/// log: the question it hid is still counted and handed over, and its id is
+/// not handed out again.
+///
+/// A stamp matching the log's length used to be the whole of what a reader
+/// checked, so a document with its waiting surfaces emptied and its counter
+/// reset — by a rewrite, an editor, or a write that went wrong — was trusted
+/// for good. Every writer now seals its claims and every reader checks the seal
+/// from the document alone, so such a document reads as no document and the
+/// whole log is folded.
+#[test]
+fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log() {
+    use std::io::Write;
+
+    let world = World::new("channel-moved-claims");
+    world.script("seed.wait", "hold");
+    let run = running(&world, "movedclaims", vec![agent("seed", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"Which base should seed build on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to be queued", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the document is edited in
+    // place because nothing this binary does moves a projection's claims under
+    // its stamp — every write it makes seals what it stamps — so a rewrite that
+    // did is one only another writer, an editor, or a failed write can leave.
+    // The stamp is kept exactly as written, which is what a reader trusting the
+    // stamp alone would take as current; everything before and after is driven
+    // through the CLI.
+    let queue = world.run_file(&run, "channel/queue.json");
+    let mut document: Value =
+        serde_json::from_slice(&std::fs::read(&queue).expect("the projection"))
+            .expect("the projection is a document");
+    assert!(
+        document["accounted"]
+            .as_u64()
+            .is_some_and(|stamped| stamped > 0),
+        "the projection carries no stamp to keep intact: {document}"
+    );
+    document["waiting"] = json!([]);
+    document["pending"] = Value::Null;
+    document["next_id"] = json!(0);
+    let staged = queue.with_extension("staged");
+    std::fs::write(
+        &staged,
+        serde_json::to_vec(&document).expect("the document"),
+    )
+    .expect("the moved document is staged");
+    std::fs::rename(&staged, &queue).expect("the moved document lands");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 planner update(s) waiting");
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("Which base should seed build on?");
+    assert_eq!(read.json()["surface"]["id"], json!(0));
+    let queued = world.run(&["surface", &run, "--kind", "finding", "--message", "noted"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"build on main"}"#,
+        )
+        .exited(0);
+    drop(stdin);
+    world.release("seed.go");
+    ended(serving);
+}
+
+/// A push whose read of the surface log fails is refused, and records nothing.
+///
+/// Every mutation of the queue reads the log's tail under the log's lock and
+/// then stamps the log's whole length as accounted for. A read that failed and
+/// went on would append its record beside the ones it never folded and stamp
+/// them accounted for — a question hidden for good by the write meant to record
+/// one. So the push is refused where the log cannot be read: nothing is
+/// appended, nothing is stamped, the journal does not say a surface was queued,
+/// and the next push — with the log readable again — allocates the id the
+/// refused one would have taken and folds every surface the log holds.
+///
+/// The failure is the one a disk gives, at the one read it has to fail at: the
+/// binary is run under `strace`, with the surface log's second `read(2)` — the
+/// first is the appender looking at the file's own tail — answered `EIO`. Only
+/// reads of that file are touched; everything else the process does is real.
+///
+/// The push reads the log's tail only where the projection is behind it, and
+/// a run's own driver repairs a projection it finds behind: it wakes on the
+/// channel's fingerprint moving, folds the log, and writes the projection back
+/// — and on a slow host it did so between this journey leaving the projection
+/// behind and the traced push starting, so the push had nothing to fold and
+/// the injected failure had no read to land on. So the run is one that has
+/// **settled**, with its driver gone: every verb here answers for a settled run
+/// as for a live one, and with no driver there is nothing but this journey's
+/// own commands to touch the channel, wherever it runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_push_whose_log_cannot_be_read_is_refused_and_records_nothing() {
+    let world = World::new("channel-unreadable-log");
+    let run = "unreadablelog";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--attach"]).exited(0);
+    assert!(
+        world.run_file(run, "result.json").is_file(),
+        "the run did not settle under the attach"
+    );
+    world
+        .run(&["surface", run, "--kind", "finding", "--message", "first"])
+        .exited(0);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the projection is removed
+    // because a push reads the log's tail only where the projection is behind
+    // it, and nothing user-facing leaves it behind on purpose: a lost write to
+    // the projection is the very state the log-derived queue exists to survive,
+    // and the one shape of it a journey can place is the write never landing.
+    // Everything under test is driven through the CLI.
+    let queue = world.run_file(run, "channel/queue.json");
+    std::fs::remove_file(&queue).expect("the projection's write is lost");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let log = world.run_file(run, "channel/surfaces.jsonl");
+    let logged = std::fs::read(&log).expect("the log");
+    let journalled = world.events_of(run, "planner-surface-queued").len();
+
+    let trace = world.root.join("unreadable-log.strace");
+    let refused = under_strace(
+        &world,
+        &[
+            "-P",
+            &std::fs::canonicalize(&log)
+                .expect("the log's real path")
+                .to_string_lossy(),
+            "-e",
+            "inject=read:error=EIO:when=2",
+        ],
+        &trace,
+        &["surface", run, "--kind", "finding", "--message", "second"],
+    );
+    // The failure the command reports is the one that was induced: exactly one
+    // read of the log was answered `EIO`, and the command named that file.
+    let traced = std::fs::read_to_string(&trace).expect("the trace the tracer wrote");
+    let injected: Vec<&str> = traced
+        .lines()
+        .filter(|l| l.contains("(INJECTED)"))
+        .collect();
+    assert_eq!(injected.len(), 1, "{traced}");
+    assert!(injected[0].contains("read("), "{traced}");
+    assert_eq!(
+        refused.status.code(),
+        Some(REFUSED),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("surfaces.jsonl") && stderr.contains("Input/output error"),
+        "the refusal does not name the log and what the disk said: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&log).expect("the log"),
+        logged,
+        "a push that could not read the log still appended to it"
+    );
+    assert!(
+        !queue.exists(),
+        "a push that could not read the log still stamped a projection: {}",
+        std::fs::read_to_string(&queue).unwrap_or_default()
+    );
+    assert_eq!(
+        world.events_of(run, "planner-surface-queued").len(),
+        journalled,
+        "the journal says a surface was queued that the log does not hold"
+    );
+
+    // Readable again, the next push takes the id the refused one would have,
+    // and every surface the log holds is handed over under its own id.
+    let queued = world.run(&["surface", run, "--kind", "finding", "--message", "second"]);
+    queued.exited(0);
+    assert_eq!(queued.json()["surface"], json!(1));
+    world
+        .run(&["status", run])
+        .exited(0)
+        .out_has("2 planner update(s) waiting");
+    let first = world.run(&["next", run]);
+    first.exited(0).out_has("first");
+    assert_eq!(first.json()["surface"]["id"], json!(0));
+    let second = world.run(&["next", run]);
+    second.exited(0).out_has("second");
+    assert_eq!(second.json()["surface"]["id"], json!(1));
+}
+
+/// The binary under `strace`, with the tracer's own options in front of it.
+///
+/// The command is the one `World` composes — same binary, same environment —
+/// with the tracer wrapped around it, so what is observed is the invocation a
+/// user makes rather than a second one assembled here. Children are followed
+/// and the trace goes to `into`.
+///
+/// It **refuses** rather than passes where the tracer will not run: a failure
+/// nobody induced is not evidence of how the binary meets one, and this is the
+/// one journey whose whole claim is about what the process did when the disk
+/// failed under it.
+#[cfg(target_os = "linux")]
+fn under_strace(
+    world: &World,
+    tracing: &[&str],
+    into: &std::path::Path,
+    argv: &[&str],
+) -> std::process::Output {
+    let inner = world.cmd(argv);
+    let mut traced = std::process::Command::new("strace");
+    traced
+        .arg("-f")
+        .arg("-qq")
+        .args(tracing)
+        .arg("-o")
+        .arg(into)
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .stdin(std::process::Stdio::null());
+    for (key, value) in inner.get_envs() {
+        match value {
+            Some(value) => traced.env(key, value),
+            None => traced.env_remove(key),
+        };
+    }
+    traced.output().unwrap_or_else(|error| {
+        panic!(
+            "this journey's whole claim is what the process did when its log could not be \
+             read, and the tracer that makes it unreadable would not run: strace: {error}. \
+             Install strace, or run the suite where ptrace is permitted — a journey that \
+             cannot induce the failure is not a journey that observed the binary survive it."
+        )
+    })
+}
+
+/// A log line carrying an id nothing can follow does not make the next surface
+/// take an id already in use.
+///
+/// The allocator hands out one past the highest id the log has queued, so an
+/// id with no successor — the last one there is, which no writer here ever
+/// allocates — is one the counter cannot move past. A fold that kept such a
+/// record and left the counter *at* it would allocate that id to every surface
+/// queued afterwards, for good: not one collision but all of them. So the
+/// record is refused rather than folded, the counter stays where the last
+/// usable id put it, and every later surface takes an id nothing has used. And
+/// where the log has queued the id *before* the last, so that the last is the
+/// one the allocator would hand out next, the push is refused rather than
+/// made: nothing could follow it either.
+#[test]
+fn a_log_line_carrying_an_id_nothing_can_follow_does_not_make_a_later_surface_take_a_used_id() {
+    let world = World::new("channel-last-id");
+    world.script("build.wait", "hold");
+    let run = running(&world, "lastid", vec![agent("build", &[])]);
+    let first = world.run(&["surface", &run, "--kind", "finding", "--message", "first"]);
+    first.exited(0);
+    assert_eq!(first.json()["surface"], json!(0));
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the line is placed
+    // because no writer here allocates this id: the allocator refuses it
+    // below, so a line carrying it is a corrupt or hostile one, and what is
+    // under test is that such a line cannot turn the allocator into one that
+    // collides. Everything else is driven through the CLI.
+    let log = world.run_file(&run, "channel/surfaces.jsonl");
+    let line_under = |id: u64| {
+        format!(
+            r#"{{"event":"queued","id":{id},"kind":"finding","message":"placed under {id}","source":"proposal","blocking":false,"queued_at":0,"abandoned":false}}"#,
+        )
+    };
+    let mut placed = std::fs::read_to_string(&log).expect("the log");
+    placed.push_str(&line_under(u64::MAX));
+    placed.push('\n');
+    std::fs::write(&log, &placed).expect("the line is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Two surfaces queued afterwards take two distinct ids, neither of which
+    // the log has ever carried.
+    let second = world.run(&["surface", &run, "--kind", "finding", "--message", "second"]);
+    second.exited(0);
+    assert_eq!(second.json()["surface"], json!(1));
+    let third = world.run(&["surface", &run, "--kind", "finding", "--message", "third"]);
+    third.exited(0);
+    assert_eq!(third.json()["surface"], json!(2));
+    let mut read = Vec::new();
+    for _ in 0..3 {
+        let next = world.run(&["next", &run]);
+        next.exited(0);
+        read.push((
+            next.json()["surface"]["id"].as_u64().expect("an id"),
+            next.json()["surface"]["message"]
+                .as_str()
+                .expect("a message")
+                .to_owned(),
+        ));
+    }
+    assert_eq!(
+        read,
+        vec![
+            (0, "first".to_owned()),
+            (1, "second".to_owned()),
+            (2, "third".to_owned())
+        ]
+    );
+    let none = world.run(&["next", &run]);
+    none.exited(0);
+    assert_eq!(
+        none.json()["surface"],
+        Value::Null,
+        "the placed line was folded"
+    );
+
+    // And with the id before the last queued, the push that would hand out the
+    // last is refused by name, recording nothing.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] placed for the reason the
+    // block above gives: this id is one the log reaches after 2^64 - 1 pushes.
+    let mut placed = std::fs::read_to_string(&log).expect("the log");
+    placed.push_str(&line_under(u64::MAX - 1));
+    placed.push('\n');
+    std::fs::write(&log, &placed).expect("the line is placed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run(&["surface", &run, "--kind", "finding", "--message", "fourth"])
+        .exited(REFUSED)
+        .err_has("the channel has no id left to allocate")
+        .err_has(&format!("{}, has already been queued", u64::MAX - 1));
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("the log"),
+        placed,
+        "a refused push still appended to the log"
+    );
+    assert!(
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .all(|event| event["payload"]["message"] != json!("fourth")),
+        "the journal says a surface was queued that the log does not hold"
+    );
+    // What the log does hold under a usable id is still handed over.
+    let last = world.run(&["next", &run]);
+    last.exited(0).out_has("placed under 18446744073709551614");
+
+    world.release("build.go");
+}
+
 /// A queue that records a name identifying nobody still hands over every surface
 /// in it.
 ///
@@ -1352,6 +2125,10 @@ fn a_quiet_stream_does_not_hold_a_session_past_its_bound() {
 /// every path that writes an asker checks it first. That is what makes this
 /// worth a journey rather than a unit test — what is under test is not the
 /// parse, it is whether a live run still answers for the queue holding it.
+///
+/// The queue placed carries no stamp, so this is also the journey for a
+/// projection an older build wrote: it is taken as it stands rather than
+/// rebuilt from a log that has no line for the surface it holds.
 #[test]
 fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces() {
     let world = World::new("channel-blank-record");
