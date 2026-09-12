@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::harness::{
     agent, counts, human, plan_of, renamed, reporting, Counts, World, LOOP_STATS_ENV,
+    RENDEZVOUS_SECONDS_ENV,
 };
 use serde_json::{json, Value};
 
@@ -33,10 +34,29 @@ use serde_json::{json, Value};
 /// which an idle run records nothing, and sixty in which a paced read happens on
 /// its own interval rather than on the loop's. The tree before this change
 /// performed about 2,400 passes in it.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this is the interval the
+// three minute-long journeys below sleep, each of which carries this same suppression
+// with its reason: the minute is the bound's own interval rather than a knob, and what
+// it measures is the whole crate's reconcile loop, which any change under `src/` can
+// put the sink back into — so no project edged narrower than the crate could honestly
+// run them, and a constant they share cannot be edged narrower than they are.
 const WINDOW: Duration = Duration::from_secs(60);
 
+/// A world whose driver counts its own work, and whose held dispatches outlast
+/// the journey holding them.
+///
+/// The harness's default hold patience is set above one `until` deadline, which
+/// is what every other journey holds a dispatch across. The journeys here hold
+/// one across several — three `until` deadlines and then the whole of
+/// [`WINDOW`], four hundred and twenty seconds — and a hold that expires inside
+/// the window is not reported as the expiry it is: the double exits, the engine
+/// dispatches the node again, and that re-dispatch's reads land in the minute
+/// that was supposed to record nothing. So the patience is that sum with room,
+/// and a hold nobody releases still fails first, as an `until` timeout.
 fn measured(name: &str) -> World {
-    World::new(name).with_env(LOOP_STATS_ENV, "1")
+    World::new(name)
+        .with_env(LOOP_STATS_ENV, "1")
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
 }
 
 /// The records a run wrote that change what the graph is: what "one per recorded

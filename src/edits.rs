@@ -236,6 +236,12 @@ pub enum Operation {
     // `compile_note`; the note's own two narrowable values are **not** strings here — the
     // addressee is a closed enum and the text and criterion are the seam's validated
     // newtypes, so a record this build did not write is refused by their own conversions.
+    // `shown_to` and `routed_to` are **durable record fields** beside `reached` rather
+    // than derivations of it, for the reason `NodeParked::reason` is one: each is written
+    // from `Reached`'s own answer by the one function that builds this record, and a
+    // record an older build wrote carries neither — a reader that re-derived them would
+    // be inventing facts that build never recorded, and one that refused the triple would
+    // lose the delivery along with them.
     /// A manager's note was delivered into a node's live conversation, or carried
     /// to that node's next dispatch because no turn of it took the note.
     ///
@@ -260,6 +266,25 @@ pub enum Operation {
         /// Which party of the conversation actually took it.
         #[serde(flatten)]
         reached: crate::note::Reached,
+        /// The parties the conversation had **already shown** it when it
+        /// acknowledged it — a presentation that happened, never one intended.
+        /// [`Reached::shown_at_delivery`](crate::note::Reached::shown_at_delivery)'s
+        /// answer: the supervisor, for a decision re-taken or completed with the
+        /// note in hand, and nobody for a worker turn reopened to carry it,
+        /// because that turn has not opened when the acknowledgement is given.
+        /// Omitted where it is nobody, and absent from a record written before
+        /// the field existed, which reads back the same way.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        shown_to: Vec<crate::note::Party>,
+        /// The parties the conversation said it **will** present it to, which
+        /// the acknowledgement does not confirm —
+        /// [`Reached::routed_to`](crate::note::Reached::routed_to)'s answer. Each
+        /// presentation that then happens is its own `note-shown`, written when
+        /// the relayed stream shows it; a dispatch that ends before one leaves
+        /// this routing unconfirmed and no record saying otherwise. Omitted
+        /// where nothing is routed onward.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routed_to: Vec<crate::note::Party>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
@@ -3484,6 +3509,8 @@ mod tests {
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
             reached: crate::note::Reached::Carried,
+            shown_to: Vec::new(),
+            routed_to: Vec::new(),
         };
         let mut graph = graph_of(vec![agent("build", &[])]);
         apply(&mut graph, &carried);
@@ -3500,6 +3527,8 @@ mod tests {
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
             reached: crate::note::Reached::Worker,
+            shown_to: Vec::new(),
+            routed_to: crate::note::Reached::Worker.routed_to().to_vec(),
         };
         let mut untouched = graph_of(vec![agent("build", &[])]);
         apply(&mut untouched, &taken);

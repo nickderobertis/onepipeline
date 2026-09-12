@@ -49,6 +49,7 @@
 
 use oneagentgraph::note::Accepted;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use oneagentgraph::note::{
     Addressee, Criterion, Note, NoteRefused, NoteText, Party, Undelivered,
@@ -56,6 +57,7 @@ pub use oneagentgraph::note::{
 
 use crate::channel::{Author, Command, Deliver, Reply, REPLY_ENVELOPE_VERSION};
 use crate::error::{Error, Result};
+use crate::event::Envelope;
 use crate::views::RunPaths;
 
 /// What became of one note, as the run records it.
@@ -138,6 +140,46 @@ impl Reached {
             Self::Supervisor => "supervisor",
             Self::JudgedWith { .. } => "judged-with",
             Self::Carried => "carried",
+        }
+    }
+
+    /// The parties the conversation had **already shown** the note to when it
+    /// acknowledged it.
+    ///
+    /// Only what is confirmed at that instant, never what the conversation
+    /// intends to do next. The judge's re-taken decision and its completion
+    /// with the note in hand are both settled *after* the decision was taken,
+    /// so the supervisor has been presented the note by the time either is
+    /// answered. A worker turn reopened to carry it is acknowledged *before*
+    /// that turn opens, so nothing is confirmed: the receipt would otherwise be
+    /// written at submission and read afterwards as a receipt for arrival, and a
+    /// dispatch cancelled between the two would leave a record asserting a
+    /// presentation that never happened. What the conversation routes onward is
+    /// [`routed_to`](Self::routed_to), and each presentation that then happens
+    /// is recorded as its own `note-shown` when the stream shows it.
+    #[must_use]
+    pub fn shown_at_delivery(&self) -> &'static [Party] {
+        match self {
+            Self::Supervisor | Self::JudgedWith { .. } => &[Party::Supervisor],
+            Self::Queued | Self::Worker | Self::Carried => &[],
+        }
+    }
+
+    /// The parties the conversation said it **will** present the note to,
+    /// which the acknowledgement does not confirm.
+    ///
+    /// A worker's reopened turn presents it to the worker and, with the worker's
+    /// response, to the judge; a judge's re-taken decision rides to the worker
+    /// with that decision; a queued note reaches whichever turn opens next and
+    /// the other party after. A completion leaves no turn to route to, and a
+    /// carried note is routed by the dispatch that composes it rather than by a
+    /// conversation.
+    #[must_use]
+    pub fn routed_to(&self) -> &'static [Party] {
+        match self {
+            Self::Worker | Self::Queued => &[Party::Worker, Party::Supervisor],
+            Self::Supervisor => &[Party::Worker],
+            Self::JudgedWith { .. } | Self::Carried => &[],
         }
     }
 }
@@ -328,5 +370,1268 @@ pub(crate) fn of(
     match criterion {
         None => Ok(note),
         Some(criterion) => note.binding(criterion.as_str()),
+    }
+}
+
+/// One note as the run's record carries it: what was delivered, whether a party
+/// read it or it was carried, as a later record — a dispatch composed with it, a
+/// dispatch composed without it, a presentation of it — names it.
+///
+/// The **note's own** fields of a
+/// [`NoteDelivered`](crate::edits::Operation::NoteDelivered) — whose task it
+/// updated, what it said, what it bound, and what became of it — carried whole
+/// rather than referenced, because a note has no id of its own: the record that
+/// says a dispatch was given a note has to be able to say *which*. What that
+/// operation says about presentations (`shown_to`, `routed_to`) is deliberately
+/// not here: a presentation belongs to the conversation that made it, and each
+/// one a later dispatch makes is its own `note-shown`. Built from the operation
+/// by [`of_delivery`](Self::of_delivery) and nowhere else, and this module's
+/// tests hold the two shapes field for field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RecordedNote {
+    /// Whose task it said it was updating.
+    pub addressee: Addressee,
+    /// What the note says.
+    pub text: NoteText,
+    /// The criterion it bound, when it bound one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<Criterion>,
+    /// What became of it when it was delivered: which party took it, or that
+    /// none did and it was carried.
+    #[serde(flatten)]
+    pub reached: Reached,
+}
+
+impl RecordedNote {
+    /// The note a committed delivery carried, or `None` for any other operation.
+    pub(crate) fn of_delivery(operation: &crate::edits::Operation) -> Option<Self> {
+        let crate::edits::Operation::NoteDelivered {
+            addressee,
+            text,
+            criterion,
+            reached,
+            ..
+        } = operation
+        else {
+            return None;
+        };
+        Some(Self {
+            addressee: *addressee,
+            text: text.clone(),
+            criterion: criterion.clone(),
+            reached: reached.clone(),
+        })
+    }
+}
+
+/// The payload key under which a `node-dispatched` names the notes the dispatch
+/// it announces was **composed with**: each was read by an earlier dispatch of
+/// the node, or carried to this one, and this dispatch's task carries it.
+pub(crate) const CARRIED_KEY: &str = "notes_carried";
+
+/// The payload key under which a `node-dispatched` names the notes an earlier
+/// dispatch of the node read that this dispatch was **not** composed with.
+///
+/// The other half of [`CARRIED_KEY`], and the one a manager reads: a note that
+/// reached a conversation is consumed by it, and a dispatch composed without it
+/// has spent it. The receipt for the delivery named the party that read it, which
+/// looks like success; this is the record that says the ruling did not survive
+/// the dispatch it was issued during, so the manager knows to re-issue it rather
+/// than believe the receipt.
+pub(crate) const SPENT_KEY: &str = "notes_spent";
+
+/// The value a `node-dispatched` carries a list of notes as.
+pub(crate) fn payload_of(notes: &[RecordedNote]) -> Value {
+    serde_json::to_value(notes).unwrap_or_else(|_| Value::Array(Vec::new()))
+}
+
+/// Where one standing note sits relative to the node's current dispatch, which
+/// decides whether that dispatch's conversation has read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// Composed into the current dispatch's task, so read by both of its parties
+    /// whatever the disposition it was first delivered under.
+    ComposedIntoIt,
+    /// Delivered since the current dispatch was composed; whether a party read
+    /// it is its own disposition's to say.
+    DeliveredSince,
+}
+
+/// One standing note and where it sits — exactly one place, so a note cannot be
+/// both composed into the dispatch and delivered after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub note: RecordedNote,
+    pub placement: Placement,
+}
+
+impl Held {
+    /// Whether a conversation of the node's current dispatch has read this note.
+    fn read(&self) -> bool {
+        match self.placement {
+            Placement::ComposedIntoIt => true,
+            Placement::DeliveredSince => self.note.reached.a_conversation_read_it(),
+        }
+    }
+}
+
+/// The notes a node's **current** dispatch holds, as the run's record has them:
+/// what that dispatch was composed with, and every note the run delivered to
+/// the node since — each in exactly one of those two places.
+///
+/// Folded off the journal rather than kept in memory, because the two readers of
+/// it are on different threads and neither owns the answer: the dispatch thread
+/// composing the node's next attempt, and the reconcile loop about to announce a
+/// dispatch that was composed without them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Standing {
+    /// Every note, in the order the run recorded them.
+    pub held: Vec<Held>,
+}
+
+impl Standing {
+    /// Every note, as the node's next dispatch is composed with all of them.
+    pub(crate) fn notes(&self) -> Vec<RecordedNote> {
+        self.held.iter().map(|held| held.note.clone()).collect()
+    }
+
+    /// The notes delivered since the current dispatch was composed that **no**
+    /// turn took, and which are therefore owed to the node's next dispatch.
+    pub(crate) fn carried(&self) -> Vec<RecordedNote> {
+        self.held
+            .iter()
+            .filter(|held| !held.read())
+            .map(|held| held.note.clone())
+            .collect()
+    }
+
+    /// The notes a conversation of the node's current dispatch has read.
+    pub(crate) fn read(&self) -> Vec<RecordedNote> {
+        self.held
+            .iter()
+            .filter(|held| held.read())
+            .map(|held| held.note.clone())
+            .collect()
+    }
+}
+
+/// Fold what stands for `node` out of the run's journal.
+///
+/// A `node-dispatched` resets the fold to what that dispatch was composed with —
+/// [`CARRIED_KEY`], or nothing for a dispatch composed with none — and a
+/// committed `note` adds its note. Both are this crate's own records, and both
+/// are **refused** rather than read past where they cannot be read: a
+/// `notes_carried` that is not a list of notes, or an operation list this build
+/// cannot parse, would otherwise decide *by its absence* which rulings a dispatch
+/// is composed with, which is the silent loss this fold exists to end. The
+/// refusal names the record, so a reader is sent at the line rather than at the
+/// run.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the record that could not be read as what its kind
+/// says it is.
+pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
+    let mut standing = Standing::default();
+    for envelope in journal {
+        // A dispatch is stamped with its node; a committed edit is not — it may
+        // touch several — so the note inside it is matched on its own `node`.
+        if envelope.kind.0 == crate::event::PipelineKind::NodeDispatched.as_str() {
+            if envelope.labels.node.as_deref() != Some(node) {
+                continue;
+            }
+            let composed: Vec<RecordedNote> = match envelope.payload.get(CARRIED_KEY) {
+                None => Vec::new(),
+                Some(carried) => serde_json::from_value(carried.clone())
+                    .map_err(|error| unreadable_record(envelope, CARRIED_KEY, &error))?,
+            };
+            standing.held = composed
+                .into_iter()
+                .map(|note| Held {
+                    note,
+                    placement: Placement::ComposedIntoIt,
+                })
+                .collect();
+            continue;
+        }
+        let is_a_commit = [
+            crate::event::PipelineKind::EditCommitted,
+            crate::event::PipelineKind::CommandAccepted,
+        ]
+        .iter()
+        .any(|kind| envelope.kind.0 == kind.as_str());
+        if !is_a_commit || envelope.source != crate::event::Source::Pipeline {
+            continue;
+        }
+        // Every commit this crate writes carries its operations; one without
+        // them is as unreadable as one whose operations cannot be parsed.
+        let operations: Vec<crate::edits::Operation> = serde_json::from_value(
+            envelope
+                .payload
+                .get("operations")
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+        .map_err(|error| unreadable_record(envelope, "operations", &error))?;
+        for operation in operations {
+            let crate::edits::Operation::NoteDelivered { node: whose, .. } = &operation else {
+                continue;
+            };
+            if whose == node {
+                if let Some(note) = RecordedNote::of_delivery(&operation) {
+                    standing.held.push(Held {
+                        note,
+                        placement: Placement::DeliveredSince,
+                    });
+                }
+            }
+        }
+    }
+    Ok(standing)
+}
+
+/// The refusal for a record of this crate's own that cannot be read as what its
+/// kind says it carries.
+fn unreadable_record(envelope: &Envelope, field: &str, error: &serde_json::Error) -> Error {
+    Error::Invalid(format!(
+        "the run's record of the notes delivered to its nodes cannot be read: `{}` record \
+         {}/{} carries a `{field}` this build cannot read ({error}), so which notes a \
+         dispatch is composed with cannot be decided from it",
+        envelope.kind.0, envelope.stream, envelope.seq
+    ))
+}
+
+/// The same, read off the run's own journal.
+///
+/// # Errors
+///
+/// [`standing`]'s.
+pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
+    // llmlint: ignore-block[boundary_inputs_validated] `journal::read` is the crate's
+    // one reader of its own journal, the same one the projection that decides the run's
+    // whole state reads through, and a line it drops — blank, truncated, unparseable —
+    // is a line that state was decided without too; a stricter reader here would
+    // decide a node's notes from a record the engine itself never saw. What this fold
+    // validates is the layer above that: a record of this crate's own kind, parsed
+    // whole, whose payload cannot be read as what its kind says, which `standing`
+    // refuses by name.
+    // llmlint: ignore-block[changed_behavior_has_e2e] this is the reader the engine's
+    // continuation calls (`lifecycle::execute`), and `tests/note/main.rs`'s
+    // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives
+    // it through that path over a real run's journal; the refusal is held by
+    // `note::tests` over the fold, for the reason the caller's arm records.
+    standing(&crate::journal::read(&paths.journal()), node)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // llmlint: ignore-end[boundary_inputs_validated]
+}
+
+/// Where a note stands on the way from the worker to the judge, for a route on
+/// which the judge is shown it only after the worker: the judge receives a note
+/// the worker's turn carried *with* that turn's response, so a supervisor turn
+/// opening before the worker's was not shown it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerThenJudge {
+    /// The worker's turn has not opened on it.
+    AwaitingWorker,
+    /// The worker's turn numbered here opened on it; the judge's answer to that
+    /// turn, or a later one, is the judge's presentation. The supervisor answers
+    /// the worker's reply under that reply's own turn number, so it is numbered
+    /// as that turn, not after it.
+    AwaitingJudge { worker_turn: u64 },
+}
+
+/// How a conversation presents a note it has been told to, and how far it has
+/// got — each route carrying exactly the state it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Routing {
+    /// The worker's turn is reopened carrying it, and the judge receives it with
+    /// the worker's response: the worker's presentation is the turn the producer
+    /// stamps `delivered`.
+    ReopenedWorkerTurn(WorkerThenJudge),
+    /// Composed into the dispatch's own task: the opening worker turn carries it
+    /// as the task itself, whatever origin it is stamped with.
+    ComposedIntoTheTask(WorkerThenJudge),
+    /// The judge re-took its decision with it in hand, which the delivery
+    /// already confirmed, and the note rides that decision to the worker: the
+    /// one presentation owed is the worker's `delivered` turn.
+    RidesTheDecision,
+    /// Nobody was taking a turn, so whichever turn opens next takes it and the
+    /// other party receives it after: a `delivered` worker turn and any
+    /// supervisor turn, in either order, until both have.
+    NextTurnToOpen {
+        worker_shown: bool,
+        judge_shown: bool,
+    },
+    /// The conversation took nothing — the note was recorded `carried` — and
+    /// yet its text may still reach a worker turn of this same dispatch by a
+    /// lever outside the note seam: an `interrupt` an operator issues by hand,
+    /// or the supervising side reading it aloud. The seam cannot predict that,
+    /// so the only evidence is the turn's own opening **instruction carrying the
+    /// note's text whole**; the judge is then shown it as every judge is shown
+    /// the transcript. Measured: a correction recorded `carried` at 02:58:53Z
+    /// opened the worker's turn 2 at 03:17:55Z, and the record said nobody had
+    /// taken it.
+    PresentedOutsideTheSeam(WorkerThenJudge),
+}
+
+/// What a `note-shown` was decided from, written on the record so a reader
+/// knows whether the producer said so or this crate read it off the words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Evidence {
+    /// The producer stamped the worker's turn `origin: delivered`.
+    DeliveredOrigin,
+    /// The worker's opening turn carried the task the note was composed into.
+    OpeningTask,
+    /// The worker's turn opened on an instruction carrying the note's whole text.
+    InstructionText,
+    /// The supervisor's turn answered a worker turn that had been shown it.
+    AnsweringTurn,
+}
+
+impl Evidence {
+    /// Who this evidence is a presentation to: the first three are things only
+    /// a worker's turn can be, and the last is the supervisor's alone, so the
+    /// party a `note-shown` names is read off its evidence rather than kept
+    /// beside it.
+    fn party(self) -> Party {
+        match self {
+            Self::DeliveredOrigin | Self::OpeningTask | Self::InstructionText => Party::Worker,
+            Self::AnsweringTurn => Party::Supervisor,
+        }
+    }
+}
+
+impl Routing {
+    /// The route a conversation's own acknowledgement implies, or `None` for a
+    /// disposition that routes nothing onward.
+    fn of(reached: &Reached) -> Option<Self> {
+        match reached {
+            Reached::Worker => Some(Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingWorker)),
+            Reached::Supervisor => Some(Self::RidesTheDecision),
+            // llmlint: ignore[changed_behavior_has_e2e] no journey drives this
+            // arm, for the reason `Reached::Queued` states over that variant:
+            // the conversation answers it only for a note offered with no turn
+            // live, and this suite has no seam that holds the gap between two
+            // turns open. What the arm decides is held by this module's own
+            // tests over the same relayed shapes the journeys read.
+            Reached::Queued => Some(Self::NextTurnToOpen {
+                worker_shown: false,
+                judge_shown: false,
+            }),
+            Reached::Carried => Some(Self::PresentedOutsideTheSeam(
+                WorkerThenJudge::AwaitingWorker,
+            )),
+            Reached::JudgedWith { .. } => None,
+        }
+    }
+
+    /// Advance on a relayed turn of `party`, answering what that turn is
+    /// evidence of where it is a presentation this route was owed.
+    ///
+    /// A worker turn is **this note's** presentation only where its opening
+    /// instruction carries this note's text: the producer's `delivered` stamp
+    /// says the turn opened on *a* note, and several notes routed at once — two
+    /// in one envelope are acknowledged one turn apart and recorded at one
+    /// instant — open separate turns, so the stamp alone would put every
+    /// pending note on the first of them. An instruction cut short of the text
+    /// by the payload bound is no evidence either way, and confirms nothing.
+    fn presented_by(
+        &mut self,
+        party: Party,
+        opened: &oneagentgraph::event::TurnStarted,
+        text: &str,
+    ) -> Option<Evidence> {
+        let turn = opened.turn;
+        let carries_this_note = opened.instruction.contains(text);
+        let delivered =
+            opened.origin == Some(oneagentgraph::event::Origin::Delivered) && carries_this_note;
+        let shown_to_both = Self::NextTurnToOpen {
+            worker_shown: true,
+            judge_shown: true,
+        };
+        match (party, *self) {
+            (Party::Worker, Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingWorker))
+                if delivered =>
+            {
+                *self =
+                    Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingJudge { worker_turn: turn });
+                Some(Evidence::DeliveredOrigin)
+            }
+            (Party::Worker, Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingWorker)) => {
+                *self =
+                    Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn: turn });
+                Some(Evidence::OpeningTask)
+            }
+            (Party::Worker, Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingWorker))
+                if carries_this_note =>
+            {
+                *self = Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingJudge {
+                    worker_turn: turn,
+                });
+                Some(Evidence::InstructionText)
+            }
+            (
+                Party::Supervisor,
+                Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingJudge { worker_turn })
+                | Self::ComposedIntoTheTask(WorkerThenJudge::AwaitingJudge { worker_turn })
+                | Self::PresentedOutsideTheSeam(WorkerThenJudge::AwaitingJudge { worker_turn }),
+            ) if turn >= worker_turn => {
+                *self = shown_to_both;
+                Some(Evidence::AnsweringTurn)
+            }
+            (Party::Worker, Self::RidesTheDecision) if delivered => {
+                *self = shown_to_both;
+                Some(Evidence::DeliveredOrigin)
+            }
+            (
+                Party::Worker,
+                Self::NextTurnToOpen {
+                    worker_shown: false,
+                    judge_shown,
+                },
+            ) if delivered => {
+                *self = Self::NextTurnToOpen {
+                    worker_shown: true,
+                    judge_shown,
+                };
+                Some(Evidence::DeliveredOrigin)
+            }
+            (
+                Party::Supervisor,
+                Self::NextTurnToOpen {
+                    worker_shown,
+                    judge_shown: false,
+                },
+            ) => {
+                *self = Self::NextTurnToOpen {
+                    worker_shown,
+                    judge_shown: true,
+                };
+                Some(Evidence::AnsweringTurn)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether every presentation this route owed has been seen.
+    fn settled(self) -> bool {
+        matches!(
+            self,
+            Self::NextTurnToOpen {
+                worker_shown: true,
+                judge_shown: true,
+            }
+        )
+    }
+}
+
+/// One note a conversation has been told to present, and where that stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Routed {
+    // llmlint: ignore-block[invalid_states_unrepresentable] `routing` is not a second
+    // spelling of `note.reached`, so the two cannot contradict each other. `reached` is
+    // what the conversation the note was *first* delivered into did with it, and stays on
+    // the note because every `note-shown` carries the note as the record delivered it;
+    // `routing` is where *this* dispatch's presentation of it stands, and moves as the
+    // stream shows each party the note. It opens from `reached` for a note the
+    // conversation routed (`Routing::of`) and as `ComposedIntoTheTask` whatever `reached`
+    // says for a note a later dispatch's task carries — so `reached: worker` beside
+    // `ComposedIntoTheTask` is the meaningful state "the last conversation's worker read
+    // it, and this one is handed it as its task", not an impossible one. Folding the two
+    // into one enum would have to drop `reached` from the record or freeze `routing` at
+    // its opening value, and the record needs both. The struct is private and
+    // `Presentations`' two constructors are the only way to build one.
+    note: RecordedNote,
+    routing: Routing, // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The instant this routing was recorded, against which a relayed turn is
+    /// read: a turn that opened before it cannot be the presentation of it.
+    routed_at: u64,
+}
+
+/// One presentation the stream showed happening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Shown {
+    /// The turn that opened carrying it.
+    pub turn: u64,
+    /// What the presentation was decided from, which says who was shown it:
+    /// [`Evidence::party`].
+    pub evidence: Evidence,
+    /// The note.
+    pub note: RecordedNote,
+}
+
+impl Shown {
+    /// The payload a `note-shown` carries.
+    pub(crate) fn payload(&self) -> serde_json::Map<String, Value> {
+        let mut payload = match serde_json::to_value(&self.note) {
+            Ok(Value::Object(note)) => note,
+            _ => serde_json::Map::new(),
+        };
+        payload.insert(
+            "party".into(),
+            serde_json::to_value(self.evidence.party()).unwrap_or(Value::Null),
+        );
+        payload.insert("turn".into(), Value::from(self.turn));
+        payload.insert(
+            "evidence".into(),
+            serde_json::to_value(self.evidence).unwrap_or(Value::Null),
+        );
+        payload
+    }
+}
+
+/// What one dispatch's conversation has been told to present and has not yet
+/// been seen presenting.
+///
+/// Kept by the writer that relays the conversation's stream, per in-flight
+/// dispatch, so a presentation is recorded when the stream shows it and never
+/// when it is merely intended. The stream is the producer's own account: a
+/// worker turn the producer stamps `delivered` is the turn that opened on a
+/// note, and a supervisor turn that opens after it is one the judge takes with
+/// every delivered note in hand. A dispatch that ends between the two — cancelled,
+/// or a worker turn that fails — drops this with it, and the record keeps only
+/// the presentations that happened.
+///
+/// A note recorded `carried` is watched too, and this is where the record can
+/// say something the delivery could not: the seam took nothing, so it predicted
+/// nothing, and a turn that then opens on the note's whole text is a
+/// presentation that happened with no receipt anywhere else.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Presentations {
+    routed: Vec<Routed>,
+}
+
+impl Presentations {
+    /// A note the run delivered while this dispatch was live, whatever the
+    /// conversation answered: routed onward by it, as [`Reached::routed_to`]
+    /// says, or recorded `carried` and watched all the same, because a lever
+    /// outside the seam can still read it into a turn.
+    pub(crate) fn delivered_while_live(&mut self, note: RecordedNote, at: u64) {
+        let Some(routing) = Routing::of(&note.reached) else {
+            return;
+        };
+        self.routed.push(Routed {
+            note,
+            routing,
+            routed_at: at,
+        });
+    }
+
+    /// A note composed into the dispatch's own task, which its opening worker
+    /// turn carries and every supervisor turn after that reads.
+    pub(crate) fn composed_into_the_task(&mut self, note: RecordedNote, at: u64) {
+        self.routed.push(Routed {
+            note,
+            routing: Routing::ComposedIntoTheTask(WorkerThenJudge::AwaitingWorker),
+            routed_at: at,
+        });
+    }
+
+    /// Read one relayed envelope of the conversation, and answer every
+    /// presentation it shows happening.
+    ///
+    /// Only a `turn-started` the producer published, opened no earlier than the
+    /// routing it would confirm, on the member the notes were addressed to — the
+    /// caller decides the member. The payload is read through the producer's
+    /// **own** declared type, which refuses a shape that library does not write;
+    /// a turn this build cannot read that way is no evidence of a presentation,
+    /// and answers none. It is not refused further up, because the envelope
+    /// itself was already relayed whole and a producer newer than this build is
+    /// held to its floor in `src/agentgraph.rs` rather than here.
+    pub(crate) fn observe(&mut self, envelope: &Envelope) -> Vec<Shown> {
+        if self.routed.is_empty()
+            || envelope.source != crate::event::Source::Agentgraph
+            || envelope.kind.0 != oneagentgraph::event::EventKind::TurnStarted.as_str()
+        {
+            return Vec::new();
+        }
+        let Ok(opened) = serde_json::from_value::<oneagentgraph::event::TurnStarted>(
+            Value::Object(envelope.payload.clone()),
+        ) else {
+            return Vec::new();
+        };
+        let Some(started_at) = crate::projection::millis_of(&opened.started_at) else {
+            return Vec::new();
+        };
+        let party = if opened.role == oneagentgraph::event::Party::Assistant.as_str() {
+            Party::Worker
+        } else if opened.role == oneagentgraph::event::Party::User.as_str() {
+            Party::Supervisor
+        } else {
+            return Vec::new();
+        };
+        let mut shown = Vec::new();
+        for routed in &mut self.routed {
+            if started_at < routed.routed_at {
+                continue;
+            }
+            let Some(evidence) =
+                routed
+                    .routing
+                    .presented_by(party, &opened, routed.note.text.as_str())
+            else {
+                continue;
+            };
+            shown.push(Shown {
+                turn: opened.turn,
+                evidence,
+                note: routed.note.clone(),
+            });
+        }
+        self.routed.retain(|routed| !routed.routing.settled());
+        shown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edits::Operation;
+    use crate::event::{Labels, Source, ENVELOPE_VERSION};
+    use crate::journal::{self, labels, payload};
+    use serde_json::json;
+
+    fn pipeline(
+        kind: journal::PipelineKind,
+        seq: u64,
+        node: Option<&str>,
+        fields: &[(&str, Value)],
+    ) -> Envelope {
+        Envelope {
+            v: ENVELOPE_VERSION,
+            ts: crate::sys::rfc3339_from_millis(1_786_000_000_000 + seq * 1_000),
+            stream: "s".into(),
+            seq,
+            source: Source::Pipeline,
+            kind: kind.into(),
+            phase: None,
+            labels: Labels {
+                node: node.map(str::to_string),
+                ..labels("demo", None)
+            },
+            payload: payload(fields),
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// One committed `note`, as the reconciler journals it: unlabelled, because a
+    /// committed edit may touch several nodes, with the node on the operation.
+    fn delivered(seq: u64, node: &str, text: &str, reached: Reached) -> Envelope {
+        pipeline(
+            journal::PipelineKind::EditCommitted,
+            seq,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NoteDelivered {
+                    node: node.into(),
+                    addressee: Addressee::Worker,
+                    text: text.parse().expect("a usable note"),
+                    criterion: None,
+                    shown_to: reached.shown_at_delivery().to_vec(),
+                    routed_to: reached.routed_to().to_vec(),
+                    reached,
+                }]),
+            )],
+        )
+    }
+
+    fn texts(notes: &[RecordedNote]) -> Vec<&str> {
+        notes.iter().map(|note| note.text.as_str()).collect()
+    }
+
+    /// What stands for a node is what its last dispatch was composed with plus
+    /// what reached it since — and nothing from before that dispatch, which a
+    /// record composed without it already spent.
+    #[test]
+    fn what_stands_for_a_node_starts_at_its_last_dispatch_and_reads_forward() {
+        let journal = vec![
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                1,
+                Some("build"),
+                &[("attempt", json!(1))],
+            ),
+            delivered(2, "build", "first ruling", Reached::Worker),
+            // Another node's note, on an unlabelled record like every committed
+            // edit: matched on the operation's own node, so it stays out.
+            delivered(3, "other", "not yours", Reached::Worker),
+            delivered(4, "build", "landed nowhere", Reached::Carried),
+        ];
+        let before = standing(&journal, "build").expect("the record reads");
+        assert_eq!(texts(&before.notes()), ["first ruling", "landed nowhere"]);
+        // Read by this dispatch's conversation: the one a turn took. The one
+        // that landed nowhere is owed forward and not yet read by anybody.
+        assert_eq!(texts(&before.read()), ["first ruling"]);
+
+        let composed = payload_of(&before.notes());
+        assert_eq!(composed[1]["reached"], json!("carried"));
+        assert!(
+            composed[0].get("shown_to").is_none(),
+            "a dispatch's record claimed a presentation it has not made: {composed}"
+        );
+
+        // A continuation composed with them resets the fold to exactly them, and
+        // a dispatch composed with none resets it to nothing: what an earlier
+        // dispatch read is spent by the first dispatch that does not carry it.
+        let mut continued = journal.clone();
+        continued.push(pipeline(
+            journal::PipelineKind::NodeDispatched,
+            5,
+            Some("build"),
+            &[("attempt", json!(2)), (CARRIED_KEY, composed)],
+        ));
+        continued.push(delivered(6, "build", "second ruling", Reached::Supervisor));
+        let after = standing(&continued, "build").expect("the record reads");
+        assert_eq!(
+            texts(&after.notes()),
+            ["first ruling", "landed nowhere", "second ruling"]
+        );
+        // The note that landed nowhere was composed into this dispatch's task,
+        // so its conversation has read it: nothing is owed forward, and a
+        // dispatch composed without it would spend it.
+        assert_eq!(
+            texts(&after.read()),
+            ["first ruling", "landed nowhere", "second ruling"]
+        );
+
+        let mut fresh = continued.clone();
+        fresh.push(pipeline(
+            journal::PipelineKind::NodeDispatched,
+            7,
+            Some("build"),
+            &[("attempt", json!(1))],
+        ));
+        assert_eq!(
+            standing(&fresh, "build").expect("the record reads"),
+            Standing::default()
+        );
+    }
+
+    /// A record of this crate's own that cannot be read as what it says it
+    /// carries is refused, naming the record — never read past, because a
+    /// dispatch composed without the notes it cannot read is the silent loss the
+    /// fold exists to end.
+    #[test]
+    fn a_record_the_fold_cannot_read_is_refused_by_name_rather_than_read_past() {
+        let carried_wrong = vec![pipeline(
+            journal::PipelineKind::NodeDispatched,
+            1,
+            Some("build"),
+            &[("attempt", json!(2)), (CARRIED_KEY, json!("a ruling"))],
+        )];
+        let refused =
+            standing(&carried_wrong, "build").expect_err("a string is not a list of notes");
+        let said = refused.to_string();
+        assert!(
+            said.contains("node-dispatched") && said.contains("s/1") && said.contains(CARRIED_KEY),
+            "the refusal does not name the record or the field: {said}"
+        );
+
+        let operations_wrong = vec![pipeline(
+            journal::PipelineKind::EditCommitted,
+            2,
+            None,
+            &[("operations", json!([{"kind": "from-the-future"}]))],
+        )];
+        let refused = standing(&operations_wrong, "build")
+            .expect_err("an operation this build does not know is not read past");
+        assert!(
+            refused.to_string().contains("`operations`"),
+            "the refusal does not name the field: {refused}"
+        );
+
+        // A sibling's record is not this crate's to read, whatever it is called.
+        let mut foreign = pipeline(
+            journal::PipelineKind::EditCommitted,
+            3,
+            None,
+            &[("operations", json!("not ours"))],
+        );
+        foreign.source = Source::Agentgraph;
+        assert_eq!(
+            standing(&[foreign], "build").expect("a sibling's record is passed over"),
+            Standing::default()
+        );
+    }
+
+    /// What each disposition confirms at the acknowledgement and what it only
+    /// routes onward, written on the record as two facts rather than one.
+    #[test]
+    fn each_disposition_tells_a_confirmed_presentation_from_a_routed_one() {
+        assert!(Reached::Worker.shown_at_delivery().is_empty());
+        assert_eq!(
+            Reached::Worker.routed_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert_eq!(Reached::Supervisor.shown_at_delivery(), [Party::Supervisor]);
+        assert_eq!(Reached::Supervisor.routed_to(), [Party::Worker]);
+        let judged = Reached::JudgedWith {
+            completion_reason: "done".into(),
+        };
+        assert_eq!(judged.shown_at_delivery(), [Party::Supervisor]);
+        assert!(judged.routed_to().is_empty());
+        assert!(Reached::Queued.shown_at_delivery().is_empty());
+        assert_eq!(
+            Reached::Queued.routed_to(),
+            [Party::Worker, Party::Supervisor]
+        );
+        assert!(Reached::Carried.shown_at_delivery().is_empty());
+        assert!(Reached::Carried.routed_to().is_empty());
+
+        // And on the wire each field is omitted where it is empty, so a record
+        // of a carried note reads exactly as it did before either field.
+        let record = |reached: Reached| Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: reached.shown_at_delivery().to_vec(),
+            routed_to: reached.routed_to().to_vec(),
+            reached,
+        };
+        let wire = serde_json::to_value(record(Reached::Carried)).expect("it serializes");
+        assert!(
+            wire.get("shown_to").is_none() && wire.get("routed_to").is_none(),
+            "{wire}"
+        );
+        let wire = serde_json::to_value(record(Reached::Worker)).expect("it serializes");
+        assert!(wire.get("shown_to").is_none(), "{wire}");
+        assert_eq!(wire["routed_to"], json!(["worker", "supervisor"]), "{wire}");
+        let wire = serde_json::to_value(record(Reached::Supervisor)).expect("it serializes");
+        assert_eq!(wire["shown_to"], json!(["supervisor"]), "{wire}");
+        assert_eq!(wire["routed_to"], json!(["worker"]), "{wire}");
+        assert_eq!(
+            serde_json::from_value::<Operation>(wire).expect("it reads back"),
+            record(Reached::Supervisor)
+        );
+    }
+
+    /// A relayed turn, as the producer publishes it.
+    fn turn(seq: u64, at: u64, role: &str, turn: u64, origin: Option<&str>) -> Envelope {
+        turn_on(seq, at, role, turn, origin, "do it")
+    }
+
+    /// The same, opening on `instruction`.
+    fn turn_on(
+        seq: u64,
+        at: u64,
+        role: &str,
+        turn: u64,
+        origin: Option<&str>,
+        instruction: &str,
+    ) -> Envelope {
+        let mut payload = payload(&[
+            ("turn", json!(turn)),
+            ("role", json!(role)),
+            ("instruction", json!(instruction)),
+            ("started_at", json!(crate::sys::rfc3339_from_millis(at))),
+        ]);
+        if let Some(origin) = origin {
+            payload.insert("origin".into(), json!(origin));
+        }
+        Envelope {
+            v: 1,
+            ts: crate::sys::rfc3339_from_millis(at),
+            stream: "node-scope-1".into(),
+            seq,
+            source: Source::Agentgraph,
+            kind: crate::event::EventKind(
+                oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
+            ),
+            phase: None,
+            labels: labels("demo", Some("build")),
+            payload,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn recorded(text: &str, reached: Reached) -> RecordedNote {
+        RecordedNote {
+            addressee: Addressee::Both,
+            text: text.parse().expect("a usable note"),
+            criterion: None,
+            reached,
+        }
+    }
+
+    /// A presentation is recorded when the stream shows it and not before: a
+    /// note the worker's reopened turn carries is shown to the worker by the
+    /// turn the producer stamps `delivered`, and to the supervisor by the turn
+    /// that answers it — never by a turn that opened before the note was
+    /// offered, and never to the supervisor ahead of the worker.
+    ///
+    /// The shape an interrupted conversation leaves is the unit half of what
+    /// `tests/note` drives against a real one: the worker's turn shown and the
+    /// supervisor's never confirmed, because nothing here invents it.
+    #[test]
+    fn a_presentation_is_recorded_when_the_stream_shows_it_and_in_the_producers_order() {
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(recorded("stop", Reached::Worker), 1_000);
+
+        // A supervisor turn that opened before the note was offered, and a
+        // worker turn that opened before it too, confirm nothing — whatever
+        // order the writer meets them in.
+        assert!(watch.observe(&turn(1, 900, "user", 1, None)).is_empty());
+        assert!(watch
+            .observe(&turn(2, 950, "assistant", 1, Some("task")))
+            .is_empty());
+        // Nor does a worker turn after it that the producer does not stamp as a
+        // delivery: that turn opened on something else.
+        assert!(watch
+            .observe(&turn(3, 1_100, "assistant", 2, Some("supervisor")))
+            .is_empty());
+        // Nor a supervisor turn ahead of the worker's delivered one.
+        assert!(watch.observe(&turn(4, 1_200, "user", 2, None)).is_empty());
+        // Nor a delivered turn that opened on some **other** note: the stamp
+        // says a note, and the instruction says which.
+        assert!(watch
+            .observe(&turn_on(
+                5,
+                1_250,
+                "assistant",
+                3,
+                Some("delivered"),
+                "## Notes delivered to you during this run\n\n- carry on"
+            ))
+            .is_empty());
+
+        let shown = watch.observe(&turn_on(
+            5,
+            1_300,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- stop",
+        ));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+        assert_eq!(shown[0].turn, 3);
+        assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
+        assert_eq!(shown[0].payload()["party"], json!("worker"));
+        assert_eq!(shown[0].payload()["evidence"], json!("delivered-origin"));
+        assert_eq!(shown[0].payload()["text"], json!("stop"));
+        assert_eq!(shown[0].payload()["reached"], json!("worker"));
+
+        // The supervisor answers that reply under the same turn number, and
+        // that is the presentation; a second supervisor turn confirms nothing
+        // twice.
+        let shown = watch.observe(&turn(6, 1_400, "user", 3, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
+        assert!(watch.observe(&turn(7, 1_500, "user", 4, None)).is_empty());
+
+        // A note the judge re-took its decision with is confirmed to the judge at
+        // delivery and owed only to the worker, by the delivered turn that rides
+        // the decision.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(recorded("ruling", Reached::Supervisor), 2_000);
+        assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
+        let shown = watch.observe(&turn_on(
+            9,
+            2_200,
+            "assistant",
+            6,
+            Some("delivered"),
+            "the supervisor was told: ruling",
+        ));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+
+        // One composed into the task is carried by the opening turn as the
+        // task, and read by the supervisor that answers it.
+        let mut watch = Presentations::default();
+        watch.composed_into_the_task(recorded("carried in", Reached::Carried), 3_000);
+        let shown = watch.observe(&turn(10, 3_100, "assistant", 1, Some("task")));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::OpeningTask);
+        let shown = watch.observe(&turn(11, 3_200, "user", 1, None));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
+
+        // A note recorded `carried` is owed nothing by the conversation, and is
+        // watched all the same: a worker turn that opens on its whole text —
+        // however that text got there — is the presentation the seam could not
+        // predict, the judge's answer follows, and each says what it was read
+        // from. A turn cut short of the text, or carrying other words, is not.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(
+            recorded("stop re-running the tier", Reached::Carried),
+            5_000,
+        );
+        // An instruction the payload bound cut short of the text says nothing
+        // either way, and confirms nothing.
+        let mut cut = turn_on(
+            13,
+            5_100,
+            "assistant",
+            2,
+            Some("supervisor"),
+            "The manager says: stop re-running",
+        );
+        cut.payload
+            .insert("instruction_truncated".into(), json!(true));
+        assert!(
+            watch.observe(&cut).is_empty(),
+            "an instruction cut short of the text was read as carrying it"
+        );
+        let mut other = turn(14, 5_200, "assistant", 3, Some("supervisor"));
+        other
+            .payload
+            .insert("instruction".into(), json!("carry on as you were"));
+        assert!(watch.observe(&other).is_empty());
+        let mut read_aloud = turn(15, 5_300, "assistant", 4, Some("supervisor"));
+        read_aloud.payload.insert(
+            "instruction".into(),
+            json!("The manager says: stop re-running the tier. Do that."),
+        );
+        let shown = watch.observe(&read_aloud);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::InstructionText);
+        assert_eq!(shown[0].payload()["evidence"], json!("instruction-text"));
+        let shown = watch.observe(&turn(16, 5_400, "user", 4, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
+        assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
+
+        // Two notes routed at one instant — one envelope, acknowledged a turn
+        // apart — are each recorded on the turn that opened on them, and a
+        // supervisor turn answering the first's turn is shown the first alone.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(recorded("first ruling", Reached::Worker), 6_000);
+        watch.delivered_while_live(recorded("second ruling", Reached::Worker), 6_000);
+        let shown = watch.observe(&turn_on(
+            17,
+            6_100,
+            "assistant",
+            2,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- first ruling",
+        ));
+        assert_eq!(
+            shown
+                .iter()
+                .map(|shown| shown.note.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first ruling"],
+            "{shown:?}"
+        );
+        let shown = watch.observe(&turn_on(
+            18,
+            6_200,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- second ruling",
+        ));
+        assert_eq!(
+            shown
+                .iter()
+                .map(|shown| (shown.note.text.as_str(), shown.turn))
+                .collect::<Vec<_>>(),
+            [("second ruling", 3)],
+            "{shown:?}"
+        );
+        let shown = watch.observe(&turn(19, 6_300, "user", 3, None));
+        assert_eq!(
+            shown.len(),
+            2,
+            "both were carried by turns the judge's answer follows: {shown:?}"
+        );
+
+        // A note the conversation queued — offered with no turn live, for the
+        // next turn to open — is owed to both parties in whichever order the
+        // stream shows them: the worker by the turn stamped `delivered` that
+        // carries its text, the judge by the first supervisor turn after the
+        // note was offered. A turn from before the offer confirms nothing, a
+        // worker turn the producer did not stamp as a delivery confirms nothing,
+        // and once both have been shown a further turn confirms nothing more.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 7_000);
+        assert!(watch.observe(&turn(20, 6_900, "user", 1, None)).is_empty());
+        assert!(watch
+            .observe(&turn(21, 7_050, "assistant", 2, Some("supervisor")))
+            .is_empty());
+        let shown = watch.observe(&turn_on(
+            22,
+            7_100,
+            "assistant",
+            3,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- queued ruling",
+        ));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+        assert_eq!(shown[0].evidence, Evidence::DeliveredOrigin);
+        assert_eq!(shown[0].payload()["reached"], json!("queued"));
+        let shown = watch.observe(&turn(23, 7_200, "user", 3, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
+        assert_eq!(shown[0].evidence, Evidence::AnsweringTurn);
+        assert!(watch.observe(&turn(24, 7_300, "user", 4, None)).is_empty());
+
+        // And the judge first, where the supervisor's turn is the one to open.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 8_000);
+        let shown = watch.observe(&turn(25, 8_100, "user", 5, None));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Supervisor);
+        let shown = watch.observe(&turn_on(
+            26,
+            8_200,
+            "assistant",
+            6,
+            Some("delivered"),
+            "## Notes delivered to you during this run\n\n- queued ruling",
+        ));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence.party(), Party::Worker);
+        assert!(watch
+            .observe(&turn_on(
+                27,
+                8_300,
+                "assistant",
+                7,
+                Some("delivered"),
+                "## Notes delivered to you during this run\n\n- queued ruling",
+            ))
+            .is_empty());
+
+        // Nothing the conversation routes nowhere is watched at all.
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(
+            recorded(
+                "passed",
+                Reached::JudgedWith {
+                    completion_reason: "done".into(),
+                },
+            ),
+            4_000,
+        );
+        assert!(watch
+            .observe(&turn(12, 4_100, "assistant", 7, Some("delivered")))
+            .is_empty());
+    }
+
+    /// The names this module writes are the ones divergence entry 70 states, so
+    /// the record and the document cannot drift apart: the two payload keys, the
+    /// field a delivery is stamped with, and the heading a re-dispatch renders
+    /// the notes under.
+    ///
+    /// Read here rather than in `tests/contract.rs` because the constants are
+    /// the crate's own and not part of its published surface; the table of what
+    /// each disposition confirms and routes is held there, through the public
+    /// [`Reached::shown_at_delivery`] and [`Reached::routed_to`].
+    #[test]
+    fn the_names_this_module_writes_are_the_ones_the_divergence_record_states() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("70."))
+            .expect("the record carries entry 70");
+        let block: Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 70's block is JSON"))
+            .expect("entry 70 carries the json block this test drives");
+        assert_eq!(
+            block["node_dispatched_keys"],
+            json!([CARRIED_KEY, SPENT_KEY]),
+            "the keys a `node-dispatched` carries are not the ones entry 70 names"
+        );
+        assert_eq!(
+            block["heading"],
+            json!(crate::plan::MANAGER_NOTES_HEADING),
+            "the heading a re-dispatch renders the notes under is not the one entry 70 names"
+        );
+        // The field name is read off what the operation really writes rather
+        // than off a constant, because serde's attribute is the one source of it.
+        let written = serde_json::to_value(Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Worker,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: None,
+            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
+            routed_to: Reached::Supervisor.routed_to().to_vec(),
+            reached: Reached::Supervisor,
+        })
+        .expect("it serializes");
+        let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
+            .expect("entry 70 names the fields");
+        for field in &fields {
+            assert!(
+                written.get(field).is_some(),
+                "a delivery is not stamped under the field entry 70 names (`{field}`): {written}"
+            );
+        }
+        assert_eq!(
+            block["event_kinds"],
+            json!([crate::event::PipelineKind::NoteShown.as_str()]),
+            "the kind a presentation is recorded under is not the one entry 70 names"
+        );
+        // Every kind of evidence a presentation is decided from, spelled as the
+        // record writes it, and no other: a match rather than a list, so a
+        // variant added here has to be named there.
+        let every = |evidence: Evidence| match evidence {
+            Evidence::DeliveredOrigin
+            | Evidence::OpeningTask
+            | Evidence::InstructionText
+            | Evidence::AnsweringTurn => serde_json::to_value(evidence).expect("it serializes"),
+        };
+        assert_eq!(
+            block["note_shown_evidence"],
+            json!([
+                every(Evidence::DeliveredOrigin),
+                every(Evidence::OpeningTask),
+                every(Evidence::InstructionText),
+                every(Evidence::AnsweringTurn),
+            ]),
+            "the evidence a `note-shown` can name is not what entry 70 states"
+        );
+    }
+
+    /// A note as a dispatch is handed it is the delivery's own record, field for
+    /// field, less the node and the two presentation fields — so the two shapes
+    /// cannot drift apart without this saying so.
+    #[test]
+    fn a_recorded_note_is_the_deliverys_own_fields_less_the_node_and_the_presentations() {
+        let delivery = Operation::NoteDelivered {
+            node: "build".into(),
+            addressee: Addressee::Both,
+            text: "ship it".parse().expect("a usable note"),
+            criterion: Some(
+                "`version.txt` holds `v: 2`"
+                    .parse()
+                    .expect("a usable criterion"),
+            ),
+            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
+            routed_to: Reached::Supervisor.routed_to().to_vec(),
+            reached: Reached::Supervisor,
+        };
+        let note = RecordedNote::of_delivery(&delivery).expect("a delivery carries a note");
+        let mut written = serde_json::to_value(&delivery).expect("it serializes");
+        let written = written.as_object_mut().expect("an object");
+        for not_the_notes_own in ["kind", "node", "shown_to", "routed_to"] {
+            assert!(
+                written.remove(not_the_notes_own).is_some(),
+                "the delivery no longer writes `{not_the_notes_own}`; this gate is stale"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&note).expect("it serializes"),
+            Value::Object(written.clone()),
+            "a recorded note and the delivery it came from no longer share the note's fields"
+        );
+        assert!(RecordedNote::of_delivery(&Operation::HumanAttested {
+            node: "approve".into()
+        })
+        .is_none());
     }
 }
