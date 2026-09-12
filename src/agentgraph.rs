@@ -3313,22 +3313,15 @@ mod tests {
         );
     }
 
-    /// The linked `oneagentgraph` accepts a **paced** two-party member: a
-    /// `kind: onejudge` member on a `schedule`, under graph schema version 9.
+    /// The linked `oneagentgraph` accepts a **paced** two-party member — a
+    /// `kind: onejudge` member on a `schedule` — under graph schema version 9.
+    /// The floor, and why the lock rather than the requirement carries it, are
+    /// with the pin in `Cargo.toml`.
     ///
-    /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
-    /// the requirement, are with the pin in `Cargo.toml`.
-    ///
-    /// What is not obvious here is *where* each half fails. Both are driven
-    /// through the linked library's own reader — its `GraphConfig`
-    /// deserializer and `config::validate`, the pair the `crates/testfakes`
-    /// double reads a graph through — so below the floor the version-9 half
-    /// fails at **parse**: `OnejudgeMember` denies unknown fields and has no
-    /// `schedule`, so the refusal names the field rather than the version. The
-    /// version-8 half is the release's own schema gate, asserted in the wording
-    /// the `paced-conversations` contract states, so a resolution that accepted
-    /// a scheduled two-party member under a schema that never declared one
-    /// fails here too.
+    /// Below the floor the version-9 half fails at **parse** — `OnejudgeMember`
+    /// denies unknown fields and has no `schedule` — so the refusal names the
+    /// field rather than the version. The version-8 half is asserted in the
+    /// wording the `paced-conversations` contract states.
     #[test]
     fn the_linked_oneagentgraph_accepts_a_paced_two_party_member() {
         fn document(version: u32) -> String {
