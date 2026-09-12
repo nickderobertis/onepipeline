@@ -37,13 +37,14 @@ mod harness;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use oneagentgraph::event::{Origin, TurnMessage, TurnStarted};
 use onepipeline::channel::Command;
 use onepipeline::channel::Deliver;
 use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
-use harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
+use harness::{agent, lifecycle, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
 
 /// The correction a manager sends at the moment it matters: while the worker is
 /// still working, and before its judge has ruled on anything.
@@ -52,6 +53,9 @@ const NOTE: &str = "the reviewer asked for a smaller diff; stop editing src/old.
 /// A note that changes what the finished tree must contain, rather than only how
 /// the worker should go about it.
 const CRITERION: &str = "`version.txt` holds `v: 2`";
+
+/// The planner's own note a node can be launched with, rendered as observed state.
+const PLANNER_CONTEXT: &str = "the fixture moved to fixtures/v2 before this node was launched";
 
 /// The instruction the shipped judge side opens with, which is how a recorded
 /// prompt says which party it was for.
@@ -110,6 +114,59 @@ fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
         }
     }
     dispatched
+}
+
+/// Every turn one node opened, read back through the producer's own payload type.
+///
+/// Through that type rather than by field name, because `deny_unknown_fields`
+/// on it is what makes this an assertion about the *whole* payload this engine
+/// relayed: a relay that stamped something of its own onto the sibling's payload
+/// fails on the unknown field, and one that dropped a field fails on the missing
+/// one.
+fn openings_of(world: &World, run: &str, node: &str) -> Vec<TurnStarted> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["labels"]["node"] == node && event["kind"] == "turn-started")
+        .map(|event| {
+            serde_json::from_value(event["payload"].clone()).unwrap_or_else(|error| {
+                panic!("a relayed turn-started is not the payload the linked oneagentgraph declares: {error}: {event}")
+            })
+        })
+        .collect()
+}
+
+/// Every word a party of one node said, read back the same way.
+fn words_of(world: &World, run: &str, node: &str) -> Vec<TurnMessage> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["labels"]["node"] == node && event["kind"] == "turn-message")
+        .map(|event| {
+            serde_json::from_value(event["payload"].clone()).unwrap_or_else(|error| {
+                panic!("a relayed turn-message is not the payload the linked oneagentgraph declares: {error}: {event}")
+            })
+        })
+        .collect()
+}
+
+/// The `note-shown` records of one node, in order: one per presentation the
+/// run saw happen.
+fn presentations_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "note-shown")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
+}
+
+/// The `node-dispatched` records of one node, in order: one per dispatch.
+fn dispatch_records_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
 }
 
 /// Start a run whose nodes are two-party members, against the real sibling.
@@ -324,7 +381,9 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     );
 
     // And the run says which party actually took it, which is the one thing no
-    // reader of the transcript can work out for itself.
+    // reader of the transcript can work out for itself — and which parties it
+    // was put in front of, so a note for both is verifiable from this record
+    // alone rather than from what the disposition is documented to imply.
     let operation = recorded(&world, run);
     assert_eq!(operation["node"], json!("build"), "{operation}");
     assert_eq!(operation["addressee"], json!("worker"), "{operation}");
@@ -333,6 +392,110 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
         operation["reached"],
         json!("worker"),
         "the note reached a party the note was not delivered to first: {operation}"
+    );
+    // The acknowledgement confirms nothing: the conversation acknowledges a
+    // reopened worker turn before that turn opens, so the record says where it
+    // is routed and claims no presentation yet.
+    assert!(
+        operation.get("shown_to").is_none(),
+        "the delivery record claims a presentation the conversation had not made: {operation}"
+    );
+    assert_eq!(
+        operation["routed_to"],
+        json!(["worker", "supervisor"]),
+        "{operation}"
+    );
+    // Each presentation is then recorded as the stream showed it happening:
+    // the worker's turn that opened on the note, and then the judge's turn
+    // that answered it — in that order, and each once.
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker"), json!("supervisor")],
+        "the presentations the run recorded are not the worker's and then the judge's:\n{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("worker")),
+        "{shown:#?}"
+    );
+    // And each says what it was decided from: the producer's own stamp on the
+    // worker's turn, and the turn that answered it for the judge.
+    assert_eq!(
+        shown[0]["payload"]["evidence"],
+        json!("delivered-origin"),
+        "{shown:#?}"
+    );
+    assert_eq!(
+        shown[1]["payload"]["evidence"],
+        json!("answering-turn"),
+        "{shown:#?}"
+    );
+    let worker_turn = shown[0]["payload"]["turn"].as_u64().expect("a turn");
+    let judge_turn = shown[1]["payload"]["turn"].as_u64().expect("a turn");
+    assert!(judge_turn >= worker_turn, "{shown:#?}");
+
+    // And a reader of the run's own stream can tell the turn that carried the
+    // manager's note from the one the simulated supervisor improvised, without
+    // consulting anything outside it. This engine relays the sibling's payload
+    // untouched, so the field reaching the store is the producer's own — and
+    // the delivery went through the path that stamps it, which is what this
+    // assertion is really about: a note handed to the conversation by any other
+    // lever would arrive as the supervisor's own words.
+    let openings = openings_of(&world, run, "build");
+    let by_origin = |origin: Origin| -> Vec<&TurnStarted> {
+        openings
+            .iter()
+            .filter(|opening| opening.origin == Some(origin))
+            .collect()
+    };
+    let delivered = by_origin(Origin::Delivered);
+    assert!(
+        delivered.len() == 1 && delivered[0].instruction.contains(NOTE),
+        "the turn that carried the manager's note is not stamped as a delivery:\n{openings:#?}"
+    );
+    assert_eq!(
+        delivered[0].turn, worker_turn,
+        "the worker's recorded presentation is not the turn the producer stamped as the \
+         delivery"
+    );
+    let task = by_origin(Origin::Task);
+    assert!(
+        task.len() == 1 && task[0].turn == 1,
+        "the opening turn is not stamped as the composed task:\n{openings:#?}"
+    );
+    let supervised = by_origin(Origin::Supervisor);
+    assert!(
+        !supervised.is_empty()
+            && supervised
+                .iter()
+                .all(|opening| opening.instruction.contains("Run the check again")),
+        "the turn the supervisor sent the worker back on is not stamped as the \
+         supervisor's own:\n{openings:#?}"
+    );
+    // The supervisor's words themselves, as they were said, carry the same
+    // attribution; the worker's carry none of the three, because none names
+    // them, and absent reads as unknown rather than as any of them.
+    let words = words_of(&world, run, "build");
+    assert!(
+        words
+            .iter()
+            .filter(|word| word.role == "user")
+            .all(|word| word.origin == Some(Origin::Supervisor))
+            && words.iter().any(|word| word.role == "user"),
+        "the supervisor's own words are not stamped as its own:\n{words:#?}"
+    );
+    assert!(
+        words
+            .iter()
+            .filter(|word| word.role == "assistant")
+            .all(|word| word.origin.is_none()),
+        "the worker's words were attributed to a party that did not author them:\n{words:#?}"
     );
 }
 
@@ -786,6 +949,12 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         json!("carried"),
         "a note no turn took was not named as carried: {operation}"
     );
+    // Nobody has been shown it yet, and the record says nobody rather than
+    // guessing at the dispatch that will.
+    assert!(
+        operation.get("shown_to").is_none() && operation.get("routed_to").is_none(),
+        "a note nobody has read yet is recorded as shown or routed to somebody: {operation}"
+    );
 
     world.until("the run to settle", |world| {
         world.events_of(run, "node-settled").len() >= 2
@@ -805,6 +974,414 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         first.iter().any(|instruction| instruction.contains(NOTE)),
         "the carried note did not reach the dispatch it was carried to:\n{first:#?}"
     );
+    // And that dispatch's record does not call the note spent: it was composed
+    // with it, as the node's own context. Only a note a conversation **read**
+    // that a later dispatch is composed without is spent.
+    let records = dispatch_records_of(&world, run, "later");
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert!(
+        records[0]["payload"].get("notes_spent").is_none(),
+        "the dispatch a note was carried to reported it spent: {}",
+        records[0]
+    );
+    // The carried record is not the last word on the note: the dispatch it was
+    // carried to shows it — the opening turn as the task, the judge's answer
+    // after — and each presentation is recorded as its stream showed it.
+    let shown = presentations_of(&world, run, "later");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| (
+                event["payload"]["party"].clone(),
+                event["payload"]["evidence"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("worker"), json!("opening-task")),
+            (json!("supervisor"), json!("answering-turn")),
+        ],
+        "the dispatch a note was carried to did not record showing it:\n{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("carried")),
+        "{shown:#?}"
+    );
+}
+
+/// A note recorded `carried` whose text a turn of the **same** dispatch then
+/// opens on is recorded as shown — from the words, since nothing routed it.
+///
+/// A carried note can reach a live turn by a lever outside the note seam (an
+/// interrupt issued by hand into the harness process, which this suite has no
+/// double for), and a record that then still says nobody took it is a
+/// presentation with no receipt at all. What is driven here against the real
+/// conversation is that lever's effect: `deliver: next` asks for no live
+/// attempt, so the note is `carried` while the dispatch is live, and the
+/// supervising side then reads its text into the worker's next turn. The
+/// stream shows a worker turn opening on the note's whole text, stamped as the
+/// supervisor's own, and the record says the worker was shown it, from the
+/// text, and the judge with the turn that answered.
+#[test]
+fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown() {
+    let world = World::new("note-carried-read");
+    let run = "carriedread";
+    // The supervising side's next instruction is the note's own text: the
+    // lever that reads a carried note into a live turn, in this suite.
+    world.script("judge.asks-again", NOTE);
+    world.script("turn.hold", "hold");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    // Recorded `carried` while the conversation is live and the worker's turn is
+    // held open: no live attempt was asked for, so the seam took nothing.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    let delivery = recorded(&world, run);
+    assert_eq!(delivery["reached"], json!("carried"), "{delivery}");
+    assert!(
+        delivery.get("shown_to").is_none() && delivery.get("routed_to").is_none(),
+        "the seam took nothing, and the record says it routed something: {delivery}"
+    );
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The text reached the worker's next turn — by the supervisor's own words,
+    // which the producer stamps as such — and the record says the worker was
+    // shown it and how that was decided, and then the judge.
+    let openings = openings_of(&world, run, "build");
+    let read_in = openings
+        .iter()
+        .find(|opening| opening.instruction.contains(NOTE))
+        .unwrap_or_else(|| panic!("no worker turn opened on the note's text:\n{openings:#?}"));
+    assert_eq!(read_in.origin, Some(Origin::Supervisor), "{read_in:?}");
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| {
+                (
+                    event["payload"]["party"].clone(),
+                    event["payload"]["evidence"].clone(),
+                    event["payload"]["turn"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                json!("worker"),
+                json!("instruction-text"),
+                json!(read_in.turn)
+            ),
+            (
+                json!("supervisor"),
+                json!("answering-turn"),
+                json!(read_in.turn)
+            ),
+        ],
+        "a note recorded carried that a turn then opened on was not recorded as shown:\n\
+         {shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|event| event["payload"]["text"] == json!(NOTE)
+                && event["payload"]["reached"] == json!("carried")),
+        "{shown:#?}"
+    );
+}
+
+/// Two notes in one envelope reach the worker on **two** turns, and each
+/// presentation the run records names the note that turn really opened on — and
+/// a note whose next presentation never happened gets no receipt for it.
+///
+/// The conversation acknowledges a note into a live worker turn only when that
+/// turn ends and the next opens carrying it, and the envelope's notes are
+/// offered one at a time: the second is offered while the turn carrying the
+/// first is live, so it opens the turn after. The two acknowledgements reach the
+/// run's record together, in one commit, at one instant — so nothing about
+/// *when* they were recorded tells the two turns apart, and a watch that read
+/// any `delivered` worker turn as every pending note's presentation stamped the
+/// second note on the first note's turn. The dispatch is cancelled while the
+/// second note's turn is held, so neither note's judge presentation happens,
+/// and the record must say so for both.
+#[test]
+fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them() {
+    let world = World::new("note-two-turns");
+    let run = "twoturns";
+    let first = "the reviewer asked for a smaller diff; stop editing src/old.rs";
+    let second = "leave the changelog alone; release-plz writes it";
+    // Every worker turn of the one node is held and released on its own — an
+    // empty marker holds them all — so the turn carrying the second note is
+    // still open when the cancel arrives. One node only: a second one's turns
+    // would take the same gates.
+    world.script("turn.hold-each", "");
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    // The reply blocks until both notes are acknowledged, which is until the
+    // turn carrying the first has ended and the one carrying the second has
+    // opened — so it runs on its own thread while this one releases the turns.
+    // And while it blocks, the run's writer relays nothing: the turn carrying
+    // the first note is waited for at the harness the double records, never in
+    // the journal, which cannot show it until the reply returns.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let mut reply = world.agentgraph_cmd(&["reply", run]);
+    let body = json!({"version": 2, "commands": [
+        note_op("build", "worker", first, None),
+        note_op("build", "worker", second, None),
+    ]})
+    .to_string();
+    let replied = std::thread::spawn(move || {
+        use std::io::Write;
+        let mut child = reply
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin is piped")
+            .write_all(body.as_bytes())
+            .expect("the envelope is written");
+        child.wait_with_output().expect("the binary runs")
+    });
+    releasing.join().expect("the releasing thread finishes");
+    // The first note's turn is open and held; release it so the second note is
+    // acknowledged into the turn after it — promptly, because the seam waits a
+    // bounded time for that acknowledgement and answers `carried` past it.
+    world.until("the turn carrying the first note to open", |world| {
+        worked(world).len() >= 2
+    });
+    // The second note is offered the moment the first is acknowledged, which is
+    // the moment that turn opened; the offer is the reconciler's own step, with
+    // nothing durable to watch for, so it is given the same short pause the
+    // release above gives a queued note before the turn it is bound for ends.
+    std::thread::sleep(Duration::from_secs(2));
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let output = replied.join().expect("the reply thread finishes");
+    assert!(
+        output.status.success(),
+        "the envelope was not applied: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    world.until("the turn carrying the second note to open", |world| {
+        worked(world).len() >= 3
+    });
+    // Both notes reached a live turn, and the record says so of each.
+    let committed: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .map(|event| event["payload"]["operations"][0].clone())
+        .collect();
+    assert_eq!(committed.len(), 2, "{committed:#?}");
+    assert!(
+        committed
+            .iter()
+            .all(|operation| operation["reached"] == json!("worker")),
+        "a note did not reach the worker's turn: {committed:#?}"
+    );
+
+    // Cancelled while the second note's turn is held: neither note's judge
+    // presentation ever happens.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "cancel", "id": "build", "reason": "stop here"})),
+        )
+        .exited(0);
+    world.until("the held dispatch to be reaped at its deadline", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+
+    // Which turn opened on which note, from the producer's own record.
+    let openings = openings_of(&world, run, "build");
+    let turn_carrying = |text: &str| -> u64 {
+        let carrying: Vec<&TurnStarted> = openings
+            .iter()
+            .filter(|opening| opening.instruction.contains(text))
+            .collect();
+        assert_eq!(
+            carrying.len(),
+            1,
+            "{text:?} opened {} turns, not one:\n{openings:#?}",
+            carrying.len()
+        );
+        assert_eq!(
+            carrying[0].origin,
+            Some(Origin::Delivered),
+            "{:?}",
+            carrying[0]
+        );
+        carrying[0].turn
+    };
+    let first_turn = turn_carrying(first);
+    let second_turn = turn_carrying(second);
+    assert!(second_turn > first_turn, "{openings:#?}");
+
+    // Each presentation names the note that turn really opened on, and nobody
+    // is recorded as shown a note on a turn that did not carry it. No judge
+    // presentation at all: the conversation was reaped before one.
+    let shown = presentations_of(&world, run, "build");
+    let mut recorded: Vec<(String, String, u64)> = shown
+        .iter()
+        .map(|event| {
+            (
+                event["payload"]["text"]
+                    .as_str()
+                    .expect("a note")
+                    .to_string(),
+                event["payload"]["party"]
+                    .as_str()
+                    .expect("a party")
+                    .to_string(),
+                event["payload"]["turn"].as_u64().expect("a turn"),
+            )
+        })
+        .collect();
+    recorded.sort();
+    let mut expected = vec![
+        (first.to_string(), "worker".to_string(), first_turn),
+        (second.to_string(), "worker".to_string(), second_turn),
+    ];
+    expected.sort();
+    assert_eq!(
+        recorded, expected,
+        "the presentations recorded are not one per note on the turn that opened on \
+         it:\n{shown:#?}"
+    );
+
+    // Released so the held turn ends with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle"] {
+        release(&world.fakes, gate);
+    }
+}
+
+/// A `retry`'s replacement is composed from the manager's own task, so the notes
+/// the node it supersedes read are **spent** by it — and its record says so.
+///
+/// The manager-initiated re-dispatch entry 60 ruled on, kept as ruled: nothing
+/// of the superseded node's conversation is composed into the replacement, and
+/// `amend` or the replacement's own task is where a ruling that has to survive
+/// goes. What is new is that the replacement's dispatch names what it spent, so a
+/// manager who retried a node without restating a ruling learns that from the
+/// record rather than from the replacement's judge.
+///
+/// The node is retried **while running**, which is what leaves a conversation
+/// that read the note for the replacement to supersede: a node that completed
+/// would refuse the retry, and one that failed would have nothing live to have
+/// read it. Every worker turn of `build` is held, as in the requeue journey
+/// above, so it is still in flight when the retry arrives.
+#[test]
+fn a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so() {
+    let world = World::new("note-retry-spent");
+    let run = "retryspent";
+    world.script("turn.hold-each", "Do build.");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("turn.hold", "hold");
+    world.script("judge.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("keep", &[])]),
+    );
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    assert_eq!(recorded(&world, run)["reached"], json!("worker"));
+
+    // Superseded while its reopened turn is still held: the retry cancels that
+    // dispatch and adds the replacement, which dispatches once the superseded
+    // one has been reaped at its deadline.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({
+                "op": "retry",
+                "id": "build",
+                "node": {
+                    "id": "build-again",
+                    "persona": "engineer",
+                    "task": "## What\nDo build again.",
+                },
+            })),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    world.until("the replacement to be dispatched", |world| {
+        !dispatch_records_of(world, run, "build-again").is_empty()
+    });
+
+    let records = dispatch_records_of(&world, run, "build-again");
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let spent = records[0]["payload"]["notes_spent"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the replacement does not say what its superseded node read: {}",
+                records[0]
+            )
+        });
+    assert_eq!(spent.len(), 1, "{spent:#?}");
+    assert_eq!(spent[0]["text"], json!(NOTE), "{spent:#?}");
+    assert_eq!(spent[0]["reached"], json!("worker"), "{spent:#?}");
+    assert!(
+        records[0]["payload"].get("notes_carried").is_none(),
+        "a replacement composed from the manager's own task carried a note: {}",
+        records[0]
+    );
+
+    // Released so the held turns end with the journey rather than waiting out the
+    // doubles' own bound on a hold.
+    for gate in ["turn.go", "turn.settle", "judge.go"] {
+        release(&world.fakes, gate);
+    }
 }
 
 /// The other direction: a note a running turn **did** take is not also carried to
@@ -926,11 +1503,249 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
         dispatched[1]
     );
 
+    // And the run's record says so, where a manager reading the node's history
+    // will find it: the dispatch that was composed without the note names it as
+    // **spent**, beside the receipt that named the party that read it. Without
+    // this the receipt reads as success throughout, and the ruling the first
+    // dispatch obeyed is invisible to the second dispatch's judge and to the
+    // manager alike.
+    let records = dispatch_records_of(&world, run, "build");
+    assert_eq!(records.len(), 2, "{records:#?}");
+    assert!(
+        records[0]["payload"].get("notes_spent").is_none(),
+        "the first dispatch spent a note nothing had delivered yet: {}",
+        records[0]
+    );
+    let spent = records[1]["payload"]["notes_spent"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the requeued dispatch does not say what it spent: {}",
+                records[1]
+            )
+        });
+    assert_eq!(spent.len(), 1, "{spent:#?}");
+    assert_eq!(spent[0]["text"], json!(NOTE), "{spent:#?}");
+    assert_eq!(spent[0]["reached"], json!("worker"), "{spent:#?}");
+    assert_eq!(spent[0]["addressee"], json!("worker"), "{spent:#?}");
+
+    // This is a conversation **interrupted between the two presentations**: the
+    // worker's turn reopened on the note and was reaped before the judge was
+    // ever consulted. The record says exactly that — the worker was shown it,
+    // the judge was not — and nothing in it claims otherwise: not the delivery,
+    // which routed the note and confirmed nobody, and not a presentation the
+    // stream never showed.
+    let delivery = recorded(&world, run);
+    assert!(
+        delivery.get("shown_to").is_none(),
+        "the delivery record asserted a presentation the cancelled conversation never \
+         made: {delivery}"
+    );
+    assert_eq!(delivery["routed_to"], json!(["worker", "supervisor"]));
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker")],
+        "a conversation reaped before its judge was consulted recorded a presentation to \
+         the judge, or none to the worker whose turn opened on the note:\n{shown:#?}"
+    );
+
     // Released so the held turns end with the journey rather than waiting out the
     // doubles' own bound on a hold.
     for gate in ["turn.go", "turn.settle", "judge.go"] {
         release(&world.fakes, gate);
     }
+}
+
+/// A note a dispatch's conversation read **survives the engine's own re-dispatch
+/// of the node**: the attempt that continues a preserved branch is composed with
+/// it, both parties of the new conversation read it, and the run's record names
+/// it as carried.
+///
+/// The regression: a re-dispatch recomposes the task from the plan, which a
+/// note delivered mid-dispatch is not part of, so a ruling the worker obeyed
+/// was absent from the conversation whose judge ruled on that compliance —
+/// while the manager's receipt still read `worker`.
+///
+/// The publication fails **checks-failed**, which is preserving: the host reports
+/// a required check red, the branch is handed back, and the node is asked again
+/// on it. What is read is the second dispatch's own prompt — the task it was
+/// composed with, which is the first message of the transcript its judge is
+/// handed — and the record of that dispatch. The budget is two attempts, so the
+/// run settles on the second without a host that has to be flipped green.
+#[test]
+fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
+    let world = World::new("note-redispatch").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let run = "redispatch";
+    // `change-auto` watches the host's checks to their conclusion, which is
+    // where a red one is observed at all; the worker leaves a diff behind, so
+    // there is a publication to fail.
+    world.repository("change-auto", &[]);
+    world.script("harness.work", "the worker wrote this\n");
+    world.script("gh.checks", "llmlint completed failure required");
+    // The planner's own carried note, which the node is launched with: it rode
+    // in as the first dispatch's context, and the continuation is the engine's
+    // — not a dispatch anybody asked for — so it is owed there too.
+    let mut service = lifecycle("service", &[]);
+    service["context"] = json!(PLANNER_CONTEXT);
+    held_conversation(&world, run, vec![service]);
+
+    // The ruling, addressed to both parties, delivered into the held worker
+    // turn — so it is read by the worker and, with the worker's response, by the
+    // judge of the first conversation.
+    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("service", "both", NOTE, Some(CRITERION))),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied.exited(0).out_has("\"state\":\"applied\"");
+    let operation = recorded(&world, run);
+    assert_eq!(operation["reached"], json!("worker"), "{operation}");
+
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    // The node was dispatched again by the engine, on the failure the host
+    // reported, and the second dispatch's record names the note it was composed
+    // with — the note itself, and no presentation it has not yet made.
+    let records = dispatch_records_of(&world, run, "service");
+    assert_eq!(
+        records.len(),
+        2,
+        "the node was not dispatched exactly twice:\n{records:#?}"
+    );
+    let again = &records[1];
+    assert_eq!(again["payload"]["attempt"], json!(2), "{again}");
+    assert!(
+        again["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("checks-failed:")),
+        "the re-dispatch is not the engine's own continuation: {again}"
+    );
+    let carried = again["payload"]["notes_carried"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the re-dispatch does not name the notes it carries: {again}"));
+    assert_eq!(carried.len(), 1, "{carried:#?}");
+    assert_eq!(carried[0]["text"], json!(NOTE), "{carried:#?}");
+    assert_eq!(carried[0]["criterion"], json!(CRITERION), "{carried:#?}");
+    assert_eq!(carried[0]["addressee"], json!("both"), "{carried:#?}");
+    assert_eq!(carried[0]["reached"], json!("worker"), "{carried:#?}");
+    assert!(
+        again["payload"].get("notes_spent").is_none(),
+        "a dispatch composed with the note reported it spent: {again}"
+    );
+    // What the record says about the second conversation's presentations is
+    // only what its stream showed — the opening worker turn that carried the
+    // note as the task, and the judge's turn that answered it — after the ones
+    // the first conversation made; the composition itself claims none.
+    let journal = world.journal(run);
+    let redispatched_at = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "node-dispatched"
+                && event["labels"]["node"] == "service"
+                && event["payload"]["attempt"] == json!(2)
+        })
+        .expect("the re-dispatch is in the store");
+    let after: Vec<Value> = journal[redispatched_at..]
+        .iter()
+        .filter(|event| event["kind"] == "note-shown" && event["labels"]["node"] == "service")
+        .map(|event| event["payload"]["party"].clone())
+        .collect();
+    assert_eq!(
+        after,
+        vec![json!("worker"), json!("supervisor")],
+        "the second conversation's presentations are not the worker's and then the \
+         judge's:\n{:#?}",
+        presentations_of(&world, run, "service")
+    );
+    assert_eq!(
+        presentations_of(&world, run, "service").len(),
+        4,
+        "each conversation shows the note to each party once:\n{:#?}",
+        presentations_of(&world, run, "service")
+    );
+
+    // The worker of the second conversation was handed it, in the task it opened
+    // on — composed after the first conversation ended, so there is no other way
+    // the note could be in it — as a ruling with the amendment's authority, and
+    // with the criterion it bound.
+    let dispatched = dispatches_of(&world, run, "service");
+    assert_eq!(dispatched.len(), 2, "{dispatched:#?}");
+    let opening = dispatched[1]
+        .first()
+        .unwrap_or_else(|| panic!("the second dispatch opened no turn:\n{dispatched:#?}"));
+    for said in [
+        "## Manager notes\nWhere this section and the operational notes below disagree, this \
+         section wins.\n\nThe manager delivered these notes to this node during an earlier \
+         dispatch of it, and this dispatch continues that node's work: each stands here exactly \
+         as it stood there, for the worker and for the supervisor alike. A note that states a \
+         criterion is part of the bar this node is judged against.\n\n1. Addressed to both parties",
+        NOTE,
+        CRITERION,
+        // And the diagnosis is still there beside it: carrying the note did not
+        // cost the worker the failure it was re-dispatched over — nor the
+        // planner's own note the node was launched with, which the first
+        // attempt was given and the continuation keeps above the diagnosis.
+        "## Planner context",
+        PLANNER_CONTEXT,
+        "checks-failed",
+    ] {
+        assert!(
+            opening.contains(said),
+            "the re-dispatch's task lacks {said:?}:\n{opening}"
+        );
+    }
+    assert!(
+        !dispatched[0][0].contains("## Manager notes"),
+        "the first dispatch was composed with a note that had not been delivered yet:\n{}",
+        dispatched[0][0]
+    );
+    assert!(
+        dispatched[0][0].contains(PLANNER_CONTEXT) && !dispatched[0][0].contains("checks-failed"),
+        "the first dispatch was not composed with the planner's note alone:\n{}",
+        dispatched[0][0]
+    );
+    let planner_note_at = opening
+        .find(PLANNER_CONTEXT)
+        .expect("the planner's note is in the continuation");
+    let diagnosis_at = opening
+        .find("The previous attempt's publication failed")
+        .expect("the diagnosis is in the continuation");
+    assert!(
+        planner_note_at < diagnosis_at,
+        "the planner's note does not lead the continuation's context:\n{opening}"
+    );
+    // The second conversation's opening is the composed task and nothing else,
+    // which is what the stream says about it too.
+    let openings = openings_of(&world, run, "service");
+    let second_opening = openings
+        .iter()
+        .find(|turn| turn.instruction.contains("## Manager notes"))
+        .expect("the second dispatch's opening turn is in the store");
+    assert_eq!(second_opening.turn, 1, "{second_opening:?}");
+    assert_eq!(
+        second_opening.origin,
+        Some(Origin::Task),
+        "{second_opening:?}"
+    );
+
+    // And the judge that rendered the second verdict read it: the ruling the
+    // worker obeyed reached the party that rules on the worker, inside the task
+    // it judged against rather than as a delivery it never received.
+    let judge = judged(&world);
+    assert!(
+        judge
+            .iter()
+            .any(|prompt| prompt.contains("## Manager notes") && prompt.contains(NOTE)),
+        "no judge decision of the second dispatch was handed the note the first \
+         dispatch obeyed:\n{judge:#?}"
+    );
 }
 
 /// A note whose live delivery is really **attempted and refused** is carried,
@@ -1024,6 +1839,21 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
         json!("supervisor"),
         "the note did not reach the party whose turn was live: {operation}"
     );
+    // The judge is confirmed at delivery — its decision was re-taken with the
+    // note in hand before the acknowledgement was given — and the worker is
+    // only routed to, until the stream shows the turn that rode the decision.
+    assert_eq!(operation["shown_to"], json!(["supervisor"]), "{operation}");
+    assert_eq!(operation["routed_to"], json!(["worker"]), "{operation}");
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker")],
+        "the worker's presentation of a note that rode the judge's decision was not \
+         recorded once and alone:\n{shown:#?}"
+    );
 
     // The judge read it as its own, addressed to it...
     let judge = judged(&world);
@@ -1082,6 +1912,22 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
     assert!(
         operation["completion_reason"].is_string(),
         "the record does not carry the reason the work was passed: {operation}"
+    );
+    // The one disposition a party read alone: the decision was completion, so no
+    // worker turn followed for the note to ride to — and the record says so
+    // rather than leaving a note addressed to both to read as reaching both.
+    assert_eq!(
+        operation["shown_to"],
+        json!(["supervisor"]),
+        "a note only the judge read is recorded as shown to the worker too: {operation}"
+    );
+    assert!(
+        operation.get("routed_to").is_none(),
+        "a note the judge completed with was routed onward: {operation}"
+    );
+    assert!(
+        presentations_of(&world, run, "build").is_empty(),
+        "a presentation was recorded for a note that reached no turn after the decision"
     );
 
     // And the judge really was told it, under the addressing it was sent with.

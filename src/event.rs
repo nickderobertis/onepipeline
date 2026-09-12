@@ -317,6 +317,18 @@ pub enum PipelineKind {
     /// dispatch and neither is a failure to report. The payload's `ending` says
     /// which of the three it was, because they need three different fixes.
     BodyNotDrafted,
+    /// A party of a node's conversation was **shown** a manager's note.
+    ///
+    /// Written when the relayed stream shows the presentation happening — the
+    /// worker's turn opening on the note, the supervisor's turn opening after
+    /// it — and never at delivery, where the conversation has only said where
+    /// it *will* route the note. `note-delivered` records what was confirmed
+    /// the moment the conversation acknowledged the note and what it routed
+    /// onward; this is the record for each routed presentation that then
+    /// happened, so a conversation interrupted between the two leaves no claim
+    /// that the second party saw anything. Carries `party`, the `turn` the
+    /// presentation opened, and the note.
+    NoteShown,
 }
 
 impl PipelineKind {
@@ -350,6 +362,7 @@ impl PipelineKind {
             Self::ReleaseAdopted => "release-adopted",
             Self::CriterionChecked => "criterion-checked",
             Self::BodyNotDrafted => "body-not-drafted",
+            Self::NoteShown => "note-shown",
         }
     }
 
@@ -406,6 +419,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ReleaseAdopted,
     PipelineKind::CriterionChecked,
     PipelineKind::BodyNotDrafted,
+    PipelineKind::NoteShown,
 ];
 
 /// A reference to evidence stored beside the stream rather than inside it.

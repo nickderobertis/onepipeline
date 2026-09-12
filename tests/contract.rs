@@ -37,7 +37,7 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
     LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
-use onepipeline::note::{Addressee, Delivered, Note, Reached};
+use onepipeline::note::{Addressee, Delivered, Note, Party, Reached};
 use onepipeline::plan::{
     adoption_instructions, arrival_note, CrossRepoReference, Node, NodeKind, Plan, RepoType,
     Resume, Step, Workflow, ADOPTION_INSTRUCTION_VARIABLES, AMENDMENT_HEADING,
@@ -2972,7 +2972,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 27, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 28, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2981,7 +2981,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -5156,6 +5156,51 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         let written = serde_json::to_value(one).expect("a disposition serializes");
         let read: Reached = serde_json::from_value(written.clone()).expect("and reads back");
         assert_eq!(&read, one, "{written} did not round-trip");
+    }
+
+    // And what each disposition confirms at the acknowledgement and what it
+    // only routes onward, as entry 70 tabulates them — the two facts a reader
+    // of the record no longer has to tell apart by inference. Keyed by the
+    // disposition's own word, and exhaustive both ways: a disposition a table
+    // does not name, or a row naming no disposition, fails here.
+    let tabulated_by = divergence_block("70.");
+    let words = |party: &Party| -> String {
+        serde_json::to_value(party)
+            .expect("a party serializes")
+            .as_str()
+            .expect("a party is a word")
+            .to_string()
+    };
+    for (table, answer) in [
+        (
+            "shown_at_delivery",
+            Reached::shown_at_delivery as fn(&Reached) -> &'static [Party],
+        ),
+        (
+            "routed_to",
+            Reached::routed_to as fn(&Reached) -> &'static [Party],
+        ),
+    ] {
+        let tabulated: std::collections::BTreeMap<String, Vec<String>> =
+            serde_json::from_value(tabulated_by[table].clone())
+                .unwrap_or_else(|e| panic!("entry 70 tabulates `{table}` per disposition: {e}"));
+        assert_eq!(
+            tabulated.keys().cloned().collect::<Vec<_>>(),
+            {
+                let mut named = reached.clone();
+                named.sort();
+                named
+            },
+            "entry 70's `{table}` table and entry 60's dispositions are not one set"
+        );
+        for one in &carried {
+            assert_eq!(
+                &answer(one).iter().map(words).collect::<Vec<_>>(),
+                &tabulated[one.as_str()],
+                "`{}`'s `{table}` is not what entry 70 says",
+                one.as_str()
+            );
+        }
     }
 
     // The boundary: an envelope this seam cannot act on is refused where it

@@ -2312,6 +2312,8 @@ mod tests {
                         addressee: crate::note::Addressee::Worker,
                         text: "the fixture moved".parse().expect("a usable note"),
                         criterion: None,
+                        shown_to: Vec::new(),
+                        routed_to: Vec::new(),
                         reached,
                     }]),
                 )],

@@ -4774,3 +4774,225 @@ verb run on those two variables alone from elsewhere; by
 and the `earlydraft` case of `plan::`'s refusals, the loader; and by
 `store::a_project_reads_as_the_plan_document_of_the_same_content`, the metadata
 round-trip.
+
+## 70. A note a dispatch read is destroyed by a re-dispatch nobody issued, and the record cannot say who was shown it — OPEN
+
+**Proposal (for the planner who owns the contract): compose an engine-initiated
+re-dispatch of a node — the continuation on a preserved branch the
+publication-failure paragraph decides — with every manager note a conversation
+of the dispatch it replaces read, and with every note carried to it, rendered
+under a `## Manager notes` section that carries the amendment's precedence
+sentence; let the planner's own carried note survive that same continuation,
+above the diagnosis, amending the sentence *"The planner's own note is not
+carried again: a note carries exactly one dispatch and the attempt that just ran
+was it"*; have `node-dispatched` carry two optional payload keys,
+`notes_carried` and `notes_spent`, each omitted when empty; have the
+`note-delivered` operation carry two optional fields, `shown_to` — the parties
+the conversation had **already** shown the note to when it acknowledged it — and
+`routed_to` — the parties it said it **will** present it to — each omitted where
+empty; and add one kind to the closed set, `note-shown`, written for each routed
+presentation when the relayed stream shows it happening.**
+
+Entry 60 made the manager's note one op and ruled that reaching the running turn
+and being composed into the node's next dispatch are mutually exclusive: `persist`
+carries forward only what no turn took, and `amend` is the lever for a ruling that
+must survive a re-dispatch. That ruling was written about a re-dispatch a
+**manager** issues — a `requeue`, a `retry` — where the manager composing the new
+dispatch has `amend` in hand. It was silent about the re-dispatch the **engine**
+issues on its own: a lifecycle node whose publication failed preserving its branch
+is dispatched again, on that branch, with a task recomposed from the plan and the
+diagnosis. Nobody asked for that dispatch, and nothing the manager could have done
+would have put the note into it.
+
+**The cost is measured, and it inverted the note's durability.** A manager ruled
+a judged-lint tier a toolchain failure and told a node to stop spending turns
+re-running it. The note reopened the worker's turn — disposition `worker`, which
+reads as success — and the worker complied. The node's publication then failed
+`checks-failed`; the engine continued it on its branch; the second conversation's
+task was the plan's prose plus the diagnosis, and the judge of that conversation
+failed the node for exactly its compliance: *"the assistant never reran that tier,
+so its clean final-tree claim is unsupported."* The evidence was per-side harness
+history the run's journal does not keep: the note's text was in every judge
+prompt of the first dispatch and in neither prompt of the second. Composed with
+entry 60's biconditional, **a note that lands is destroyed and a note that misses
+is carried**, and the receipt for the one that landed named the party that read
+it.
+
+A second half of the same incident class is on the producer's side and is adopted
+here rather than proposed: `oneagentgraph` 0.3.16 stamps an `origin` on the turn
+payloads this crate relays, so a reader of the merged stream can tell a turn
+carrying a manager's delivered note from one the simulated supervisor improvised —
+which is what let a monitor cancel a live dispatch on a stop order nobody issued.
+That field is that library's to declare; this crate relays the payload untouched,
+delivers its notes through `oneagentgraph::control::note`, which is the path that
+release stamps as `delivered`, and holds the field against the linked library in
+`src/agentgraph.rs`. Nothing about it is restated here.
+
+**What this crate does.**
+
+1. **The engine's own continuation carries what the conversation it replaces
+   read.** When `lifecycle::execute` dispatches a node again after a preserving
+   publication failure, it reads off the run's journal what stands for the node
+   — the notes the last `node-dispatched` was composed with, plus every
+   `note-delivered` since whose disposition says a party took it, plus every one
+   whose disposition is `carried` and is therefore owed to this very dispatch —
+   and composes all of it into the recomposed task under `## Manager notes`. The
+   section opens with the amendment's precedence sentence, because that is the
+   authority the note had in the conversation it reached: the ruling above was
+   issued *against* the task's operational notes. Each entry names the addressee,
+   what the conversation it was first delivered into did with it, the text, and
+   the criterion where it bound one, which the section says is part of the bar.
+   The task is the first message of the transcript the judge is handed, so the
+   ruling the worker obeyed reaches the party that rules on the worker. The
+   planner's own carried note survives the continuation too, above the
+   diagnosis, and it is the **launched** node's that is kept, so a third attempt
+   carries one diagnosis rather than a stack of them.
+
+2. **The record names what a dispatch was composed with, and what it spent.** A
+   `node-dispatched` the engine's continuation emits carries `notes_carried`: the
+   notes above, each as the `note-delivered` operation recorded it, stamped
+   `shown_to` both parties because a task reaches both. A `node-dispatched` the
+   plan or a manager caused — the first dispatch of a node, a `requeue`, a
+   `retry`'s replacement — carries `notes_spent`: every note a conversation of
+   the node's last dispatch read that this dispatch was composed without, and,
+   for a replacement, everything that stood for the node it supersedes — what
+   its last dispatch was composed with and everything delivered since. Both
+   are omitted when empty, so a dispatch composed with no note and spending none
+   reads exactly as it did before the keys existed. A record of either that this
+   build cannot read as a list of notes is **refused by name** rather than read
+   past, on both threads that fold it: a continuation composed without the notes
+   it could not read would be the silent loss this entry exists to end, so that
+   node settles `infrastructure-failure` saying which record and what to do, and
+   the reconcile loop's pass ends on the same sentence.
+
+3. **A manager-initiated re-dispatch keeps entry 60's ruling.** A `requeue` and a
+   `retry` compose from the plan and the manager's own `amend` or task, as they
+   did; what changes is only that the dispatch says so, under `notes_spent`, so a
+   manager reading the node's history can tell a ruling that survived from one
+   that has to be re-issued rather than believing a receipt that reads `worker`.
+   `tests/note/main.rs`'s
+   `a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch` holds
+   both halves for a `requeue`: the requeued dispatch is composed without the
+   note and its record names it spent; and
+   `a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so`
+   holds them for a `retry`.
+
+4. **The record tells a presentation that happened from a routing that is
+   intended.** A `note-delivered` is written when the conversation acknowledges
+   the note, and the linked `onejudge` acknowledges a worker's reopened turn
+   *before* that turn opens — so a record that said the worker, let alone the
+   judge, had been shown the note would be a receipt written at submission and
+   read afterwards as a receipt for arrival, which is the defect class this
+   whole entry exists to end. `shown_to` therefore carries only what is confirmed
+   at that instant: the supervisor, for a decision re-taken or completed with the
+   note in hand, both of which the engine settles after the decision was taken;
+   nobody, for a worker turn reopened to carry it, a queued note, or a carried
+   one. `routed_to` carries what the conversation said it will do next — the
+   worker and then the judge for a reopened worker turn, the worker for a
+   re-taken decision, whichever opens next and then the other for a queued note.
+   Each routed presentation is then its own **`note-shown`**, labelled with the
+   node and carrying `party`, the `turn` that opened, and the note, written by
+   the reconcile loop when the relayed stream shows it: a worker turn the
+   producer stamps `origin: delivered` — the release adopted above stamps
+   exactly the turn that opened on a note — and a supervisor turn opening under
+   that reply's number or after it, which the judge takes with every delivered
+   note in hand. A note composed into a dispatch's task is watched the same way,
+   presented by the opening turn as the task and by the first supervisor turn.
+   The watch is per in-flight dispatch and dies with it, so a conversation
+   cancelled or failed between the two presentations leaves the first recorded,
+   the second unrecorded, and no claim anywhere that the second party saw
+   anything. A turn that opened before the note was offered is never read as its
+   presentation, whatever order the loop meets the records in. A worker turn is
+   a **particular** note's presentation only where its opening instruction
+   carries that note's text: the producer's stamp says the turn opened on *a*
+   note, and two notes in one envelope are acknowledged a turn apart and reach
+   the record at one instant, so the stamp alone put the second on the first's
+   turn. An instruction the payload bound cut short of the text confirms
+   nothing. Each `note-shown` names its **evidence** — `delivered-origin`,
+   `opening-task`, `instruction-text`, or `answering-turn` — so a reader knows
+   whether the producer said so or this crate read it off the words. The block below is what
+   `tests/contract.rs` holds `note::Reached::shown_at_delivery` and `routed_to`
+   to, and what `note`'s own tests hold the evidence spellings to.
+
+5. **A note recorded `carried` is watched for a presentation the seam could
+   not predict.** Measured, on this very node: a correction was recorded
+   `reached: carried` at 02:58:53Z, the manager believed the record and told
+   their operator it had not arrived, and at 03:17:55Z the dispatch emitted
+   `turn-interrupted delivered=true` and the correction's text opened the
+   worker's turn 2 — a presentation made by a lever outside the note seam (an
+   `interrupt` issued by hand) inside the same dispatch, with no receipt
+   anywhere. Reproduced here, the mechanism is the producer's own: the linked
+   `oneagentgraph` waits **30 seconds** for the conversation's acknowledgement,
+   and a note offered into a live worker turn is acknowledged only when that
+   turn ends — so a turn longer than that answers *"did not take the note
+   within 30 seconds"*, this crate records `carried`, and the interrupt the seam
+   already issued delivers the note when the turn does end. That is the
+   producer's to rule on and is not restated as a defect of this record; what
+   this record owes is to say what then happened. The seam routed nothing, so `routed_to` is empty and honest; but
+   the dispatch's watch now holds a carried note too, and a worker turn whose
+   opening **instruction carries the note's whole text** — not one cut short of
+   it by the payload bound — is recorded as the worker's presentation with
+   evidence `instruction-text`, and the supervisor's answering turn as the
+   judge's. Text is weaker evidence than the producer's stamp, which is why it
+   is named as such on the record and used only where the stamp cannot exist:
+   nothing routed the note, so nothing could stamp it. A note carried to the
+   node's **next** dispatch is watched the same way there, as composed into that
+   dispatch's task — its opening turn and first supervisor turn record it — so a
+   carried note's record is not the last word on it whichever conversation ends
+   up reading it. What this cannot see is stated: a presentation made by a lever
+   this engine did not pull and that does not put the text into a turn's opening
+   instruction whole leaves no evidence in the stream, and is recorded nowhere.
+
+The window this leaves is stated rather than hidden: a lifecycle node's **steps**
+within one attempt are composed together, so a note delivered into step one's
+conversation is not composed into step two's task of the same attempt — it is
+carried to the *next attempt* of the node, as it is for a single-step node. And a
+boundary retry of a dispatch that produced nothing is composed exactly as the
+attempt before it: no conversation of it read anything, and it carries nothing.
+
+`tests/note/main.rs` drives the whole of it against the real `oneagentgraph` and
+a real two-party conversation: a note delivered into a live worker turn read back
+off the stream as a `delivered` turn, beside the supervisor's own `supervisor`
+turns and the opening `task`; a lifecycle node whose publication the host rejects
+dispatched again by the engine with that note in its second conversation's
+opening task and in its judge's hands, and the record naming it carried; the
+requeue and the retry above, spending it by name; a dispatch a note was carried
+to composing it as context and spending nothing; `shown_to` and `routed_to`
+under every disposition a journey can reach — `worker`, `supervisor`,
+`judged-with`, and `carried` — with `queued` held by the unit table alone, for
+the reason `note::Reached` states over that variant; a note delivered into a
+live worker turn recorded as shown to the worker by that turn and to the judge
+by the turn that answered it, in that order; and a conversation **interrupted
+between the two** — the worker's reopened turn held and the dispatch cancelled
+and reaped — leaving the worker's presentation recorded and the judge's
+unrecorded, with no `note-shown` and no `shown_to` claiming otherwise; a note
+recorded `carried` while the dispatch was live whose text the supervising side
+then read into the worker's next turn, recorded as shown to the worker from the
+instruction's text and to the judge from the answering turn; and a note carried
+to a node's next dispatch recorded as shown by that dispatch's opening turn;
+and two notes in one envelope, opening two turns, each recorded on its own turn
+and neither given a judge's receipt when the dispatch is reaped before one.
+
+```json
+{
+  "node_dispatched_keys": ["notes_carried", "notes_spent"],
+  "note_delivered_fields": ["shown_to", "routed_to"],
+  "event_kinds": ["note-shown"],
+  "note_shown_evidence": ["delivered-origin", "opening-task", "instruction-text", "answering-turn"],
+  "heading": "## Manager notes",
+  "shown_at_delivery": {
+    "queued": [],
+    "worker": [],
+    "supervisor": ["supervisor"],
+    "judged-with": ["supervisor"],
+    "carried": []
+  },
+  "routed_to": {
+    "queued": ["worker", "supervisor"],
+    "worker": ["worker", "supervisor"],
+    "supervisor": ["worker"],
+    "judged-with": [],
+    "carried": []
+  }
+}
+```
