@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0](https://github.com/nickderobertis/onepipeline/compare/v0.27.2...v0.28.0) - 2026-09-12
+
+### Added
+
+- *(lifecycle)* finish a change request the worker opened as a draft at closeout ([#235](https://github.com/nickderobertis/onepipeline/pull/235))
+
+### Fixed
+
+- *(channel)* make the surface log the record and the queue a projection of it ([#227](https://github.com/nickderobertis/onepipeline/pull/227))
+
 ## [0.27.2](https://github.com/nickderobertis/onepipeline/compare/v0.27.1...v0.27.2) - 2026-09-12
 
 ### Fixed
