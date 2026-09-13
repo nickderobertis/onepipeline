@@ -3638,8 +3638,6 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     let Member::Onejudge(monitor) = monitor else {
         panic!("the monitor is a two-party member");
     };
-    // One side and not a panel: `judge` is a list at this pin, and the shipped
-    // document is the one-element shorthand for it.
     match &monitor.judge[..] {
         [JudgeSide::Command(judge)] => assert_eq!(
             judge.command[..3],

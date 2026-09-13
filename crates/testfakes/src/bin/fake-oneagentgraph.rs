@@ -2260,7 +2260,11 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
 
 /// The most judge decisions one turn may be scripted with: their `seq`s run
 /// from 5, and 10 is where this double's session records start.
-const JUDGEABLE: usize = 4;
+const MAX_JUDGE_DECISIONS: usize = 4;
+
+/// The provider kinds a judge of a panel is one of, in the spelling the
+/// sibling's `JudgeSide::kind` publishes and onejudge records.
+const JUDGE_KINDS: [&str; 3] = ["oneharness", "llmlint", "command"];
 
 /// What each judge of this member's panel decided about its one worker turn.
 ///
@@ -2272,8 +2276,9 @@ const JUDGEABLE: usize = 4;
 /// Built through the sibling's **own** [`JudgeDecided`], like every other
 /// sibling-owned payload this double writes, and the decision word through
 /// onejudge's own [`Decision`]: a line naming a decision that library does not
-/// spell, or fewer than four columns, is fatal, because a script read leniently
-/// would publish a decision the test author did not write.
+/// spell, a kind outside [`JUDGE_KINDS`], an empty judge label, or fewer than
+/// four columns, is fatal, because a script read leniently would publish a
+/// decision the test author did not write.
 ///
 /// [`JudgeDecided`]: oneagentgraph::event::JudgeDecided
 /// [`Decision`]: onejudge::Decision
@@ -2305,19 +2310,32 @@ fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::ev
                              does not spell: {error}"
                         ))
                     });
+            let judge = judge.trim();
+            if judge.is_empty() {
+                fake::fail(&format!(
+                    "a `.judged` line reads {line:?}, which names no judge"
+                ));
+            }
+            let kind = kind.trim();
+            if !JUDGE_KINDS.contains(&kind) {
+                fake::fail(&format!(
+                    "a `.judged` line names the judge kind {kind:?}, which is none of \
+                     {JUDGE_KINDS:?}"
+                ));
+            }
             oneagentgraph::event::JudgeDecided {
                 turn: 1,
-                judge: judge.trim().to_string(),
-                kind: kind.trim().to_string(),
+                judge: judge.to_string(),
+                kind: kind.to_string(),
                 decision: decision.as_str().to_string(),
                 reason: reason.trim().to_string(),
             }
         })
         .collect();
-    if decided.len() > JUDGEABLE {
+    if decided.len() > MAX_JUDGE_DECISIONS {
         fake::fail(&format!(
-            "{key}.judged names {} judges; nothing past {JUDGEABLE} says anything a panel does \
-             not already",
+            "{key}.judged names {} judges; nothing past {MAX_JUDGE_DECISIONS} says anything a \
+             panel does not already",
             decided.len()
         ));
     }
@@ -2503,8 +2521,6 @@ fn report_of(
         });
     }
     let mut report = serde_json::json!({
-        // The version the linked onejudge writes, so the document this double
-        // stores is the one a consumer of *that* release reads.
         "schema_version": onejudge::SCHEMA_VERSION,
         "transcript": {"messages": [
             {"role": "user", "content": task},
