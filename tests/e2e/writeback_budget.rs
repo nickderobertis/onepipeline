@@ -315,6 +315,51 @@ fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A hold the double cannot read is a refusal by the script's name, not a store that
+/// answered at once.
+///
+/// The rendezvous file is the journey's own input to the double, and the two
+/// journeys above time a store that has not answered yet against it. A double that
+/// read an unreadable address as "no hold" would answer immediately and hand those
+/// journeys a copy that landed well inside any deadline — proving the deadline
+/// nothing. So the double refuses it, the refusal reaches the driver's log as the
+/// copy's own failure, and that is what this asserts: the write-back names the
+/// script, and the board is not written as though the store had answered.
+#[test]
+fn a_hold_the_double_cannot_read_refuses_the_copy_by_the_scripts_name() {
+    let world = World::new("writeback-budget-unreadable-hold");
+    let run = "budgetunreadable";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    // A directory where the address should be: present, and not a file this double
+    // can read.
+    std::fs::create_dir(world.fakes.join(format!("{COPY}.rendezvous")))
+        .expect("the unreadable hold is in place");
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+    world
+        .run(&["start", project.as_str(), "--detach"])
+        .exited(0);
+
+    let expected = format!(
+        "write-back failed for '{project}': copy exited {}: `{COPY}.rendezvous` could not be \
+         read",
+        onepipeline_testfakes::USAGE
+    );
+    world.until_run_file_holds(run, "driver.log", &expected);
+    // The board still holds what the fixture authored, not what the copy carried.
+    assert_eq!(
+        board_status(&world, &project, "work").as_deref(),
+        Some("backlog"),
+        "the board moved as though the store had answered"
+    );
+}
+
 /// The budget the record carries for one run, as the launch record names it.
 fn recorded_budget(world: &World, run: &str) -> Value {
     world.run_json(run, "launch.json")["writeback_item_budget"].clone()

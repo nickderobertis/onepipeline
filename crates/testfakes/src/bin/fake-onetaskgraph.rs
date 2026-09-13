@@ -351,9 +351,15 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     // Held here, before any answer, so what the test times is the whole of what the
-    // caller waited for: a store that has not answered yet.
-    if let Ok(address) = std::fs::read_to_string(fake::rendezvous_script(&dir, &name)) {
-        fake::meet(address.trim());
+    // caller waited for: a store that has not answered yet. Only "there is no such
+    // file" is no hold: an address a journey wrote and this program cannot read would
+    // otherwise answer at once while the journey timed a store that had not.
+    match std::fs::read_to_string(fake::rendezvous_script(&dir, &name)) {
+        Ok(address) => fake::meet(address.trim()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return fake::refuse(&format!("`{name}.rendezvous` could not be read: {error}"))
+        }
     }
     let answer = (nth > 1)
         .then(|| std::fs::read_to_string(dir.join(format!("{name}.{nth}"))).ok())

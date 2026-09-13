@@ -3378,17 +3378,12 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// truncate, and is still a writer that is mid-replacement more often than not as the
 /// rule samples it — see the teeth below.
 ///
-/// **Measured over this tree, at 640 runs — 128 000 asks — of which none refused.**
-/// 400 of them by invoking the compiled `e2e` binary on this test's module-qualified
-/// name, 40 through `cargo nextest run -E`, whose `binary(e2e) and test(...)` filterset
-/// matches this name by substring, 100 pinned with six busy loops to one CPU, and 100
-/// under eight `fsync`-heavy writers on the same filesystem; each run counted only
-/// where the runner itself reported that one test ran and passed. Its teeth were
-/// re-checked over that same tree rather than remembered: `settled_title` cut down to a
-/// single read called this sound fixture a defect between 106 and 190 of 200 times in
-/// six runs and failed the journey on its own assertion. The 440-run figure the
-/// back-to-back writer carried was taken over that writer, so it is honest about that
-/// tree and does not cover this one.
+/// **Measured over this tree, at 640 runs — 128 000 asks — of which none refused**,
+/// 200 of them pinned to one contended CPU or under `fsync` pressure, and each counted
+/// only where the runner itself reported that one test ran and passed. Its teeth were
+/// re-checked over the same tree rather than remembered: `settled_title` cut down to a
+/// single read called this sound fixture a defect between 106 and 190 of 200 times and
+/// failed the journey on its own assertion.
 ///
 /// **Count what the runner reports ran, never exit codes.** This test's libtest name
 /// carries its module, so `--exact` over the bare function name matches nothing, runs
@@ -3417,14 +3412,7 @@ fn a_project_document_being_rewritten_underneath_the_rule_is_not_a_fixture_defec
                 let replacing = std::time::Instant::now();
                 std::fs::write(&rewritten, "").expect("the truncate half of a replacement");
                 std::fs::write(&rewritten, &whole).expect("the write half of a replacement");
-                // Rested for as long as the replacement took, so the document is whole
-                // for at least half of every cycle however slow this host makes the
-                // truncate. A store's writer replaces a document once and moves on; one
-                // that truncates again the instant it has written is harsher than any
-                // store, and on a loaded runner — where a truncate waits on the journal
-                // and a parked thread is parked inside it — it left the document empty
-                // for longer than the rule is patient, and called a sound fixture a
-                // defect for it.
+                // Whole for at least as long as it was not; see above.
                 std::thread::sleep(replacing.elapsed());
             }
         })
