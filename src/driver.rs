@@ -2990,10 +2990,10 @@ enum Holder {
     AnotherTakeover,
     /// A driver driving the run.
     ADriver,
-    /// A verb this build does not know — a later release's, or a record it could
-    /// not read. **Not** a state to act on: waiting on a holder is right for one
-    /// of the three and this is not it, so an unrecognised one is answered the
-    /// way a driver is, which is the answer that assumes least.
+    /// A verb this build does not know, such as a later release's. **Not** a
+    /// state to act on: waiting on a holder is right for one of the three and
+    /// this is not it, so an unrecognised one is answered the way a driver is,
+    /// which is the answer that assumes least.
     Unrecognised,
 }
 

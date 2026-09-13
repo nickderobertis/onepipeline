@@ -856,6 +856,10 @@ fn accepting_under_the_handover(
     match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
         Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
         Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
+        // A lock nobody can be named as holding is still a claim on the run.
+        Err(unreadable) if ledger::is_unreadable_lock(&unreadable) => {
+            channel.submit(author, commands).map(Accepted::Queued)
+        }
         Err(other) => Err(other),
     }
 }

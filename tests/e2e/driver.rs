@@ -1621,6 +1621,114 @@ fn the_driving_process_is_a_single_writer() {
     world.release("build.go");
 }
 
+/// Two takeovers of one dead driver's run leave one of them driving it, and the
+/// other refused **naming that one**.
+///
+/// A driver killed while it holds a run leaves its lock behind naming a process
+/// that is gone, and every process arriving to take the run over proves that and
+/// contends to replace it. `drive-run --adopt` is the driver an adoption retains,
+/// and the ownership lock is the first thing it takes, so two of them started
+/// together are two takeovers meeting at the lock and nowhere else. The one that
+/// loses is told who won: a refusal naming nobody — a lock read before its record
+/// was whole, reported as pid 0 — sends whoever reads it looking for a process
+/// that never existed.
+///
+/// `#[cfg(unix)]` because it ends the driver by pid.
+#[cfg(unix)]
+#[test]
+fn two_takeovers_of_a_dead_drivers_run_leave_one_driving_and_name_it_to_the_other() {
+    let world = World::new("driver-takeover-race");
+    world.script("work.wait", "hold");
+    let (run, driver) =
+        start_detached_announcing(&world, "takeover-race", vec![agent("work", &[])]);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    end_process(driver);
+    assert_eq!(
+        world.run_json(&run, "owner.lock")["pid"],
+        json!(driver),
+        "the lock the takeovers contend for is not the dead driver's"
+    );
+
+    // Both streams go to files rather than pipes: the takeover still driving is
+    // read only after it ends, and a pipe nothing drains would stop it first.
+    let output = |which: &str, stream: &str| world.root.join(format!("takeover-{which}.{stream}"));
+    let takeover = |which: &str| {
+        let file = |stream: &str| {
+            std::fs::File::create(output(which, stream)).expect("a file for the takeover's output")
+        };
+        world
+            .cmd(&["drive-run", &run, "--adopt"])
+            .stdout(file("stdout"))
+            .stderr(file("stderr"))
+            .spawn()
+            .expect("the takeover starts")
+    };
+    let names = ["a", "b"];
+    let mut takeovers = [takeover(names[0]), takeover(names[1])];
+
+    let mut ended = None;
+    world.until("one of the two takeovers to end", |_| {
+        ended = takeovers.iter_mut().position(|child| {
+            child
+                .try_wait()
+                .expect("a takeover answers whether it has ended")
+                .is_some()
+        });
+        ended.is_some()
+    });
+    let loser = ended.expect("a takeover ended");
+    let winner = 1 - loser;
+    let said = std::fs::read_to_string(output(names[loser], "stderr")).unwrap_or_default();
+    let lost = takeovers[loser]
+        .try_wait()
+        .expect("a takeover answers whether it has ended")
+        .expect("the takeover that ended has a status");
+    assert_eq!(
+        lost.code(),
+        Some(REFUSED),
+        "the takeover that ended was not refused: {said}"
+    );
+    assert!(
+        takeovers[winner]
+            .try_wait()
+            .expect("a takeover answers whether it has ended")
+            .is_none(),
+        "neither takeover is still driving the run: {said}"
+    );
+    let won_by = takeovers[winner].id();
+    assert!(
+        said.contains(&format!("pid {won_by} on")) && said.contains("(drive)"),
+        "the refusal did not name the takeover driving the run, pid {won_by}: {said}"
+    );
+    assert!(
+        !said.contains("unreadable"),
+        "the loser read a lock nobody could be named as holding: {said}"
+    );
+    assert_eq!(
+        world.run_json(&run, "owner.lock")["pid"],
+        json!(won_by),
+        "the lock does not name the takeover driving the run"
+    );
+
+    // And the takeover that won is the run's one driver to the end: its held
+    // node is let go, the run completes, and one adoption is what it records.
+    world.release("work.go");
+    let finished = takeovers[winner].wait().expect("the winning takeover ends");
+    assert!(
+        finished.success(),
+        "the winning takeover did not drive the run to its end: {}",
+        std::fs::read_to_string(output(names[winner], "stderr")).unwrap_or_default()
+    );
+    assert_eq!(
+        world.events_of(&run, "driver-adopted").len(),
+        1,
+        "the run records other than one takeover: {:?}",
+        world.kinds(&run)
+    );
+}
+
 #[test]
 fn a_detached_launch_drives_the_whole_chain_and_records_one_result() {
     let world = World::new("driver-detached-drive");
