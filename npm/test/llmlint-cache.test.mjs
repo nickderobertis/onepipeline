@@ -804,6 +804,56 @@ describe("the judged tier's refusals", () => {
     assert.match(result.stderr, /reported no verdict for base/, report(result));
   });
 
+  for (const [what, record] of [
+    ["is not a verdict", "lint-llm-diff: certified\n"],
+    [
+      "carries more than one verdict",
+      `lint-llm-diff: ${PASS_VERDICT}\nlint-llm-diff: ${FAIL_VERDICT}\n`,
+    ],
+  ]) {
+    it(`refuses to report a pass from a verdict record that ${what}`, (t) => {
+      // The record is restored from the cache as well as written by the judge, so
+      // it is read as input: only one whole verdict line certifies anything.
+      const ws = workspace(t);
+      writeExecutable(
+        join(ws.root, "scripts", "llmlint-judge.sh"),
+        `#!/usr/bin/env bash\nmkdir -p .lint-llm-diff\nprintf '%s' '${record}' >.lint-llm-diff/verdict\n`,
+      );
+
+      const result = ws.lint(ws.head());
+
+      assert.equal(result.status, 2, report(result));
+      assert.match(result.stderr, /reported no verdict for base/, report(result));
+      assert.doesNotMatch(result.stderr, new RegExp(CACHE_MISS), report(result));
+    });
+  }
+
+  it("says what to free when the judge cannot record its verdict", (t) => {
+    const ws = workspace(t);
+    // A file where the record's directory belongs: the judge reaches a verdict and
+    // has nowhere to put it, which must not pass as a clean run.
+    writeFileSync(join(ws.root, ".lint-llm-diff"), "", "utf8");
+
+    const result = ws.judge({ env: { LLMLINT_DIFF_BASE_SHA: ws.head() } });
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /could not record the verdict/, report(result));
+    assert.doesNotMatch(result.stdout, new RegExp(PASS_VERDICT), report(result));
+  });
+
+  it("says what to repair when an earlier verdict record cannot be cleared", (t) => {
+    // A record this run cannot remove could answer for it, so the judge is not
+    // paid for a verdict the tier could not tell apart from the stale one.
+    const ws = workspace(t);
+    mkdirSync(join(ws.root, ".lint-llm-diff", "verdict", "stuck"), { recursive: true });
+
+    const result = ws.lint(ws.head());
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /could not clear the previous verdict record/, report(result));
+    assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
+
   it("says what to free when the judge cannot open storage for its report", (t) => {
     const ws = workspace(t);
 

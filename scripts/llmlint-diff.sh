@@ -106,7 +106,7 @@ trap 'rm -rf "$captured"' EXIT
 # on a miss, Nx restores it on a hit, and either way it is this run's or it is absent.
 record="$root/.lint-llm-diff/verdict"
 rm -f "$record" || {
-  echo "lint-llm-diff: could not clear the previous verdict record $record; make it writable and retry" >&2
+  echo "lint-llm-diff: could not clear the previous verdict record $record; remove it and retry" >&2
   exit 3
 }
 
@@ -154,8 +154,14 @@ fi
 # stored and restores it only around that exit, and Nx itself has exited too.
 #
 # A task that succeeded without recording one has not certified anything, whatever
-# its status said, so it is refused rather than reported as a pass.
-verdict="$(grep -m1 '^lint-llm-diff: ' "$record" 2>/dev/null)" || {
+# its status said, so it is refused rather than reported as a pass. The record is
+# restored from the cache as well as written by the judge, so it is read as input:
+# exactly one line, and that line the whole verdict the judge writes.
+verdict=""
+if [ -f "$record" ] && [ "$(wc -l <"$record")" -eq 1 ]; then
+  IFS= read -r verdict <"$record"
+fi
+[[ "$verdict" =~ ^lint-llm-diff:\ [0-9]+\ rules:\ [^[:cntrl:]]*$ ]] || {
   echo "lint-llm-diff: the judged run reported no verdict for base $base_sha; rerun with --skip-nx-cache, and if it stays empty run 'bash scripts/llmlint-judge.sh' with LLMLINT_DIFF_BASE_SHA set to see what it did" >&2
   exit 2
 }
