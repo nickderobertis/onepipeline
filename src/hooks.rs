@@ -783,6 +783,23 @@ mod tests {
                 "`{malformed}` was read as naming a driver"
             );
         }
+        // And a document — a checkpoint or a summary — cannot put back what the
+        // stream refuses: a claim naming no host is refused where it is read.
+        let written = serde_json::to_value(&hyphenated).expect("a claim serialises");
+        assert_eq!(
+            serde_json::from_value::<DriverClaim>(written).expect("it reads back"),
+            hyphenated
+        );
+        for refused in [
+            json!({"host": "", "pid": 4242}),
+            json!({"host": "h", "pid": 0}),
+            json!({"host": "h", "pid": 1, "stream": "h-1"}),
+        ] {
+            assert!(
+                serde_json::from_value::<DriverClaim>(refused.clone()).is_err(),
+                "{refused} was read as a driver claim"
+            );
+        }
     }
 
     /// A timeout too large for this host's clock is no deadline rather than a panic,

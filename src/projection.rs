@@ -568,12 +568,42 @@ pub(crate) fn evidences_progress(event: &Envelope) -> bool {
 /// `<host>-<pid>` on everything it writes — so a stream in any other form is not
 /// one this crate wrote, identifies no driver, and folds as none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ClaimAsWritten")]
 pub struct DriverClaim {
-    /// The host the pid is meaningful on.
+    /// The host the pid is meaningful on. Never empty: a claim naming no host
+    /// names a pid on no machine, which identifies no driver.
     pub host: String,
     /// The process that let go.
     pub pid: std::num::NonZeroU32,
+}
+
+/// A driver claim as a document carries it, before its host is checked.
+///
+/// The checkpoint and the summary are read back into [`DriverClaim`] through this,
+/// so a document cannot put back the empty host [`DriverClaim::of_stream`]
+/// refuses.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimAsWritten {
+    host: String,
+    pid: std::num::NonZeroU32,
+}
+
+impl TryFrom<ClaimAsWritten> for DriverClaim {
+    type Error = String;
+
+    fn try_from(written: ClaimAsWritten) -> std::result::Result<Self, Self::Error> {
+        if written.host.is_empty() {
+            return Err(
+                "a driver claim names no host, so the pid beside it identifies no driver"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            host: written.host,
+            pid: written.pid,
+        })
+    }
 }
 
 impl DriverClaim {

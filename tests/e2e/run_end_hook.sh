@@ -24,23 +24,36 @@
 # `said line 1` to `said line 25` on stdout and `said on stderr` on stderr, so a
 # journey can read which of its output the engine kept.
 #
+# Every record is checked as it is written. The journeys read these files as the
+# only witness to what the engine handed a hook, so one that could not be written
+# is refused out loud — exit 70, naming the file and what to fix — rather than
+# left missing for a journey to read as a hook that was never run.
+#
 # `run_end_hook.bat` is the Windows half and answers the same way.
 set -u
 
-record=${ONEPIPELINE_E2E_HOOK_RECORD:?ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into}
-run=${ONEPIPELINE_RUN_ID:?the engine named no run}
-mkdir -p "$record/$run" || exit 70
+# A record this fixture could not write, or a scripted value it could not use.
+broke() {
+  echo "run_end_hook: $1" >&2
+  echo "run_end_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as run_end_hooks.rs does, and write <run>.exit as a whole number" >&2
+  exit 70
+}
+
+record=${ONEPIPELINE_E2E_HOOK_RECORD:?ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into; set it to the world scratch run_end_hooks.rs creates}
+run=${ONEPIPELINE_RUN_ID:?the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given}
+mkdir -p "$record/$run" || broke "cannot create $record/$run"
 
 count=0
 if [ -f "$record/$run/invocations" ]; then
-  count=$(wc -l <"$record/$run/invocations")
+  count=$(wc -l <"$record/$run/invocations") || broke "cannot read $record/$run/invocations"
 fi
 here="$record/$run/$((count + 1))"
-mkdir -p "$here" || exit 70
-printf '%s\n' "${ONEPIPELINE_HOOK-}" >>"$record/$run/invocations"
+mkdir -p "$here" || broke "cannot create $here"
+printf '%s\n' "${ONEPIPELINE_HOOK-}" >>"$record/$run/invocations" \
+  || broke "cannot append to $record/$run/invocations"
 
-pwd >"$here/cwd"
-cat >"$here/stdin"
+pwd >"$here/cwd" || broke "cannot write $here/cwd"
+cat >"$here/stdin" || broke "cannot write $here/stdin"
 {
   printf 'hook=%s\n' "${ONEPIPELINE_HOOK-}"
   printf 'run_id=%s\n' "$run"
@@ -55,7 +68,7 @@ cat >"$here/stdin"
   else
     printf 'session unset\n'
   fi
-} >"$here/env"
+} >"$here/env" || broke "cannot write $here/env"
 
 # llmlint: ignore-block[tool_output_is_signal] this output is the fixture's evidence,
 # not narration: the journeys read these 26 lines back out of the log the engine kept,
@@ -68,13 +81,13 @@ while [ "$i" -le 25 ]; do
 done
 printf 'said on stderr\n' >&2
 # llmlint: ignore-end[tool_output_is_signal]
-: >"$here/started"
+: >"$here/started" || broke "cannot write $here/started"
 
 if [ -f "$record/$run.hold" ]; then
   deadline=$(($(date +%s) + 300))
   until [ -f "$record/$run.go" ]; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      printf 'nothing wrote %s within 300 seconds\n' "$record/$run.go" >&2
+      echo "run_end_hook: nothing wrote $record/$run.go within 300 seconds; write it to release this hook" >&2
       exit 1
     fi
     sleep 0.05
@@ -83,6 +96,9 @@ fi
 
 status=0
 if [ -f "$record/$run.exit" ]; then
-  status=$(cat "$record/$run.exit")
+  status=$(cat "$record/$run.exit") || broke "cannot read $record/$run.exit"
 fi
+case "$status" in
+  '' | *[!0-9]*) broke "$record/$run.exit holds '$status', which is not an exit status" ;;
+esac
 exit "$status"

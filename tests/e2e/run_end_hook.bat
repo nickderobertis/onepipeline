@@ -1,21 +1,21 @@
 @echo off
 rem The Windows half of the run-end hook the journeys in `run_end_hooks.rs` name.
-rem `run_end_hook.sh` is where what it records, what it reads and what it says are
-rem written down; this answers the same way. What is written down here is what cmd
-rem makes different.
+rem `run_end_hook.sh` is where what it records, what it reads, what it says, and
+rem why a record it cannot write is refused out loud are written down; this answers
+rem the same way. What is written down here is what cmd makes different.
 setlocal enabledelayedexpansion
 
 if not defined ONEPIPELINE_E2E_HOOK_RECORD (
-  echo ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into 1>&2
+  echo run_end_hook: ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into; set it to the world scratch run_end_hooks.rs creates 1>&2
   exit /b 64
 )
 if not defined ONEPIPELINE_RUN_ID (
-  echo the engine named no run 1>&2
+  echo run_end_hook: the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given 1>&2
   exit /b 64
 )
 set "record=%ONEPIPELINE_E2E_HOOK_RECORD%"
 set "run=%ONEPIPELINE_RUN_ID%"
-if not exist "%record%\%run%\" mkdir "%record%\%run%"
+if not exist "%record%\%run%\" mkdir "%record%\%run%" || (call :broke "cannot create %record%\%run%" & exit /b 70)
 
 set "count=0"
 if exist "%record%\%run%\invocations" (
@@ -23,36 +23,31 @@ if exist "%record%\%run%\invocations" (
 )
 set /a "nth=count+1"
 set "here=%record%\%run%\!nth!"
-mkdir "!here!"
-echo %ONEPIPELINE_HOOK%>>"%record%\%run%\invocations"
+mkdir "!here!" || (call :broke "cannot create !here!" & exit /b 70)
+(echo %ONEPIPELINE_HOOK%)>>"%record%\%run%\invocations" || (call :broke "cannot append to %record%\%run%\invocations" & exit /b 70)
 
-echo %CD%>"!here!\cwd"
+(echo %CD%)>"!here!\cwd" || (call :broke "cannot write !here!\cwd" & exit /b 70)
 rem `findstr "^"` copies stdin through to its end, which is the whole document.
 findstr "^" >"!here!\stdin"
-echo hook=%ONEPIPELINE_HOOK%>"!here!\env"
-echo run_id=%run%>>"!here!\env"
-echo run_root=%ONEPIPELINE_RUN_ROOT%>>"!here!\env"
-if defined ONEPIPELINE_LAUNCHER (
-  echo launcher=!ONEPIPELINE_LAUNCHER!>>"!here!\env"
-) else (
-  echo launcher unset>>"!here!\env"
-)
-if defined ONEPIPELINE_LAUNCHER_SESSION (
-  echo session=!ONEPIPELINE_LAUNCHER_SESSION!>>"!here!\env"
-) else (
-  echo session unset>>"!here!\env"
-)
+if not exist "!here!\stdin" (call :broke "cannot write !here!\stdin" & exit /b 70)
+(
+  echo hook=%ONEPIPELINE_HOOK%
+  echo run_id=%run%
+  echo run_root=%ONEPIPELINE_RUN_ROOT%
+  if defined ONEPIPELINE_LAUNCHER (echo launcher=!ONEPIPELINE_LAUNCHER!) else (echo launcher unset)
+  if defined ONEPIPELINE_LAUNCHER_SESSION (echo session=!ONEPIPELINE_LAUNCHER_SESSION!) else (echo session unset)
+)>"!here!\env" || (call :broke "cannot write !here!\env" & exit /b 70)
 
 for /l %%i in (1,1,25) do echo said line %%i
 echo said on stderr 1>&2
-type nul >"!here!\started"
+type nul >"!here!\started" || (call :broke "cannot write !here!\started" & exit /b 70)
 
 if not exist "%record%\%run%.hold" goto finish
 set /a "left=300"
 :waitloop
 if exist "%record%\%run%.go" goto finish
 if !left! LEQ 0 (
-  echo nothing wrote %record%\%run%.go within 300 seconds 1>&2
+  echo run_end_hook: nothing wrote %record%\%run%.go within 300 seconds; write it to release this hook 1>&2
   exit /b 1
 )
 set /a "left=left-1"
@@ -63,4 +58,11 @@ goto waitloop
 :finish
 set "status=0"
 if exist "%record%\%run%.exit" set /p status=<"%record%\%run%.exit"
+echo !status!|findstr /r "^[0-9][0-9]*$" >nul || (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status" & exit /b 70)
 exit /b %status%
+
+rem A record this fixture could not write, or a scripted value it could not use.
+:broke
+echo run_end_hook: %~1 1>&2
+echo run_end_hook: point ONEPIPELINE_E2E_HOOK_RECORD at a writable directory the journey owns, as run_end_hooks.rs does, and write ^<run^>.exit as a whole number 1>&2
+goto :eof
