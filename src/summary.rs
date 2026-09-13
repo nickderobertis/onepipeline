@@ -1642,10 +1642,10 @@ mod tests {
             pid: None,
             host: None,
             started: None,
-            let_go_by: Some(crate::projection::DriverClaim {
-                host: "golden-host".into(),
-                pid: std::num::NonZeroU32::new(4242).expect("a pid"),
-            }),
+            let_go_by: Some(
+                crate::projection::DriverClaim::of_stream("golden-host-4242")
+                    .expect("the golden stream names a driver"),
+            ),
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
             // Nothing parked, which is an absent key rather than an empty list on

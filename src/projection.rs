@@ -571,10 +571,11 @@ pub(crate) fn evidences_progress(event: &Envelope) -> bool {
 #[serde(try_from = "ClaimAsWritten")]
 pub struct DriverClaim {
     /// The host the pid is meaningful on. Never empty: a claim naming no host
-    /// names a pid on no machine, which identifies no driver.
-    pub host: String,
+    /// names a pid on no machine, which identifies no driver. Private, so the two
+    /// ways a claim is built — a stream and a checked document — are the only ones.
+    host: String,
     /// The process that let go.
-    pub pid: std::num::NonZeroU32,
+    pid: std::num::NonZeroU32,
 }
 
 /// A driver claim as a document carries it, before its host is checked.

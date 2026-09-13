@@ -857,14 +857,13 @@ mod tests {
         let host = sys::hostname();
         let stamped = DriverClaim::of_stream(&format!("{host}-{}", sys::pid()))
             .expect("the stream a journal here writes names its driver");
-        assert_eq!(stamped.host, host);
         assert!(stamped.is(Some(&host), std::num::NonZeroU32::new(sys::pid())));
         assert!(!stamped.is(None, std::num::NonZeroU32::new(sys::pid())));
         assert!(!stamped.is(Some(&host), None));
         // A host carrying its own hyphens still splits at the last one.
         let hyphenated = DriverClaim::of_stream("build-host-01-4242").expect("a claim");
-        assert_eq!(hyphenated.host, "build-host-01");
-        assert_eq!(hyphenated.pid.get(), 4242);
+        assert!(hyphenated.is(Some("build-host-01"), std::num::NonZeroU32::new(4242)));
+        assert!(!hyphenated.is(Some("build-host"), std::num::NonZeroU32::new(4242)));
         for malformed in ["", "4242", "-4242", "host-", "host-0", "host-pid", "host"] {
             assert_eq!(
                 DriverClaim::of_stream(malformed),
