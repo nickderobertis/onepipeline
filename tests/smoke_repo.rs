@@ -48,14 +48,19 @@ mod unix {
     const RECORD_ENV: &str = "ONEPIPELINE_SMOKE_GH_RECORD";
     const PROBE_ENV: &str = "ONEPIPELINE_SMOKE_GH_PROBE";
 
-    /// The `gh` stand-in: one fixed program, reading the two variables above.
-    /// One invocation per line, arguments separated by the unit separator: no
-    /// argument here carries either, and a description with spaces in it has
-    /// to come back as one argument.
+    /// What separates one argument from the next in the record: the unit
+    /// separator, which no argument here carries, so a description with spaces
+    /// in it comes back as one argument. The stand-in is given it as the octal
+    /// escape `printf` reads, spelled from this one value.
+    const SEPARATOR: char = '\u{1f}';
+
+    /// The `gh` stand-in: one fixed program, reading the two variables above,
+    /// recording one invocation per line.
     fn stand_in_program() -> String {
+        let separator = format!("\\{:03o}", SEPARATOR as u32);
         format!(
             "#!/bin/sh\n\
-             printf '%s\\037' \"$@\" >> \"${RECORD_ENV}\"\n\
+             printf '%s{separator}' \"$@\" >> \"${RECORD_ENV}\"\n\
              printf '\\n' >> \"${RECORD_ENV}\"\n\
              case \"$1 $2\" in\n  \
                'repo view') echo 'GraphQL: Could not resolve to a Repository' >&2; \
@@ -95,7 +100,7 @@ mod unix {
             .expect("the stand-in recorded what it was asked")
             .lines()
             .map(|line| {
-                line.split('\u{1f}')
+                line.split(SEPARATOR)
                     .filter(|arg| !arg.is_empty())
                     .map(str::to_owned)
                     .collect()
