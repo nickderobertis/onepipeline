@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/nickderobertis/onepipeline/compare/v0.28.3...v0.29.0) - 2026-09-13
+
+### Added
+
+- *(writeback)* bound the settlement copy per item, and let a launch set the per-item budget ([#248](https://github.com/nickderobertis/onepipeline/pull/248))
+
+### Fixed
+
+- *(ledger)* make a lock's record complete before its name can be seen ([#259](https://github.com/nickderobertis/onepipeline/pull/259))
+- *(ledger)* let exactly one reclaimer take a dead holder's lock ([#255](https://github.com/nickderobertis/onepipeline/pull/255))
+- *(deps)* link the oneagentgraph and onejudge releases that stack judges, and relay which judge decided what ([#252](https://github.com/nickderobertis/onepipeline/pull/252))
+
 ## [0.28.2](https://github.com/nickderobertis/onepipeline/compare/v0.28.1...v0.28.2) - 2026-09-12
 
 ### Fixed
