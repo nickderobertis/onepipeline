@@ -135,7 +135,7 @@ fn board_status(world: &World, project: &str, node: &str) -> Option<String> {
     })
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the three journeys
 // below wait past the sixty-second floor by construction — a copy that outlasts a minute
 // cannot be observed in less than one — and the edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker, exactly
@@ -313,6 +313,78 @@ fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic
          {message}"
     );
 }
+
+/// A run whose launch record an older build wrote — no budget field on it — is
+/// adopted, and the driver the adoption starts bounds its copy by the shipped
+/// default: the refusal it is killed with names that figure, not one the
+/// adopting shell's environment offered and not a zero read off the record.
+///
+/// The record is the one file a run *is* to an adoption, and a build before this
+/// field left it without one. Reading the missing field as no budget at all would
+/// kill every copy; reading it as the environment's would let the shell that
+/// adopted decide what the launch had. What the worker does with it is only
+/// observable on a copy it actually bounds, so this holds one past the floor.
+#[test]
+fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_default() {
+    let floor = number("floor_seconds");
+    let per_item = number("default_seconds");
+    let items = 1;
+    let run = "budgetolder";
+    let (world, meeting, project) =
+        a_run_whose_copy_is_held("writeback-budget-older-record", run, items, &[]);
+
+    // The launching driver's first copy is let go at once, so the run is quiet and
+    // an adoption may end its driver.
+    meeting.arrived().release();
+    world.until_store("the launching driver's copy to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
+    assert!(!a_projection_failed(&world, run));
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a launch record written by **another
+    // build** is the input here, and there is no invocation a user can type that produces
+    // one: this build writes the field on every record. What is written is the one file a
+    // run *is* to an adoption — its launch record, as the build before this field left it
+    // — and everything then asserted is the real compiled binary adopting it.
+    let launch = world.run_file(run, "launch.json");
+    let mut older = world.run_json(run, "launch.json");
+    older
+        .as_object_mut()
+        .expect("a launch record")
+        .remove("writeback_item_budget")
+        .expect("the record this build writes carries the field");
+    std::fs::write(&launch, older.to_string()).expect("the older record is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.until("the quiet driver to be reported parked", |world| {
+        let mut status = world.cmd(&["status", run]);
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
+    adopt
+        .env(spelling("environment"), "1000")
+        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    world
+        .run_on(adopt, "adopt --detach")
+        .exited(0)
+        .err_has("ending it to adopt the run");
+    assert_eq!(
+        recorded_budget(&world, run),
+        Value::from(0),
+        "the adoption invented a budget the launch never recorded"
+    );
+
+    // The adopted driver's copy is held and never let go: the deadline ends it, and
+    // the refusal says which budget that deadline was computed from.
+    let _held = meeting.arrived();
+    let expected = format!(
+        "project-copy exceeded {floor} seconds (the {floor} second floor; {items} item × \
+         {per_item} seconds per item is less)"
+    );
+    world.until_run_file_holds(run, "driver.log", &expected);
+}
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A hold the double cannot read is a refusal by the script's name, not a store that
@@ -448,27 +520,6 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
         Value::from(40),
         "the adopted run runs under a budget its launch never chose: {record}"
     );
-
-    // A record an older build wrote carries no field, and reads as `0` — which the
-    // worker resolves to the shipped default — rather than as an invented figure.
-    // llmlint: ignore-block[tests_mirror_real_usage] a launch record written by **another
-    // build** is the input here, and there is no invocation a user can type that produces
-    // one: this build writes the field on every record. What is written is the one file a
-    // run *is* to an adoption — its launch record, as the build before this field left it
-    // — and everything then asserted is the real compiled binary adopting it, which is
-    // exactly how it meets a run root a preceding build wrote. `tests/e2e/compatibility.rs`
-    // makes the same argument for a journal and a record an older build wrote.
-    let launch = world.run_file(none, "launch.json");
-    let mut older = world.run_json(none, "launch.json");
-    older
-        .as_object_mut()
-        .expect("a launch record")
-        .remove("writeback_item_budget")
-        .expect("the record this build writes carries the field");
-    std::fs::write(&launch, older.to_string()).expect("the older record is written");
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    world.run(&["adopt", none]).exited(0);
-    assert_eq!(recorded_budget(&world, none), Value::from(0));
 }
 
 /// A budget of zero is refused at whichever spelling carried it, by that

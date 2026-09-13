@@ -3368,22 +3368,15 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// while the rule is asked over and over. The rule has to answer for the document,
 /// not for the instant it was asked in.
 ///
-/// **The writer rests between replacements for as long as the last one took.** It
-/// used to truncate again the instant it had written, which is harsher than any store
-/// — a store replaces a document once per projection and moves on — and on one loaded
-/// CI runner that harshness won: the test ran for seventeen seconds where it takes a
-/// fraction of one, and one ask in 200 saw nothing but the empty half for the whole of
-/// the rule's patience and called this sound fixture a defect. A rest the length of the replacement keeps the
-/// document whole for at least half of every cycle however slow the host makes the
-/// truncate, and is still a writer that is mid-replacement more often than not as the
-/// rule samples it — see the teeth below.
+/// **The writer rests between replacements for as long as the last one took**, so the
+/// document is whole for at least half of every cycle however slow the host makes the
+/// truncate. A store replaces a document once per projection and moves on; a writer
+/// that truncates again the instant it has written is harsher than any store, and on a
+/// loaded runner it kept the document empty for longer than the rule is patient.
 ///
-/// **Measured over this tree, at 640 runs — 128 000 asks — of which none refused**,
-/// 200 of them pinned to one contended CPU or under `fsync` pressure, and each counted
-/// only where the runner itself reported that one test ran and passed. Its teeth were
-/// re-checked over the same tree rather than remembered: `settled_title` cut down to a
-/// single read called this sound fixture a defect between 106 and 190 of 200 times and
-/// failed the journey on its own assertion.
+/// **Measured over this tree at 640 runs, none refused**, 200 of them on a contended
+/// CPU or under `fsync` pressure; its teeth re-checked there too, `settled_title` cut
+/// to a single read calling this sound fixture a defect 106 to 190 times in 200.
 ///
 /// **Count what the runner reports ran, never exit codes.** This test's libtest name
 /// carries its module, so `--exact` over the bare function name matches nothing, runs

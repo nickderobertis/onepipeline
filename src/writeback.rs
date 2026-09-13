@@ -87,7 +87,7 @@ const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs. It is the
 // whole deadline for the reads, and the floor under the copy's — see [`Deadline`].
-const COMMAND_LIMIT: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECONDS);
+const COMMAND_FLOOR: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECONDS);
 // The retry schedule, chosen from the refusal that produces it in practice: a hosted
 // destination's rate limiter, which every further attempt extends. It starts where a fixed
 // quarter-second schedule did, so a projection that fails once still lands unnoticeably
@@ -105,7 +105,7 @@ const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 
 /// How long one store command may run, and the account a refusal gives of the figure.
 ///
-/// The reads are the same size whatever the plan, so [`COMMAND_LIMIT`] alone bounds them.
+/// The reads are the same size whatever the plan, so [`COMMAND_FLOOR`] alone bounds them.
 /// The copy writes one item per node, so its deadline is the launch's per-item budget
 /// multiplied by the nodes the snapshot holds — the list an [`Unprojected`] surface names
 /// — with the floor governing until a plan is large enough to lift it. The account is
@@ -137,8 +137,8 @@ impl Deadline {
     /// How long the command is allowed.
     fn within(self) -> Duration {
         match self {
-            Self::Floor => COMMAND_LIMIT,
-            Self::Copy { per_item, items } => Self::product(per_item, items).max(COMMAND_LIMIT),
+            Self::Floor => COMMAND_FLOOR,
+            Self::Copy { per_item, items } => Self::product(per_item, items).max(COMMAND_FLOOR),
         }
     }
 
@@ -158,11 +158,11 @@ impl Deadline {
                         "seconds"
                     }
                 );
-                if Self::product(per_item, items) < COMMAND_LIMIT {
+                if Self::product(per_item, items) < COMMAND_FLOOR {
                     format!(
                         "{name} exceeded {seconds} seconds (the {} second floor; {arithmetic} \
                          is less)",
-                        COMMAND_LIMIT.as_secs()
+                        COMMAND_FLOOR.as_secs()
                     )
                 } else {
                     format!("{name} exceeded {seconds} seconds ({arithmetic})")
@@ -1254,7 +1254,7 @@ mod tests {
     use super::{
         per_item_budget, projected, write_shadow, Deadline, DestinationLabel,
         DestinationProjectItem, Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState,
-        Writeback, CHANGE_URL_KEY, COMMAND_LIMIT, LANDING_COMMIT_KEY, LANDING_KEY,
+        Writeback, CHANGE_URL_KEY, COMMAND_FLOOR, LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -1295,7 +1295,7 @@ mod tests {
             "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
         );
 
-        assert_eq!(copy(2).within(), COMMAND_LIMIT);
+        assert_eq!(copy(2).within(), COMMAND_FLOOR);
         assert_eq!(
             copy(2).refusal("project-copy"),
             "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds \
@@ -1304,7 +1304,7 @@ mod tests {
 
         // Exactly the floor is the product, and said as the product: the floor did not
         // lift anything.
-        assert_eq!(copy(6).within(), COMMAND_LIMIT);
+        assert_eq!(copy(6).within(), COMMAND_FLOOR);
         assert_eq!(
             copy(6).refusal("project-copy"),
             "project-copy exceeded 60 seconds (6 items × 10 seconds per item)"
@@ -1322,7 +1322,7 @@ mod tests {
         );
 
         // The reads are the floor alone, and their refusal is the line it always was.
-        assert_eq!(Deadline::Floor.within(), COMMAND_LIMIT);
+        assert_eq!(Deadline::Floor.within(), COMMAND_FLOOR);
         assert_eq!(
             Deadline::Floor.refusal("project-show"),
             "project-show exceeded 60 seconds"
@@ -1384,7 +1384,7 @@ mod tests {
 
         assert_eq!(
             budget["floor_seconds"].as_u64().map(Duration::from_secs),
-            Some(COMMAND_LIMIT),
+            Some(COMMAND_FLOOR),
             "entry 71 states a floor other than the one the copy runs under"
         );
         assert_eq!(
