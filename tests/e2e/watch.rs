@@ -1719,7 +1719,6 @@ fn monitor_events(read: &Run) -> Vec<String> {
         .collect()
 }
 
-/// The byte a cursor token names.
 fn byte_of(cursor: &str) -> u64 {
     cursor
         .rsplit_once(':')
