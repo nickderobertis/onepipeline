@@ -3203,8 +3203,15 @@ fn a_run_that_is_both_parked_and_judged_is_told_to_requeue_first() {
                 .to_string(),
         )
         .exited(0);
-    world.until("the driver to close the run out", |world| {
-        world.run_file("bothrun", "result.json").is_file()
+    // Waited for the driver to be *gone*, not for the result it writes on the way
+    // out: the prescription is for a run nothing is driving, and a driver that has
+    // written the result is still in the process table until it exits, reading
+    // as `ACTIVE` — and giving no advice at all — for as long as that takes.
+    world.until("the driver to close the run out and exit", |world| {
+        world
+            .run(&["status", "bothrun"])
+            .stdout
+            .contains("DRIVER DEAD")
     });
 
     for rendered in [world.run(&["runs"]), world.run(&["status", "bothrun"])] {
