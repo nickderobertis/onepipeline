@@ -4924,7 +4924,7 @@ pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
 /// and for one this build cannot read as text.
 ///
 /// [`cli::WRITEBACK_ITEM_BUDGET_ENV`]: crate::cli::WRITEBACK_ITEM_BUDGET_ENV
-pub(crate) fn configured_writeback_item_budget() -> Result<Option<u64>> {
+pub(crate) fn configured_writeback_item_budget() -> Result<Option<NonZeroU64>> {
     use crate::cli::WRITEBACK_ITEM_BUDGET_ENV;
     let value = match std::env::var(WRITEBACK_ITEM_BUDGET_ENV) {
         Ok(value) => value,
@@ -4938,10 +4938,11 @@ pub(crate) fn configured_writeback_item_budget() -> Result<Option<u64>> {
         }
     };
     match value.trim().parse::<u64>() {
-        Ok(0) => Err(Error::Invalid(crate::writeback::refused_zero_budget(
-            WRITEBACK_ITEM_BUDGET_ENV,
-        ))),
-        Ok(seconds) => Ok(Some(seconds)),
+        Ok(seconds) => NonZeroU64::new(seconds).map(Some).ok_or_else(|| {
+            Error::Invalid(crate::writeback::refused_zero_budget(
+                WRITEBACK_ITEM_BUDGET_ENV,
+            ))
+        }),
         Err(_) => Err(Error::Invalid(format!(
             "{WRITEBACK_ITEM_BUDGET_ENV} holds {value:?}, which is not a whole number of \
              seconds per item — set it to a positive whole number, or unset it to take the \

@@ -14,6 +14,7 @@
 //! is worth more than an override.
 
 use std::io::{BufRead, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -455,21 +456,15 @@ fn start(args: &StartArgs) -> Result<i32> {
         .filter(|command| !command.is_empty());
     // llmlint: ignore-end[invalid_states_unrepresentable]
 
-    // The write-back's per-item budget, by the same three rungs. What differs is that
-    // every rung is *read* rather than merely present: a budget of zero is no budget at
-    // all — the floor would be the whole deadline for every plan, which is the outgrown
-    // minute the setting exists to end — so the flag refuses it by its own name here,
-    // exactly as the variable and the config key refuse it by theirs where each is read,
-    // and none of the three falls through to the rung below it. The shipped default is
-    // beneath all three, and it is what the record carries when nothing named one, so the
-    // worker never decides that.
-    let writeback_item_budget = match args.writeback_item_budget {
-        Some(0) => {
-            return Err(Error::Invalid(crate::writeback::refused_zero_budget(
+    // The write-back's per-item budget, by the same three rungs. Every rung is *read*
+    // rather than merely present: zero is no budget at all, and each rung refuses it by
+    // its own spelling rather than falling through to the one below.
+    let writeback_item_budget: NonZeroU64 = match args.writeback_item_budget {
+        Some(seconds) => NonZeroU64::new(seconds).ok_or_else(|| {
+            Error::Invalid(crate::writeback::refused_zero_budget(
                 "--writeback-item-budget",
-            )))
-        }
-        Some(seconds) => seconds,
+            ))
+        })?,
         None => match engine::configured_writeback_item_budget()? {
             Some(seconds) => seconds,
             None => declared
@@ -574,7 +569,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         started: String::new(),
         started_at: sys::now_rfc3339(),
         heartbeat_interval: args.heartbeat_interval,
-        writeback_item_budget,
+        writeback_item_budget: writeback_item_budget.get(),
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
         adoptions: 0,

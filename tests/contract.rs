@@ -10,7 +10,7 @@
 //! asserts the document still names them.
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
@@ -2413,7 +2413,6 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     let block = divergence_block("71.");
     let budget = &block["budget"];
 
-    // Named three ways, with the config key at the version the entry states.
     assert_eq!(budget["config_key"].as_str(), Some("writeback_item_budget"));
     let at = budget["config_schema_version"]
         .as_u64()
@@ -2430,7 +2429,7 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
         "writeback_item_budget": 12,
     }))
     .expect("a launch config naming a budget parses");
-    assert_eq!(named.writeback_item_budget, Some(12));
+    assert_eq!(named.writeback_item_budget, NonZeroU64::new(12));
     // At **no** earlier version this build reads: the key is refused by its own
     // name there, and a config written before the setting existed still loads
     // and says nothing about it.
@@ -2492,7 +2491,7 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     // The two numbers beneath the spellings are the constants the code carries.
     assert_eq!(
         budget["default_seconds"].as_u64(),
-        Some(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
+        Some(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get()),
         "entry 71 states a different shipped default than the code carries"
     );
     assert_eq!(

@@ -62,7 +62,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -946,14 +946,14 @@ impl LaunchRecord {
     ///
     /// `None` for the `0` a record carrying no budget defaults to, and the
     /// caller takes the shipped default —
-    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. **Never `Some(0)`**: a
-    /// budget of zero seconds per item is no budget at all, leaving the floor as
-    /// the whole deadline for every plan — the outgrown minute the setting
-    /// exists to end.
+    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. A [`NonZeroU64`] so that
+    /// no later reader can put zero back: a budget of zero seconds per item is
+    /// no budget at all, leaving the floor as the whole deadline for every plan
+    /// — the outgrown minute the setting exists to end.
     ///
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
-    pub fn item_budget(&self) -> Option<u64> {
-        (self.writeback_item_budget > 0).then_some(self.writeback_item_budget)
+    pub fn item_budget(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.writeback_item_budget)
     }
 }
 
@@ -2716,9 +2716,9 @@ mod tests {
                         None,
                         "a record naming no budget produced a per-item budget"
                     );
-                    assert_ne!(
-                        read.item_budget(),
-                        Some(0),
+                    assert_eq!(
+                        read.item_budget().map(NonZeroU64::get),
+                        None,
                         "a zero-second budget was served as one"
                     );
                 }
@@ -2750,7 +2750,7 @@ mod tests {
         assert_eq!(whole.recorded_host(), Some("h"));
         assert!(whole.launched_at().is_some());
         assert_eq!(whole.pacemaker_interval(), Some(1_800));
-        assert_eq!(whole.item_budget(), Some(10));
+        assert_eq!(whole.item_budget(), NonZeroU64::new(10));
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its

@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+use std::num::NonZeroU64;
+
 use clap::{Args, Parser, Subcommand};
 
 use crate::channel::SurfaceKind;
@@ -31,8 +33,9 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
 /// `writeback_item_budget`, and this is what every launch ran under before any
 /// of the three existed. Multiplied by the number of items a settlement projects
 /// to bound the store's `project copy`, and never below
-/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`].
-pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: u64 = 10;
+/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`]. A [`NonZeroU64`] because zero is no
+/// budget at all, and every rung that names one refuses it.
+pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10).unwrap();
 
 /// The least any store command the write-back spawns is allowed, in seconds.
 ///

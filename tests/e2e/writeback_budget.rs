@@ -348,9 +348,7 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
     )
     .expect("the launch config is written");
 
-    // Each rung, from the bottom up: the config alone, then the variable over it,
-    // then the flag over both. A fresh run each time, because the budget is
-    // resolved once, at the launch.
+    // A fresh run per rung, because the budget is resolved once, at the launch.
     for (which, expected, extra, environment) in [
         ("by-config", 30, vec![], None),
         ("by-environment", 20, vec![], Some("20")),
@@ -385,8 +383,6 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
         );
     }
 
-    // Naming none, on no rung at all, records the shipped default rather than
-    // nothing: the record says what the run runs under.
     let none = "budget-none";
     let path = world.plan(none, &plan_of(none, vec![agent("only", &[])]));
     let mut command = world.cmd(&["start", &path, "--attach"]);
@@ -397,9 +393,6 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
         Value::from(number("default_seconds"))
     );
 
-    // A fresh driver takes up what its launch chose. Adopted from a shell whose
-    // environment names another figure, which is exactly the drift this guards
-    // against.
     let mut adopt = world.cmd(&["adopt", "budget-by-flag"]);
     adopt.env(spelling("environment"), "99");
     world.run_on(adopt, "adopt").exited(0);
@@ -411,10 +404,8 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
         "the adopted run runs under a budget its launch never chose: {record}"
     );
 
-    // A record written before the field existed — by an older build — still
-    // reads, and the adopted run carries no invented figure: the field reads as
-    // `0`, which the worker resolves to the shipped default rather than to a
-    // budget of zero.
+    // A record an older build wrote carries no field, and reads as `0` — which the
+    // worker resolves to the shipped default — rather than as an invented figure.
     // llmlint: ignore-block[tests_mirror_real_usage] a launch record written by **another
     // build** is the input here, and there is no invocation a user can type that produces
     // one: this build writes the field on every record. What is written is the one file a
@@ -453,7 +444,6 @@ fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
     let key = spelling("config_key");
     let version = number("config_schema_version");
 
-    // The flag, with the config naming a usable figure beneath it.
     let config = world.root.join("launch.yaml");
     std::fs::write(&config, format!("schema_version: {version}\n{key}: 30\n"))
         .expect("the config is written");
@@ -472,8 +462,6 @@ fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
         .err_has("zero")
         .err_lacks(&variable);
 
-    // The variable, with the same config beneath it — and a variable that holds
-    // text rather than a number, which is not a launch naming none either.
     for (held, said) in [("0", "zero"), ("ten", "not a whole number")] {
         let mut command = world.cmd(&[
             "start",
@@ -491,9 +479,6 @@ fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
             .err_lacks(&flag);
     }
 
-    // The config key: zero, the key present and blank, and a value that is not a
-    // whole number of seconds at all, each refused by the key's name where the
-    // document is read.
     for (spelled, written, said) in [
         ("zero", format!("{key}: 0"), "zero"),
         ("bare", format!("{key}:"), "names nothing"),

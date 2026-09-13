@@ -33,6 +33,7 @@
 // invalid is not reachable from outside this process.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -95,12 +96,8 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     (WRITEBACK_ITEM_BUDGET_KEY, 5, BlankValue::Refused),
 ];
 
-/// The launch-config key naming the write-back's per-item budget.
-///
-/// Spelled once, because two places refuse by it: [`LaunchConfig::load`] for a
-/// document whose version never had it, and [`item_budget`] for one that
-/// carries it blank or as zero — a number has no blank to read, so the value's
-/// own reader is where those two are turned down.
+/// The launch-config key naming the write-back's per-item budget, spelled once
+/// for the two readers that refuse by it.
 const WRITEBACK_ITEM_BUDGET_KEY: &str = "writeback_item_budget";
 
 /// How a document carries one of the keys [`KEYS_BY_VERSION`] names.
@@ -146,7 +143,7 @@ fn refused_blank(key: &str) -> String {
 /// loop uses, and zero's is the one the flag and the variable use.
 fn item_budget<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> std::result::Result<Option<u64>, D::Error> {
+) -> std::result::Result<Option<NonZeroU64>, D::Error> {
     struct Budget;
 
     impl Budget {
@@ -161,7 +158,7 @@ fn item_budget<'de, D: Deserializer<'de>>(
     }
 
     impl<'de> serde::de::Visitor<'de> for Budget {
-        type Value = Option<u64>;
+        type Value = Option<NonZeroU64>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("a positive whole number of seconds per item")
@@ -171,12 +168,11 @@ fn item_budget<'de, D: Deserializer<'de>>(
             self,
             seconds: u64,
         ) -> std::result::Result<Self::Value, E> {
-            match seconds {
-                0 => Err(E::custom(crate::writeback::refused_zero_budget(&format!(
+            NonZeroU64::new(seconds).map(Some).ok_or_else(|| {
+                E::custom(crate::writeback::refused_zero_budget(&format!(
                     "`{WRITEBACK_ITEM_BUDGET_KEY}`"
-                )))),
-                seconds => Ok(Some(seconds)),
-            }
+                )))
+            })
         }
 
         fn visit_i64<E: serde::de::Error>(
@@ -309,26 +305,20 @@ pub struct LaunchConfig {
     /// How long this launch's settlement write-back allows its store's
     /// `project copy` per item it writes, in seconds, if the launch says.
     ///
-    /// The fifth launch-level decision, and it is written down beside a plan
-    /// for the reason the first four are: how patient a run is with the board
-    /// it projects to is a property of the store a team keeps rather than of
-    /// one launch. `--writeback-item-budget` spells the same thing for a launch
-    /// that would rather say it inline and overrides this, as does
-    /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` between them; beneath all three is
-    /// the shipped ten seconds per item. A positive whole number: the key
-    /// present and blank, or naming zero, is refused by its name where it is
-    /// read, because a number has no blank for the loader's own rule to see.
+    /// The fifth launch-level decision, written down beside a plan for the
+    /// reason the first four are: how patient a run is with the board it
+    /// projects to is a property of the store a team keeps rather than of one
+    /// launch. The lowest of the three rungs `--writeback-item-budget` heads.
     ///
     /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
     /// not carry one. Omitted when absent, so a config that names no budget
-    /// round-trips as the file wrote it — and so what this crate writes for a
-    /// launch that named none is a document an earlier reader still accepts.
+    /// round-trips as the file wrote it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "item_budget"
     )]
-    pub writeback_item_budget: Option<u64>,
+    pub writeback_item_budget: Option<NonZeroU64>,
 }
 
 impl Default for LaunchConfig {
@@ -1007,7 +997,7 @@ mod tests {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
-            writeback_item_budget: Some(10),
+            writeback_item_budget: NonZeroU64::new(10),
         }
     }
 
@@ -1081,7 +1071,7 @@ mod tests {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
-            writeback_item_budget: Some(15),
+            writeback_item_budget: NonZeroU64::new(15),
             ..LaunchConfig::default()
         };
         let rendered = serde_json::to_string(&named).expect("it serialises");

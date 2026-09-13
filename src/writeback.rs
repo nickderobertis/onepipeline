@@ -52,6 +52,7 @@
 //! Both are absent for a node with no change of its own, which is most of them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -104,22 +105,17 @@ const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 
 /// How long one store command may run, and the account a refusal gives of the figure.
 ///
-/// The reads are bounded by [`COMMAND_LIMIT`] alone: a project, and one page of its
-/// tasks, are the same size whatever the plan. The copy is not — it writes one item per
-/// node — so its deadline is the launch's per-item budget multiplied by how many nodes the
-/// snapshot holds, which is the same list an [`Unprojected`] surface names, and the floor
-/// governs until a plan is large enough to lift it. Measured: a run of 34 items outlasted
-/// the fixed sixty seconds, and its settlement never reached the board. The refusal says
-/// which of the two governed and what it was computed from, because the one line on the
-/// driver's stderr and the surface built from it are all anybody reads. What it says is
-/// derived from what it was computed from rather than stored beside it, so no refusal can
-/// account for a figure other than the one that was enforced.
+/// The reads are the same size whatever the plan, so [`COMMAND_LIMIT`] alone bounds them.
+/// The copy writes one item per node, so its deadline is the launch's per-item budget
+/// multiplied by the nodes the snapshot holds — the list an [`Unprojected`] surface names
+/// — with the floor governing until a plan is large enough to lift it. The account is
+/// derived from the figure rather than stored beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
     /// The fixed floor, which is the whole deadline for a read.
     Floor,
-    /// The copy's: `max(floor, per_item × items)`.
-    Copy { per_item: Duration, items: usize },
+    /// The copy's: `max(floor, per_item × items)`, with the budget in seconds.
+    Copy { per_item: NonZeroU64, items: usize },
 }
 
 impl Deadline {
@@ -127,11 +123,11 @@ impl Deadline {
     ///
     /// Saturating rather than wrapping, because a product that wrapped to nothing would
     /// leave the floor governing exactly the plan the budget exists to accommodate.
-    fn product(per_item: Duration, items: usize) -> Duration {
+    fn product(per_item: NonZeroU64, items: usize) -> Duration {
         // llmlint: ignore[changed_behavior_has_e2e] a plan of more than four billion items
         // is not a journey any host can run; the unit test holds the arithmetic, and the
         // floor is what a wrapped product would have lost.
-        per_item.saturating_mul(u32::try_from(items).unwrap_or(u32::MAX))
+        Duration::from_secs(per_item.get()).saturating_mul(u32::try_from(items).unwrap_or(u32::MAX))
     }
 
     /// How long the command is allowed.
@@ -151,8 +147,8 @@ impl Deadline {
                 let arithmetic = format!(
                     "{items} {} × {} {} per item",
                     if items == 1 { "item" } else { "items" },
-                    per_item.as_secs(),
-                    if per_item.as_secs() == 1 {
+                    per_item,
+                    if per_item.get() == 1 {
                         "second"
                     } else {
                         "seconds"
@@ -175,10 +171,7 @@ impl Deadline {
 /// The refusal for a per-item budget of zero, wherever one is named.
 ///
 /// One sentence for the flag, the variable and the config key, each naming the spelling
-/// that carried it. Zero is no budget at all: multiplied through, it leaves the floor as
-/// the whole deadline for every plan however large, which is the outgrown minute this
-/// setting exists to end — so a launch that wrote it asked for something it would not
-/// get, and is told so at the rung that named it rather than handed the one below.
+/// that carried it: zero is no budget at all, and leaves the floor as the whole deadline.
 pub(crate) fn refused_zero_budget(spelling: &str) -> String {
     format!(
         "{spelling} names a write-back budget of zero seconds per item, which is no budget \
@@ -460,19 +453,17 @@ impl Drop for Writeback {
 /// Off the launch record rather than this process's environment, so a driver a fresh
 /// `adopt` starts bounds its copies as the launch resolved them; a record written before
 /// the field existed names none, and runs under the shipped default.
-fn per_item_budget(launch: &LaunchRecord) -> Duration {
-    Duration::from_secs(
-        launch
-            .item_budget()
-            .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
-    )
+fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
+    launch
+        .item_budget()
+        .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
 }
 
 fn worker(
     binary: PathBuf,
     launch_dir: PathBuf,
     run_dir: PathBuf,
-    per_item: Duration,
+    per_item: NonZeroU64,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     // The consecutive failures of the streak in progress, and the whole of what this worker
@@ -606,7 +597,7 @@ fn project(
     binary: &Path,
     launch_dir: &Path,
     run_dir: &Path,
-    per_item: Duration,
+    per_item: NonZeroU64,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
     let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
@@ -1268,6 +1259,7 @@ mod tests {
     use crate::projection::RunState;
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
+    use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -1288,7 +1280,7 @@ mod tests {
     /// still governs says that instead, rather than a figure that was never the deadline.
     #[test]
     fn the_copy_deadline_is_the_budget_times_the_items_and_never_below_the_floor() {
-        let shipped = Duration::from_secs(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS);
+        let shipped = DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
         let copy = |items: usize| Deadline::Copy {
             per_item: shipped,
             items,
@@ -1316,7 +1308,7 @@ mod tests {
 
         // One of each, in the singular, so the line reads as a sentence.
         let one = Deadline::Copy {
-            per_item: Duration::from_secs(1),
+            per_item: NonZeroU64::MIN,
             items: 1,
         };
         assert_eq!(
@@ -1340,7 +1332,7 @@ mod tests {
         // a product that wrapped to nothing would leave the floor governing a very large
         // plan.
         let vast = Deadline::Copy {
-            per_item: Duration::from_secs(u64::MAX / 2),
+            per_item: NonZeroU64::MAX,
             items: usize::MAX,
         };
         assert!(vast.within() >= COMMAND_LIMIT);
@@ -1359,7 +1351,10 @@ mod tests {
             writeback_item_budget: 25,
             ..a_launch(&paths)
         };
-        assert_eq!(per_item_budget(&chosen), Duration::from_secs(25));
+        assert_eq!(
+            per_item_budget(&chosen),
+            NonZeroU64::new(25).expect("a budget")
+        );
 
         let older: LaunchRecord = serde_json::from_value(json!({
             "run_id": "older",
@@ -1370,9 +1365,8 @@ mod tests {
         assert_eq!(older.item_budget(), None);
         assert_eq!(
             per_item_budget(&older),
-            Duration::from_secs(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+            DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
         );
-        assert!(!per_item_budget(&older).is_zero());
     }
 
     #[test]
