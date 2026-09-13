@@ -26,6 +26,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -418,6 +419,33 @@ describe("the judged tier's computation cache", () => {
     }
     assert.equal(ws.judgeRuns().length, 1, report(replayed));
     assert.match(replayed.stderr, new RegExp(CACHE_HIT), report(replayed));
+  });
+
+  it("reports the verdict the judge recorded when none of its output reaches the caller", (t) => {
+    // What a task prints reaches the recipe only through Nx, which reads, stores,
+    // and replays it on its own schedule — so a verdict read from there can still
+    // be missing when the task has exited. A judge whose streams reached nobody
+    // still certified this diff, and the replay of that run has to say so too.
+    const ws = workspace(t);
+    const base = ws.head();
+    const judge = join(ws.root, "scripts", "llmlint-judge.sh");
+    renameSync(judge, join(ws.root, "scripts", "llmlint-judge-unheard.sh"));
+    writeExecutable(
+      judge,
+      "#!/usr/bin/env bash\nexec bash scripts/llmlint-judge-unheard.sh >/dev/null 2>&1\n",
+    );
+
+    const judged = ws.lint(base);
+    const replayed = ws.lint(base);
+
+    for (const result of [judged, replayed]) {
+      assert.equal(result.status, 0, report(result));
+      assert.match(result.stderr, new RegExp(PASS_VERDICT), report(result));
+      assert.match(result.stderr, new RegExp(POINTER), report(result));
+    }
+    assert.equal(ws.judgeRuns().length, 1, report(replayed));
+    assert.match(judged.stderr, new RegExp(`${CACHE_MISS} ${base}`), report(judged));
+    assert.match(replayed.stderr, new RegExp(`${CACHE_HIT} ${base}`), report(replayed));
   });
 
   it("judges again when the workspace changes", (t) => {

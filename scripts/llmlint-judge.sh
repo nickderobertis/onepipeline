@@ -81,4 +81,15 @@ verdict="$(grep -m1 -E '^[0-9]+ rules: ' "$report")" || {
   exit 2
 }
 pointer="$(sed -n 's/.*\(llmlint history [A-Za-z0-9_-]*\).*/\1/p' "$report" | tail -1)"
-printf 'lint-llm-diff: %s%s\n' "$verdict" "${pointer:+ (full report: $pointer)}"
+line="lint-llm-diff: ${verdict}${pointer:+ (full report: $pointer)}"
+# The line is recorded as well as printed, because what this task prints reaches
+# `scripts/llmlint-diff.sh` only through Nx's pipes, and Nx decides for itself when
+# that output is finished. The record is complete by the time this task has exited:
+# the write below returns before this process can exit, Nx stores the target's
+# declared outputs only after that exit, and it restores them before it reports a
+# hit. So the record is the verdict, and the printed line is for whoever is reading.
+if ! mkdir -p "$root/.lint-llm-diff" || ! printf '%s\n' "$line" >"$root/.lint-llm-diff/verdict"; then
+  echo "lint-llm-diff: could not record the verdict in .lint-llm-diff/verdict; free disk space and retry" >&2
+  exit 3
+fi
+printf '%s\n' "$line"

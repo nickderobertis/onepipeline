@@ -7,8 +7,9 @@
 # in the base-to-head diff, because llmlint has no increment mode — and what
 # changed, so with no memo every gate run over one diff is an independent roll, and
 # rolls of one branch have named a different rule each time. The cached Nx
-# `onepipeline:lint-llm-diff` target caches the judge run itself; there is no
-# verdict record to write, restore, or race on.
+# `onepipeline:lint-llm-diff` target caches the judge run itself, and its one
+# declared output — the verdict record the judge writes — is what Nx restores for
+# a replay.
 #
 # The base ref is resolved to a commit here, before Nx hashes it, so a rebased or
 # advanced base misses rather than replaying a verdict computed against a different
@@ -100,6 +101,15 @@ captured="$(mktemp -d)" || {
 }
 trap 'rm -rf "$captured"' EXIT
 
+# The verdict this run reports is read from the record the judged target declares
+# as its output, never from a record an earlier run left here: the judge writes it
+# on a miss, Nx restores it on a hit, and either way it is this run's or it is absent.
+record="$root/.lint-llm-diff/verdict"
+rm -f "$record" || {
+  echo "lint-llm-diff: could not clear the previous verdict record $record; make it writable and retry" >&2
+  exit 3
+}
+
 status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
   bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
@@ -132,13 +142,20 @@ if ((status != 0)); then
 fi
 
 # A pass is one line, like every other recipe here: Nx's orchestration chatter is
-# not this tier's answer. The answer is the verdict line the task itself produced,
-# which is what Nx stored and what it replays — so a fresh run and a replayed one
+# not this tier's answer. The answer is the verdict line the task itself recorded,
+# which is what Nx stored and what it restores — so a fresh run and a replayed one
 # say the same thing, which is the whole claim this cache makes.
 #
-# A task that succeeded without producing one has not certified anything, whatever
+# It is read from the record rather than from the streams captured above, because
+# those reach this script through Nx, which reads, forwards, and stores a task's
+# output on its own schedule and exits when it counts the task finished — a clean
+# run on a loaded host has arrived here with no verdict line in them. The record
+# is complete by now: the judge's write returned before its process exited, Nx
+# stored and restores it only around that exit, and Nx itself has exited too.
+#
+# A task that succeeded without recording one has not certified anything, whatever
 # its status said, so it is refused rather than reported as a pass.
-verdict="$(grep -m1 '^lint-llm-diff: ' "$plain")" || {
+verdict="$(grep -m1 '^lint-llm-diff: ' "$record" 2>/dev/null)" || {
   echo "lint-llm-diff: the judged run reported no verdict for base $base_sha; rerun with --skip-nx-cache, and if it stays empty run 'bash scripts/llmlint-judge.sh' with LLMLINT_DIFF_BASE_SHA set to see what it did" >&2
   exit 2
 }
