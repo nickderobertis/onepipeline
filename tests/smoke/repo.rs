@@ -49,11 +49,10 @@ pub fn missing(what: &str) -> String {
 
 /// What a created repository says about itself on its GitHub page.
 ///
-/// Names no slug, so the same wording stays true after a rename — the rename
+/// Names no slug, so the same wording stays true after a rename: the rename
 /// leaves the old name redirecting, and the probe in [`ensure_repo`] succeeds
-/// through it — and is pasted by hand onto the existing repository. Kept under
-/// GitHub's cap on a description by its wording; `tests/smoke_repo.rs` proves
-/// what it says.
+/// through it. Kept under GitHub's cap on a description by its wording;
+/// `tests/smoke_repo.rs` proves what it says.
 pub const DESCRIPTION: &str = "Intentional, and reused by every run of onepipeline's \
     real-everything smoke, which creates it when absent and never deletes it. Deleting or \
     renaming it is no cleanup (a deleted one is recreated, a renamed one keeps its old name \
