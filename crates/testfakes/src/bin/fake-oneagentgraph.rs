@@ -1952,7 +1952,8 @@ fn emit(
     for (offset, invocation) in served_invocations(dir, key).iter().enumerate() {
         publish_oneharness_session(&labels, node, offset, invocation);
     }
-    let report = report_of(task, scripted_verdicts(dir, key));
+    let judged = scripted_decisions(dir, key);
+    let report = report_of(task, scripted_verdicts(dir, key), &judged);
     envelope(
         4,
         oneagentgraph::event::EventKind::TurnCompleted,
@@ -1975,6 +1976,22 @@ fn emit(
             Err(error) => fake::fail(&format!("a turn close is not an object: {error}")),
         },
     );
+    // What each judge of a panel decided about the turn that just closed, one
+    // envelope per judge in the panel's list order — published where the real
+    // member publishes them, after the worker turn's close and before the
+    // settlement, and only where the script names a panel: a member judged by
+    // a bare harness side publishes none, and neither does this double.
+    for (offset, decided) in judged.iter().enumerate() {
+        envelope(
+            5 + offset as u64,
+            oneagentgraph::event::EventKind::JudgeDecided,
+            match serde_json::to_value(decided) {
+                Ok(payload) => payload,
+                Err(error) => fake::fail(&format!("a judge decision is not an object: {error}")),
+            },
+        );
+    }
+    let settled_seq = 5 + judged.len() as u64;
     // Records this producer publishes **out of its own order**, when a scenario
     // asks for them. A producer's `seq` is its own statement of the order it
     // wrote things in and its stamps do not have to agree with it: the real
@@ -2083,7 +2100,7 @@ fn emit(
     // `a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider` in
     // `tests/e2e/views.rs` fails.
     envelope(
-        5,
+        settled_seq,
         oneagentgraph::event::EventKind::MemberSettled,
         serde_json::json!({
             "completed": true,
@@ -2241,6 +2258,75 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
         .collect()
 }
 
+/// The most judge decisions one turn may be scripted with: their `seq`s run
+/// from 5, and 10 is where this double's session records start.
+const JUDGEABLE: usize = 4;
+
+/// What each judge of this member's panel decided about its one worker turn.
+///
+/// Scripted `<key>.judged`, one `JUDGE|KIND|DECISION|REASON` per line, in the
+/// panel's list order. Nothing scripted is a member judged by a bare harness
+/// side — the shipped node-scope graph's — which publishes no decision and
+/// records none on its report.
+///
+/// Built through the sibling's **own** [`JudgeDecided`], like every other
+/// sibling-owned payload this double writes, and the decision word through
+/// onejudge's own [`Decision`]: a line naming a decision that library does not
+/// spell, or fewer than four columns, is fatal, because a script read leniently
+/// would publish a decision the test author did not write.
+///
+/// [`JudgeDecided`]: oneagentgraph::event::JudgeDecided
+/// [`Decision`]: onejudge::Decision
+fn scripted_decisions(
+    dir: &std::path::Path,
+    key: &str,
+) -> Vec<oneagentgraph::event::JudgeDecided> {
+    let Some(script) = fake::node_script(dir, key, "judged") else {
+        return Vec::new();
+    };
+    let decided: Vec<_> = script
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split('|');
+            let (Some(judge), Some(kind), Some(decision), Some(reason), None) = (
+                columns.next(),
+                columns.next(),
+                columns.next(),
+                columns.next(),
+                columns.next(),
+            ) else {
+                fake::fail(&format!(
+                    "a `.judged` line reads {line:?}, which is not `JUDGE|KIND|DECISION|REASON`"
+                ));
+            };
+            let decision: onejudge::Decision =
+                serde_json::from_value(serde_json::Value::String(decision.trim().to_string()))
+                    .unwrap_or_else(|error| {
+                        fake::fail(&format!(
+                            "a `.judged` line names the decision {decision:?}, which onejudge \
+                             does not spell: {error}"
+                        ))
+                    });
+            oneagentgraph::event::JudgeDecided {
+                turn: 1,
+                judge: judge.trim().to_string(),
+                kind: kind.trim().to_string(),
+                decision: decision.as_str().to_string(),
+                reason: reason.trim().to_string(),
+            }
+        })
+        .collect();
+    if decided.len() > JUDGEABLE {
+        fake::fail(&format!(
+            "{key}.judged names {} judges; nothing past {JUDGEABLE} says anything a panel does \
+             not already",
+            decided.len()
+        ));
+    }
+    decided
+}
+
 /// A scripted `VALUE`, read as `true`, `false`, or a score.
 ///
 /// A word that is none of the three is fatal: a script read leniently would
@@ -2367,7 +2453,19 @@ fn publish_oneharness_session(
 /// `results[].structured` of the one that ran. That is the channel this stack
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
-fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value {
+///
+/// A two-party report carries what its panel decided, turn by turn, as
+/// `judge_decisions` — the same decisions the member published as
+/// `judge-decided`, built through onejudge's **own** [`JudgedTurn`] so the
+/// document is that library's shape and not a copy of it — and is omitted, as
+/// that library omits it, for a member no panel judged.
+///
+/// [`JudgedTurn`]: onejudge::JudgedTurn
+fn report_of(
+    task: &str,
+    verdicts: Vec<serde_json::Value>,
+    judged: &[oneagentgraph::event::JudgeDecided],
+) -> serde_json::Value {
     if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
         // A candidate the identity chain stepped past: it ran nothing, so it
         // answered nothing, and a consumer that read the first entry rather than
@@ -2407,8 +2505,10 @@ fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value 
             "usage": {"input_tokens": 40, "output_tokens": 20, "cost_usd": 0.01},
         });
     }
-    serde_json::json!({
-        "schema_version": 7,
+    let mut report = serde_json::json!({
+        // The version the linked onejudge writes, so the document this double
+        // stores is the one a consumer of *that* release reads.
+        "schema_version": onejudge::SCHEMA_VERSION,
         "transcript": {"messages": [
             {"role": "user", "content": task},
             {"role": "assistant", "content": SAID, "events": [
@@ -2442,7 +2542,29 @@ fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value 
             "orchestration_ms": 100,
             "sessions": [],
         },
-    })
+    });
+    if !judged.is_empty() {
+        let turn = onejudge::JudgedTurn {
+            turn: 1,
+            decisions: judged
+                .iter()
+                .map(|decided| onejudge::JudgeDecision {
+                    judge: decided.judge.clone(),
+                    kind: decided.kind.clone(),
+                    decision: serde_json::from_value(serde_json::Value::String(
+                        decided.decision.clone(),
+                    ))
+                    .unwrap_or_else(|error| {
+                        fake::fail(&format!("a published decision is not onejudge's: {error}"))
+                    }),
+                    reason: decided.reason.clone(),
+                })
+                .collect(),
+        };
+        report["judge_decisions"] = serde_json::to_value(vec![turn])
+            .unwrap_or_else(|error| fake::fail(&format!("a judged turn will not write: {error}")));
+    }
+    report
 }
 
 /// What a `pr-author` dispatch's turn answered with.
