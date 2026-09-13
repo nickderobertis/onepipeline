@@ -317,7 +317,7 @@ pub struct LaunchConfig {
     /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` between them; beneath all three is
     /// the shipped ten seconds per item. A positive whole number: the key
     /// present and blank, or naming zero, is refused by its name where it is
-    /// read — see [`item_budget`].
+    /// read, because a number has no blank for the loader's own rule to see.
     ///
     /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
     /// not carry one. Omitted when absent, so a config that names no budget
