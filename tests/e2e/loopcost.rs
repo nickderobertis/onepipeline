@@ -23,7 +23,7 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    agent, counts, human, plan_of, renamed, reporting, Counts, World, LOOP_STATS_ENV,
+    agent, counts, human, plan_of, reporting, restored, unreachable, Counts, World, LOOP_STATS_ENV,
     RENDEZVOUS_SECONDS_ENV,
 };
 use serde_json::{json, Value};
@@ -630,9 +630,11 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
 
     // The store goes away, one node settles, and then the run records nothing
     // at all: the settlement's own pass publishes the snapshot, and the worker
-    // meets the outage well after that pass has finished asking.
+    // meets the outage well after that pass has finished asking. Taken away
+    // rather than moved, because the copy that put `first` on the board can
+    // still be writing when it goes — see `unreachable` for what a move lets it do.
     let unavailable = world.root.join("plan-store-unavailable");
-    renamed(
+    unreachable(
         &world.store(),
         &unavailable,
         "the store becomes unreachable",
@@ -641,6 +643,10 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
     world.until("the node to settle", |world| {
         recorded(world, "unprojected", "node-settled", "first")
     });
+    // How soon is the engine's to bound, not this wait's: the sum
+    // `src/writeback.rs` states where the failure is recorded, of
+    // `FIRST_RETRY_AFTER` and `CHANNEL_POLL`. The deadline is the backstop for a
+    // host that has not scheduled the worker.
     world.until("the failed projection to reach the planner", |world| {
         world
             .events_of("unprojected", "planner-surface-queued")
@@ -652,7 +658,7 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
             })
     });
 
-    renamed(&unavailable, &world.store(), "the store returns");
+    restored(&unavailable, &world.store(), "the store returns");
     world.release("hold.go");
     world.until("the run to settle", |world| {
         world.run_file("unprojected", "result.json").is_file()
