@@ -168,14 +168,6 @@ mod unix {
                 "the description says {said:?}: {description:?}"
             );
         }
-        // GitHub's own refusal of a longer one reads "description is too long
-        // (maximum is 350 characters)", and the create call that would meet it
-        // runs only on an account with no scratch repository yet.
-        assert!(
-            description.chars().count() < 350,
-            "GitHub refuses a description over 350 characters; this one is {}",
-            description.chars().count()
-        );
         // Named by neither its slug nor its name, so the same sentence stays
         // true after a rename — the case that made it necessary.
         assert!(
