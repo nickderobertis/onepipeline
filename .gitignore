@@ -3,6 +3,10 @@
 # re-creates node_modules from the committed lockfile whenever it is missing.
 /node_modules
 /.nx
+# The judged tier's verdict record (scripts/llmlint-judge.sh): the cached Nx
+# output a replay restores. Ignored, so recording a verdict never changes the tree
+# that verdict is keyed on.
+/.lint-llm-diff
 # Preserved command output (scripts/nx.sh). Owner-only, truncated per run, and
 # never a source: it is the evidence a captured run leaves behind.
 /.logs

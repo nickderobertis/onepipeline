@@ -69,7 +69,10 @@
       "command": "bash scripts/llmlint-judge.sh",
       "options": {
         "cwd": "."
-      }
+      },
+      "outputs": [
+        "{workspaceRoot}/.lint-llm-diff/verdict"
+      ]
     },
     "check": {
       "executor": "nx:noop",
