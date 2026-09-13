@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use crate::cli::{WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
+use crate::cli::{MonitorArgs, WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
     Error, Result, EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_SUCCESS, EXIT_SURFACE_WAITING,
     EXIT_WATCH_ELAPSED,
@@ -216,6 +216,37 @@ fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
                  give `--timeout` a value it can reach"
             ))
         })
+}
+
+/// `onepipeline monitor` — one pass over the merged stream, from a cursor or
+/// from the start, ending on the cursor the next pass resumes from.
+///
+/// Here rather than in the views because the cursor is this module's: one type,
+/// one parser and one tail read behind both verbs, so a token either prints is
+/// a token the other reads. The events rendered and the byte printed come out
+/// of the **same** read of the journal — see [`views::monitor_of`] for why
+/// [`RunView::open`]'s own copy of the store will not do — and the byte is past
+/// every finished record that read reached, whether or not the profile showed
+/// it, exactly as a watch advances its own.
+///
+/// Every refusal is made before a line is written, so a cursor this run cannot
+/// place prints no events at all.
+pub(crate) fn monitor(
+    args: &MonitorArgs,
+    paths: &RunPaths,
+    view: &RunView,
+    filter: &EventFilter,
+) -> Result<i32> {
+    let mut cursor = match args.cursor.as_deref() {
+        Some(token) => resolve_cursor(paths, token)?,
+        None => Cursor::start(&paths.run),
+    };
+    let fresh = tail(paths, &mut cursor);
+    println!(
+        "{}-- cursor {cursor}",
+        views::monitor_of(view, &fresh, filter)
+    );
+    Ok(EXIT_SUCCESS)
 }
 
 fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
@@ -484,7 +515,8 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     let Cursor { run, at } = parse_cursor(token)?;
     if run != paths.run {
         return Err(Error::Invalid(format!(
-            "cursor '{token}' was printed by a watch of run '{run}', and this is a watch of              run '{}'; a cursor is only readable by the run it was printed for",
+            "cursor '{token}' was printed by a watch or monitor of run '{run}', and this \
+             reads run '{}'; a cursor is only readable by the run it was printed for",
             paths.run
         )));
     }
@@ -510,15 +542,15 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     if at > held {
         return Err(Error::Invalid(format!(
             "cursor '{token}' resumes at byte {at} of run '{}', whose store holds {held}; \
-             a cursor is only readable by the run the watch that printed it was watching",
+             a cursor is only readable by the run it was printed for",
             paths.run
         )));
     }
     if at > 0 && !ends_a_record(&journal, at) {
         return Err(Error::Invalid(format!(
             "cursor '{token}' resumes at byte {at} of run '{}', which is inside a record \
-             rather than after one; a cursor is what an earlier `onepipeline watch` \
-             printed, and never a byte count of its own",
+             rather than after one; a cursor is what an earlier `onepipeline watch` or \
+             `monitor` printed, and never a byte count of its own",
             paths.run
         )));
     }
@@ -550,7 +582,8 @@ fn parse_cursor(token: &str) -> Result<Cursor> {
     let refusal = || {
         Error::Invalid(format!(
             "'{token}' is not a cursor this build reads; a cursor is what an earlier \
-             `onepipeline watch` printed, spelled `{WATCH_CURSOR_VERSION}:<run>:<byte>`"
+             `onepipeline watch` or `monitor` printed, spelled \
+             `{WATCH_CURSOR_VERSION}:<run>:<byte>`"
         ))
     };
     let (version, rest) = token.split_once(':').ok_or_else(refusal)?;
@@ -972,6 +1005,66 @@ mod tests {
             !offered.contains("heartbeat-interval"),
             "`watch` took `start`'s pacemaker flag"
         );
+    }
+
+    /// `monitor` shares the cursor, and the entry and the README both state its
+    /// surface: the flags clap gives it and the resume line it ends on.
+    ///
+    /// Held here rather than beside the views because the cursor spelling is this
+    /// module's, and a flag added to `monitor` or dropped from it that the two
+    /// documents did not follow is a surface nobody was told about.
+    #[test]
+    fn the_divergence_entry_and_the_readme_state_exactly_the_flags_monitor_offers() {
+        use clap::CommandFactory;
+
+        let flags_of = |synopsis: &str| -> std::collections::BTreeSet<String> {
+            synopsis
+                .split_whitespace()
+                .filter_map(|word| {
+                    word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                        .strip_prefix("--")
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+        let offered: std::collections::BTreeSet<String> = crate::cli::Cli::command()
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "monitor")
+            .expect("the binary offers `monitor`")
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_string))
+            .collect();
+        let resume = format!("`-- cursor {WATCH_CURSOR_VERSION}:<run>:<byte>`");
+
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        for (document, text, opening) in [
+            (
+                "divergence entry",
+                divergence_entry(),
+                "`onepipeline monitor <RUN>",
+            ),
+            ("README", readme, "`onepipeline monitor RUN"),
+        ] {
+            let synopsis = text
+                .split_once(opening)
+                .unwrap_or_else(|| panic!("the {document} states `monitor`'s surface"))
+                .1
+                .split_once('`')
+                .unwrap_or_else(|| panic!("the {document}'s synopsis is one fenced span"))
+                .0;
+            assert_eq!(
+                flags_of(synopsis),
+                offered,
+                "the {document} states a different set of `monitor` flags than this build offers"
+            );
+            assert!(
+                text.contains(&resume),
+                "the {document} does not state the resume line {resume}"
+            );
+        }
     }
 
     /// The entry describes the machine-readable form by naming its records, and

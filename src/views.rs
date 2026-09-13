@@ -2689,10 +2689,21 @@ pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> 
 /// typed id a detail lookup resolves, and the monitor never tries to *be* the
 /// detail.
 pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
+    monitor_of(view, &view.events, filter)
+}
+
+/// The same pass over a slice of the store the caller read itself.
+///
+/// What the `monitor` verb renders through, because the resume line it ends on
+/// is a byte of the journal and the events above that line have to come out of
+/// the one read that byte was taken from — [`RunView::open`]'s own read is a
+/// different moment, and a record appended between the two would be one the
+/// cursor stepped past without it ever being rendered.
+pub(crate) fn monitor_of(view: &RunView, events: &[Envelope], filter: &EventFilter) -> String {
     let mut out = String::from(
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
-    for event in shaped(view, filter) {
+    for event in events.iter().filter(|event| filter.matches(event)) {
         out.push_str(&event_line(view, event));
         out.push('\n');
     }

@@ -97,7 +97,7 @@ pub enum Command {
     /// Every live dispatch on this host, with its owner and load contribution.
     Host,
     /// Stream a run's merged events.
-    Monitor(ReadArgs),
+    Monitor(MonitorArgs),
     /// Block until a run needs a supervisor, saying so as it waits.
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
@@ -323,6 +323,22 @@ pub struct ReadArgs {
     /// Read every event in the store, through no profile at all.
     #[arg(long)]
     pub all: bool,
+}
+
+/// `onepipeline monitor`: the run and profile selection every read verb takes,
+/// and the cursor `watch` prints and reads back.
+///
+/// A struct of its own rather than a flag on [`ReadArgs`], because `next` takes
+/// those too and a cursor is not something `next` can resume from.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct MonitorArgs {
+    /// The run, and the profile its event view is shaped through.
+    #[command(flatten)]
+    pub read: ReadArgs,
+    /// Render only what was recorded after this cursor — one an earlier
+    /// `monitor` or `watch` printed.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// How long a `watch` waits before giving up, when it is given none.

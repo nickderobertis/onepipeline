@@ -3564,8 +3564,29 @@ settling, so `--until node=<ID>` naming it does wake a caller on the ready actio
 but only one that knew which node to name, which a supervisor asking "is anything
 waiting for a person?" does not.
 
-`monitor` and `status` are untouched: no flag, no output, and no exit code of
-either changed, so an existing caller of them is unaffected.
+**`monitor` carries the same cursor, so an observer keeps no file of its own.**
+The surface is `onepipeline monitor <RUN> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`.
+`monitor` has no cursor otherwise, so the host's observer persona kept one in two
+files in its working directory, and that directory was a publication checkout: in
+the run that closed `ai-orchestrator` #855 the observer's `monitor.cursor` and
+`monitor.batch` were left in a `local-direct` checkout, the publication was
+refused, and it was repaired by hand (`ai-orchestrator` #1004, root cause 4). So
+every `monitor` pass — with or without `--cursor`, and including one that renders
+no event — now ends its stdout with exactly one resume line after the trailer,
+`-- cursor 1:<run>:<byte>`. The byte is the end of the last finished record in
+the journal at the moment of the read, past records the profile hid, as a watch
+advances its own. `--cursor` renders, in the existing line format, profile and
+header, only the events from records that finish after that byte — what `watch
+--cursor` would emit before its meaningful-kind selection. The token, its parser and the tail read behind it are the ones
+`watch` uses rather than a copy, so a cursor either verb prints is one the other
+resumes from, and a cursor `watch` refuses — malformed, another run's, past the
+journal's end, or inside a record — `monitor` refuses the same way: exit `2`, the
+reason on stderr, nothing on stdout. The events rendered and the byte printed
+come out of one read of the journal rather than the view's own earlier read, so a
+record appended between the two cannot be stepped past unrendered. A `monitor`
+with no cursor renders what it rendered before; the resume line is the one thing
+it adds. `status` is untouched.
+
 `tests/e2e/watch.rs` drives the verb through the compiled binary — a line for a
 graph edit the monitor issued, for a node settling and for a surface being raised;
 a heartbeat carrying an unread count and its kinds; each of the five returns with

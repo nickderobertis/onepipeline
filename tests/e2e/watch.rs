@@ -1028,7 +1028,7 @@ fn a_cursor_from_another_run_is_refused_rather_than_resumed_from() {
         .exited(REFUSED)
         // The refusal is *this* one, and not the length or boundary refusal
         // standing in for it: those two cannot see this token at all.
-        .err_has("was printed by a watch of run")
+        .err_has("was printed by a watch or monitor of run")
         .err_has(&mine)
         .err_has(&theirs);
 
@@ -1673,6 +1673,323 @@ fn naming_a_condition_every_wait_already_returns_on_returns_what_an_unnamed_one_
     }
 }
 
+/// The cursor a `monitor` ends on, read off the one resume line it must print as
+/// the last line of its stdout.
+///
+/// Exactly one, and last: a caller resumes by reading the final line, so a second
+/// resume line — or anything written after it — is a monitor handing that caller
+/// the wrong place to resume from.
+fn resume_line(read: &Run) -> String {
+    read.exited(0);
+    let resumes: Vec<&str> = read
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("-- cursor "))
+        .collect();
+    assert_eq!(
+        resumes.len(),
+        1,
+        "`onepipeline {}` did not end on exactly one resume line:\n{}",
+        read.args,
+        read.stdout
+    );
+    assert!(
+        read.stdout.ends_with(&format!("{}\n", resumes[0])),
+        "`onepipeline {}` wrote something after its resume line:\n{}",
+        read.args,
+        read.stdout
+    );
+    resumes[0]["-- cursor ".len()..].to_string()
+}
+
+/// The event lines a `monitor` rendered: everything between the header and the
+/// two `-- ` lines it ends on.
+fn monitor_events(read: &Run) -> Vec<String> {
+    let mut lines = read.stdout.lines();
+    assert_eq!(
+        lines.next(),
+        Some("Concise graph events; ask the producing library for full detail by stream id."),
+        "`onepipeline {}` lost its header:\n{}",
+        read.args,
+        read.stdout
+    );
+    lines
+        .filter(|line| !line.starts_with("-- "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The byte a cursor token names.
+fn byte_of(cursor: &str) -> u64 {
+    cursor
+        .rsplit_once(':')
+        .and_then(|(_, byte)| byte.parse().ok())
+        .unwrap_or_else(|| panic!("not a cursor: {cursor}"))
+}
+
+/// A `monitor` ends on a cursor, and a `monitor` resumed from it renders what was
+/// recorded since and nothing it already rendered — under the default profile,
+/// under a named one, and under `--all`.
+///
+/// This is what lets an observer keep no cursor file of its own: the verb it reads
+/// hands back the place to resume from on every pass.
+#[test]
+fn a_monitor_resumed_from_the_cursor_it_printed_repeats_nothing_and_misses_nothing() {
+    let world = World::new("monitor-cursor");
+    world.script("build.wait", "hold");
+    let run = running(&world, "monitorcursor", vec![agent("build", &[])]);
+
+    let mut said: Vec<String> = Vec::new();
+    for selection in [Vec::new(), vec!["--filter", "planner"], vec!["--all"]] {
+        let with = |cursor: Option<&str>| {
+            let mut argv = vec!["monitor", run.as_str()];
+            argv.extend(selection.iter().copied());
+            if let Some(cursor) = cursor {
+                argv.extend(["--cursor", cursor]);
+            }
+            world.run(&argv)
+        };
+        let first = with(None);
+        let taken = resume_line(&first);
+        assert!(
+            taken.starts_with(&format!("1:{run}:")),
+            "the cursor does not name the run it was printed for: {taken}"
+        );
+        for earlier in &said {
+            first.out_has(earlier);
+        }
+
+        let message = format!("recorded after the cursor, read through {selection:?}");
+        world
+            .run(&["surface", &run, "--kind", "finding", "--message", &message])
+            .exited(0);
+
+        let resumed = with(Some(&taken));
+        let next = resume_line(&resumed);
+        resumed.out_has(&message).out_has(&format!("-- {run}  "));
+        for earlier in &said {
+            resumed.out_lacks(earlier);
+        }
+        assert!(
+            byte_of(&next) > byte_of(&taken),
+            "the cursor did not move past what the resumed monitor rendered: {taken} -> {next}"
+        );
+
+        let again = with(Some(&next));
+        resume_line(&again);
+        again.out_lacks(&message);
+        said.push(message);
+    }
+
+    world.release("build.go");
+}
+
+/// The byte a `monitor` ends on is past every finished record — the ones its
+/// profile hid included — and short of a record whose writer has not finished it.
+///
+/// Both halves lose an event if they are wrong. A cursor that stopped at the last
+/// record the profile *showed* would re-read the hidden ones for ever, and one
+/// that stepped past a half-written record would never come back for it.
+#[test]
+fn a_monitor_cursor_passes_hidden_records_and_holds_before_an_unfinished_one() {
+    let world = World::new("monitor-torn");
+    world.script("build.wait", "hold");
+    let run = running(&world, "monitortorn", vec![agent("build", &[])]);
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let journal = world.run_file(&run, "events.jsonl");
+    let held = || {
+        std::fs::metadata(&journal)
+            .expect("the journal is there")
+            .len()
+    };
+
+    // A settled run nothing writes to: the cursor is the whole journal, and a
+    // monitor from byte 0 renders exactly what a monitor with no cursor does.
+    let whole = world.run(&["monitor", &run]);
+    let end = resume_line(&whole);
+    assert_eq!(end, format!("1:{run}:{}", held()), "{}", whole.stdout);
+    assert!(!monitor_events(&whole).is_empty(), "{}", whole.stdout);
+    let from_start = world.run(&["monitor", &run, "--cursor", &format!("1:{run}:0")]);
+    assert_eq!(resume_line(&from_start), end);
+    assert_eq!(monitor_events(&from_start), monitor_events(&whole));
+
+    // Nothing recorded since: no event, and still the resume line, unmoved.
+    let nothing = world.run(&["monitor", &run, "--cursor", &end]);
+    assert_eq!(resume_line(&nothing), end);
+    assert!(monitor_events(&nothing).is_empty(), "{}", nothing.stdout);
+    nothing.out_has(&format!("-- {run}  "));
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the journal is appended to
+    // directly because the two records under test are a *sibling's* envelope the
+    // planner profile hides and a writer caught halfway through an append — the first
+    // is a relay this double does not make on demand, and the second is a moment
+    // rather than a command. The run has settled first, so this journey is the only
+    // writer, and every `monitor` and `watch` below is a real invocation.
+    let settlement: Value = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["kind"] == json!("node-settled"))
+        .expect("a settled run recorded a settlement");
+    let mut hidden = settlement.clone();
+    hidden["ts"] = json!("2099-01-01T00:00:00.000Z");
+    hidden["stream"] = json!("hidden-by-the-planner-profile");
+    hidden["source"] = json!("agentgraph");
+    append(
+        &journal,
+        &format!("{}\n", serde_json::to_string(&hidden).expect("renders")),
+    );
+    let past_hidden = format!("1:{run}:{}", held());
+    let mut torn = settlement;
+    torn["ts"] = json!("2099-02-02T00:00:00.000Z");
+    torn["stream"] = json!("a-writer-caught-halfway");
+    let torn = serde_json::to_string(&torn).expect("renders");
+    let (opening, rest) = torn.split_at(torn.len() / 2);
+    append(&journal, opening);
+
+    // The planner profile hides the sibling's record and nothing is finished past
+    // it: no event, and a cursor past the hidden record but short of the torn one.
+    for cursor in [None, Some(end.as_str())] {
+        let mut argv = vec!["monitor", run.as_str()];
+        if let Some(cursor) = cursor {
+            argv.extend(["--cursor", cursor]);
+        }
+        let read = world.run(&argv);
+        assert_eq!(resume_line(&read), past_hidden, "{}", read.stdout);
+        read.out_lacks("2099-01-01").out_lacks("2099-02-02");
+    }
+    // The same place under `--all`, which does show the sibling's record.
+    let all = world.run(&["monitor", &run, "--all", "--cursor", &end]);
+    assert_eq!(resume_line(&all), past_hidden);
+    let shown = monitor_events(&all);
+    assert_eq!(shown.len(), 1, "{}", all.stdout);
+    assert!(shown[0].starts_with("2099-01-01"), "{}", all.stdout);
+    all.out_lacks("2099-02-02");
+
+    // Once the writer finishes, the record the cursor held before is rendered.
+    append(&journal, &format!("{rest}\n"));
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let finished = world.run(&["monitor", &run, "--cursor", &past_hidden]);
+    assert_eq!(resume_line(&finished), format!("1:{run}:{}", held()));
+    let shown = monitor_events(&finished);
+    assert_eq!(shown.len(), 1, "{}", finished.stdout);
+    assert!(shown[0].starts_with("2099-02-02"), "{}", finished.stdout);
+}
+
+/// A cursor `watch` prints is one `monitor` resumes from, and the other way round:
+/// one spelling, one parser, one place in the journal.
+#[test]
+fn a_cursor_either_verb_prints_is_one_the_other_resumes_from() {
+    let world = World::new("monitor-interchange");
+    world.script("build.wait", "hold");
+    let run = running(&world, "monitorinterchange", vec![agent("build", &[])]);
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let journal = world.run_file(&run, "events.jsonl");
+
+    let watched = world.run(&["watch", &run, "--timeout", "0", "--tick-interval", "0"]);
+    agreed(&watched, "settled", 0);
+    let from_watch = returned(&watched)["cursor"]
+        .as_str()
+        .expect("a watch prints a cursor on exit")
+        .to_string();
+    // Over a journal nothing is writing, both verbs name the same place.
+    assert_eq!(resume_line(&world.run(&["monitor", &run])), from_watch);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a record is appended directly so
+    // that each verb has exactly one known record past the other's cursor to find; the
+    // run has settled, so no verb of this binary would record another, and this
+    // journey is the only writer. Both reads are real invocations.
+    let settlement: Value = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["kind"] == json!("node-settled"))
+        .expect("a settled run recorded a settlement");
+    let record = |ts: &str| {
+        let mut appended = settlement.clone();
+        appended["ts"] = json!(ts);
+        format!("{}\n", serde_json::to_string(&appended).expect("renders"))
+    };
+    append(&journal, &record("2099-03-03T00:00:00.000Z"));
+
+    // `watch`'s cursor, resumed by `monitor`.
+    let monitored = world.run(&["monitor", &run, "--cursor", &from_watch]);
+    let from_monitor = resume_line(&monitored);
+    let shown = monitor_events(&monitored);
+    assert_eq!(shown.len(), 1, "{}", monitored.stdout);
+    assert!(shown[0].starts_with("2099-03-03"), "{}", monitored.stdout);
+
+    append(&journal, &record("2099-04-04T00:00:00.000Z"));
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // `monitor`'s cursor, resumed by `watch`.
+    let resumed = world.run(&[
+        "watch",
+        &run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        &from_monitor,
+    ]);
+    agreed(&resumed, "settled", 0);
+    assert_eq!(emitted(&resumed), vec!["node-settled".to_string()]);
+    assert!(resumed.stderr.contains("2099-04-04"), "{}", resumed.stderr);
+    assert!(!resumed.stderr.contains("2099-03-03"), "{}", resumed.stderr);
+    assert_eq!(
+        returned(&resumed)["cursor"].as_str(),
+        Some(resume_line(&world.run(&["monitor", &run])).as_str())
+    );
+}
+
+/// Every cursor `watch` refuses, `monitor` refuses the same way, and before it
+/// renders anything: not the header, not an event, not a resume line.
+#[test]
+fn every_cursor_a_monitor_cannot_place_is_refused_before_it_renders_anything() {
+    let world = World::new("monitor-refusals");
+    world.script("build.wait", "hold");
+    let run = running(&world, "monitorrefusals", vec![agent("build", &[])]);
+
+    let refused = |cursor: &str, reason: &str| {
+        for selection in [Vec::new(), vec!["--all"]] {
+            let mut argv = vec!["monitor", run.as_str(), "--cursor", cursor];
+            argv.extend(selection);
+            let read = world.run(&argv);
+            read.exited(REFUSED).err_has(reason);
+            assert!(
+                read.stdout.is_empty(),
+                "a refused monitor wrote to stdout:\n{}",
+                read.stdout
+            );
+        }
+    };
+    for token in [
+        "nonsense",
+        "2:monitorrefusals:0",
+        "1:monitorrefusals:later",
+        "1:monitorrefusals:-1",
+        "1::0",
+        "1:0",
+    ] {
+        refused(token, "is not a cursor this build reads");
+    }
+    refused(
+        "1:someotherrun:0",
+        "was printed by a watch or monitor of run",
+    );
+    refused("1:monitorrefusals:99999999", "whose store holds");
+    refused("1:monitorrefusals:3", "inside a record");
+
+    world.release("build.go");
+}
+
 fn append(journal: &std::path::Path, bytes: &str) {
     std::fs::OpenOptions::new()
         .append(true)
@@ -1742,7 +2059,7 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
             "600",
         ])
         .exited(REFUSED)
-        .err_has("was printed by a watch of run");
+        .err_has("was printed by a watch or monitor of run");
     world
         .run(&[
             "watch",
