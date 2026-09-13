@@ -187,12 +187,10 @@ enum StoreItemKind {
 /// A task page is read whether the source said where the task is or not, and both
 /// forms of saying are understood.
 ///
-/// The **absent** form is what every journey in `store.rs` drives end to end: the
-/// `onetaskgraph` revision the checks pin predates the field, so a task read back
-/// through it never says where it is. What no source here produces is either form of
-/// *saying* — a newer install on a real host reports one on every task its `local-md`
-/// plugin serves, and that is what turned this suite red — so the two spellings are
-/// pinned here, beside the silence, against the boundary that actually validates them.
+/// The **absent** form is what an install older than the field produces, and the
+/// **present** forms are what one that has it reports on every task its `local-md`
+/// plugin serves. No single install produces both, so the two spellings are pinned
+/// here, beside the silence, against the boundary that actually validates them.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the suite's own
 // validated boundary rather than a journey: what is asserted is which store pages this
 // harness will accept, which is the thing every journey built on it takes for granted
