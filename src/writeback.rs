@@ -119,15 +119,19 @@ enum Deadline {
 }
 
 impl Deadline {
-    /// The budget multiplied through, before the floor is applied.
+    /// The budget multiplied through, in seconds, before the floor is applied.
     ///
-    /// Saturating rather than wrapping, because a product that wrapped to nothing would
-    /// leave the floor governing exactly the plan the budget exists to accommodate.
+    /// Exact for every product that fits in a `u64` of seconds, and `u64::MAX` seconds for
+    /// one that does not — saturating rather than wrapping, because a product that wrapped
+    /// to nothing would leave the floor governing exactly the plan the budget exists to
+    /// accommodate.
     fn product(per_item: NonZeroU64, items: usize) -> Duration {
-        // llmlint: ignore[changed_behavior_has_e2e] a plan of more than four billion items
-        // is not a journey any host can run; the unit test holds the arithmetic, and the
-        // floor is what a wrapped product would have lost.
-        Duration::from_secs(per_item.get()).saturating_mul(u32::try_from(items).unwrap_or(u32::MAX))
+        // llmlint: ignore[changed_behavior_has_e2e] a product past `u64::MAX` seconds is
+        // more items than any store holds and more seconds than any host runs, so no
+        // journey can reach the saturated arm; the unit test holds the exact product on
+        // both sides of that line, and the e2e journeys drive the deadline it produces.
+        let items = u64::try_from(items).unwrap_or(u64::MAX);
+        Duration::from_secs(per_item.get().saturating_mul(items))
     }
 
     /// How long the command is allowed.
@@ -1328,14 +1332,87 @@ mod tests {
             "task-list exceeded 60 seconds"
         );
 
-        // An item count no budget could be multiplied by saturates rather than overflowing:
-        // a product that wrapped to nothing would leave the floor governing a very large
-        // plan.
+        // The product is exact for every count a `u64` of seconds can carry — well past
+        // the four billion a narrower multiplication would have capped at — and saturates
+        // to `u64::MAX` seconds beyond that, rather than wrapping to a figure the floor
+        // would then govern.
         let vast = Deadline::Copy {
-            per_item: NonZeroU64::MAX,
-            items: usize::MAX,
+            per_item: NonZeroU64::MIN,
+            items: usize::MAX / 2,
         };
-        assert!(vast.within() >= COMMAND_LIMIT);
+        assert_eq!(vast.within(), Duration::from_secs(usize::MAX as u64 / 2));
+        let saturated = Deadline::Copy {
+            per_item: NonZeroU64::MAX,
+            items: 2,
+        };
+        assert_eq!(saturated.within(), Duration::from_secs(u64::MAX));
+        assert_eq!(
+            saturated.refusal("project-copy"),
+            format!(
+                "project-copy exceeded {} seconds (2 items × {} seconds per item)",
+                u64::MAX,
+                u64::MAX
+            )
+        );
+    }
+
+    /// Every worked example entry 71 of the divergence record states is the deadline
+    /// [`Deadline`] enforces and the refusal it gives, and the formula the entry states is
+    /// the one `within` computes.
+    ///
+    /// The record's block is the one source every copy of this setting is held to, and
+    /// `tests/contract.rs` holds it against the public types; the deadline itself is
+    /// private, so this is where the block's arithmetic meets what the worker runs under.
+    #[test]
+    fn the_divergence_records_examples_are_the_deadlines_the_copy_runs_under() {
+        let record = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("71."))
+            .expect("the record still carries entry 71");
+        let block = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("entry 71 carries its json block");
+        let budget = serde_json::from_str::<Value>(block).expect("entry 71's block is JSON")
+            ["budget"]
+            .clone();
+
+        assert_eq!(
+            budget["floor_seconds"].as_u64().map(Duration::from_secs),
+            Some(COMMAND_LIMIT),
+            "entry 71 states a floor other than the one the copy runs under"
+        );
+        assert_eq!(
+            budget["deadline"].as_str(),
+            Some("max(floor_seconds, budget × items)"),
+            "entry 71 states a deadline formula other than the one `Deadline::within` computes"
+        );
+        let examples = budget["examples"]
+            .as_array()
+            .expect("entry 71 works an example");
+        assert!(!examples.is_empty(), "{budget}");
+        for example in examples {
+            let items = usize::try_from(example["items"].as_u64().expect("an item count"))
+                .expect("a count");
+            let per_item = NonZeroU64::new(example["budget_seconds"].as_u64().expect("a budget"))
+                .expect("entry 71 works an example under a budget of zero");
+            let copy = Deadline::Copy { per_item, items };
+            assert_eq!(
+                copy.within(),
+                Duration::from_secs(example["deadline_seconds"].as_u64().expect("a deadline")),
+                "entry 71's example is not the deadline the copy runs under: {example}"
+            );
+            assert_eq!(
+                Some(copy.refusal("project-copy").as_str()),
+                example["refusal"].as_str(),
+                "entry 71's example is not the refusal the copy is killed with: {example}"
+            );
+        }
     }
 
     /// The budget the worker runs under is the one the launch record retained, and a

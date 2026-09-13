@@ -2507,9 +2507,16 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
             .is_some_and(|seconds| seconds > 0),
         "entry 71 states a shipped default of zero"
     );
-    // And each worked example is the arithmetic the entry states, computed from
-    // those two constants: the deadline is the floor or the product, whichever
-    // is larger, and the refusal names the one that governed.
+    // The formula the entry states is the one each example below is computed by
+    // — the floor or the product, whichever is larger — so a block whose formula
+    // and examples disagreed would fail here rather than read as two truths.
+    assert_eq!(
+        budget["deadline"].as_str(),
+        Some("max(floor_seconds, budget × items)"),
+        "entry 71 states a deadline other than the arithmetic its examples are held to"
+    );
+    // And each worked example is that arithmetic, computed from those two
+    // constants, with the refusal naming the one that governed.
     let examples = budget["examples"]
         .as_array()
         .expect("entry 71 works an example");
