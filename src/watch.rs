@@ -237,29 +237,43 @@ pub(crate) fn monitor(
     view: &RunView,
     filter: &EventFilter,
 ) -> Result<i32> {
+    let document = monitor_document(args, paths, view, filter)?;
+    // One write of the whole document, and a failed one refused rather than
+    // panicked on: a caller that closed the pipe early is not this run's failure,
+    // and it is the end of what this pass can report.
+    let mut out = std::io::stdout();
+    // llmlint: ignore-block[cli_output_contract] `monitor` has no machine form: its stdout is one line-oriented document, and the resume line's place in it, last and after the trailer, is the contract its consumer reads back. The NDJSON form is `watch`'s, on its own descriptor.
+    writeln!(out, "{document}")
+        .and_then(|()| out.flush())
+        .map_err(|e| {
+            Error::Invalid(format!(
+                "the monitor could not write to standard output: {e}"
+            ))
+        })?;
+    // llmlint: ignore-end[cli_output_contract]
+    Ok(EXIT_SUCCESS)
+}
+
+/// The document one `monitor` pass writes, resume line and all.
+///
+/// Apart from the write so the one-read property is held by a test that can put
+/// a record between the view's read and this one — which no invocation of the
+/// binary can be made to do on demand.
+pub(crate) fn monitor_document(
+    args: &MonitorArgs,
+    paths: &RunPaths,
+    view: &RunView,
+    filter: &EventFilter,
+) -> Result<String> {
     let mut cursor = match args.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
         None => Cursor::start(&paths.run),
     };
     let fresh = tail(paths, &mut cursor);
-    // One write of the whole document, and a failed one refused rather than
-    // panicked on: a caller that closed the pipe early is not this run's failure,
-    // and it is the end of what this pass can report.
-    let mut out = std::io::stdout();
-    // llmlint: ignore-block[cli_output_contract] `monitor` has no machine form to keep this apart from: its whole stdout is a line-oriented text document, and the resume line is a trailer of that document exactly as the `-- <run>` summary above it is. Its spelling and its place — one `-- cursor 1:<run>:<byte>` line, last on stdout, after the trailer — are the contract this change was dispatched to build and that the host's observer persona is rewritten onto, which reads the final line back rather than a second stream. The NDJSON form a caller branches on is `watch`'s, on its own descriptor, and it carries this same token.
-    writeln!(
-        out,
+    Ok(format!(
         "{}-- cursor {cursor}",
         views::monitor_of(view, &fresh, filter)
-    )
-    .and_then(|()| out.flush())
-    .map_err(|e| {
-        Error::Invalid(format!(
-            "the monitor could not write to standard output: {e}"
-        ))
-    })?;
-    // llmlint: ignore-end[cli_output_contract]
-    Ok(EXIT_SUCCESS)
+    ))
 }
 
 fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
