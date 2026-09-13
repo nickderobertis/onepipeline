@@ -26,12 +26,6 @@ mod unix {
     /// is ever looked up.
     const THROWAWAY: &str = "nobody/onepipeline-throwaway-smoke";
 
-    /// GitHub's cap on a repository description, as its API states it when it
-    /// refuses a longer one: "description is too long (maximum is 350
-    /// characters)".
-    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the source is GitHub's live API, which the offline tier cannot ask by design, and the one call that would find a drift — `gh repo create` refusing a description over the cap — runs only on an account with no scratch repository yet. This is the repository's single spelling of the number; the doc comment on `DESCRIPTION` points here rather than restating it.
-    const DESCRIPTION_CAP: usize = 350;
-
     struct Scratch(PathBuf);
 
     impl Drop for Scratch {
@@ -169,9 +163,12 @@ mod unix {
                 "the description says {said:?}: {description:?}"
             );
         }
+        // GitHub's own refusal of a longer one reads "description is too long
+        // (maximum is 350 characters)", and the create call that would meet it
+        // runs only on an account with no scratch repository yet.
         assert!(
-            description.chars().count() < DESCRIPTION_CAP,
-            "GitHub caps a description at {DESCRIPTION_CAP} characters; this one is {}",
+            description.chars().count() < 350,
+            "GitHub refuses a description over 350 characters; this one is {}",
             description.chars().count()
         );
         // Named by neither its slug nor its name, so the same sentence stays
