@@ -2262,9 +2262,39 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
 /// from 5, and 10 is where this double's session records start.
 const MAX_JUDGE_DECISIONS: usize = 4;
 
-/// The provider kinds a judge of a panel is one of, in the spelling the
-/// sibling's `JudgeSide::kind` publishes and onejudge records.
-const JUDGE_KINDS: [&str; 3] = ["oneharness", "llmlint", "command"];
+/// The provider kinds a judge of a panel is one of, asked of the sibling's
+/// **own** [`JudgeSide::kind`] for each of its three shapes rather than copied
+/// from it — so a spelling that library changes changes here, and a field it
+/// adds to a shape stops this compiling rather than reading differently.
+///
+/// [`JudgeSide::kind`]: oneagentgraph::config::JudgeSide::kind
+fn judge_kinds() -> [&'static str; 3] {
+    use oneagentgraph::config::{
+        ConfigRef, JudgeCommand, JudgeHarness, JudgeLlmlint, JudgeSide, LlmlintKind,
+    };
+    [
+        JudgeSide::Harness(JudgeHarness {
+            oneharness_config: ConfigRef("oneharness.judge.toml".into()),
+            model: None,
+            label: None,
+        })
+        .kind(),
+        JudgeSide::Llmlint(JudgeLlmlint {
+            kind: LlmlintKind::Llmlint,
+            config: None,
+            bin: None,
+            diff_base: None,
+            args: Vec::new(),
+            label: None,
+        })
+        .kind(),
+        JudgeSide::Command(JudgeCommand {
+            command: Vec::new(),
+            label: None,
+        })
+        .kind(),
+    ]
+}
 
 /// What each judge of this member's panel decided about its one worker turn.
 ///
@@ -2276,7 +2306,7 @@ const JUDGE_KINDS: [&str; 3] = ["oneharness", "llmlint", "command"];
 /// Built through the sibling's **own** [`JudgeDecided`], like every other
 /// sibling-owned payload this double writes, and the decision word through
 /// onejudge's own [`Decision`]: a line naming a decision that library does not
-/// spell, a kind outside [`JUDGE_KINDS`], an empty judge label, or fewer than
+/// spell, a kind outside [`judge_kinds`], an empty judge label, or fewer than
 /// four columns, is fatal, because a script read leniently would publish a
 /// decision the test author did not write.
 ///
@@ -2286,6 +2316,7 @@ fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::ev
     let Some(script) = fake::node_script(dir, key, "judged") else {
         return Vec::new();
     };
+    let kinds = judge_kinds();
     let decided: Vec<_> = script
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -2317,10 +2348,9 @@ fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::ev
                 ));
             }
             let kind = kind.trim();
-            if !JUDGE_KINDS.contains(&kind) {
+            if !kinds.contains(&kind) {
                 fake::fail(&format!(
-                    "a `.judged` line names the judge kind {kind:?}, which is none of \
-                     {JUDGE_KINDS:?}"
+                    "a `.judged` line names the judge kind {kind:?}, which is none of {kinds:?}"
                 ));
             }
             oneagentgraph::event::JudgeDecided {
@@ -2469,12 +2499,14 @@ fn publish_oneharness_session(
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
 ///
-/// A two-party report carries what its panel decided, turn by turn, as
-/// `judge_decisions` — the same decisions the member published as
-/// `judge-decided`, built through onejudge's **own** [`JudgedTurn`] so the
-/// document is that library's shape and not a copy of it — and is omitted, as
-/// that library omits it, for a member no panel judged.
+/// A two-party report carries what its panel decided, turn by turn — the same
+/// decisions the member published as `judge-decided` — under the key onejudge's
+/// **own** [`Report`] writes them under, built through that library's
+/// [`JudgedTurn`], so both the key and the shape are that library's and not a
+/// copy of either; and it carries nothing, as that library writes nothing, for
+/// a member no panel judged.
 ///
+/// [`Report`]: onejudge::Report
 /// [`JudgedTurn`]: onejudge::JudgedTurn
 fn report_of(
     task: &str,
@@ -2574,8 +2606,33 @@ fn report_of(
                 })
                 .collect(),
         };
-        report["judge_decisions"] = serde_json::to_value(vec![turn])
-            .unwrap_or_else(|error| fake::fail(&format!("a judged turn will not write: {error}")));
+        // The key is read off the sibling's own report rather than spelled
+        // here: whatever an otherwise-empty `Report` carrying this turn writes
+        // that one carrying none does not is what the decisions are recorded
+        // under, so a key that library renames is followed rather than kept.
+        let mut typed =
+            onejudge::Report::new(onejudge::Transcript::default(), Vec::new(), None, false);
+        let bare = serde_json::to_value(&typed)
+            .unwrap_or_else(|error| fake::fail(&format!("a bare report will not write: {error}")));
+        typed.judge_decisions = vec![turn];
+        let carrying = serde_json::to_value(&typed).unwrap_or_else(|error| {
+            fake::fail(&format!("a judged report will not write: {error}"))
+        });
+        let Some(carrying) = carrying.as_object() else {
+            fake::fail("onejudge's report is not an object");
+        };
+        let mut added = carrying
+            .iter()
+            .filter(|(key, value)| bare.get(key.as_str()) != Some(value));
+        let Some((key, decisions)) = added.next() else {
+            fake::fail("a report carrying a judged turn writes nothing a bare one does not");
+        };
+        if added.next().is_some() {
+            fake::fail(
+                "a report carrying a judged turn writes more than one key a bare one does not",
+            );
+        }
+        report[key.as_str()] = decisions.clone();
     }
     report
 }
