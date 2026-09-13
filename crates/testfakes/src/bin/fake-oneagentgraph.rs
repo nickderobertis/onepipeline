@@ -2277,10 +2277,7 @@ const JUDGEABLE: usize = 4;
 ///
 /// [`JudgeDecided`]: oneagentgraph::event::JudgeDecided
 /// [`Decision`]: onejudge::Decision
-fn scripted_decisions(
-    dir: &std::path::Path,
-    key: &str,
-) -> Vec<oneagentgraph::event::JudgeDecided> {
+fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::event::JudgeDecided> {
     let Some(script) = fake::node_script(dir, key, "judged") else {
         return Vec::new();
     };

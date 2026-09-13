@@ -3646,9 +3646,7 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
             ["onepipeline", "channel", "serve"],
             "the monitor's judge side is this crate's channel server"
         ),
-        other => panic!(
-            "the contract makes the judge side one command provider, not {other:?}"
-        ),
+        other => panic!("the contract makes the judge side one command provider, not {other:?}"),
     }
 
     let check_in = graph.members.get("check-in").expect("a check-in member");
