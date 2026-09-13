@@ -39,6 +39,7 @@
 mod harness;
 
 mod release_probe;
+mod repo;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,6 +47,7 @@ use std::process::Command;
 use serde_json::{json, Value};
 
 use harness::{plan_of, World};
+use repo::{ensure_repo, gh, gh_try, missing};
 
 /// The scratch repository this journey publishes to when nothing names another.
 pub const DEFAULT_SMOKE_REPO: &str = "nickderobertis/onepipeline-smoke";
@@ -99,44 +101,6 @@ fn scratch_repo() -> String {
     slug
 }
 
-/// Run `gh`, or say what is missing rather than pretending it is not needed.
-fn gh(args: &[&str]) -> String {
-    match gh_try(args) {
-        Ok(out) => out,
-        Err(refusal) => panic!("{refusal}"),
-    }
-}
-
-fn gh_try(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("gh")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|error| missing(&format!("`gh` could not be run: {error}")))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-    }
-    Err(format!(
-        "gh {} exited {}: {}",
-        args.join(" "),
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
-}
-
-/// What a run with no credential is told, which has to be enough to fix it.
-fn missing(what: &str) -> String {
-    format!(
-        "the real-everything smoke needs the GitHub CLI and a credential for it, and {what}. \
-         Install `gh` (https://cli.github.com), then either run `gh auth login` or set GH_TOKEN \
-         to a token that can push to, open a pull request on, and merge in the scratch \
-         repository. In CI it is the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN — the \
-         repository's existing PAT, which the operator chose for this job deliberately rather \
-         than provisioning a second one. This journey never skips and never falls back to a \
-         fake: a smoke that can pass without talking to GitHub proves nothing."
-    )
-}
-
 /// Who GitHub says is calling, or a refusal naming the missing credential.
 fn authenticated_user() -> String {
     match gh_try(&["api", "user", "--jq", ".login"]) {
@@ -144,36 +108,6 @@ fn authenticated_user() -> String {
         Ok(_) => panic!("{}", missing("GitHub named no authenticated user")),
         Err(refusal) => panic!("{}", missing(&format!("it refused: {refusal}"))),
     }
-}
-
-/// The scratch repository, created private if it is not there yet.
-///
-/// Created rather than required, so a first run on a fresh account works — and
-/// **never deleted**, by this journey or any other: what it removes is the
-/// branches and pull requests it made.
-fn ensure_repo(slug: &str) {
-    if gh_try(&["repo", "view", slug, "--json", "name"]).is_ok() {
-        return;
-    }
-    gh(&[
-        "repo",
-        "create",
-        slug,
-        "--private",
-        "--add-readme",
-        "--description",
-        "Scratch repository for onepipeline's real-everything smoke. Nothing here is kept.",
-    ]);
-    // `--add-readme` commits asynchronously often enough to matter: a clone that
-    // wins the race gets a repository with no branch at all, and every later
-    // step then fails naming something other than the reason.
-    for _ in 0..60 {
-        if gh_try(&["api", &format!("repos/{slug}/commits/HEAD")]).is_ok() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-    panic!("the scratch repository {slug} was created but never got its first commit");
 }
 
 /// Teach this world's git to authenticate the way `gh` does.
