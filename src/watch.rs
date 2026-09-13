@@ -242,10 +242,21 @@ pub(crate) fn monitor(
         None => Cursor::start(&paths.run),
     };
     let fresh = tail(paths, &mut cursor);
-    println!(
+    // One write of the whole document, and a failed one refused rather than
+    // panicked on: a caller that closed the pipe early is not this run's failure,
+    // and it is the end of what this pass can report.
+    let mut out = std::io::stdout();
+    writeln!(
+        out,
         "{}-- cursor {cursor}",
         views::monitor_of(view, &fresh, filter)
-    );
+    )
+    .and_then(|()| out.flush())
+    .map_err(|e| {
+        Error::Invalid(format!(
+            "the monitor could not write to standard output: {e}"
+        ))
+    })?;
     Ok(EXIT_SUCCESS)
 }
 
