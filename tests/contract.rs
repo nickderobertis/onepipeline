@@ -2503,7 +2503,9 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     // A shipped default of zero would kill every copy, so it is held against the
     // block's own number rather than asserted constant.
     assert!(
-        budget["default_seconds"].as_u64().is_some_and(|seconds| seconds > 0),
+        budget["default_seconds"]
+            .as_u64()
+            .is_some_and(|seconds| seconds > 0),
         "entry 71 states a shipped default of zero"
     );
     // And each worked example is the arithmetic the entry states, computed from
