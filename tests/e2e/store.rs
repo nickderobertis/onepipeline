@@ -3368,15 +3368,27 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// while the rule is asked over and over. The rule has to answer for the document,
 /// not for the instant it was asked in.
 ///
-/// **Measured over this tree, at 440 runs — 88 000 asks — of which none refused.** 400
-/// of them by invoking the compiled `e2e` binary on this test's module-qualified name,
-/// and 40 through `cargo nextest run -E`, whose `binary(e2e) and test(...)` filterset
-/// matches this name by substring; each run counted only where the runner itself
-/// reported that one test ran and passed. Its teeth were re-checked over that same tree
-/// rather than remembered: `settled_title` cut down to a single read called this sound
-/// fixture a defect 189 of 200 times and failed the journey on its own assertion. The 340-run
-/// figure the cadence commit carries was taken before `harness::renamed` changed this
-/// file and `harness.rs`, so it is honest about that tree and does not cover this one.
+/// **The writer rests between replacements for as long as the last one took.** It
+/// used to truncate again the instant it had written, which is harsher than any store
+/// — a store replaces a document once per projection and moves on — and on one loaded
+/// CI runner that harshness won: the test ran for seventeen seconds where it takes a
+/// fraction of one, and one ask in 200 saw nothing but the empty half for the whole of
+/// the rule's patience and called this sound fixture a defect. A rest the length of the replacement keeps the
+/// document whole for at least half of every cycle however slow the host makes the
+/// truncate, and is still a writer that is mid-replacement more often than not as the
+/// rule samples it — see the teeth below.
+///
+/// **Measured over this tree, at 640 runs — 128 000 asks — of which none refused.**
+/// 400 of them by invoking the compiled `e2e` binary on this test's module-qualified
+/// name, 40 through `cargo nextest run -E`, whose `binary(e2e) and test(...)` filterset
+/// matches this name by substring, 100 pinned with six busy loops to one CPU, and 100
+/// under eight `fsync`-heavy writers on the same filesystem; each run counted only
+/// where the runner itself reported that one test ran and passed. Its teeth were
+/// re-checked over that same tree rather than remembered: `settled_title` cut down to a
+/// single read called this sound fixture a defect between 106 and 190 of 200 times in
+/// six runs and failed the journey on its own assertion. The 440-run figure the
+/// back-to-back writer carried was taken over that writer, so it is honest about that
+/// tree and does not cover this one.
 ///
 /// **Count what the runner reports ran, never exit codes.** This test's libtest name
 /// carries its module, so `--exact` over the bare function name matches nothing, runs
@@ -3402,8 +3414,18 @@ fn a_project_document_being_rewritten_underneath_the_rule_is_not_a_fixture_defec
         let (rewritten, whole, stop) = (rewritten.clone(), whole.clone(), stop.clone());
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let replacing = std::time::Instant::now();
                 std::fs::write(&rewritten, "").expect("the truncate half of a replacement");
                 std::fs::write(&rewritten, &whole).expect("the write half of a replacement");
+                // Rested for as long as the replacement took, so the document is whole
+                // for at least half of every cycle however slow this host makes the
+                // truncate. A store's writer replaces a document once and moves on; one
+                // that truncates again the instant it has written is harsher than any
+                // store, and on a loaded runner — where a truncate waits on the journal
+                // and a parked thread is parked inside it — it left the document empty
+                // for longer than the rule is patient, and called a sound fixture a
+                // defect for it.
+                std::thread::sleep(replacing.elapsed());
             }
         })
     };
