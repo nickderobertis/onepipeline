@@ -1951,7 +1951,10 @@ fn summary_fields() -> BTreeSet<String> {
         pid: NonZeroU32::new(4_242),
         host: Some("a-host".into()),
         started: Some("linux-proc-stat:1".into()),
-        let_go_by: Some("a-host-4242".into()),
+        // Read rather than built: the claim's type is the engine's, and what this
+        // inventory counts is the key it is written under.
+        let_go_by: serde_json::from_value(json!({"host": "a-host", "pid": 4242}))
+            .expect("a driver claim reads"),
         timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
             .expect("the telemetry golden reads back into the types"),
         parked: vec!["idle".into()],

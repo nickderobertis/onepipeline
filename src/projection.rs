@@ -203,17 +203,17 @@ pub struct RunState {
     pub last_write_at: Option<u64>,
     /// What `stop` left the run as.
     pub stop: StopState,
-    /// The journal stream of the driver that let go of this run to fire its
-    /// run-end hook, while no later adoption has driven it since.
+    /// The driver that let go of this run to fire its run-end hook, while no later
+    /// adoption has driven it since.
     ///
-    /// A stream names the host and pid that wrote it, so a reader holding the
-    /// launch record can tell whether the driver it names is the one that let go:
-    /// that process is still alive while it awaits the hook, and without this it
-    /// reads as driving a run it has released. Cleared by `driver-adopted`,
-    /// because a driver that adopts the run afterwards is driving it. Omitted when
-    /// absent, so a fold of a run that fired no hook is written as it always was.
+    /// Read off the firing's own journal stream, so a reader holding the launch
+    /// record can tell whether the driver it names is the one that let go: that
+    /// process is still alive while it awaits the hook, and without this it reads
+    /// as driving a run it has released. Cleared by `driver-adopted`, because a
+    /// driver that adopts the run afterwards is driving it. Omitted when absent, so
+    /// a fold of a run that fired no hook is written as it always was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub let_go_by: Option<String>,
+    pub let_go_by: Option<DriverClaim>,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -559,6 +559,38 @@ const TURN_ACTIVITY: &str = "turn-activity";
 /// a compile error rather than a clock that silently stops reading.
 pub(crate) fn evidences_progress(event: &Envelope) -> bool {
     event.kind.0 != oneagentgraph::event::EventKind::MemberHeartbeat.as_str()
+}
+
+/// The driver a run-end hook's firing names: the host, and the process on it that
+/// let go of the run.
+///
+/// Read off the firing's journal stream, which this crate stamps as
+/// `<host>-<pid>` on everything it writes — so a stream in any other form is not
+/// one this crate wrote, identifies no driver, and folds as none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriverClaim {
+    /// The host the pid is meaningful on.
+    pub host: String,
+    /// The process that let go.
+    pub pid: std::num::NonZeroU32,
+}
+
+impl DriverClaim {
+    /// The driver a journal stream names, when it names one.
+    pub(crate) fn of_stream(stream: &str) -> Option<Self> {
+        let (host, pid) = stream.rsplit_once('-')?;
+        let pid = pid.parse().ok()?;
+        (!host.is_empty()).then(|| Self {
+            host: host.to_string(),
+            pid,
+        })
+    }
+
+    /// Whether this is the driver a launch record's claim names.
+    pub(crate) fn is(&self, host: Option<&str>, pid: Option<std::num::NonZeroU32>) -> bool {
+        host == Some(self.host.as_str()) && pid == Some(self.pid)
+    }
 }
 
 impl RunState {
@@ -1106,7 +1138,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // The firing driver's own stream: it is the process that released the run,
         // and the only one this record can prove let go. See `RunState::let_go_by`.
         Some(journal::PipelineKind::RunHookFired) => {
-            state.let_go_by = Some(event.stream.clone());
+            state.let_go_by = DriverClaim::of_stream(&event.stream);
         }
         Some(journal::PipelineKind::RunStopped) => {
             state.stop = match journal::StopTeardown::of(payload) {

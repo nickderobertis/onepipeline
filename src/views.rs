@@ -311,7 +311,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
             || let_go(
                 launch.recorded_host(),
                 launch.driver_pid(),
-                state.let_go_by.as_deref(),
+                state.let_go_by.as_ref(),
             ),
         launch.recorded_host(),
         launch.driver_pid(),
@@ -333,12 +333,9 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 pub(crate) fn let_go(
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
-    let_go_by: Option<&str>,
+    let_go_by: Option<&crate::projection::DriverClaim>,
 ) -> bool {
-    match (recorded_host, pid, let_go_by) {
-        (Some(host), Some(pid), Some(stream)) => stream == format!("{host}-{pid}"),
-        _ => false,
-    }
+    let_go_by.is_some_and(|claim| claim.is(recorded_host, pid))
 }
 
 /// The same verdict, over the six things a record says and the run's own
@@ -1487,7 +1484,7 @@ impl<'a> Row<'a> {
                 || let_go(
                     self.summary.host.as_deref(),
                     self.summary.pid,
-                    self.summary.let_go_by.as_deref(),
+                    self.summary.let_go_by.as_ref(),
                 ),
             self.summary.host.as_deref(),
             self.summary.pid,

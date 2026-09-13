@@ -57,12 +57,17 @@ cat >"$here/stdin"
   fi
 } >"$here/env"
 
+# llmlint: ignore-block[tool_output_is_signal] this output is the fixture's evidence,
+# not narration: the journeys read these 26 lines back out of the log the engine kept,
+# off the attached driver's relayed stderr, and as the last 20 lines `results` repeats,
+# so a hook that said nothing would leave all three of those claims unproven.
 i=1
 while [ "$i" -le 25 ]; do
   printf 'said line %s\n' "$i"
   i=$((i + 1))
 done
 printf 'said on stderr\n' >&2
+# llmlint: ignore-end[tool_output_is_signal]
 : >"$here/started"
 
 if [ -f "$record/$run.hold" ]; then

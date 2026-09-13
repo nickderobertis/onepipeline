@@ -706,7 +706,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     // advances, and the release itself is [`let_go_of`]'s.
     let channel = ChannelState::new(paths);
     let mut lock = lock;
-    let mut released = false;
+    let mut departure = Departure::LeftClaimed;
     loop {
         // Everything the queue is holding, applied and then recorded — the run's
         // last word has to carry an edit applied after it was written.
@@ -730,7 +730,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
         // stopped claiming is an edit accepted from a run that is free.
         match let_go_of(paths, lock) {
             LettingGo::Released => {
-                released = true;
+                departure = Departure::Released;
                 break;
             }
             LettingGo::QueueMoved(back) => lock = back,
@@ -760,21 +760,31 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     crate::summary::seal(paths);
     Ok(Driven {
         state: outcome,
-        released,
+        departure,
     })
 }
 
-/// How a driver's loop ended: the state the graph settled in, and whether the
-/// driver let go of the run.
+/// How a driver's loop ended: the state the graph settled in, and how the driver
+/// left the run.
 pub struct Driven {
     /// The state the graph settled in, whose exit code the binary carries.
     pub state: GraphState,
-    /// Whether the ownership lock was **released**, rather than left claimed over
-    /// a process that is ending because the handover could not be taken.
-    ///
-    /// A run-end hook is judged only at a let-go: one left claimed has a next
-    /// writer that reclaims it, and that writer is the one that judges.
-    pub released: bool,
+    /// Whether the driver let go of the run on its way out.
+    pub departure: Departure,
+}
+
+/// How a driver left the run it drove.
+///
+/// A run-end hook is judged only at a let-go, so the two are kept apart by type
+/// rather than by a flag a caller could read the wrong way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure {
+    /// The ownership lock was released: the run is free, and this driver is the
+    /// one that judges how it ended.
+    Released,
+    /// The handover could not be taken, so the lock was left claimed over a
+    /// process that is ending. The next writer reclaims the run, and judges it.
+    LeftClaimed,
 }
 
 /// What a writer that tried to let go of a run found on its way out.

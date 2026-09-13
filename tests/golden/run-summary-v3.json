@@ -17,7 +17,10 @@
   "project": "plans:golden",
   "launcher": "claude-code",
   "session": "",
-  "let_go_by": "golden-host-4242",
+  "let_go_by": {
+    "host": "golden-host",
+    "pid": 4242
+  },
   "timing": {
     "schema_version": 2,
     "run_id": "golden",

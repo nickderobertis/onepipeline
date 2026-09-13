@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -497,7 +498,7 @@ fn run(
         });
     }
 
-    let deadline = Instant::now() + Duration::from_secs(record.hook_timeout().get());
+    let deadline = deadline_after(record.hook_timeout());
     let mut relayed = 0;
     let ran = loop {
         match child.try_wait() {
@@ -511,7 +512,7 @@ fn run(
                     },
                 }
             }
-            Ok(None) if Instant::now() < deadline => {}
+            Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
             // Past the timeout — or a child this process can no longer ask about,
             // which is waited out the same way rather than left running unrecorded.
             waited => {
@@ -537,6 +538,16 @@ fn run(
         relay_from(log, relayed);
     }
     ran
+}
+
+/// When a hook started now has outlived its timeout, or `None` where that is
+/// further off than this host's clock can count to.
+///
+/// A timeout is any positive whole number of seconds, so one can name an instant
+/// no `Instant` holds. That is a timeout no hook can outlive, and it is waited
+/// without a bound rather than panicking on a value the launch accepted.
+fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
+    Instant::now().checked_add(Duration::from_secs(timeout.get()))
 }
 
 /// Repeat what a hook's log gained since `from` on this process's stderr, and
@@ -746,6 +757,41 @@ mod tests {
             Judged::Fire(Hook::Success, None)
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The driver a firing names is read off the stream this crate stamps, and a
+    /// stream in any other form names none — so it can never be taken for the
+    /// driver a launch record claims.
+    #[test]
+    fn a_firing_names_its_driver_only_by_the_stream_this_crate_stamps() {
+        use crate::projection::DriverClaim;
+        let host = sys::hostname();
+        let stamped = DriverClaim::of_stream(&format!("{host}-{}", sys::pid()))
+            .expect("the stream a journal here writes names its driver");
+        assert_eq!(stamped.host, host);
+        assert!(stamped.is(Some(&host), std::num::NonZeroU32::new(sys::pid())));
+        assert!(!stamped.is(None, std::num::NonZeroU32::new(sys::pid())));
+        assert!(!stamped.is(Some(&host), None));
+        // A host carrying its own hyphens still splits at the last one.
+        let hyphenated = DriverClaim::of_stream("build-host-01-4242").expect("a claim");
+        assert_eq!(hyphenated.host, "build-host-01");
+        assert_eq!(hyphenated.pid.get(), 4242);
+        for malformed in ["", "4242", "-4242", "host-", "host-0", "host-pid", "host"] {
+            assert_eq!(
+                DriverClaim::of_stream(malformed),
+                None,
+                "`{malformed}` was read as naming a driver"
+            );
+        }
+    }
+
+    /// A timeout too large for this host's clock is no deadline rather than a panic,
+    /// and the shipped one is an instant still to come.
+    #[test]
+    fn a_timeout_past_what_the_clock_can_count_to_is_no_deadline_rather_than_a_panic() {
+        assert_eq!(deadline_after(NonZeroU64::MAX), None);
+        assert!(deadline_after(DEFAULT_HOOK_TIMEOUT_SECONDS)
+            .is_some_and(|deadline| deadline > Instant::now()));
     }
 
     /// `results` reads a hook's log from no further back than its bound, and never

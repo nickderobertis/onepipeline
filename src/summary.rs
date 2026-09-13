@@ -276,14 +276,14 @@ pub struct RunSummary {
     /// this field lets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
-    /// The journal stream of the driver that let go of this run to fire its
-    /// run-end hook, while no adoption has driven it since.
+    /// The driver that let go of this run to fire its run-end hook, while no
+    /// adoption has driven it since.
     ///
     /// What the listing reads its liveness through beside the claim above, for
     /// the reason the fold carries it: that driver is alive while it awaits the
     /// hook and holds nothing. Absent for every run that fired no hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub let_go_by: Option<String>,
+    pub let_go_by: Option<crate::projection::DriverClaim>,
     /// The run's aggregate wall clock and usage.
     ///
     /// The **whole of [`RunTelemetry`](crate::views::RunTelemetry)**, referenced
@@ -1642,7 +1642,10 @@ mod tests {
             pid: None,
             host: None,
             started: None,
-            let_go_by: Some("golden-host-4242".into()),
+            let_go_by: Some(crate::projection::DriverClaim {
+                host: "golden-host".into(),
+                pid: std::num::NonZeroU32::new(4242).expect("a pid"),
+            }),
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
             // Nothing parked, which is an absent key rather than an empty list on

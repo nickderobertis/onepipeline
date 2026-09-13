@@ -914,7 +914,7 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     }
     // The run's end is judged by the driver that let go of it, with the lock
     // already released — a detached one exactly as an attached one.
-    if settled.released {
+    if settled.departure == engine::Departure::Released {
         crate::hooks::at_let_go(&paths, crate::hooks::Relay::Quiet);
     }
     Ok(settled.state.exit_code())
@@ -1447,7 +1447,7 @@ fn attach(
             );
             // After the settlement is decided and said, so nothing a hook does —
             // however it ends, and whatever it launches — can change either.
-            if driven.released {
+            if driven.departure == engine::Departure::Released {
                 crate::hooks::at_let_go(paths, crate::hooks::Relay::Stderr);
             }
             return Ok(settlement.exit_code());
@@ -1581,7 +1581,7 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
     if !views::let_go(
         record.recorded_host(),
         record.driver_pid(),
-        view.state.let_go_by.as_deref(),
+        view.state.let_go_by.as_ref(),
     ) {
         displace_the_parked_driver(&record);
     }
