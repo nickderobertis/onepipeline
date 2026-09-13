@@ -1433,6 +1433,9 @@ mod tests {
         };
         let chosen = LaunchRecord {
             writeback_item_budget: 25,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             ..a_launch(&paths)
         };
         assert_eq!(

@@ -56,6 +56,15 @@ pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 /// rather than whatever this variable happens to say later.
 pub const WRITEBACK_ITEM_BUDGET_ENV: &str = "ONEPIPELINE_WRITEBACK_ITEM_BUDGET";
 
+/// How long a run-end hook is awaited, in seconds, when a launch names no
+/// timeout.
+///
+/// The bottom rung of two: `--hook-timeout` beats the launch config's own
+/// `hook_timeout`. A hook still running when it elapses has its process tree
+/// ended. A [`NonZeroU64`] because a timeout of zero ends every hook before it
+/// has begun, and both rungs refuse it.
+pub const DEFAULT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = NonZeroU64::new(600).unwrap();
+
 /// Execute a task DAG over oneagentgraph and onevcs, merging their event
 /// streams into one.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
@@ -235,6 +244,32 @@ pub struct StartArgs {
     /// field; naming none takes the shipped ten seconds per item.
     #[arg(long, value_name = "SECONDS")]
     pub writeback_item_budget: Option<u64>,
+    /// The command run once when this run ends with every node `done`.
+    ///
+    /// Spawned the way `--node-validator` is, in the launch directory, with the
+    /// run named in its environment and one JSON document on its stdin; awaited
+    /// for up to `--hook-timeout`, and never able to change how the run settled.
+    /// Naming none is the shipped default and is exactly what a launch did before
+    /// this flag existed. Given here it beats the launch config's own field —
+    /// including when what it names is blank, which is this launch saying it has
+    /// none.
+    #[arg(long, value_name = "COMMAND")]
+    pub success_hook: Option<String>,
+    /// The command run once when this run ends any other way: a failed or
+    /// skipped node, an unfinished graph with no decision outstanding, or a clean
+    /// `stop`.
+    ///
+    /// Spawned, awaited and overridden exactly as `--success-hook` is. A run
+    /// paused on a decision has not ended and fires neither.
+    #[arg(long, value_name = "COMMAND")]
+    pub failure_hook: Option<String>,
+    /// How long a run-end hook is awaited, in seconds, before its process tree is
+    /// ended.
+    ///
+    /// A positive whole number: zero is refused. Given here it beats the launch
+    /// config's own field; naming none takes the shipped six hundred seconds.
+    #[arg(long, value_name = "SECONDS")]
+    pub hook_timeout: Option<u64>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]

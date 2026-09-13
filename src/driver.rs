@@ -472,6 +472,27 @@ fn start(args: &StartArgs) -> Result<i32> {
                 .unwrap_or(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
         },
     };
+
+    // The run-end hooks and their timeout, by two rungs: the flag, then the launch
+    // config. A hook rung that is there and blank is this launch naming none, as a
+    // blank drafting graph is, and a timeout of zero is refused by its spelling.
+    // Before the run directory exists, so a launch that could not be honoured mints
+    // nothing.
+    let success_hook = crate::hooks::named(
+        args.success_hook.as_deref(),
+        declared.success_hook.as_deref(),
+    );
+    let failure_hook = crate::hooks::named(
+        args.failure_hook.as_deref(),
+        declared.failure_hook.as_deref(),
+    );
+    let hook_timeout: NonZeroU64 = match args.hook_timeout {
+        Some(seconds) => NonZeroU64::new(seconds)
+            .ok_or_else(|| Error::Invalid(crate::hooks::refused_zero_timeout("--hook-timeout")))?,
+        None => declared
+            .hook_timeout
+            .unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS),
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -570,6 +591,15 @@ fn start(args: &StartArgs) -> Result<i32> {
         started_at: sys::now_rfc3339(),
         heartbeat_interval: args.heartbeat_interval,
         writeback_item_budget: writeback_item_budget.get(),
+        // The timeout only beside a hook it bounds, so a launch naming none
+        // writes the record it always wrote.
+        hook_timeout: if success_hook.is_some() || failure_hook.is_some() {
+            hook_timeout.get()
+        } else {
+            0
+        },
+        success_hook: success_hook.unwrap_or_default(),
+        failure_hook: failure_hook.unwrap_or_default(),
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
         adoptions: 0,
@@ -3687,6 +3717,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
