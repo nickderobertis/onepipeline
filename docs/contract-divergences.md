@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–68 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–71 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 68 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 71 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -5111,6 +5111,109 @@ and neither given a judge's receipt when the dispatch is reaped before one.
     "supervisor": ["worker"],
     "judged-with": [],
     "carried": []
+  }
+}
+```
+
+## 71. The write-back's copy is bounded by a fixed minute, which a plan outgrows — OPEN
+
+**Proposal (for the planner who owns the contract): bound the settlement
+write-back's `project copy` by a **per-item budget multiplied by the number of
+items it projects**, never below the sixty-second floor every other store command
+keeps, and make the per-item figure a launch-level setting named by
+`--writeback-item-budget`, `ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, and a
+`writeback_item_budget` key at launch-config schema 5, with the shipped default
+of ten seconds per item beneath all three.**
+
+The contract's write-back is best-effort and off the reconcile loop, so a run
+settles identically whether or not its projection landed, and what keeps the
+board in step with a run is only the worker that projects it. That worker bounds
+every store command it spawns with one constant — sixty seconds of wall clock,
+after which the child is killed and the projection is reported as
+`<command> exceeded 60 seconds`. It is a liveness backstop for an unreachable
+store, and it is the right shape for two of the three commands: the project is one
+item however large the plan, and a page of its tasks is one page. The copy is
+not. It writes one item per node of the plan, so its duration is linear in plan
+size, and a fixed bound is one that plans outgrow.
+
+Measured: `root-causes-539-fixes` settled 18/18 with every node landed, and its
+settlement never reached the board. Its own surface read *reason: project-copy
+exceeded 60 seconds*; the run held 34 items. Write-back being off the reconcile
+loop is what made this invisible — the run was green, and the only signal was
+one line on a detached driver's stderr that nobody opens. A green run already
+proves nothing about the board, and a fixed minute is the mechanism that makes
+that true more often as plans grow.
+
+What this crate does today is the block below, and the block is the source. The
+copy's deadline is `max(floor, budget × items)`, where the item count is the
+number of nodes in the snapshot being projected — the same list the
+`Unprojected` surface names as `items:` when the copy fails. The floor stays
+sixty seconds, stays the whole deadline for `project show` and each `task list`
+page, and stays what it was: a liveness backstop rather than a latency target. The
+refusal names the seconds the copy was allowed, the item count and the per-item
+budget it was computed from, and — where the floor governed — says so, so the
+line on the driver's stderr and the surface built from it read as the arithmetic
+they are. Nothing else about how the failure is reported changes.
+
+The budget is nameable three ways, in the order entry 41 states and for the same
+reason: the flag, then the environment variable, then the launch config field,
+then the shipped default. It is resolved **once**, at the launch, and retained in
+the launch record beside the pacemaker interval — so a driver a fresh `adopt`
+starts bounds its copies as the launch chose, and a record written before the
+field existed reads and resolves to the default. The value is a positive whole
+number of seconds. **Zero is refused wherever it is read** — flag, variable, or
+config key — by the spelling that carried it, because zero is no budget at all:
+multiplied through, it leaves the floor as the whole deadline for every plan
+however large, which is the outgrown minute this setting exists to end, so a
+launch that wrote it asked for something it would not get; it never falls
+through to the rung below. `writeback_item_budget` is
+a launch-config key versions 1 to 4 never had, so the version this build writes
+moves to **5**, the versions it reads keep 4, 3, 2 and 1, and a document
+declaring an earlier one while carrying the key is refused **by that field's
+name** — exactly as a version-3 document carrying `envelope_reviewer` is. A key
+present and blank is refused by name too, as the two hook keys are: it arrives
+with this version, so no config on disk carries one. The setting arrives with a
+**minor** version bump, cut by `release-plz` from the `feat` commit that
+introduces it, exactly as entries 41 and 45 did.
+
+`tests/contract.rs` parses the block out of this file and holds it against the
+types: the flag must be one `start` takes, the config key must parse at the
+version stated and at no earlier one this build reads, the environment name must
+be the constant the engine reads, the precedence must be the order the driver
+resolves, and the default and the floor must be the constants the code carries.
+`tests/e2e/writeback_budget.rs` reads the three spellings out of the same block
+and drives them against the real binary and the store double: a copy held past
+the floor that still lands because the item count lifted its deadline above it, a
+copy held past what a deliberately tiny budget allows — which the floor then
+governs — killed and reported with the computed budget, the item count and the
+floor in the refusal, and the precedence between the three spellings observable
+on the launch record an `adopt` replays.
+
+```json
+{
+  "budget": {
+    "flag": "--writeback-item-budget",
+    "environment": "ONEPIPELINE_WRITEBACK_ITEM_BUDGET",
+    "config_key": "writeback_item_budget",
+    "config_schema_version": 5,
+    "precedence": ["flag", "environment", "config_key"],
+    "default_seconds": 10,
+    "floor_seconds": 60,
+    "deadline": "max(floor_seconds, budget × items)",
+    "examples": [
+      {
+        "items": 34,
+        "budget_seconds": 10,
+        "deadline_seconds": 340,
+        "refusal": "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+      },
+      {
+        "items": 2,
+        "budget_seconds": 10,
+        "deadline_seconds": 60,
+        "refusal": "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds per item is less)"
+      }
+    ]
   }
 }
 ```

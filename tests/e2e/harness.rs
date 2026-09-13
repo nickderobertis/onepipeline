@@ -2433,6 +2433,21 @@ impl World {
         read_jsonl(&self.runs.join(run).join("events.jsonl"))
     }
 
+    /// The **real** `oneagentgraph`'s own event log for one of its runs, read
+    /// out of [`graph_state`](World::graph_state).
+    ///
+    /// What the sibling did with something this crate addressed to it — a
+    /// clock it restarted, a member it settled — is recorded here and nowhere
+    /// in this crate's journal.
+    pub fn graph_journal(&self, graph_run: &str) -> Vec<Value> {
+        read_jsonl(
+            &self
+                .graph_state()
+                .join(graph_run)
+                .join(oneagentgraph::run::EVENTS_FILE),
+        )
+    }
+
     /// The kinds one run's journal recorded, in order.
     pub fn kinds(&self, run: &str) -> Vec<String> {
         self.journal(run)

@@ -821,6 +821,7 @@ mod tests {
             started: String::new(),
             started_at: crate::sys::now_rfc3339(),
             heartbeat_interval: 1_800,
+            writeback_item_budget: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

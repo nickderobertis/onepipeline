@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -745,6 +745,21 @@ pub struct LaunchRecord {
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     #[serde(default)]
     pub heartbeat_interval: u64,
+    /// The write-back's per-item budget, in seconds, or `0` on a record that
+    /// names none.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, and
+    /// the launch config in that order — so an `adopt` bounds the copies it
+    /// projects as its launch chose rather than by an environment that has
+    /// since moved. Read through [`item_budget`](Self::item_budget), which is
+    /// where `0` becomes "the record does not say" again: the shipped default,
+    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`] — and never a budget of
+    /// zero, which is no budget at all. Defaulted so a record written before
+    /// this field existed still reads, and resolves to that default.
+    ///
+    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+    #[serde(default)]
+    pub writeback_item_budget: u64,
     /// Opaque overrides replayed on the dag-scope graph launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dag_sets: Vec<String>,
@@ -925,6 +940,21 @@ impl LaunchRecord {
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     pub fn pacemaker_interval(&self) -> Option<u64> {
         (self.heartbeat_interval > 0).then_some(self.heartbeat_interval)
+    }
+
+    /// The write-back's per-item budget this launch recorded, in seconds, when
+    /// it recorded one.
+    ///
+    /// `None` for the `0` a record carrying no budget defaults to, and the
+    /// caller takes the shipped default —
+    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. A [`NonZeroU64`] so that
+    /// no later reader can put zero back: a budget of zero seconds per item is
+    /// no budget at all, leaving the floor as the whole deadline for every plan
+    /// — the outgrown minute the setting exists to end.
+    ///
+    /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+    pub fn item_budget(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.writeback_item_budget)
     }
 }
 
@@ -2685,6 +2715,7 @@ mod tests {
             started: "Fri Aug 15 00:00:00 2026".into(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
+            writeback_item_budget: 10,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -2770,13 +2801,20 @@ mod tests {
     /// default stands for *the record does not say*, and every reading of it says
     /// so. Each assertion here fails if the value were invented — a session that
     /// named somebody, a pid a reader would probe, a host a reader would claim,
-    /// an instant nobody measured, or a pacemaker that fires every zero seconds.
+    /// an instant nobody measured, a pacemaker that fires every zero seconds, or
+    /// a write-back budget of zero seconds per item.
     #[test]
-    fn a_launch_record_written_before_any_of_these_five_keys_still_reads() {
+    fn a_launch_record_written_before_any_of_these_six_keys_still_reads() {
         /// Every key added to this record after it shipped whose absence this
         /// reader has to answer for.
-        const HISTORICAL: [&str; 5] =
-            ["session", "pid", "host", "started_at", "heartbeat_interval"];
+        const HISTORICAL: [&str; 6] = [
+            "session",
+            "pid",
+            "host",
+            "started_at",
+            "heartbeat_interval",
+            "writeback_item_budget",
+        ];
         let root = scratch("historical-launch");
         let whole = serde_json::to_value(a_record()).expect("a record this build writes");
 
@@ -2850,12 +2888,25 @@ mod tests {
                         "a zero-second pacemaker was served as an interval"
                     );
                 }
-                other => unreachable!("{other} is not one of the five"),
+                "writeback_item_budget" => {
+                    assert_eq!(read.writeback_item_budget, 0);
+                    assert_eq!(
+                        read.item_budget(),
+                        None,
+                        "a record naming no budget produced a per-item budget"
+                    );
+                    assert_eq!(
+                        read.item_budget().map(NonZeroU64::get),
+                        None,
+                        "a zero-second budget was served as one"
+                    );
+                }
+                other => unreachable!("{other} is not one of the six"),
             }
         }
 
-        // And the record 141 roots on that host actually hold: none of the five.
-        let oldest = read_one("all-five", &HISTORICAL);
+        // And the record 141 roots on that host actually hold: none of the six.
+        let oldest = read_one("all-six", &HISTORICAL);
         assert!(oldest.session.is_empty());
         assert_eq!(oldest.owner_label("a-session"), "[unknown]");
         assert!(!oldest.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -2863,13 +2914,14 @@ mod tests {
         assert_eq!(oldest.recorded_host(), None);
         assert_eq!(oldest.launched_at(), None);
         assert_eq!(oldest.pacemaker_interval(), None);
+        assert_eq!(oldest.item_budget(), None);
         // What it does say, it still says — the run it names most of all, since
         // a row a reader cannot key is a row that reaches nobody.
         assert_eq!(oldest.run_id, "demo");
         assert_eq!(oldest.launcher, "claude-code");
         assert_eq!(oldest.node_graph, "graphs/node-scope.yaml");
 
-        // A record that carries the five reads them, so none of the defaults
+        // A record that carries the six reads them, so none of the defaults
         // above is standing in front of a value somebody wrote.
         let whole = read_one("whole", &[]);
         assert_eq!(whole.session, "a-session");
@@ -2877,6 +2929,7 @@ mod tests {
         assert_eq!(whole.recorded_host(), Some("h"));
         assert!(whole.launched_at().is_some());
         assert_eq!(whole.pacemaker_interval(), Some(1_800));
+        assert_eq!(whole.item_budget(), NonZeroU64::new(10));
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its
@@ -3222,6 +3275,7 @@ mod tests {
             started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
+            writeback_item_budget: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -3252,6 +3306,7 @@ mod tests {
             started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
+            writeback_item_budget: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

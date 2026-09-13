@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+use std::num::NonZeroU64;
+
 use clap::{Args, Parser, Subcommand};
 
 use crate::channel::SurfaceKind;
@@ -23,6 +25,36 @@ pub const DAG_GRAPH_OFF: &str = "off";
 /// The planner-update pacemaker interval, in seconds, when `start` is given
 /// none.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
+
+/// The write-back's per-item budget, in seconds, when a launch names none.
+///
+/// The bottom rung of four: `--writeback-item-budget` beats
+/// [`WRITEBACK_ITEM_BUDGET_ENV`], which beats the launch config's own
+/// `writeback_item_budget`, and this is what every launch ran under before any
+/// of the three existed. Multiplied by the number of items a settlement projects
+/// to bound the store's `project copy`, and never below
+/// [`WRITEBACK_COMMAND_FLOOR_SECONDS`]. A [`NonZeroU64`] because zero is no
+/// budget at all, and every rung that names one refuses it.
+pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10).unwrap();
+
+/// The least any store command the write-back spawns is allowed, in seconds.
+///
+/// The whole deadline for the reads that are not linear in plan size — the
+/// project and each page of its tasks — and the floor under the copy's, which
+/// the per-item budget lifts once a plan carries enough items to need it. A
+/// liveness backstop for an unreachable store rather than a latency target:
+/// the projection stays off the reconcile loop while the child runs.
+pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
+
+/// The environment variable naming the write-back's per-item budget, in seconds.
+///
+/// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`
+/// is for the per-node hook: `--writeback-item-budget` beats it, it beats the
+/// launch config's own `writeback_item_budget`, and beneath all three is
+/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. Read once, at the launch, and
+/// retained in the launch record — so an `adopt` replays what its launch resolved
+/// rather than whatever this variable happens to say later.
+pub const WRITEBACK_ITEM_BUDGET_ENV: &str = "ONEPIPELINE_WRITEBACK_ITEM_BUDGET";
 
 /// Execute a task DAG over oneagentgraph and onevcs, merging their event
 /// streams into one.
@@ -191,6 +223,18 @@ pub struct StartArgs {
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,
+    /// How long the settlement write-back allows its store's `project copy` per
+    /// item it writes, in seconds.
+    ///
+    /// The copy's deadline is this multiplied by the number of items the run
+    /// projects, and never below the sixty-second floor every other store
+    /// command is bounded by, so the backstop that kills an unreachable store's
+    /// copy scales with the plan instead of being outgrown by it. A positive
+    /// whole number: zero is no budget at all and is refused. Given here it
+    /// beats `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own
+    /// field; naming none takes the shipped ten seconds per item.
+    #[arg(long, value_name = "SECONDS")]
+    pub writeback_item_budget: Option<u64>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]
