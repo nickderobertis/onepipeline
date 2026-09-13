@@ -140,7 +140,7 @@ fn refused_blank(key: &str) -> String {
 /// Serde's own reading of a `u64` would take the key present and holding
 /// nothing — `writeback_item_budget:` — as the document omitting it, which is the
 /// half-written decision every other refused-when-blank key is turned down for,
-/// and would accept zero, which kills every copy. Both are refused here **by the
+/// and would accept zero, which is no budget at all. Both are refused here **by the
 /// key's name**, where the value is read, because a number has no blank for
 /// [`LaunchConfig::load`]'s loop to see; the blank's sentence is the one that
 /// loop uses, and zero's is the one the flag and the variable use.
@@ -1344,7 +1344,7 @@ mod tests {
             );
         }
         // And a budget of zero is refused by name too, rather than read as a
-        // launch that named none: zero kills every copy, so it never falls
+        // launch that named none: zero is no budget at all, so it never falls
         // through to the shipped default.
         let zero = LaunchConfig::load(&written(
             "zero-budget.yaml",

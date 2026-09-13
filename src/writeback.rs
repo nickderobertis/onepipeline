@@ -111,76 +111,78 @@ const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 /// governs until a plan is large enough to lift it. Measured: a run of 34 items outlasted
 /// the fixed sixty seconds, and its settlement never reached the board. The refusal says
 /// which of the two governed and what it was computed from, because the one line on the
-/// driver's stderr and the surface built from it are all anybody reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Deadline {
-    within: Duration,
-    /// What the refusal says after the seconds: nothing for a plain floor, and the
-    /// arithmetic for a figure that was computed.
-    account: String,
+/// driver's stderr and the surface built from it are all anybody reads. What it says is
+/// derived from what it was computed from rather than stored beside it, so no refusal can
+/// account for a figure other than the one that was enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deadline {
+    /// The fixed floor, which is the whole deadline for a read.
+    Floor,
+    /// The copy's: `max(floor, per_item × items)`.
+    Copy { per_item: Duration, items: usize },
 }
 
 impl Deadline {
-    /// The fixed floor, which is the whole deadline for a read.
-    fn floor() -> Self {
-        Self {
-            within: COMMAND_LIMIT,
-            account: String::new(),
-        }
+    /// The budget multiplied through, before the floor is applied.
+    ///
+    /// Saturating rather than wrapping, because a product that wrapped to nothing would
+    /// leave the floor governing exactly the plan the budget exists to accommodate.
+    fn product(per_item: Duration, items: usize) -> Duration {
+        // llmlint: ignore[changed_behavior_has_e2e] a plan of more than four billion items
+        // is not a journey any host can run; the unit test holds the arithmetic, and the
+        // floor is what a wrapped product would have lost.
+        per_item.saturating_mul(u32::try_from(items).unwrap_or(u32::MAX))
     }
 
-    /// The copy's deadline: `max(floor, per_item × items)`, and the account of it.
-    fn for_copy(per_item: Duration, items: usize) -> Self {
-        let computed = per_item.saturating_mul(u32::try_from(items).unwrap_or(u32::MAX));
-        let arithmetic = format!(
-            "{items} {} × {} {} per item",
-            if items == 1 { "item" } else { "items" },
-            per_item.as_secs(),
-            if per_item.as_secs() == 1 {
-                "second"
-            } else {
-                "seconds"
-            }
-        );
-        if computed > COMMAND_LIMIT {
-            return Self {
-                within: computed,
-                account: format!(" ({arithmetic})"),
-            };
-        }
-        Self {
-            within: COMMAND_LIMIT,
-            account: format!(
-                " (the {} second floor; {arithmetic} is {})",
-                COMMAND_LIMIT.as_secs(),
-                if computed == COMMAND_LIMIT {
-                    "the same"
-                } else {
-                    "less"
-                }
-            ),
+    /// How long the command is allowed.
+    fn within(self) -> Duration {
+        match self {
+            Self::Floor => COMMAND_LIMIT,
+            Self::Copy { per_item, items } => Self::product(per_item, items).max(COMMAND_LIMIT),
         }
     }
 
     /// The one line a command that outlasted this is refused with.
-    fn refusal(&self, name: &str) -> String {
-        format!(
-            "{name} exceeded {} seconds{}",
-            self.within.as_secs(),
-            self.account
-        )
+    fn refusal(self, name: &str) -> String {
+        let seconds = self.within().as_secs();
+        match self {
+            Self::Floor => format!("{name} exceeded {seconds} seconds"),
+            Self::Copy { per_item, items } => {
+                let arithmetic = format!(
+                    "{items} {} × {} {} per item",
+                    if items == 1 { "item" } else { "items" },
+                    per_item.as_secs(),
+                    if per_item.as_secs() == 1 {
+                        "second"
+                    } else {
+                        "seconds"
+                    }
+                );
+                if Self::product(per_item, items) < COMMAND_LIMIT {
+                    format!(
+                        "{name} exceeded {seconds} seconds (the {} second floor; {arithmetic} \
+                         is less)",
+                        COMMAND_LIMIT.as_secs()
+                    )
+                } else {
+                    format!("{name} exceeded {seconds} seconds ({arithmetic})")
+                }
+            }
+        }
     }
 }
 
 /// The refusal for a per-item budget of zero, wherever one is named.
 ///
 /// One sentence for the flag, the variable and the config key, each naming the spelling
-/// that carried it: a budget of zero would kill every copy, so it is refused at the rung
-/// that named it rather than falling through to the one below.
+/// that carried it. Zero is no budget at all: multiplied through, it leaves the floor as
+/// the whole deadline for every plan however large, which is the outgrown minute this
+/// setting exists to end — so a launch that wrote it asked for something it would not
+/// get, and is told so at the rung that named it rather than handed the one below.
 pub(crate) fn refused_zero_budget(spelling: &str) -> String {
     format!(
-        "{spelling} names a write-back budget of zero seconds per item, which would kill \
-         every copy — give it a positive whole number of seconds, or leave it out to take \
+        "{spelling} names a write-back budget of zero seconds per item, which is no budget \
+         at all — give it a positive whole number of seconds, or leave it out to take \
          {DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS} seconds per item"
     )
 }
@@ -630,15 +632,11 @@ fn project(
         &format!("sources.{SHADOW_SOURCE}.config.root={root}"),
     ];
     // The one command that is linear in plan size, so the one whose deadline is.
-    let deadline = Deadline::for_copy(per_item, snapshot.nodes.len());
-    let output = bounded_output(
-        binary,
-        launch_dir,
-        run_dir,
-        "project-copy",
-        &args,
-        &deadline,
-    )?;
+    let deadline = Deadline::Copy {
+        per_item,
+        items: snapshot.nodes.len(),
+    };
+    let output = bounded_output(binary, launch_dir, run_dir, "project-copy", &args, deadline)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -663,7 +661,7 @@ fn destination_project(
         run_dir,
         "project-show",
         &args,
-        &Deadline::floor(),
+        Deadline::Floor,
     )?;
     if !output.status.success() {
         return Err(format!(
@@ -739,7 +737,7 @@ fn destination_origins(
             run_dir,
             "task-list",
             &args,
-            &Deadline::floor(),
+            Deadline::Floor,
         )?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         if !output.status.success() {
@@ -806,7 +804,7 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
     run_dir: &Path,
     name: &str,
     args: &[S],
-    deadline: &Deadline,
+    deadline: Deadline,
 ) -> Result<Output, String> {
     let stdout = run_dir.join(format!("writeback-{name}.stdout"));
     let stderr = run_dir.join(format!("writeback-{name}.stderr"));
@@ -828,7 +826,7 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < deadline.within => {
+            Ok(None) if started.elapsed() < deadline.within() => {
                 std::thread::sleep(Duration::from_millis(25));
             }
             Ok(None) => {
@@ -1291,34 +1289,36 @@ mod tests {
     #[test]
     fn the_copy_deadline_is_the_budget_times_the_items_and_never_below_the_floor() {
         let shipped = Duration::from_secs(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS);
-        let lifted = Deadline::for_copy(shipped, 34);
-        assert_eq!(lifted.within, Duration::from_secs(340));
+        let copy = |items: usize| Deadline::Copy {
+            per_item: shipped,
+            items,
+        };
+        assert_eq!(copy(34).within(), Duration::from_secs(340));
         assert_eq!(
-            lifted.refusal("project-copy"),
+            copy(34).refusal("project-copy"),
             "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
         );
 
-        let floored = Deadline::for_copy(shipped, 2);
-        assert_eq!(floored.within, COMMAND_LIMIT);
+        assert_eq!(copy(2).within(), COMMAND_LIMIT);
         assert_eq!(
-            floored.refusal("project-copy"),
+            copy(2).refusal("project-copy"),
             "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds \
              per item is less)"
         );
 
-        // Exactly the floor is still the floor, said as such rather than as "less".
-        let level = Deadline::for_copy(shipped, 6);
-        assert_eq!(level.within, COMMAND_LIMIT);
-        assert!(
-            level
-                .refusal("project-copy")
-                .ends_with("6 items × 10 seconds per item is the same)"),
-            "{}",
-            level.refusal("project-copy")
+        // Exactly the floor is the product, and said as the product: the floor did not
+        // lift anything.
+        assert_eq!(copy(6).within(), COMMAND_LIMIT);
+        assert_eq!(
+            copy(6).refusal("project-copy"),
+            "project-copy exceeded 60 seconds (6 items × 10 seconds per item)"
         );
 
         // One of each, in the singular, so the line reads as a sentence.
-        let one = Deadline::for_copy(Duration::from_secs(1), 1);
+        let one = Deadline::Copy {
+            per_item: Duration::from_secs(1),
+            items: 1,
+        };
         assert_eq!(
             one.refusal("project-copy"),
             "project-copy exceeded 60 seconds (the 60 second floor; 1 item × 1 second per \
@@ -1326,18 +1326,24 @@ mod tests {
         );
 
         // The reads are the floor alone, and their refusal is the line it always was.
-        let read = Deadline::floor();
-        assert_eq!(read.within, COMMAND_LIMIT);
+        assert_eq!(Deadline::Floor.within(), COMMAND_LIMIT);
         assert_eq!(
-            read.refusal("project-show"),
+            Deadline::Floor.refusal("project-show"),
             "project-show exceeded 60 seconds"
         );
-        assert_eq!(read.refusal("task-list"), "task-list exceeded 60 seconds");
+        assert_eq!(
+            Deadline::Floor.refusal("task-list"),
+            "task-list exceeded 60 seconds"
+        );
 
         // An item count no budget could be multiplied by saturates rather than overflowing:
-        // a deadline that wrapped to nothing would kill every copy of a very large plan.
-        let vast = Deadline::for_copy(Duration::from_secs(u64::MAX / 2), usize::MAX);
-        assert!(vast.within >= COMMAND_LIMIT);
+        // a product that wrapped to nothing would leave the floor governing a very large
+        // plan.
+        let vast = Deadline::Copy {
+            per_item: Duration::from_secs(u64::MAX / 2),
+            items: usize::MAX,
+        };
+        assert!(vast.within() >= COMMAND_LIMIT);
     }
 
     /// The budget the worker runs under is the one the launch record retained, and a

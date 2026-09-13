@@ -2500,8 +2500,8 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
         Some(WRITEBACK_COMMAND_FLOOR_SECONDS),
         "entry 71 states a different floor than the code carries"
     );
-    // A shipped default of zero would kill every copy, so it is held against the
-    // block's own number rather than asserted constant.
+    // A shipped default of zero would be no budget at all, so it is held against
+    // the block's own number rather than asserted constant.
     assert!(
         budget["default_seconds"]
             .as_u64()
@@ -2532,7 +2532,7 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
         );
         assert_eq!(
             refusal.contains("floor"),
-            deadline == WRITEBACK_COMMAND_FLOOR_SECONDS,
+            per_item * items < WRITEBACK_COMMAND_FLOOR_SECONDS,
             "entry 71's refusal says the floor governed where it did not, or the reverse: \
              {refusal}"
         );

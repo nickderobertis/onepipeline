@@ -227,7 +227,7 @@ pub struct StartArgs {
     /// projects, and never below the sixty-second floor every other store
     /// command is bounded by, so the backstop that kills an unreachable store's
     /// copy scales with the plan instead of being outgrown by it. A positive
-    /// whole number: zero would kill every copy and is refused. Given here it
+    /// whole number: zero is no budget at all and is refused. Given here it
     /// beats `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` and the launch config's own
     /// field; naming none takes the shipped ten seconds per item.
     #[arg(long, value_name = "SECONDS")]

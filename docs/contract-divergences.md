@@ -5162,8 +5162,11 @@ the launch record beside the pacemaker interval — so a driver a fresh `adopt`
 starts bounds its copies as the launch chose, and a record written before the
 field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
-config key — by the spelling that carried it, because a budget of zero kills
-every copy; it never falls through to the rung below. `writeback_item_budget` is
+config key — by the spelling that carried it, because zero is no budget at all:
+multiplied through, it leaves the floor as the whole deadline for every plan
+however large, which is the outgrown minute this setting exists to end, so a
+launch that wrote it asked for something it would not get; it never falls
+through to the rung below. `writeback_item_budget` is
 a launch-config key versions 1 to 4 never had, so the version this build writes
 moves to **5**, the versions it reads keep 4, 3, 2 and 1, and a document
 declaring an earlier one while carrying the key is refused **by that field's

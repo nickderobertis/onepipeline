@@ -78,7 +78,7 @@ const COPY: &str = "onetaskgraph.project-copy";
 /// A detached run of `items` nodes projecting through the store double in front
 /// of the real store, whose `project copy` meets this test before it answers.
 ///
-/// One node is held open and the rest depend on it, so the run is live for as
+/// One node is held open and any others depend on it, so the run is live for as
 /// long as the journey needs and every snapshot it projects carries all `items`
 /// nodes — which is the count the copy's deadline is computed from.
 fn a_run_whose_copy_is_held(
@@ -87,7 +87,7 @@ fn a_run_whose_copy_is_held(
     items: usize,
     extra: &[&str],
 ) -> (World, Rendezvous, String) {
-    assert!(items >= 2, "a held node and at least one behind it");
+    assert!(items >= 1, "a held node");
     let world = World::new(world);
     world.script("work.wait", "hold");
     let mut nodes = vec![agent("work", &[])];
@@ -218,26 +218,62 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
 
 /// A copy held past what a deliberately tiny budget allows is killed, and the
 /// refusal names what the deadline was computed from — including that the
-/// floor governed, since two items at one second each is less than a minute.
+/// floor governed, since one item at one second is less than a minute — and the
+/// driver that is killed by it is one an **adopt** started, under the budget
+/// the launch chose rather than the one the adopting shell's environment names.
 ///
 /// The line is read where it lands: on the driver's stderr, and on the planner
 /// surface built from it, which are all anybody gets about a projection that
 /// failed. Without the arithmetic an operator cannot tell a store that is down
-/// from a plan that has outgrown its budget.
+/// from a plan that has outgrown its budget. The adoption is what makes the
+/// retained budget more than a field: a fresh driver from a shell naming a
+/// thousand seconds per item would, re-reading its environment, allow this copy
+/// a thousand seconds and never kill it inside the wait below.
 #[test]
 fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic() {
     let floor = number("floor_seconds");
-    let items = 2;
+    let items = 1;
     let run = "budgetfloor";
     let flag = spelling("flag");
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-floor", run, items, &[flag.as_str(), "1"]);
 
-    // The first copy is inside its hold, and this test never lets it go: what ends
-    // it is the deadline.
+    // The launching driver's first copy is let go at once, so it lands and the run
+    // is quiet: nothing has failed yet, and the driver is one an adoption may end.
+    meeting.arrived().release();
+    world.until_store("the launching driver's copy to reach the board", |world| {
+        board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
+    });
+    assert!(!a_projection_failed(&world, run));
+
+    // Adopted from a shell whose environment names a far larger budget, with the
+    // quiet driver ended for it — the same taking-over `driver.rs` drives, once
+    // the view an operator reads calls the run parked.
+    world.until("the quiet driver to be reported parked", |world| {
+        let mut status = world.cmd(&["status", run]);
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
+    adopt
+        .env(spelling("environment"), "1000")
+        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    world
+        .run_on(adopt, "adopt --detach")
+        .exited(0)
+        .err_has("ending it to adopt the run");
+    assert_eq!(
+        world.run_json(run, "launch.json")["writeback_item_budget"],
+        Value::from(1),
+        "the adoption re-resolved the budget"
+    );
+
+    // The adopted driver's copy is inside its hold, and this test never lets it go:
+    // what ends it is the deadline.
     let _held = meeting.arrived();
     let expected = format!(
-        "project-copy exceeded {floor} seconds (the {floor} second floor; {items} items × 1 \
+        "project-copy exceeded {floor} seconds (the {floor} second floor; {items} item × 1 \
          second per item is less)"
     );
     world.until_run_file_holds(run, "driver.log", &expected);
@@ -379,6 +415,13 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
     // reads, and the adopted run carries no invented figure: the field reads as
     // `0`, which the worker resolves to the shipped default rather than to a
     // budget of zero.
+    // llmlint: ignore-block[tests_mirror_real_usage] a launch record written by **another
+    // build** is the input here, and there is no invocation a user can type that produces
+    // one: this build writes the field on every record. What is written is the one file a
+    // run *is* to an adoption — its launch record, as the build before this field left it
+    // — and everything then asserted is the real compiled binary adopting it, which is
+    // exactly how it meets a run root a preceding build wrote. `tests/e2e/compatibility.rs`
+    // makes the same argument for a journal and a record an older build wrote.
     let launch = world.run_file(none, "launch.json");
     let mut older = world.run_json(none, "launch.json");
     older
@@ -387,6 +430,7 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
         .remove("writeback_item_budget")
         .expect("the record this build writes carries the field");
     std::fs::write(&launch, older.to_string()).expect("the older record is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["adopt", none]).exited(0);
     assert_eq!(recorded_budget(&world, none), Value::from(0));
 }
@@ -395,10 +439,11 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
 /// spelling's name, and never falls through to the rung below; a value that is
 /// not a whole number of seconds is refused the same way.
 ///
-/// Zero kills every copy, so a launch that named it was not asking for the
-/// config's figure or the shipped default underneath — and a refusal that did
-/// not say which spelling carried the zero would send an operator to the wrong
-/// file.
+/// Zero is no budget at all — the floor would be the whole deadline for every
+/// plan, which is the outgrown minute the setting exists to end — so a launch
+/// that named it was not asking for the config's figure or the shipped default
+/// underneath, and a refusal that did not say which spelling carried the zero
+/// would send an operator to the wrong file.
 #[test]
 fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
     let world = World::new("writeback-budget-zero");
@@ -446,12 +491,24 @@ fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
             .err_lacks(&flag);
     }
 
-    // The config key: zero, and the key present and blank, each refused by the
-    // key's name where the document is read.
+    // The config key: zero, the key present and blank, and a value that is not a
+    // whole number of seconds at all, each refused by the key's name where the
+    // document is read.
     for (spelled, written, said) in [
         ("zero", format!("{key}: 0"), "zero"),
         ("bare", format!("{key}:"), "names nothing"),
         ("empty", format!("{key}: \"\""), "names nothing"),
+        (
+            "negative",
+            format!("{key}: -5"),
+            "not a positive whole number",
+        ),
+        (
+            "fractional",
+            format!("{key}: 2.5"),
+            "not a positive whole number",
+        ),
+        ("text", format!("{key}: ten"), "not a positive whole number"),
     ] {
         let refused = world.root.join(format!("{spelled}.yaml"));
         std::fs::write(&refused, format!("schema_version: {version}\n{written}\n"))
@@ -474,6 +531,43 @@ fn a_budget_of_zero_is_refused_by_the_spelling_that_carried_it() {
         !world.run_file("budgetzero", "launch.json").is_file(),
         "a refused launch minted a run"
     );
+}
+
+/// A variable this build cannot read as text is a rung that is *there* and names
+/// something unusable, and the launch is refused by that variable's name.
+///
+/// Discarded instead, it would read as an unset rung and hand the run whichever
+/// budget the config file names — a launch bounded by a figure its operator did
+/// not choose, with nothing said about why.
+///
+/// Unix-only for the provocation, not for the rule: an environment value that is
+/// not text is bytes, and only this platform lets a caller hand one over.
+#[test]
+#[cfg(unix)]
+fn a_budget_variable_this_build_cannot_read_refuses_the_launch_by_its_name() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let world = World::new("writeback-budget-not-text");
+    let name = "budgetnottext";
+    let path = world.plan(name, &plan_of(name, vec![agent("only", &[])]));
+    let variable = spelling("environment");
+    let not_text = OsString::from_vec(vec![0x31, 0xff, 0x30]);
+
+    let mut refused = world.cmd(&["start", &path, "--detach"]);
+    refused.env(&variable, &not_text);
+    world
+        .run_on(refused, "start")
+        .exited(REFUSED)
+        .err_has(&variable)
+        .err_has("cannot read as text");
+
+    // And a launch whose flag names one never consults the variable at all: it
+    // was not going to use it, so an unreadable one is not its problem.
+    let mut named = world.cmd(&["start", &path, &spelling("flag"), "12", "--attach"]);
+    named.env(&variable, &not_text);
+    world.run_on(named, "start").exited(0).settled();
+    assert_eq!(recorded_budget(&world, name), Value::from(12));
 }
 
 /// A config naming the key at a version that never had it is refused by that

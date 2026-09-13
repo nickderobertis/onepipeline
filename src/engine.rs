@@ -4914,8 +4914,8 @@ pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
 /// [`configured_node_validator`] reads its own — *set* rather than *usable* —
 /// but what it carries is a number rather than a command, so a value that is
 /// not a positive whole number of seconds is refused by the variable's name
-/// rather than read as the launch naming none: a budget of zero kills every
-/// copy, and a host that exported the variable as text meant something it did
+/// rather than read as the launch naming none: a budget of zero is no budget at
+/// all, and a host that exported the variable as text meant something it did
 /// not get.
 ///
 /// # Errors

@@ -753,7 +753,7 @@ pub struct LaunchRecord {
     /// since moved. Read through [`item_budget`](Self::item_budget), which is
     /// where `0` becomes "the record does not say" again: the shipped default,
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`] — and never a budget of
-    /// zero, which would kill every copy. Defaulted so a record written before
+    /// zero, which is no budget at all. Defaulted so a record written before
     /// this field existed still reads, and resolves to that default.
     ///
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
@@ -947,8 +947,9 @@ impl LaunchRecord {
     /// `None` for the `0` a record carrying no budget defaults to, and the
     /// caller takes the shipped default —
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. **Never `Some(0)`**: a
-    /// budget of zero seconds per item bounds every copy at the floor's sixty
-    /// seconds on paper and, were it multiplied through, would kill every one.
+    /// budget of zero seconds per item is no budget at all, leaving the floor as
+    /// the whole deadline for every plan — the outgrown minute the setting
+    /// exists to end.
     ///
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
     pub fn item_budget(&self) -> Option<u64> {

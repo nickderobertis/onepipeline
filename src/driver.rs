@@ -456,11 +456,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     // llmlint: ignore-end[invalid_states_unrepresentable]
 
     // The write-back's per-item budget, by the same three rungs. What differs is that
-    // every rung is *read* rather than merely present: a budget of zero would kill every
-    // copy, so the flag refuses it by its own name here, exactly as the variable and the
-    // config key refuse it by theirs where each is read — and none of the three falls
-    // through to the rung below it. The shipped default is beneath all three, and it is
-    // what the record carries when nothing named one, so the worker never decides that.
+    // every rung is *read* rather than merely present: a budget of zero is no budget at
+    // all — the floor would be the whole deadline for every plan, which is the outgrown
+    // minute the setting exists to end — so the flag refuses it by its own name here,
+    // exactly as the variable and the config key refuse it by theirs where each is read,
+    // and none of the three falls through to the rung below it. The shipped default is
+    // beneath all three, and it is what the record carries when nothing named one, so the
+    // worker never decides that.
     let writeback_item_budget = match args.writeback_item_budget {
         Some(0) => {
             return Err(Error::Invalid(crate::writeback::refused_zero_budget(
