@@ -1,0 +1,179 @@
+//! What the real-everything smoke writes on the scratch repository it creates.
+//!
+//! `just smoke-real` drives `ensure_repo` against the repository that already
+//! exists, so it never reaches the `gh repo create` call and cannot prove what a
+//! created repository is told about itself. That sentence has cost two people
+//! time: the one it used to write — "Nothing here is kept" — read as an
+//! invitation to delete, and each of them renamed the repository aside believing
+//! they were retiring leaked scratch, while the smoke went on writing to it
+//! through the redirect a rename leaves behind. So the sentence is proven here,
+//! in the offline tier, by driving the real `ensure_repo` with a `gh` on `PATH`
+//! that never reaches GitHub: it answers the probe and records every invocation.
+
+#[cfg(unix)]
+#[path = "smoke/repo.rs"]
+mod repo;
+
+#[cfg(unix)]
+mod unix {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use crate::repo;
+
+    /// A slug nothing owns: the probe is answered by the stand-in, so no name
+    /// is ever looked up.
+    const THROWAWAY: &str = "nobody/onepipeline-throwaway-smoke";
+
+    /// GitHub's cap on a repository description.
+    const DESCRIPTION_CAP: usize = 350;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("the scratch directory is removed");
+        }
+    }
+
+    fn scratch() -> Scratch {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-smoke-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).expect("a fresh scratch directory");
+        Scratch(root)
+    }
+
+    /// A `gh` that records what it was asked and answers the `repo view` probe
+    /// as `present` says, and everything else — the create, the readme wait —
+    /// as done. Put first on `PATH`, so `ensure_repo`'s own `Command::new("gh")`
+    /// resolves to it and nothing here can reach GitHub.
+    fn stand_in(root: &Path, name: &str, present: bool) -> PathBuf {
+        let bin = root.join(name);
+        fs::create_dir(&bin).expect("the stand-in has a bin directory");
+        let record = bin.join("record");
+        let probe = if present { 0 } else { 1 };
+        // One invocation per line, arguments separated by the unit separator:
+        // no argument here carries either, and a description with spaces in it
+        // has to come back as one argument.
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\037' \"$@\" >> '{record}'\nprintf '\\n' >> '{record}'\n\
+             case \"$1 $2\" in\n  'repo view') echo 'GraphQL: Could not resolve to a Repository' \
+             >&2; exit {probe} ;;\n  *) exit 0 ;;\nesac\n",
+            record = record.display()
+        );
+        let gh = bin.join("gh");
+        fs::write(&gh, script).expect("the stand-in is written");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is runnable");
+        let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+        let mut paths = vec![bin.clone()];
+        paths.extend(std::env::split_paths(&host_path));
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(paths).expect("the test PATH joins"),
+        );
+        record
+    }
+
+    /// Every `gh` invocation the stand-in saw, in order, each as its argv.
+    fn recorded(record: &Path) -> Vec<Vec<String>> {
+        fs::read_to_string(record)
+            .expect("the stand-in recorded what it was asked")
+            .lines()
+            .map(|line| {
+                line.split('\u{1f}')
+                    .filter(|arg| !arg.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn argv(invocation: &[String]) -> Vec<&str> {
+        invocation.iter().map(String::as_str).collect()
+    }
+
+    /// One test rather than two, because `PATH` is process-global: two tests
+    /// pointing it at two stand-ins from two threads would each drive the
+    /// other's.
+    #[test]
+    fn a_created_scratch_repository_is_told_it_is_kept_and_an_existing_one_is_reused() {
+        let scratch = scratch();
+
+        // Absent: the probe fails, so the repository is created, and told what
+        // it is. The other flags are the ones a scratch repository has always
+        // been created with; only the sentence changed.
+        let record = stand_in(&scratch.0, "absent", false);
+        repo::ensure_repo(THROWAWAY);
+        let invocations = recorded(&record);
+        let [probe, create, readme] = &invocations[..] else {
+            panic!("a missing repository is probed, created, and waited for, not {invocations:?}")
+        };
+        assert_eq!(argv(probe), ["repo", "view", THROWAWAY, "--json", "name"]);
+        assert_eq!(
+            argv(readme),
+            ["api", &format!("repos/{THROWAWAY}/commits/HEAD")],
+            "the readme wait is what follows the create"
+        );
+        let (description, flags) = create
+            .split_last()
+            .expect("the create invocation carries arguments");
+        assert_eq!(
+            argv(flags),
+            [
+                "repo",
+                "create",
+                THROWAWAY,
+                "--private",
+                "--add-readme",
+                "--description"
+            ],
+            "a scratch repository is created private, with a readme, and described"
+        );
+
+        // What the description says is what a person on the repository's GitHub
+        // page acts on: that it is meant to be there, that every run of the
+        // smoke uses it, that removing or renaming it retires nothing, and where
+        // the code that owns it is.
+        assert!(
+            !description.contains("Nothing here is kept"),
+            "the sentence that invited deletion is gone: {description:?}"
+        );
+        for said in [
+            "Intentional",
+            "reused by every run",
+            "never deletes it",
+            "Deleting or renaming it is no cleanup",
+            "redirecting",
+            "tests/smoke/main.rs in nickderobertis/onepipeline",
+        ] {
+            assert!(
+                description.contains(said),
+                "the description says {said:?}: {description:?}"
+            );
+        }
+        assert!(
+            description.chars().count() < DESCRIPTION_CAP,
+            "GitHub caps a description at {DESCRIPTION_CAP} characters; this one is {}",
+            description.chars().count()
+        );
+        // Named by neither its slug nor its name, so the same sentence stays
+        // true after a rename — the case that made it necessary.
+        assert!(
+            !description.contains(THROWAWAY) && !description.contains("onepipeline-smoke"),
+            "the description names no slug: {description:?}"
+        );
+
+        // Present: the probe succeeds, and nothing is created — the reuse the
+        // description promises.
+        let record = stand_in(&scratch.0, "present", true);
+        repo::ensure_repo(THROWAWAY);
+        let invocations = recorded(&record);
+        let [probe] = &invocations[..] else {
+            panic!("an existing repository is probed and reused, never recreated: {invocations:?}")
+        };
+        assert_eq!(argv(probe), ["repo", "view", THROWAWAY, "--json", "name"]);
+    }
+}
