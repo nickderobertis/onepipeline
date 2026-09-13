@@ -430,6 +430,19 @@ submission check is the only place a refusal is still whole. It is named by
 config's `envelope_reviewer`, in that order of precedence; naming none is the
 default and runs no reviewer at all.
 
+A launch may also set the **write-back item budget** — how long the settlement
+write-back allows its store's `project copy` per item it writes. The copy's
+deadline is that budget multiplied by the number of items the run projects, and
+never below the sixty-second floor every other store command is bounded by, so the
+backstop that kills an unreachable store's copy scales with the plan instead of
+being outgrown by it; a copy that outlasts its deadline is reported with the
+seconds it was allowed, the item count, the per-item budget, and whether the floor
+governed. It is named by `--writeback-item-budget SECONDS`, by
+`ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, or by a launch config's
+`writeback_item_budget`, in that order of precedence, as a positive whole number
+of seconds — zero is refused at whichever spelling carried it — and naming none
+takes ten seconds per item.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

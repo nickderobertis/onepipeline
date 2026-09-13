@@ -37,6 +37,15 @@
 //!   matching `onetaskgraph.<verb>.refuse.<n>` injects one refused call before
 //!   later calls reach that real executable, for retry journeys at this sibling
 //!   subprocess boundary.
+//! * `onetaskgraph.<verb>.rendezvous` — the address this double meets the test at
+//!   before it answers that verb, and holds until the test lets go — written by
+//!   `World::rendezvous("onetaskgraph.<verb>")`, read by `fake::meet`. The one way
+//!   to make a store command **slow** rather than wrong: the answer, once released,
+//!   is the delegated real store's own, so a journey about the deadline a command
+//!   runs under can hold `project copy` past it and assert either that the copy
+//!   still landed or that it was killed and how the refusal was worded — with no
+//!   clock inside this program deciding which. A hold the test never releases
+//!   ends when the process is killed, which is what a deadline does.
 //! * `onetaskgraph.<verb>.grow` — a JSON object whose members a *later release* of
 //!   the store added to that verb's machine answer. The delegated answer is the
 //!   real store's, and these are merged into the response, into every item of it,
@@ -340,6 +349,17 @@ fn main() -> ExitCode {
     if let Ok(reason) = std::fs::read_to_string(dir.join(format!("{name}.refuse.{nth}"))) {
         eprintln!("{}", reason.trim());
         return ExitCode::from(1);
+    }
+    // Held here, before any answer, so what the test times is the whole of what the
+    // caller waited for: a store that has not answered yet. Only "there is no such
+    // file" is no hold: an address a journey wrote and this program cannot read would
+    // otherwise answer at once while the journey timed a store that had not.
+    match std::fs::read_to_string(fake::rendezvous_script(&dir, &name)) {
+        Ok(address) => fake::meet(address.trim()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return fake::refuse(&format!("`{name}.rendezvous` could not be read: {error}"))
+        }
     }
     let answer = (nth > 1)
         .then(|| std::fs::read_to_string(dir.join(format!("{name}.{nth}"))).ok())

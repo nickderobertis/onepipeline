@@ -2268,10 +2268,16 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
 /// directory. All three only work out for the id `oneagentgraph` minted, never
 /// for this crate's, so a reset that lands there was addressed correctly.
 ///
-/// What happens to the signal *after* it lands is the sibling's: it starts a
-/// scheduled member's clock only once every member of that member's wave has
-/// settled, and the monitor shares the pacemaker's wave and runs for the whole
-/// run — so nothing consumes the signal while the run it paces is alive.
+/// What happens to the signal *after* it lands is the sibling's, and which graph
+/// run it lands in is the host's timing. The monitor's single turn settles within
+/// about a hundred milliseconds of launch; that quiesces the graph run, which
+/// stops its clock and settles, and the driver starts the next observer and
+/// records it as the launch's `graph_run`. `next` addresses whichever run the
+/// record names when it reads it, so a reset may meet a clock that consumes it
+/// and records `cron-reset`, a quiesced run that leaves it on disk, or the
+/// replacement run. The journey accepts either record under any graph run this
+/// launch has recorded — and no such record exists for an id the sibling did not
+/// mint.
 #[test]
 fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
@@ -2319,24 +2325,46 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     // llmlint: ignore-block[tests_mirror_real_usage] a pacemaker reset has no product-facing
     // result: `next` returns the surface either way, by design, because a clock that could
     // not be restarted must not cost the planner the update they asked for. The sibling's
-    // signal directory is where the reset *is*, and it is a documented location its own
-    // `signal`/`cancel` API both derive — so this is the outcome, read where the outcome
-    // lives, and asserting only on the absent error would pass against a reset that went to
-    // the wrong run. The run's own clock restarting is the sibling's half; see the module
-    // note below.
-    // Where the sibling's scheduler watches, derived from the graph run's id and
-    // nothing else. A reset addressed with this crate's run id never reaches it:
-    // `signal` refuses a run its history has no record of, which is the failure
-    // this journey used to characterise.
-    let signalled = world
-        .graph_state()
-        .join(&graph_run)
-        .join("signals")
-        .join("check-in.reset");
-    assert!(
-        signalled.is_file(),
-        "the reset did not reach the run's own signal directory: {}",
-        signalled.display()
+    // signal directory and its event log are where the reset *is* — one before a clock
+    // consumes it, the other after — and both are documented locations its own
+    // `signal`/`history` APIs derive, so this is the outcome, read where the outcome lives,
+    // and asserting only on the absent error would pass against a reset that went to the
+    // wrong run.
+    // Both derived from a graph run's id and nothing else, and read for every
+    // graph run the launch record names, re-read on each look because the driver
+    // may have replaced the observer since. A reset addressed with this crate's run
+    // id reaches none of them: `signal` refuses a run its history has no record of,
+    // which is the failure this journey used to characterise.
+    world.until(
+        "the reset to reach a check-in clock or signal directory of this launch's graph runs",
+        |world| {
+            // A look that meets the record mid-replacement looks again: Windows
+            // refuses to open a file a rename is landing on.
+            let Some(launch) = std::fs::read_to_string(world.run_file("paced", "launch.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            else {
+                return false;
+            };
+            let recorded: Vec<String> = launch["observer_runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(std::iter::once(&launch["graph_run"]))
+                .filter_map(|run| run.as_str().map(str::to_string))
+                .collect();
+            recorded.iter().any(|run| {
+                world
+                    .graph_state()
+                    .join(run)
+                    .join("signals")
+                    .join("check-in.reset")
+                    .is_file()
+                    || world.graph_journal(run).iter().any(|event| {
+                        event["kind"] == "cron-reset" && event["labels"]["member"] == "check-in"
+                    })
+            })
+        },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
 }
