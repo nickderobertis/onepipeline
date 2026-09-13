@@ -52,10 +52,10 @@ const MATCHER_FIELDS: &str = "`source`, `kind`, `run_id`, `node`, `step`, `membe
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **4** since a launch declares the command a whole reply envelope is reviewed
-/// by: `envelope_reviewer` is a key versions 1 to 3 never had, so a document
-/// carrying it is a different document and says so.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 4;
+/// **5** since a launch declares how long the settlement write-back allows its
+/// store per item it projects: `writeback_item_budget` is a key versions 1 to 4
+/// never had, so a document carrying it is a different document and says so.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 5;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -63,11 +63,12 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 4;
 /// is a file an operator wrote at a version, and what each version added is
 /// keyed to the version the document declares. An earlier config is a complete
 /// document — a version-1 one says nothing about drafting, a version-2 one says
-/// nothing about validating a node, and a version-3 one says nothing about
-/// reviewing an envelope, which is what a launch naming none of them means —
-/// and naming a later key there is refused **by that field's name**, exactly as
-/// a key no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 4] = [LAUNCH_CONFIG_SCHEMA_VERSION, 3, 2, 1];
+/// nothing about validating a node, a version-3 one says nothing about
+/// reviewing an envelope, and a version-4 one says nothing about the write-back's
+/// budget, which is what a launch naming none of them means — and naming a later
+/// key there is refused **by that field's name**, exactly as a key no version
+/// ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 5] = [LAUNCH_CONFIG_SCHEMA_VERSION, 4, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -79,9 +80,9 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 4] = [LAUNCH_CONFIG_SCHEMA_V
 /// unrelated key.
 ///
 /// The blank rule is **per key and not per schema**, for the same reason. It is
-/// the two hook keys': each was refused-when-blank from the version it arrived
-/// at, so no config on disk carries a blank one and refusing it costs nobody a
-/// launch that used to work. `pr_author_graph` has shipped since version 2 and a document
+/// the two hook keys' and the budget's: each was refused-when-blank from the
+/// version it arrived at, so no config on disk carries a blank one and refusing
+/// it costs nobody a launch that used to work. `pr_author_graph` has shipped since version 2 and a document
 /// already written may carry a blank one; whatever that meant then it goes on
 /// meaning, because a build that started refusing it would break a config over
 /// a key the operator did not change. What it means is settled where the value
@@ -91,7 +92,135 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
     ("envelope_reviewer", 4, BlankValue::Refused),
+    (WRITEBACK_ITEM_BUDGET_KEY, 5, BlankValue::Refused),
 ];
+
+/// The launch-config key naming the write-back's per-item budget.
+///
+/// Spelled once, because two places refuse by it: [`LaunchConfig::load`] for a
+/// document whose version never had it, and [`item_budget`] for one that
+/// carries it blank or as zero — a number has no blank to read, so the value's
+/// own reader is where those two are turned down.
+const WRITEBACK_ITEM_BUDGET_KEY: &str = "writeback_item_budget";
+
+/// How a document carries one of the keys [`KEYS_BY_VERSION`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carried {
+    /// The key is not in the document.
+    Absent,
+    /// The key is there and holds nothing but whitespace.
+    Blank,
+    /// The key is there and names something.
+    Named,
+}
+
+impl Carried {
+    fn text(value: Option<&str>) -> Self {
+        match value {
+            None => Self::Absent,
+            Some(text) if text.trim().is_empty() => Self::Blank,
+            Some(_) => Self::Named,
+        }
+    }
+}
+
+/// The refusal for a key present and holding nothing, by the key's own name.
+///
+/// A decision half-written: it reads as "this launch names one" everywhere
+/// downstream. One sentence, whichever reader turns it down.
+fn refused_blank(key: &str) -> String {
+    format!(
+        "`{key}` is present and names nothing — give it a value, or leave the key out to \
+         declare that this launch has none"
+    )
+}
+
+/// Read `writeback_item_budget` as the positive whole number of seconds it is.
+///
+/// Serde's own reading of a `u64` would take the key present and holding
+/// nothing — `writeback_item_budget:` — as the document omitting it, which is the
+/// half-written decision every other refused-when-blank key is turned down for,
+/// and would accept zero, which kills every copy. Both are refused here **by the
+/// key's name**, where the value is read, because a number has no blank for
+/// [`LaunchConfig::load`]'s loop to see; the blank's sentence is the one that
+/// loop uses, and zero's is the one the flag and the variable use.
+fn item_budget<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    struct Budget;
+
+    impl Budget {
+        fn refused<E: serde::de::Error>(held: &dyn std::fmt::Display) -> E {
+            E::custom(format!(
+                "`{WRITEBACK_ITEM_BUDGET_KEY}` holds {held}, which is not a positive whole \
+                 number of seconds per item — give it one, or leave the key out to take \
+                 {} seconds per item",
+                crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+            ))
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for Budget {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a positive whole number of seconds per item")
+        }
+
+        fn visit_u64<E: serde::de::Error>(
+            self,
+            seconds: u64,
+        ) -> std::result::Result<Self::Value, E> {
+            match seconds {
+                0 => Err(E::custom(crate::writeback::refused_zero_budget(&format!(
+                    "`{WRITEBACK_ITEM_BUDGET_KEY}`"
+                )))),
+                seconds => Ok(Some(seconds)),
+            }
+        }
+
+        fn visit_i64<E: serde::de::Error>(
+            self,
+            seconds: i64,
+        ) -> std::result::Result<Self::Value, E> {
+            match u64::try_from(seconds) {
+                Ok(seconds) => self.visit_u64(seconds),
+                Err(_) => Err(Self::refused(&seconds)),
+            }
+        }
+
+        fn visit_f64<E: serde::de::Error>(
+            self,
+            seconds: f64,
+        ) -> std::result::Result<Self::Value, E> {
+            Err(Self::refused(&seconds))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<Self::Value, E> {
+            if text.trim().is_empty() {
+                return Err(E::custom(refused_blank(WRITEBACK_ITEM_BUDGET_KEY)));
+            }
+            Err(Self::refused(&format!("{text:?}")))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Err(E::custom(refused_blank(WRITEBACK_ITEM_BUDGET_KEY)))
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            self.visit_unit()
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(
+            self,
+            deserializer: D2,
+        ) -> std::result::Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(Budget)
+}
 
 /// What a key present and holding nothing means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +306,29 @@ pub struct LaunchConfig {
     /// launch that named none is a document an earlier reader still accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_reviewer: Option<String>,
+    /// How long this launch's settlement write-back allows its store's
+    /// `project copy` per item it writes, in seconds, if the launch says.
+    ///
+    /// The fifth launch-level decision, and it is written down beside a plan
+    /// for the reason the first four are: how patient a run is with the board
+    /// it projects to is a property of the store a team keeps rather than of
+    /// one launch. `--writeback-item-budget` spells the same thing for a launch
+    /// that would rather say it inline and overrides this, as does
+    /// `ONEPIPELINE_WRITEBACK_ITEM_BUDGET` between them; beneath all three is
+    /// the shipped ten seconds per item. A positive whole number: the key
+    /// present and blank, or naming zero, is refused by its name where it is
+    /// read — see [`item_budget`].
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Omitted when absent, so a config that names no budget
+    /// round-trips as the file wrote it — and so what this crate writes for a
+    /// launch that named none is a document an earlier reader still accepts.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "item_budget"
+    )]
+    pub writeback_item_budget: Option<u64>,
 }
 
 impl Default for LaunchConfig {
@@ -187,6 +339,7 @@ impl Default for LaunchConfig {
             pr_author_graph: None,
             node_validator: None,
             envelope_reviewer: None,
+            writeback_item_budget: None,
         }
     }
 }
@@ -227,12 +380,30 @@ impl LaunchConfig {
         }
         // The field's own name, not the version's number: an operator who wrote a
         // drafting graph and had it dropped would find that out from a change
-        // request nobody drafted a body for, and one who wrote a validator would
-        // find it out from a node nothing checked.
-        let carried: [(&str, Option<&String>); 3] = [
-            ("pr_author_graph", config.pr_author_graph.as_ref()),
-            ("node_validator", config.node_validator.as_ref()),
-            ("envelope_reviewer", config.envelope_reviewer.as_ref()),
+        // request nobody drafted a body for, one who wrote a validator would
+        // find it out from a node nothing checked, and one who wrote a budget
+        // would find it out from a settlement that never reached the board.
+        let carried: [(&str, Carried); 4] = [
+            (
+                "pr_author_graph",
+                Carried::text(config.pr_author_graph.as_deref()),
+            ),
+            (
+                "node_validator",
+                Carried::text(config.node_validator.as_deref()),
+            ),
+            (
+                "envelope_reviewer",
+                Carried::text(config.envelope_reviewer.as_deref()),
+            ),
+            // Never `Blank` here: a blank budget has no number to be read as, so
+            // `item_budget` refused it by name before this document existed.
+            (
+                WRITEBACK_ITEM_BUDGET_KEY,
+                config
+                    .writeback_item_budget
+                    .map_or(Carried::Absent, |_| Carried::Named),
+            ),
         ];
         for (key, value) in carried {
             let Some((arrived, blank)) = KEYS_BY_VERSION
@@ -241,7 +412,7 @@ impl LaunchConfig {
             else {
                 continue;
             };
-            if value.is_some() && config.schema_version < arrived {
+            if value != Carried::Absent && config.schema_version < arrived {
                 return Err(named(format!(
                     "`{key}` is a schema {arrived} key and this config declares schema_version \
                      {} — set `schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}`",
@@ -258,11 +429,8 @@ impl LaunchConfig {
             // already carry a blank value in a file somebody wrote, and turning
             // that document down would break a launch over a key its author
             // never touched — see [`KEYS_BY_VERSION`].
-            if blank == BlankValue::Refused && value.is_some_and(|value| value.trim().is_empty()) {
-                return Err(named(format!(
-                    "`{key}` is present and names nothing — give it a value, or leave the \
-                     key out to declare that this launch has none"
-                )));
+            if blank == BlankValue::Refused && value == Carried::Blank {
+                return Err(named(refused_blank(key)));
             }
         }
         Ok(config)
@@ -783,11 +951,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v4.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v5.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 3] = [
+    const GOLDEN_EARLIER: [(u32, &str); 4] = [
+        (4, include_str!("../tests/golden/launch-config-v4.json")),
         (3, include_str!("../tests/golden/launch-config-v3.json")),
         (2, include_str!("../tests/golden/launch-config-v2.json")),
         (1, include_str!("../tests/golden/launch-config-v1.json")),
@@ -838,6 +1007,7 @@ mod tests {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
+            writeback_item_budget: Some(10),
         }
     }
 
@@ -879,10 +1049,13 @@ mod tests {
                     filters: pinned_filters(),
                     // Version 2 is the one that declared the drafting graph, and
                     // it names one; version 1 never had the key at all. Version 3
-                    // declared the node validator the same way.
+                    // declared the node validator the same way, and version 4 the
+                    // envelope reviewer.
                     pr_author_graph: (version >= 2).then(|| "./graphs/pr-author.yaml".to_string()),
                     node_validator: (version >= 3).then(|| "./scripts/check-node.sh".to_string()),
-                    envelope_reviewer: None,
+                    envelope_reviewer: (version >= 4)
+                        .then(|| "./scripts/review-envelope.sh".to_string()),
+                    writeback_item_budget: None,
                 }
             );
             assert!(
@@ -908,13 +1081,14 @@ mod tests {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
+            writeback_item_budget: Some(15),
             ..LaunchConfig::default()
         };
         let rendered = serde_json::to_string(&named).expect("it serialises");
         assert_eq!(
             rendered,
             format!(
-                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh"}}"#
+                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh","writeback_item_budget":15}}"#
             )
         );
         assert_eq!(
@@ -924,7 +1098,12 @@ mod tests {
 
         let unnamed = LaunchConfig::default();
         let rendered = serde_json::to_string(&unnamed).expect("it serialises");
-        for key in ["pr_author_graph", "node_validator", "envelope_reviewer"] {
+        for key in [
+            "pr_author_graph",
+            "node_validator",
+            "envelope_reviewer",
+            WRITEBACK_ITEM_BUDGET_KEY,
+        ] {
             assert!(
                 !rendered.contains(key),
                 "a launch that named no {key} was written one: {rendered}"
@@ -969,6 +1148,7 @@ mod tests {
             assert_eq!(minimal.pr_author_graph, None);
             assert_eq!(minimal.node_validator, None);
             assert_eq!(minimal.envelope_reviewer, None);
+            assert_eq!(minimal.writeback_item_budget, None);
         }
     }
 
@@ -1052,6 +1232,7 @@ mod tests {
                 assert!(read.filters.vcs.is_some(), "the block was dropped");
                 assert_eq!(read.node_validator, None);
                 assert_eq!(read.envelope_reviewer, None);
+                assert_eq!(read.writeback_item_budget, None);
             }
         }
         std::fs::remove_dir_all(&root).ok();
@@ -1095,6 +1276,7 @@ mod tests {
             ("pr_author_graph", 2, "./graphs/pr-author.yaml"),
             ("node_validator", 3, "./scripts/check-node.sh"),
             ("envelope_reviewer", 4, "./scripts/review-envelope.sh"),
+            (WRITEBACK_ITEM_BUDGET_KEY, 5, "12"),
         ] {
             let early = LaunchConfig::load(&written(
                 &format!("early-{key}.yaml"),
@@ -1111,10 +1293,14 @@ mod tests {
                 &format!("schema_version: {arrived}\n{key}: {value}\n"),
             ))
             .expect("the version that declares the key reads it");
+            let budget = read
+                .writeback_item_budget
+                .map(|seconds| seconds.to_string());
             let named = match key {
                 "pr_author_graph" => read.pr_author_graph.as_deref(),
                 "node_validator" => read.node_validator.as_deref(),
-                _ => read.envelope_reviewer.as_deref(),
+                "envelope_reviewer" => read.envelope_reviewer.as_deref(),
+                _ => budget.as_deref(),
             };
             assert_eq!(named, Some(value));
         }
@@ -1132,6 +1318,60 @@ mod tests {
             assert!(
                 said.contains(&format!("`{key}`")) && said.contains("names nothing"),
                 "{said}"
+            );
+        }
+
+        // The budget present and blank is the same half-written decision, in
+        // each spelling a YAML author reaches for: the bare key, and an empty or
+        // whitespace string. A number has no blank to be read as, so serde's own
+        // reading would take the first as the key omitted and the other two as
+        // a type it did not expect — and each has to be refused by the key's
+        // own name instead, with the sentence the hook keys are.
+        for (spelled, written_as) in [
+            ("bare", format!("{WRITEBACK_ITEM_BUDGET_KEY}:")),
+            ("empty", format!("{WRITEBACK_ITEM_BUDGET_KEY}: \"\"")),
+            ("spaces", format!("{WRITEBACK_ITEM_BUDGET_KEY}: \"   \"")),
+        ] {
+            let blank = LaunchConfig::load(&written(
+                &format!("blank-budget-{spelled}.yaml"),
+                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{written_as}\n"),
+            ))
+            .expect_err("a budget that names nothing is refused");
+            let said = blank.to_string();
+            assert!(
+                said.contains(&format!("`{WRITEBACK_ITEM_BUDGET_KEY}`")),
+                "a {spelled} budget was not refused by the key's name: {said}"
+            );
+        }
+        // And a budget of zero is refused by name too, rather than read as a
+        // launch that named none: zero kills every copy, so it never falls
+        // through to the shipped default.
+        let zero = LaunchConfig::load(&written(
+            "zero-budget.yaml",
+            &format!(
+                "schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{WRITEBACK_ITEM_BUDGET_KEY}: 0\n"
+            ),
+        ))
+        .expect_err("a budget of zero is refused");
+        let said = zero.to_string();
+        assert!(
+            said.contains(&format!("`{WRITEBACK_ITEM_BUDGET_KEY}`")) && said.contains("zero"),
+            "{said}"
+        );
+        // A negative or fractional number is not a whole number of seconds, and
+        // the refusal still names the key.
+        for (spelled, value) in [("negative", "-5"), ("fractional", "2.5")] {
+            let refused = LaunchConfig::load(&written(
+                &format!("{spelled}-budget.yaml"),
+                &format!(
+                    "schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{WRITEBACK_ITEM_BUDGET_KEY}: {value}\n"
+                ),
+            ))
+            .expect_err("a budget that is not a whole number of seconds is refused");
+            let said = refused.to_string();
+            assert!(
+                said.contains(WRITEBACK_ITEM_BUDGET_KEY),
+                "a {spelled} budget was not refused by the key's name: {said}"
             );
         }
 

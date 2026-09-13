@@ -4908,6 +4908,48 @@ pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
+/// What [`cli::WRITEBACK_ITEM_BUDGET_ENV`] says, when it says anything at all.
+///
+/// The middle rung of the budget's three, read at the launch as
+/// [`configured_node_validator`] reads its own — *set* rather than *usable* —
+/// but what it carries is a number rather than a command, so a value that is
+/// not a positive whole number of seconds is refused by the variable's name
+/// rather than read as the launch naming none: a budget of zero kills every
+/// copy, and a host that exported the variable as text meant something it did
+/// not get.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a value that is not a positive whole number of seconds,
+/// and for one this build cannot read as text.
+///
+/// [`cli::WRITEBACK_ITEM_BUDGET_ENV`]: crate::cli::WRITEBACK_ITEM_BUDGET_ENV
+pub(crate) fn configured_writeback_item_budget() -> Result<Option<u64>> {
+    use crate::cli::WRITEBACK_ITEM_BUDGET_ENV;
+    let value = match std::env::var(WRITEBACK_ITEM_BUDGET_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Error::Invalid(format!(
+                "{WRITEBACK_ITEM_BUDGET_ENV} holds something this build cannot read as text, \
+                 so the seconds per item it names cannot be resolved — set it to a positive \
+                 whole number, or unset it to take the launch config's or the shipped default"
+            )))
+        }
+    };
+    match value.trim().parse::<u64>() {
+        Ok(0) => Err(Error::Invalid(crate::writeback::refused_zero_budget(
+            WRITEBACK_ITEM_BUDGET_ENV,
+        ))),
+        Ok(seconds) => Ok(Some(seconds)),
+        Err(_) => Err(Error::Invalid(format!(
+            "{WRITEBACK_ITEM_BUDGET_ENV} holds {value:?}, which is not a whole number of \
+             seconds per item — set it to a positive whole number, or unset it to take the \
+             launch config's or the shipped default"
+        ))),
+    }
+}
+
 fn project_dir() -> std::path::PathBuf {
     std::env::var_os(PROJECT_DIR_ENV)
         .map(std::path::PathBuf::from)

@@ -454,6 +454,27 @@ fn start(args: &StartArgs) -> Result<i32> {
         .map(|command| command.trim().to_string())
         .filter(|command| !command.is_empty());
     // llmlint: ignore-end[invalid_states_unrepresentable]
+
+    // The write-back's per-item budget, by the same three rungs. What differs is that
+    // every rung is *read* rather than merely present: a budget of zero would kill every
+    // copy, so the flag refuses it by its own name here, exactly as the variable and the
+    // config key refuse it by theirs where each is read — and none of the three falls
+    // through to the rung below it. The shipped default is beneath all three, and it is
+    // what the record carries when nothing named one, so the worker never decides that.
+    let writeback_item_budget = match args.writeback_item_budget {
+        Some(0) => {
+            return Err(Error::Invalid(crate::writeback::refused_zero_budget(
+                "--writeback-item-budget",
+            )))
+        }
+        Some(seconds) => seconds,
+        None => match engine::configured_writeback_item_budget()? {
+            Some(seconds) => seconds,
+            None => declared
+                .writeback_item_budget
+                .unwrap_or(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
+        },
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -551,6 +572,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         started: String::new(),
         started_at: sys::now_rfc3339(),
         heartbeat_interval: args.heartbeat_interval,
+        writeback_item_budget,
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
         adoptions: 0,
@@ -3667,6 +3689,7 @@ mod tests {
             started: started.to_string(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
+            writeback_item_budget: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

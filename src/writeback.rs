@@ -60,6 +60,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::cli::{DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_COMMAND_FLOOR_SECONDS};
 use crate::edits::Operation;
 use crate::event::Source;
 use crate::graph::{Landing, NodeStatus};
@@ -83,8 +84,9 @@ const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
 const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // Cross-platform runners have measured real sibling commands taking longer than ten seconds
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
-// latency target: projection stays off the reconcile loop while the child runs.
-const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+// latency target: projection stays off the reconcile loop while the child runs. It is the
+// whole deadline for the reads, and the floor under the copy's — see [`Deadline`].
+const COMMAND_LIMIT: Duration = Duration::from_secs(WRITEBACK_COMMAND_FLOOR_SECONDS);
 // The retry schedule, chosen from the refusal that produces it in practice: a hosted
 // destination's rate limiter, which every further attempt extends. It starts where a fixed
 // quarter-second schedule did, so a projection that fails once still lands unnoticeably
@@ -99,6 +101,89 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
+
+/// How long one store command may run, and the account a refusal gives of the figure.
+///
+/// The reads are bounded by [`COMMAND_LIMIT`] alone: a project, and one page of its
+/// tasks, are the same size whatever the plan. The copy is not — it writes one item per
+/// node — so its deadline is the launch's per-item budget multiplied by how many nodes the
+/// snapshot holds, which is the same list an [`Unprojected`] surface names, and the floor
+/// governs until a plan is large enough to lift it. Measured: a run of 34 items outlasted
+/// the fixed sixty seconds, and its settlement never reached the board. The refusal says
+/// which of the two governed and what it was computed from, because the one line on the
+/// driver's stderr and the surface built from it are all anybody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Deadline {
+    within: Duration,
+    /// What the refusal says after the seconds: nothing for a plain floor, and the
+    /// arithmetic for a figure that was computed.
+    account: String,
+}
+
+impl Deadline {
+    /// The fixed floor, which is the whole deadline for a read.
+    fn floor() -> Self {
+        Self {
+            within: COMMAND_LIMIT,
+            account: String::new(),
+        }
+    }
+
+    /// The copy's deadline: `max(floor, per_item × items)`, and the account of it.
+    fn for_copy(per_item: Duration, items: usize) -> Self {
+        let computed = per_item.saturating_mul(u32::try_from(items).unwrap_or(u32::MAX));
+        let arithmetic = format!(
+            "{items} {} × {} {} per item",
+            if items == 1 { "item" } else { "items" },
+            per_item.as_secs(),
+            if per_item.as_secs() == 1 {
+                "second"
+            } else {
+                "seconds"
+            }
+        );
+        if computed > COMMAND_LIMIT {
+            return Self {
+                within: computed,
+                account: format!(" ({arithmetic})"),
+            };
+        }
+        Self {
+            within: COMMAND_LIMIT,
+            account: format!(
+                " (the {} second floor; {arithmetic} is {})",
+                COMMAND_LIMIT.as_secs(),
+                if computed == COMMAND_LIMIT {
+                    "the same"
+                } else {
+                    "less"
+                }
+            ),
+        }
+    }
+
+    /// The one line a command that outlasted this is refused with.
+    fn refusal(&self, name: &str) -> String {
+        format!(
+            "{name} exceeded {} seconds{}",
+            self.within.as_secs(),
+            self.account
+        )
+    }
+}
+
+/// The refusal for a per-item budget of zero, wherever one is named.
+///
+/// One sentence for the flag, the variable and the config key, each naming the spelling
+/// that carried it: a budget of zero would kill every copy, so it is refused at the rung
+/// that named it rather than falling through to the one below.
+pub(crate) fn refused_zero_budget(spelling: &str) -> String {
+    format!(
+        "{spelling} names a write-back budget of zero seconds per item, which would kill \
+         every copy — give it a positive whole number of seconds, or leave it out to take \
+         {DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS} seconds per item"
+    )
+}
 
 #[derive(Clone, PartialEq)]
 struct Snapshot {
@@ -216,6 +301,7 @@ impl Writeback {
         } else {
             launch.dir.clone()
         };
+        let per_item = per_item_budget(launch);
         // llmlint: ignore-block[changed_behavior_has_e2e] A host refusing one thread while
         // continuing to run this process is resource exhaustion no real CLI journey can
         // arrange at this boundary. Every reachable worker failure is covered against the
@@ -223,7 +309,7 @@ impl Writeback {
         // the projection and leaves the run unchanged.
         std::thread::Builder::new()
             .name(format!("writeback-{}", paths.run))
-            .spawn(move || worker(binary, launch_dir, run_dir, worker_pending))
+            .spawn(move || worker(binary, launch_dir, run_dir, per_item, worker_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self { pending };
@@ -367,10 +453,24 @@ impl Drop for Writeback {
     }
 }
 
+/// How long the copy is allowed per item, as this run's launch chose.
+///
+/// Off the launch record rather than this process's environment, so a driver a fresh
+/// `adopt` starts bounds its copies as the launch resolved them; a record written before
+/// the field existed names none, and runs under the shipped default.
+fn per_item_budget(launch: &LaunchRecord) -> Duration {
+    Duration::from_secs(
+        launch
+            .item_budget()
+            .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
+    )
+}
+
 fn worker(
     binary: PathBuf,
     launch_dir: PathBuf,
     run_dir: PathBuf,
+    per_item: Duration,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
     // The consecutive failures of the streak in progress, and the whole of what this worker
@@ -398,7 +498,7 @@ fn worker(
                 .take()
                 .expect("the worker was woken by a snapshot")
         };
-        match project(&binary, &launch_dir, &run_dir, &snapshot) {
+        match project(&binary, &launch_dir, &run_dir, per_item, &snapshot) {
             Ok(()) => {
                 if failures > 0 {
                     eprintln!(
@@ -504,6 +604,7 @@ fn project(
     binary: &Path,
     launch_dir: &Path,
     run_dir: &Path,
+    per_item: Duration,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
     let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
@@ -528,7 +629,16 @@ fn project(
         "--set",
         &format!("sources.{SHADOW_SOURCE}.config.root={root}"),
     ];
-    let output = bounded_output(binary, launch_dir, run_dir, "project-copy", &args)?;
+    // The one command that is linear in plan size, so the one whose deadline is.
+    let deadline = Deadline::for_copy(per_item, snapshot.nodes.len());
+    let output = bounded_output(
+        binary,
+        launch_dir,
+        run_dir,
+        "project-copy",
+        &args,
+        &deadline,
+    )?;
     if output.status.success() {
         Ok(())
     } else {
@@ -547,7 +657,14 @@ fn destination_project(
     snapshot: &Snapshot,
 ) -> Result<DestinationProjectItem, String> {
     let args = ["project", "show", snapshot.project.as_str(), "--json"];
-    let output = bounded_output(binary, launch_dir, run_dir, "project-show", &args)?;
+    let output = bounded_output(
+        binary,
+        launch_dir,
+        run_dir,
+        "project-show",
+        &args,
+        &Deadline::floor(),
+    )?;
     if !output.status.success() {
         return Err(format!(
             "project show exited {}: {}",
@@ -616,7 +733,14 @@ fn destination_origins(
         // Making the real sibling hang requires host-level process suspension, not an
         // input exposed by either CLI, and substituting a hanging script would mock the
         // exact executable boundary the journey is required to drive.
-        let output = bounded_output(binary, launch_dir, run_dir, "task-list", &args)?;
+        let output = bounded_output(
+            binary,
+            launch_dir,
+            run_dir,
+            "task-list",
+            &args,
+            &Deadline::floor(),
+        )?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         if !output.status.success() {
             return Err(format!(
@@ -682,6 +806,7 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
     run_dir: &Path,
     name: &str,
     args: &[S],
+    deadline: &Deadline,
 ) -> Result<Output, String> {
     let stdout = run_dir.join(format!("writeback-{name}.stdout"));
     let stderr = run_dir.join(format!("writeback-{name}.stderr"));
@@ -703,16 +828,13 @@ fn bounded_output<S: AsRef<std::ffi::OsStr>>(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < COMMAND_LIMIT => {
+            Ok(None) if started.elapsed() < deadline.within => {
                 std::thread::sleep(Duration::from_millis(25));
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "{name} exceeded {} seconds",
-                    COMMAND_LIMIT.as_secs()
-                ));
+                return Err(deadline.refusal(name));
             }
             Err(error) => return Err(format!("cannot wait for {name}: {error}")),
         }
@@ -1137,10 +1259,11 @@ fn encoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
-        Pending, ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY,
-        LANDING_COMMIT_KEY, LANDING_KEY,
+        per_item_budget, projected, write_shadow, Deadline, DestinationLabel,
+        DestinationProjectItem, Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState,
+        Writeback, CHANGE_URL_KEY, COMMAND_LIMIT, LANDING_COMMIT_KEY, LANDING_KEY,
     };
+    use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
     use crate::ledger::{LaunchRecord, RunPaths};
     use crate::plan::Node;
@@ -1157,6 +1280,93 @@ mod tests {
             snapshot.dir = PathBuf::from("writeback");
             snapshot.statuses = BTreeMap::from([("node".to_owned(), status)]);
         })
+    }
+
+    /// The copy's deadline is the per-item budget multiplied by the item count, and never
+    /// below the floor; the refusal says which governed and what it was computed from.
+    ///
+    /// The incident: 34 items under the fixed sixty seconds. Under the shipped budget that
+    /// run is allowed 340, and the line an operator reads says so — and a plan the floor
+    /// still governs says that instead, rather than a figure that was never the deadline.
+    #[test]
+    fn the_copy_deadline_is_the_budget_times_the_items_and_never_below_the_floor() {
+        let shipped = Duration::from_secs(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS);
+        let lifted = Deadline::for_copy(shipped, 34);
+        assert_eq!(lifted.within, Duration::from_secs(340));
+        assert_eq!(
+            lifted.refusal("project-copy"),
+            "project-copy exceeded 340 seconds (34 items × 10 seconds per item)"
+        );
+
+        let floored = Deadline::for_copy(shipped, 2);
+        assert_eq!(floored.within, COMMAND_LIMIT);
+        assert_eq!(
+            floored.refusal("project-copy"),
+            "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds \
+             per item is less)"
+        );
+
+        // Exactly the floor is still the floor, said as such rather than as "less".
+        let level = Deadline::for_copy(shipped, 6);
+        assert_eq!(level.within, COMMAND_LIMIT);
+        assert!(
+            level
+                .refusal("project-copy")
+                .ends_with("6 items × 10 seconds per item is the same)"),
+            "{}",
+            level.refusal("project-copy")
+        );
+
+        // One of each, in the singular, so the line reads as a sentence.
+        let one = Deadline::for_copy(Duration::from_secs(1), 1);
+        assert_eq!(
+            one.refusal("project-copy"),
+            "project-copy exceeded 60 seconds (the 60 second floor; 1 item × 1 second per \
+             item is less)"
+        );
+
+        // The reads are the floor alone, and their refusal is the line it always was.
+        let read = Deadline::floor();
+        assert_eq!(read.within, COMMAND_LIMIT);
+        assert_eq!(
+            read.refusal("project-show"),
+            "project-show exceeded 60 seconds"
+        );
+        assert_eq!(read.refusal("task-list"), "task-list exceeded 60 seconds");
+
+        // An item count no budget could be multiplied by saturates rather than overflowing:
+        // a deadline that wrapped to nothing would kill every copy of a very large plan.
+        let vast = Deadline::for_copy(Duration::from_secs(u64::MAX / 2), usize::MAX);
+        assert!(vast.within >= COMMAND_LIMIT);
+    }
+
+    /// The budget the worker runs under is the one the launch record retained, and a
+    /// record written before the field existed runs under the shipped default rather than
+    /// under a budget of zero.
+    #[test]
+    fn the_per_item_budget_is_the_launch_records_or_the_shipped_default() {
+        let paths = RunPaths {
+            run: "budget".to_owned(),
+            dir: PathBuf::from("budget"),
+        };
+        let chosen = LaunchRecord {
+            writeback_item_budget: 25,
+            ..a_launch(&paths)
+        };
+        assert_eq!(per_item_budget(&chosen), Duration::from_secs(25));
+
+        let older: LaunchRecord = serde_json::from_value(json!({
+            "run_id": "older",
+            "project": "plans:older",
+            "launcher": "test",
+        }))
+        .expect("a record predating the field reads");
+        assert_eq!(older.item_budget(), None);
+        assert_eq!(
+            per_item_budget(&older),
+            Duration::from_secs(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+        );
+        assert!(!per_item_budget(&older).is_zero());
     }
 
     #[test]

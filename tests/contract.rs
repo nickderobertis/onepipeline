@@ -19,7 +19,11 @@ use oneagentgraph::persona::{merge, Persona};
 use onepipeline::channel::{
     allows, Author, Command as Edit, Dependents, Reply, SettleOutcome, SurfaceKind,
 };
-use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
+use onepipeline::cli::{
+    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_COMMAND_FLOOR_SECONDS,
+    WRITEBACK_ITEM_BUDGET_ENV,
+};
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
     EXIT_NODE_SETTLED, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS,
@@ -2395,6 +2399,173 @@ fn the_envelope_reviewer_surface_is_what_the_divergence_record_names() {
         prose.contains(prefix),
         "the README does not state the `{prefix}` line a reviewer declares on"
     );
+}
+
+/// The write-back item budget this build carries **beyond** the contract.
+///
+/// The contract is committed as approved and names none of it, so entry 71 is
+/// the only place it is written down — and a divergence nothing gates quietly
+/// stops being true. The entry's own block is the source: what parses here is
+/// what an operator would type, export, or write in a config, and the two
+/// numbers beneath the three spellings are the constants the code carries.
+#[test]
+fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("71.");
+    let budget = &block["budget"];
+
+    // Named three ways, with the config key at the version the entry states.
+    assert_eq!(budget["config_key"].as_str(), Some("writeback_item_budget"));
+    let at = budget["config_schema_version"]
+        .as_u64()
+        .expect("entry 71 states the version the key arrived at");
+    let arrived = u32::try_from(at).expect("a version fits");
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&arrived)
+            && arrived <= LAUNCH_CONFIG_SCHEMA_VERSION,
+        "entry 71 states the budget key arrived at schema {arrived}, which is not a \
+         version this build reads"
+    );
+    let named: LaunchConfig = serde_json::from_value(json!({
+        "schema_version": at,
+        "writeback_item_budget": 12,
+    }))
+    .expect("a launch config naming a budget parses");
+    assert_eq!(named.writeback_item_budget, Some(12));
+    // At **no** earlier version this build reads: the key is refused by its own
+    // name there, and a config written before the setting existed still loads
+    // and says nothing about it.
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
+        let earlier: LaunchConfig =
+            serde_json::from_value(json!({"schema_version": version})).expect("it parses");
+        assert_eq!(earlier.writeback_item_budget, None);
+        if version < arrived {
+            let dir = std::env::temp_dir().join(format!(
+                "onepipeline-contract-budget-{}-{version}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            let path = dir.join("launch.yaml");
+            std::fs::write(
+                &path,
+                format!("schema_version: {version}\nwriteback_item_budget: 12\n"),
+            )
+            .expect("the config is written");
+            let refused = LaunchConfig::load(&path)
+                .expect_err("a version that never had the key refuses it")
+                .to_string();
+            assert!(
+                refused.contains("`writeback_item_budget`")
+                    && refused.contains(&format!("schema {arrived} key")),
+                "schema {version} did not refuse the key by its name: {refused}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // The flag is the one `start` actually takes, asked of the parser rather
+    // than of a list beside it.
+    let flag = budget["flag"].as_str().expect("entry 71 names the flag");
+    let parsed = Cli::try_parse_from(["onepipeline", "start", "plan.json", flag, "12"])
+        .expect("the flag entry 71 names is one `start` takes");
+    let Command::Start(started) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(started.writeback_item_budget, Some(12));
+    // And naming none leaves the flag unset, so the rungs beneath it are consulted.
+    let parsed = Cli::try_parse_from(["onepipeline", "start", "plan.json"]).expect("it parses");
+    let Command::Start(unset) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(unset.writeback_item_budget, None);
+
+    // The environment name is the constant the engine reads, and the precedence
+    // is the order the driver resolves in — the same order the two hooks take.
+    assert_eq!(
+        budget["environment"].as_str(),
+        Some(WRITEBACK_ITEM_BUDGET_ENV),
+        "entry 71 names a different variable than the engine reads"
+    );
+    let precedence: Vec<String> = serde_json::from_value(budget["precedence"].clone())
+        .expect("entry 71 states the order it proposes");
+    assert_eq!(precedence, ["flag", "environment", "config_key"]);
+
+    // The two numbers beneath the spellings are the constants the code carries.
+    assert_eq!(
+        budget["default_seconds"].as_u64(),
+        Some(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS),
+        "entry 71 states a different shipped default than the code carries"
+    );
+    assert_eq!(
+        budget["floor_seconds"].as_u64(),
+        Some(WRITEBACK_COMMAND_FLOOR_SECONDS),
+        "entry 71 states a different floor than the code carries"
+    );
+    // A shipped default of zero would kill every copy, so it is held against the
+    // block's own number rather than asserted constant.
+    assert!(
+        budget["default_seconds"].as_u64().is_some_and(|seconds| seconds > 0),
+        "entry 71 states a shipped default of zero"
+    );
+    // And each worked example is the arithmetic the entry states, computed from
+    // those two constants: the deadline is the floor or the product, whichever
+    // is larger, and the refusal names the one that governed.
+    let examples = budget["examples"]
+        .as_array()
+        .expect("entry 71 works an example");
+    assert!(!examples.is_empty(), "{budget}");
+    for example in examples {
+        let items = example["items"].as_u64().expect("an item count");
+        let per_item = example["budget_seconds"].as_u64().expect("a budget");
+        let deadline = example["deadline_seconds"].as_u64().expect("a deadline");
+        assert_eq!(
+            deadline,
+            (per_item * items).max(WRITEBACK_COMMAND_FLOOR_SECONDS),
+            "entry 71's example is not the arithmetic it states: {example}"
+        );
+        let refusal = example["refusal"].as_str().expect("the refusal");
+        assert!(
+            refusal.starts_with(&format!("project-copy exceeded {deadline} seconds ("))
+                && refusal.contains(&format!("{items} items × {per_item} seconds per item")),
+            "entry 71's refusal does not name what it computed: {refusal}"
+        );
+        assert_eq!(
+            refusal.contains("floor"),
+            deadline == WRITEBACK_COMMAND_FLOOR_SECONDS,
+            "entry 71's refusal says the floor governed where it did not, or the reverse: \
+             {refusal}"
+        );
+    }
+
+    // The README is a **second copy** of all of this, in the prose an operator
+    // meets it in, and nothing compiles that. So the entry is held against it
+    // here: every spelling, in the order the entry proposes, and the default.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut found: Vec<usize> = Vec::new();
+    for spelling in &precedence {
+        let named = budget[spelling.as_str()]
+            .as_str()
+            .expect("entry 71 names it");
+        found.push(prose.find(named).unwrap_or_else(|| {
+            panic!("the README does not name the budget's {spelling}, `{named}`")
+        }));
+    }
+    assert!(
+        found.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README names the three spellings in an order entry 71 does not propose: \
+         {precedence:?} at {found:?}"
+    );
+    for promise in [
+        "multiplied by the number of items",
+        "never below the sixty-second floor",
+        "zero is refused",
+        "naming none takes ten seconds per item",
+    ] {
+        assert!(
+            prose.contains(promise),
+            "the README no longer states that the write-back budget is {promise}"
+        );
+    }
 }
 
 /// The criterion check this build carries **beyond** the contract is exactly what
