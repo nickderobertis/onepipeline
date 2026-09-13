@@ -11,7 +11,7 @@
 //! how the hold is scripted, and why it is the only honest way to make a store
 //! slow rather than wrong.
 //!
-//! Both journeys about the deadline wait past the sixty-second floor **by
+//! The three journeys about the deadline wait past the sixty-second floor **by
 //! construction**: a copy that outlasts a minute cannot be observed in less than
 //! one. `tests/e2e/store.rs` is where the other minute-long write-back journeys
 //! live, and these take their rendezvous settings from it.
