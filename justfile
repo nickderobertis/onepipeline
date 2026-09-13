@@ -31,7 +31,9 @@ set positional-arguments := true
 # when it was pinned, and the one the engine's store journeys were run against
 # and pass through: installed by this recipe, not merely read. Any release from
 # 0.2.0 carries the custom metadata the mapping reads, which is
-# `src/taskgraph.rs`'s floor.
+# `src/taskgraph.rs`'s floor. It is written bare on purpose: `cargo install
+# --version` reads a `MAJOR.MINOR.PATCH` with no operator as that exact release,
+# never as the caret requirement the same string means in a manifest.
 #
 # **This is the only place the release is named.** `_ensure-onetaskgraph` reads
 # it, and `taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
