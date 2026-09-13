@@ -373,8 +373,8 @@ fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) 
         journal::labels(&paths.run, None),
         journal::payload(&[
             ("hook", json!(hook)),
-            ("exit", json!(ran.exit)),
-            ("ending", json!(ran.ending)),
+            ("exit", json!(ran.exit())),
+            ("ending", json!(ran.ending())),
             ("log", json!(log.to_string_lossy())),
         ]),
     ) {
@@ -429,10 +429,33 @@ fn run_root(paths: &RunPaths) -> PathBuf {
     std::path::absolute(&paths.dir).unwrap_or_else(|_| paths.dir.clone())
 }
 
-/// How a hook's process ended.
-struct Ran {
-    exit: Option<i32>,
-    ending: Ending,
+/// How a hook's process ended, carrying an exit only where that ending has one.
+enum Ran {
+    /// It exited zero.
+    Succeeded,
+    /// It exited non-zero, or ended with no code this host could report.
+    Failed(Option<i32>),
+    CouldNotStart,
+    TimedOut,
+}
+
+impl Ran {
+    fn ending(&self) -> Ending {
+        match self {
+            Self::Succeeded => Ending::Succeeded,
+            Self::Failed(_) => Ending::Failed,
+            Self::CouldNotStart => Ending::CouldNotStart,
+            Self::TimedOut => Ending::TimedOut,
+        }
+    }
+
+    fn exit(&self) -> Option<i32> {
+        match self {
+            Self::Succeeded => Some(0),
+            Self::Failed(code) => *code,
+            Self::CouldNotStart | Self::TimedOut => None,
+        }
+    }
 }
 
 /// Spawn one hook, hand it its document, and wait for it — for up to the run's
@@ -450,10 +473,6 @@ fn run(
     relay: Relay,
 ) -> Ran {
     let hook = firing.hook();
-    let could_not_start = Ran {
-        exit: None,
-        ending: Ending::CouldNotStart,
-    };
     let opened = log
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -467,7 +486,7 @@ fn run(
                 paths.run,
                 log.display()
             );
-            return could_not_start;
+            return Ran::CouldNotStart;
         }
     };
     let document = Document {
@@ -514,7 +533,7 @@ fn run(
                 &output,
                 "onepipeline: the {hook} hook '{command}' could not be started: {error}"
             );
-            return could_not_start;
+            return Ran::CouldNotStart;
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
@@ -530,13 +549,10 @@ fn run(
     let ran = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                break Ran {
-                    exit: status.code(),
-                    ending: if status.success() {
-                        Ending::Succeeded
-                    } else {
-                        Ending::Failed
-                    },
+                break if status.success() {
+                    Ran::Succeeded
+                } else {
+                    Ran::Failed(status.code())
                 }
             }
             Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
@@ -546,13 +562,10 @@ fn run(
                 let _ = sys::stop(child.id(), sys::Stop::Now);
                 let _ = child.kill();
                 let _ = child.wait();
-                break Ran {
-                    exit: None,
-                    ending: if waited.is_ok() {
-                        Ending::TimedOut
-                    } else {
-                        Ending::Failed
-                    },
+                break if waited.is_ok() {
+                    Ran::TimedOut
+                } else {
+                    Ran::Failed(None)
                 };
             }
         }
@@ -783,6 +796,55 @@ mod tests {
             ),
             Judged::Fire(Firing::Success)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `cancelled` or a `pending` node, with nothing failed or skipped and no
+    /// decision outstanding, is a run ended unfinished — listed in plan order.
+    ///
+    /// The two statuses of the `unfinished` rule no journey can reach at a let-go:
+    /// the graph reads a park ahead of the `cancelled` a stopped dispatch settles,
+    /// and a `retry` or `drop` takes the node it cancelled out of the graph; and a
+    /// quiet graph derives `pending` only behind a `complete-but-draft` dependency,
+    /// which is a run that has not ended. Held here so neither can come to fire
+    /// success, or nothing, if either ever becomes reachable.
+    #[test]
+    fn a_cancelled_or_pending_node_ends_a_run_unfinished_in_plan_order() {
+        let root = scratch("unfinished");
+        let paths = RunPaths::under(&root, "demo");
+        let unfinished = |nodes: &[(&str, &'static str)]| {
+            Judged::Fire(Firing::Failure(Reason {
+                kind: ReasonKind::Unfinished,
+                nodes: nodes
+                    .iter()
+                    .map(|(id, status)| Unsettled {
+                        id: (*id).to_string(),
+                        status,
+                        outcome: None,
+                    })
+                    .collect(),
+            }))
+        };
+        assert_eq!(
+            judge(
+                &holding(&[
+                    ("stopped", NodeStatus::Cancelled),
+                    ("build", NodeStatus::Done),
+                    ("waits", NodeStatus::Pending),
+                ]),
+                &paths
+            ),
+            unfinished(&[("stopped", "cancelled"), ("waits", "pending")])
+        );
+        for alone in [NodeStatus::Cancelled, NodeStatus::Pending] {
+            assert_eq!(
+                judge(
+                    &holding(&[("build", NodeStatus::Done), ("left", alone)]),
+                    &paths
+                ),
+                unfinished(&[("left", alone.as_str())])
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

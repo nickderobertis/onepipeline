@@ -488,6 +488,75 @@ fn a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfi
     );
 }
 
+/// A planner's `cancel` of a running node parks it, and the node behind it is held:
+/// neither is failed or skipped, so a run that ends over them has ended unfinished,
+/// and its reason lists both, in plan order.
+///
+/// The graph reads the park ahead of the `cancelled` the stopped dispatch settles,
+/// so the node reads `parked` here; `hooks::tests` holds the rule over a
+/// `cancelled` and a `pending` node, which no let-go reaches.
+#[test]
+fn a_cancel_that_stops_a_running_node_ends_the_run_unfinished_over_it_and_its_dependent() {
+    let world = hooked_world("hooks-cancelled");
+    let hook = hook(&world);
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    world.script("slow.stops-when-interrupted", "");
+    let run = "cancelled";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("slow", &[]), agent("after", &["slow"])]),
+    );
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+            ],
+        )
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "slow"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the run's hook to be recorded as ended", |world| {
+        !world.events_of(run, "run-hook-finished").is_empty()
+    });
+
+    assert_eq!(invocations(&world, run), ["failure"]);
+    let reason = &world.events_of(run, "run-hook-fired")[0]["payload"]["reason"];
+    assert_eq!(reason["kind"], "unfinished");
+    assert_eq!(
+        reason["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .map(|node| (node["id"].clone(), node["status"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("slow"), json!("parked")),
+            (json!("after"), json!("blocked"))
+        ],
+        "{reason}"
+    );
+    assert_eq!(
+        reason["nodes"],
+        not_done(&world.run_json(run, "result.json"))
+    );
+    assert_eq!(&handed(&world, run, 1).stdin["reason"], reason);
+}
+
 /// A clean stop fires the failure hook as `stopped` from the stop itself, with
 /// the owner the launch record names — and a stop that was refused fires nothing.
 #[test]
@@ -930,6 +999,10 @@ fn a_hook_whose_log_cannot_be_opened_is_recorded_as_one_that_could_not_start() {
     });
     // A file where the hook logs' directory has to be, which no host will create a
     // directory under.
+    // llmlint: ignore[tests_mirror_real_usage] a log directory the host cannot create is a
+    // filesystem fault, and no verb produces one; a file in its place is the narrowest fault
+    // that reaches that branch through the compiled binary, and everything around it — the
+    // detached driver, the journal, `result.json` and `results` — is the real one.
     std::fs::write(world.runs.join(run).join("hooks"), "not a directory")
         .expect("something in the way");
     world.release("build.go");
