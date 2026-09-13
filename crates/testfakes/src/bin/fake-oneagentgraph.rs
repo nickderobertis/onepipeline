@@ -1983,7 +1983,7 @@ fn emit(
     // a bare harness side publishes none, and neither does this double.
     for (offset, decided) in judged.iter().enumerate() {
         envelope(
-            5 + offset as u64,
+            FIRST_JUDGE_SEQ + offset as u64,
             oneagentgraph::event::EventKind::JudgeDecided,
             match serde_json::to_value(decided) {
                 Ok(payload) => payload,
@@ -1991,7 +1991,7 @@ fn emit(
             },
         );
     }
-    let settled_seq = 5 + judged.len() as u64;
+    let settled_seq = FIRST_JUDGE_SEQ + judged.len() as u64;
     // Records this producer publishes **out of its own order**, when a scenario
     // asks for them. A producer's `seq` is its own statement of the order it
     // wrote things in and its stamps do not have to agree with it: the real
@@ -2258,9 +2258,18 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
         .collect()
 }
 
-/// The most judge decisions one turn may be scripted with: their `seq`s run
-/// from 5, and 10 is where this double's session records start.
-const MAX_JUDGE_DECISIONS: usize = 4;
+/// The `seq` of the first `judge-decided` a turn publishes, right after the
+/// turn's own four envelopes; the settlement takes the one after the last.
+const FIRST_JUDGE_SEQ: u64 = 5;
+
+/// The `seq` of the first session record a turn publishes, above the turn's
+/// own envelopes and its settlement.
+const FIRST_SESSION_SEQ: u64 = 10;
+
+/// The most judge decisions one turn may be scripted with — derived from the
+/// two starts above so the decisions and the settlement after them stay below
+/// the first session record.
+const MAX_JUDGE_DECISIONS: usize = (FIRST_SESSION_SEQ - FIRST_JUDGE_SEQ - 1) as usize;
 
 /// The provider kinds a judge of a panel is one of, asked of the sibling's
 /// **own** [`JudgeSide::kind`] for each of its three shapes rather than copied
@@ -2457,7 +2466,7 @@ fn publish_oneharness_session(
         // stepped past, so no reader can take it for either. One per
         // invocation, because a producer's seq is its own statement of the
         // order it wrote things in and two records cannot share one.
-        "seq": 10 + offset as u64,
+        "seq": FIRST_SESSION_SEQ + offset as u64,
         "source": "agentgraph",
         "kind": kind.as_str(),
         // No conversation on it: the record *names* one, and a consumer that
