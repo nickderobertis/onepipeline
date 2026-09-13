@@ -23,8 +23,11 @@ import {
   appendFileSync,
   chmodSync,
   copyFileSync,
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -318,10 +321,70 @@ class Workspace {
   }
 }
 
+/// Remove a sandbox once, and when that throws, say what it left and what was running.
+///
+/// This removal has failed CI with `ENOTEMPTY`, and the cause first recorded for it
+/// — a subprocess still writing into the tree — was reproduced against and ruled
+/// out. So a failure is diagnosed, never retried: a retry would most likely hide
+/// the next occurrence, which is the one thing that can say what is happening. The
+/// removal's own error is rethrown as it was, so the test still fails on it.
+function removeSandbox(sandbox, write = (text) => process.stderr.write(text)) {
+  try {
+    rmSync(sandbox, { recursive: true, force: true });
+  } catch (error) {
+    write(removalDiagnosis(sandbox, error));
+    throw error;
+  }
+}
+
+/// Every entry still under `sandbox` — the sandbox itself first, as `.` — each with
+/// its mtime, then the process table at the moment the removal failed.
+///
+/// An entry that cannot be read is reported in its place rather than ending the
+/// report, and a symlink is listed without being followed: `node_modules` in a
+/// checkout is one, into this repository's own install.
+function removalDiagnosis(sandbox, error) {
+  const lines = [
+    `removing the sandbox ${sandbox} failed: ${error.message}`,
+    "entries still under it, each with its mtime:",
+  ];
+  const visit = (path, entry) => {
+    let stats;
+    try {
+      stats = lstatSync(path);
+    } catch (unreadable) {
+      lines.push(`  ${entry}: cannot be read: ${unreadable.message}`);
+      return;
+    }
+    lines.push(`  ${stats.mtime.toISOString()}  ${entry}`);
+    if (!stats.isDirectory()) return;
+    let children;
+    try {
+      children = readdirSync(path).sort();
+    } catch (unlistable) {
+      lines.push(`  ${entry}: cannot be listed: ${unlistable.message}`);
+      return;
+    }
+    for (const child of children) {
+      visit(join(path, child), entry === "." ? child : `${entry}/${child}`);
+    }
+  };
+  visit(sandbox, ".");
+
+  lines.push("process table when it failed:");
+  const table = spawnSync("ps", ["-ww", "-eo", "pid,ppid,lstart,args"], { encoding: "utf8" });
+  if (table.error || table.status !== 0) {
+    lines.push(`  ps could not report it: ${table.error?.message ?? table.stderr.trim()}`);
+  } else {
+    lines.push(table.stdout.trimEnd());
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 /// A fresh checkout, cache and all, removed when the test that asked for it ends.
 function workspace(t) {
   const sandbox = mkdtempSync(join(tmpdir(), "onepipeline-llmlint-cache-"));
-  t.after(() => rmSync(sandbox, { recursive: true, force: true }));
+  t.after(() => removeSandbox(sandbox));
   return new Workspace(sandbox);
 }
 
@@ -1028,5 +1091,88 @@ describe("the judged tier's toolchain directory", () => {
         `${name} no longer names $HOME/.local/bin as the llmlint install directory`,
       );
     }
+  });
+});
+
+describe("the journeys' sandbox teardown", () => {
+  /// A sandbox shaped like one a journey leaves: a directory with a file in it, and a
+  /// file beside it.
+  function populatedSandbox(t) {
+    const sandbox = mkdtempSync(join(tmpdir(), "onepipeline-llmlint-teardown-"));
+    t.after(() => removeSandbox(sandbox));
+    mkdirSync(join(sandbox, "checkout"));
+    writeFileSync(join(sandbox, "checkout", "llmlint.yml"), "version: 1\n", "utf8");
+    writeFileSync(join(sandbox, "judge-runs.log"), "", "utf8");
+    return sandbox;
+  }
+
+  /// An error's own fields and message, with the sandbox it names made generic, so
+  /// the same failure on two sandboxes compares equal.
+  function shape(error, sandbox) {
+    const generic = (value) =>
+      typeof value === "string" ? value.replaceAll(sandbox, "<sandbox>") : value;
+    return {
+      constructor: error.constructor,
+      message: generic(error.message),
+      fields: Object.fromEntries(Object.entries(error).map(([key, value]) => [key, generic(value)])),
+    };
+  }
+
+  it("removes a sandbox and prints nothing when the removal succeeds", (t) => {
+    const sandbox = populatedSandbox(t);
+    const written = [];
+
+    removeSandbox(sandbox, (text) => written.push(text));
+
+    assert.equal(existsSync(sandbox), false, `${sandbox} is still there`);
+    assert.deepEqual(written, []);
+  });
+
+  it("prints what a failed removal left and what was running, then rethrows its error", (t) => {
+    // No rmdir accepts a path whose last component is `.`, and that holds for root
+    // too, where a permission failure would not throw: this is a real removal failing.
+    // How much it deleted before failing is the runtime's: Node 22 fails before it
+    // deletes anything; Node 26 deletes the contents first when it can, so as root
+    // only the sandbox itself is left to list.
+    const sandbox = populatedSandbox(t);
+    const twin = populatedSandbox(t);
+    let direct;
+    try {
+      rmSync(`${twin}/.`, { recursive: true, force: true });
+    } catch (error) {
+      direct = error;
+    }
+    assert.ok(direct, "removing a path ending in `.` succeeded, so nothing here fails");
+
+    const written = [];
+    let rethrown;
+    assert.throws(
+      () => removeSandbox(`${sandbox}/.`, (text) => written.push(text)),
+      (error) => {
+        rethrown = error;
+        return true;
+      },
+    );
+    const diagnosis = written.join("");
+
+    // The removal's own error, not a wrapping of it: the same failure `rmSync` raises
+    // when nothing diagnoses it.
+    assert.deepEqual(shape(rethrown, sandbox), shape(direct, twin));
+    assert.ok(
+      diagnosis.startsWith(`removing the sandbox ${sandbox}/. failed: ${rethrown.message}\n`),
+      diagnosis,
+    );
+    // Exactly what is still there, each entry with the mtime it has now.
+    const remaining = [".", ...readdirSync(sandbox, { recursive: true }).sort()];
+    const listed = diagnosis.split("\n").filter((line) => /^ {2}\d{4}-\d\d-\d\dT/.test(line));
+    assert.deepEqual(
+      listed,
+      remaining.map((entry) => `  ${lstatSync(join(sandbox, entry)).mtime.toISOString()}  ${entry}`),
+      diagnosis,
+    );
+    // The process table as `ps` reports it: this process is in it, under its parent.
+    const table = diagnosis.split("process table when it failed:\n")[1] ?? "";
+    assert.match(table, /^\s*PID\s+PPID\s/, diagnosis);
+    assert.match(table, new RegExp(`^\\s*${process.pid}\\s+${process.ppid}\\s`, "m"), diagnosis);
   });
 });
