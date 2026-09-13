@@ -526,6 +526,13 @@ fn worker(
                         RETRY_CEILING.as_secs()
                     );
                 }
+                // How soon the planner hears of it, which is this sum and no deadline: the
+                // surface is recorded one [`FIRST_RETRY_AFTER`] after the command that refused,
+                // and the reconcile loop asks for it every `engine::CHANNEL_POLL`. A store that
+                // is not there refuses the first command outright — `onetaskgraph` cannot
+                // resolve a root that is gone, and answers so in milliseconds — so
+                // [`COMMAND_FLOOR`] is no part of it: that is spent only by a command that has
+                // not exited, which is a store answering slowly.
                 if !should_retry_after(&pending, retry_after(failures)) {
                     return;
                 }
