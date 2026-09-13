@@ -334,16 +334,16 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
 /// panel's decisions can be made to arrive from without a real panel.
 #[test]
 fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_reads() {
+    let world = World::new("judge-decided");
+    // Two judges, in the panel's list order: one of each kind a bare harness
+    // side is not, so a relay that read the kind as an enum of the kinds it
+    // knew would fail on the second.
     // llmlint: ignore[tests_mirror_real_usage] the double is the one producer a panel's
     // decisions can be made to arrive from without a harness credential, which is the
     // credentialled tier's to spend; its `.judged` script says what the member decided the
     // way `.verdict` and `.fail` say what it settled on in every other journey here, and
     // everything downstream of it — the binary, the relay, the journal, the report reader
     // and the rendered views — is the real one.
-    let world = World::new("judge-decided");
-    // Two judges, in the panel's list order: one of each kind a bare harness
-    // side is not, so a relay that read the kind as an enum of the kinds it
-    // knew would fail on the second.
     world.script(
         &format!("{NODE}.judged"),
         "lint|llmlint|continue|two findings under comments_earn_their_place\n\
@@ -475,10 +475,10 @@ fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_read
 /// publish a decision nobody wrote, and the journey above would pass on it.
 #[test]
 fn a_judged_line_naming_no_judge_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-nameless");
     // llmlint: ignore[tests_mirror_real_usage] the `.judged` script is external input to
     // this suite, and its refusal is met the way its author would meet it — through a real
     // dispatch settling the node — rather than by calling into the double.
-    let world = World::new("judged-nameless");
     world.script(&format!("{NODE}.judged"), " |llmlint|continue|no label\n");
     let path = world.plan("nameless", &plan_of("nameless", vec![agent(NODE, &[])]));
     world.run(&["start", &path, "--attach"]).settled();
@@ -498,9 +498,9 @@ fn a_judged_line_naming_no_judge_fails_the_dispatch_and_publishes_no_decision() 
 /// a script the author got wrong rather than a judge to publish.
 #[test]
 fn a_judged_line_naming_a_kind_no_panel_has_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-unkind");
     // llmlint: ignore[tests_mirror_real_usage] the same boundary as the journey above, for
     // the one refusal that reads the linked sibling's kinds rather than the line's shape.
-    let world = World::new("judged-unkind");
     world.script(
         &format!("{NODE}.judged"),
         "lint|llmlint|continue|two findings\nreviewer|human|done|looks fine to me\n",
