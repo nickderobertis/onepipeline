@@ -2268,14 +2268,24 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
 /// directory. All three only work out for the id `oneagentgraph` minted, never
 /// for this crate's, so a reset that lands there was addressed correctly.
 ///
-/// What happens to the signal *after* it lands is the sibling's: it starts a
-/// scheduled member's clock only once every member of that member's wave has
-/// settled, and the monitor shares the pacemaker's wave and runs for the whole
-/// run — so nothing consumes the signal while the run it paces is alive.
+/// What happens to the signal *after* it lands is the sibling's. The pacemaker
+/// defers its first turn, so the sibling starts its clock at launch, and that
+/// clock consumes a reset within a tick of its landing and records `cron-reset`
+/// for the member — for as long as the run is alive. Once the run's foreground
+/// is quiescent the clock stops and a reset is consumed by nothing, and the
+/// monitor's single turn settles within a few hundred milliseconds of launch,
+/// so which of those a reset meets is the host's timing: this host met the file
+/// left on disk, and macOS met the clock and an empty directory. The monitor is
+/// held for the whole journey so that the clock is the one that meets it, and
+/// the clock's own record is what the journey reads, because that record is
+/// durable where the file it consumed is not.
 #[test]
 fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
     world.write_graphs_with_pacemaker();
+    // The observing turn is held, so the run it paces is alive — and its clock
+    // counting — when the reset lands.
+    world.script("observer.wait", "hold");
     let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
     world
         .run_on_agentgraph(&[
@@ -2319,26 +2329,24 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     // llmlint: ignore-block[tests_mirror_real_usage] a pacemaker reset has no product-facing
     // result: `next` returns the surface either way, by design, because a clock that could
     // not be restarted must not cost the planner the update they asked for. The sibling's
-    // signal directory is where the reset *is*, and it is a documented location its own
-    // `signal`/`cancel` API both derive — so this is the outcome, read where the outcome
-    // lives, and asserting only on the absent error would pass against a reset that went to
-    // the wrong run. The run's own clock restarting is the sibling's half; see the module
-    // note below.
-    // Where the sibling's scheduler watches, derived from the graph run's id and
-    // nothing else. A reset addressed with this crate's run id never reaches it:
-    // `signal` refuses a run its history has no record of, which is the failure
-    // this journey used to characterise.
-    let signalled = world
-        .graph_state()
-        .join(&graph_run)
-        .join("signals")
-        .join("check-in.reset");
-    assert!(
-        signalled.is_file(),
-        "the reset did not reach the run's own signal directory: {}",
-        signalled.display()
+    // event log is where the restart *is* recorded, at a documented location its own
+    // `history` API derives — so this is the outcome, read where the outcome lives, and
+    // asserting only on the absent error would pass against a reset that went to the wrong
+    // run.
+    // The clock that consumed it is the graph run's own, watching a directory
+    // derived from that run's id and nothing else. A reset addressed with this
+    // crate's run id never reaches it: `signal` refuses a run its history has no
+    // record of, which is the failure this journey used to characterise.
+    world.until(
+        "the run's own check-in clock to record its restart",
+        |world| {
+            world.graph_journal(&graph_run).iter().any(|event| {
+                event["kind"] == "cron-reset" && event["labels"]["member"] == "check-in"
+            })
+        },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
 }
 
 /// A view still renders when the provider-health block comes from the library.
