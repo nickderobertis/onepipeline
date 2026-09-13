@@ -41,6 +41,14 @@ broke() {
 
 record=${ONEPIPELINE_E2E_HOOK_RECORD:?ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into; set it to the world scratch run_end_hooks.rs creates}
 run=${ONEPIPELINE_RUN_ID:?the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given}
+# The run id becomes one path segment under the record directory, so it is held to
+# the characters a run id is minted from before anything is written under it: a
+# separator or a `..` would record somewhere the journey never reads.
+case "$run" in
+  '' | . | .. | *[!A-Za-z0-9._-]*)
+    broke "ONEPIPELINE_RUN_ID holds '$run', which is not a single run id path segment"
+    ;;
+esac
 mkdir -p "$record/$run" || broke "cannot create $record/$run"
 
 count=0
@@ -98,7 +106,12 @@ status=0
 if [ -f "$record/$run.exit" ]; then
   status=$(cat "$record/$run.exit") || broke "cannot read $record/$run.exit"
 fi
+# An exit status is 0 to 255; a longer number is refused before it is compared, so a
+# value no shell can return is never silently truncated into one it can.
 case "$status" in
-  '' | *[!0-9]*) broke "$record/$run.exit holds '$status', which is not an exit status" ;;
+  '' | *[!0-9]* | ????*) broke "$record/$run.exit holds '$status', which is not an exit status from 0 to 255" ;;
 esac
+if [ "$status" -gt 255 ]; then
+  broke "$record/$run.exit holds '$status', which is not an exit status from 0 to 255"
+fi
 exit "$status"

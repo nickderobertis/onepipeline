@@ -712,10 +712,10 @@ fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
 
 /// A detached driver judges and fires exactly as an attached one does — and while
 /// its hook runs, the run reads as nothing driving it, through the binary's own
-/// views.
+/// views, and an `adopt` takes the run over without ending the process awaiting
+/// that hook or firing a second one.
 #[test]
-fn a_detached_driver_fires_as_an_attached_one_does_and_its_run_reads_undriven_while_the_hook_runs()
-{
+fn a_detached_driver_fires_as_an_attached_one_does_and_its_run_is_undriven_while_the_hook_runs() {
     let world = hooked_world("hooks-detached");
     let hook = hook(&world);
     world.script("build.fail", "1");
@@ -751,6 +751,20 @@ fn a_detached_driver_fires_as_an_attached_one_does_and_its_run_reads_undriven_wh
         .run(&["results", run])
         .exited(0)
         .out_has("failure hook fired — reason: nodes; still running");
+
+    // The verb that refuses a driven run takes this one over: the lock is free, and
+    // the live process awaiting the hook is not a parked driver to end. The run has
+    // already fired, so the adopting driver fires nothing of its own.
+    world
+        .run(&["adopt", run])
+        .exited(NOTHING_DRIVING)
+        .err_lacks("ending it to adopt the run");
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+    assert!(
+        world.events_of(run, "run-hook-finished").is_empty(),
+        "the adoption ended the hook it should have left running"
+    );
 
     std::fs::write(records(&world).join(format!("{run}.go")), "go").expect("the hold is released");
     world.until("the detached driver's hook to finish", |world| {
@@ -885,4 +899,56 @@ fn a_launch_resolves_its_hooks_flag_over_config_refuses_a_zero_timeout_and_adopt
         .run(&["adopt", "configured", "--success-hook", &hook])
         .exited(USAGE_ERROR)
         .err_has("--success-hook");
+}
+
+/// A hook whose log cannot be opened could not be started, and is recorded as
+/// that — without its command ever running, and without the run settling any
+/// differently.
+#[test]
+fn a_hook_whose_log_cannot_be_opened_is_recorded_as_one_that_could_not_start() {
+    let world = hooked_world("hooks-no-log");
+    let hook = hook(&world);
+    world.script("build.wait", "hold");
+    let run = "nolog";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+            ],
+        )
+        .exited(0);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    // A file where the hook logs' directory has to be, which no host will create a
+    // directory under.
+    std::fs::write(world.runs.join(run).join("hooks"), "not a directory")
+        .expect("something in the way");
+    world.release("build.go");
+    world.until("the run's hook to be recorded as ended", |world| {
+        !world.events_of(run, "run-hook-finished").is_empty()
+    });
+
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+    let finished = &world.events_of(run, "run-hook-finished")[0]["payload"];
+    assert_eq!(finished["hook"], "success");
+    assert_eq!(finished["ending"], "could-not-start");
+    assert_eq!(finished["exit"], Value::Null);
+    assert!(
+        invocations(&world, run).is_empty(),
+        "a hook with nowhere to keep its output was run anyway"
+    );
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("success hook fired — reason: none; ending: could-not-start; exit: none");
 }

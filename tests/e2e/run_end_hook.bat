@@ -15,6 +15,11 @@ if not defined ONEPIPELINE_RUN_ID (
 )
 set "record=%ONEPIPELINE_E2E_HOOK_RECORD%"
 set "run=%ONEPIPELINE_RUN_ID%"
+rem One path segment of a run id's own characters, for the reason `run_end_hook.sh`
+rem gives; `findstr` is the pattern cmd has.
+echo !run!|findstr /r "^[A-Za-z0-9._-][A-Za-z0-9._-]*$" >nul || (call :broke "ONEPIPELINE_RUN_ID holds '!run!', which is not a single run id path segment" & exit /b 70)
+if "!run!"=="." (call :broke "ONEPIPELINE_RUN_ID holds '.', which is not a single run id path segment" & exit /b 70)
+if "!run!"==".." (call :broke "ONEPIPELINE_RUN_ID holds '..', which is not a single run id path segment" & exit /b 70)
 if not exist "%record%\%run%\" mkdir "%record%\%run%" || (call :broke "cannot create %record%\%run%" & exit /b 70)
 
 set "count=0"
@@ -58,7 +63,11 @@ goto waitloop
 :finish
 set "status=0"
 if exist "%record%\%run%.exit" set /p status=<"%record%\%run%.exit"
-echo !status!|findstr /r "^[0-9][0-9]*$" >nul || (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status" & exit /b 70)
+rem 0 to 255, and the length is checked before the value for the reason `hook.bat`
+rem gives: `set /a` and `GTR` are 32-bit.
+echo !status!|findstr /r "^[0-9][0-9]*$" >nul || (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status from 0 to 255" & exit /b 70)
+if not "!status:~3!"=="" (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status from 0 to 255" & exit /b 70)
+if !status! GTR 255 (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status from 0 to 255" & exit /b 70)
 exit /b %status%
 
 rem A record this fixture could not write, or a scripted value it could not use.
