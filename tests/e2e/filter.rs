@@ -299,7 +299,9 @@ fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
             .position(|line| line.starts_with("-- "))
             .expect("`monitor` ends its pass with a trailer");
         assert_eq!(
-            lines[trailer..].last().map(|line| line.starts_with("-- cursor ")),
+            lines[trailer..]
+                .last()
+                .map(|line| line.starts_with("-- cursor ")),
             Some(true),
             "`monitor` ended on something other than its resume line: {lines:?}"
         );
