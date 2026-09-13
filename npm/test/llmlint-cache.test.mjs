@@ -1095,8 +1095,6 @@ describe("the judged tier's toolchain directory", () => {
 });
 
 describe("the journeys' sandbox teardown", () => {
-  /// A sandbox shaped like one a journey leaves: a directory with a file in it, and a
-  /// file beside it.
   function populatedSandbox(t) {
     const sandbox = mkdtempSync(join(tmpdir(), "onepipeline-llmlint-teardown-"));
     t.after(() => removeSandbox(sandbox));
@@ -1114,7 +1112,9 @@ describe("the journeys' sandbox teardown", () => {
     return {
       constructor: error.constructor,
       message: generic(error.message),
-      fields: Object.fromEntries(Object.entries(error).map(([key, value]) => [key, generic(value)])),
+      fields: Object.fromEntries(
+        Object.entries(error).map(([key, value]) => [key, generic(value)]),
+      ),
     };
   }
 
@@ -1162,15 +1162,15 @@ describe("the journeys' sandbox teardown", () => {
       diagnosis.startsWith(`removing the sandbox ${sandbox}/. failed: ${rethrown.message}\n`),
       diagnosis,
     );
-    // Exactly what is still there, each entry with the mtime it has now.
     const remaining = [".", ...readdirSync(sandbox, { recursive: true }).sort()];
     const listed = diagnosis.split("\n").filter((line) => /^ {2}\d{4}-\d\d-\d\dT/.test(line));
     assert.deepEqual(
       listed,
-      remaining.map((entry) => `  ${lstatSync(join(sandbox, entry)).mtime.toISOString()}  ${entry}`),
+      remaining.map(
+        (entry) => `  ${lstatSync(join(sandbox, entry)).mtime.toISOString()}  ${entry}`,
+      ),
       diagnosis,
     );
-    // The process table as `ps` reports it: this process is in it, under its parent.
     const table = diagnosis.split("process table when it failed:\n")[1] ?? "";
     assert.match(table, /^\s*PID\s+PPID\s/, diagnosis);
     assert.match(table, new RegExp(`^\\s*${process.pid}\\s+${process.ppid}\\s`, "m"), diagnosis);
