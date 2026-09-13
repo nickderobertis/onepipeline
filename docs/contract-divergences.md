@@ -2485,16 +2485,26 @@ is a *name* and a normalised *category*, a `project copy` carries both, and a
 destination refuses a pair it would read differently — so a name outside that
 seven-word vocabulary can only be written where the destination normalises it the
 same way this shadow does. Four of the eight words this projection writes *are* a
-category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected. The
-other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
-vocabulary has none of: a store that does not know one reads it as the `unknown`
-category and keeps the name, which is what
-the shadow source's own default mapping produces, so the copy is accepted and the
-word arrives. The alternative — writing `failed` under the `done` category —
-requires the operator's own store to declare that mapping first, and until it did,
-**every projection after any node failed would be refused outright**. A board that
-stopped updating is strictly worse than one carrying a status category a filter
-cannot place beside a name that says exactly what happened.
+category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected.
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This open
+divergence is the repository's required record of the dependency behavior that makes
+its projection incomplete. The implementation source is cited at each GitHub Projects
+claim; onetaskgraph's disabled-status tests and `onetaskgraph-unknown-status` e2e journey
+are the reconciliation named by the owning plan, and adding that sibling work or a
+cross-repository gate is outside this entry's documentation-only correction. -->
+The other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
+vocabulary has none of. The `local-md` source reads each as the `unknown` category
+and keeps its name, so its default mapping accepts the copy and the word arrives.
+The `github-projects` source instead ships `unknown` disabled in
+`crates/onetaskgraph-github-projects/src/lib.rs`. That source writes the target board
+Status option rather than the incoming word, as
+`crates/onetaskgraph-github-projects/src/lib.rs` describes, and refuses the copy until
+`status_mapping.unknown` names a board Status option, as enforced in
+`crates/onetaskgraph-github-projects/src/lib.rs`. A board projection therefore needs
+that mapping configured. A closed state is not a remedy for `unknown`: it reads back
+as `done` or `cancelled`, so a copy under one of the four settlement words would never
+settle.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 **Beside the word, what closed the node.** The contract says only that "the
 settlement detail goes to reserved metadata", and it did: the whole settlement
