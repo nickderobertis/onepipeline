@@ -238,14 +238,11 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
 /// here.
 ///
 /// This suite carries a hand-written copy of a two-variant enum, and a copy of an
-/// external schema is exactly the thing that rots silently. But the copy is a *forward*
-/// tolerance rather than a mirror: the unreleased revision these checks once installed
-/// predated the field entirely, and the field arrived from the newer install a real host
-/// shells out to — as a whole suite going red. So what is asked of the authoritative
-/// source is the one thing that holds either way: whatever `onetaskgraph schema`
-/// declares, this boundary reads. Against an install older than the field that is an
-/// empty set beside a `Task` carrying no `location` at all; against one that has it — the
-/// release the checks install now — it is the two spellings, and a third would fail here.
+/// external schema is exactly the thing that rots silently. So what is asked of the
+/// authoritative source is the one thing that holds for every install: whatever
+/// `onetaskgraph schema` declares, this boundary reads — no `location` at all from an
+/// install older than the field, and the two spellings from one that has it, where a
+/// third would fail here.
 ///
 /// **The copy is this suite's alone.** `src/writeback.rs` names `location` too, but no
 /// longer as a second copy of this shape: those types stopped denying unknown fields, and
