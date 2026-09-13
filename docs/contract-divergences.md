@@ -2656,6 +2656,18 @@ and `patch_pin::the_audit_permits_exactly_the_revisions_the_manifest_patches` is
 what holds them equal — including at zero, so the audit's exemption is deleted in
 the same change the patch is.
 
+**Ruled in part: the vocabulary is now the contract's, and the semantics stay
+open.** The approved run-end hooks addition to `docs/contract.md` says that success
+covers every outcome that settles done, `no-changes` and `change-draft` among them,
+and that a run holding a `complete-but-draft` node has not ended. The manager
+ruled that this approval takes both words up as contract vocabulary. The contract
+now uses them as the settlement words the engine writes. What stays open is the
+rest of this proposal: publishing a draft change request, the node holding the run,
+and the release arriving to start a new worker on the node's existing branch.
+`graph::tests::the_draft_settlement_vocabulary_is_what_the_divergence_record_names`
+holds both halves. The contract names both words, and both still round-trip
+through the status and the outcome this build writes.
+
 ## 52. A correction reaches one party of a node's dispatch, and never both — SUPERSEDED BY 60
 
 **Superseded by entry 60, which is where the shape now lives.** This entry is the
