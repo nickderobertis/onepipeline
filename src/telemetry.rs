@@ -365,16 +365,11 @@ const SESSION_CLOSED: &str = "session-closed";
 ///
 /// One of these ends whatever phase the session was in: the workspace is ready
 /// and the turn is running, so the time is the agent's and not the setup's.
-/// `judge-decided` is what one judge of a two-party member's panel decided
-/// about a worker turn — published between that turn's close and the next
-/// turn's opening, so the member is as live as either — and it names no side,
-/// so it neither opens nor ends the judge's own measure below.
-const WORKING: [&str; 6] = [
+const WORKING: [&str; 5] = [
     "member-started",
     "turn-started",
     "turn-activity",
     "turn-completed",
-    "judge-decided",
     crate::report::MEMBER_SETTLED,
 ];
 
@@ -1123,50 +1118,6 @@ mod tests {
         );
         assert_eq!(bucket_of(&telemetry, BucketName::Judge), Some(30_000));
         assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(20_000));
-        assert_eq!(summed(&telemetry), telemetry.wall_ms);
-    }
-
-    /// A panel's decision about a worker turn says the member is live in its
-    /// workspace as surely as the turn it judged does. The `judge-decided` that
-    /// `oneagentgraph` 0.4.0 relays lands between a turn's close and the next
-    /// turn's opening, so it is bracketed by kinds already read as working — but
-    /// a store whose stream ordering put it first would otherwise leave the
-    /// session charged to setup until a turn kind arrived.
-    #[test]
-    fn a_panels_decision_says_the_member_is_working_and_ends_the_setup_it_followed() {
-        let telemetry = of_run(
-            &paths(),
-            &[
-                started(),
-                at(
-                    10,
-                    journal::PipelineKind::NodeDispatched,
-                    Some("build"),
-                    &[],
-                ),
-                session(10, "session-opened", Some("build")),
-                turn(
-                    20,
-                    "judge-decided",
-                    Some("build"),
-                    &[
-                        ("turn", json!(1)),
-                        ("judge", json!("reviewer")),
-                        ("kind", json!("oneharness")),
-                        ("decision", json!("continue")),
-                        ("reason", json!("one criterion is still open")),
-                    ],
-                ),
-                at(
-                    30,
-                    journal::PipelineKind::NodeSettled,
-                    Some("build"),
-                    &[("status", json!("done"))],
-                ),
-            ],
-        );
-        assert_eq!(bucket_of(&telemetry, BucketName::Setup), Some(10_000));
-        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(10_000));
         assert_eq!(summed(&telemetry), telemetry.wall_ms);
     }
 
