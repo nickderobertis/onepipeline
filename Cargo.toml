@@ -100,23 +100,17 @@ resolver = "2"
 #   `the_linked_oneagentgraph_stamps_who_authored_a_turn_and_the_relay_carries_it`
 #   fails naming the lock rather than reading differently.
 # - `oneagentgraph` 0.4.0 makes a two-party member's `judge` a **list of sides
-#   judged as one panel** — `config::OnejudgeMember::judge` is a `Vec<JudgeSide>`,
-#   and the single mapping every graph wrote before is the one-element shorthand
-#   for it — adds the `llmlint` kind as the third shape a side takes beside a
-#   harness and a command, and relays onejudge's `Observation::JudgeDecided` as
-#   the `judge-decided` event kind: what one judge of the panel decided about one
-#   worker turn, one envelope per judge in the panel's list order, and none from
-#   a member judged by a bare harness side. It is the release that carries
-#   `onejudge` to 0.10.0, whose report is **schema 12**. A **requirement** and
-#   not a lock floor: `^0.3.17` admits no 0.4.x, the breaking position pre-1.0,
-#   and `crates/testfakes` builds the `judge-decided` payload and matches
-#   `JudgeSide` arm by arm, so a pin below 0.4.0 does not compile. Nothing here
-#   stacks a judge — `graphs/node-scope.yaml` keeps its one harness side, and
-#   `tests/e2e/shipped.rs` holds it to exactly that — but the relay is total and
-#   `tests/e2e/turns.rs`'s
+#   judged as one panel** (`Vec<JudgeSide>`; the single mapping is the
+#   one-element shorthand), adds the `llmlint` side kind beside a harness and a
+#   command, and relays onejudge's `Observation::JudgeDecided` as the
+#   `judge-decided` event kind — one envelope per judge of the panel, in list
+#   order, and none from a bare harness side. It carries `onejudge` to 0.10.0,
+#   whose report is **schema 12**. A **requirement**, not a lock floor: `^0.3.17`
+#   admits no 0.4.x pre-1.0, and `crates/testfakes` matches `JudgeSide` arm by
+#   arm, so a lower pin does not compile. `graphs/node-scope.yaml` keeps its one
+#   harness side; the relay is total, and `tests/e2e/turns.rs`'s
 #   `a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_reads`
-#   drives a panel's decisions through the double into a run's journal, so a kind
-#   this crate never named is proven to arrive whole rather than assumed to.
+#   proves the new kind arrives whole rather than assuming it.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -350,15 +344,10 @@ resolver = "2"
 # `the_linked_oneagentgraph_accepts_a_paced_two_party_member` holds it.
 #
 # `oneagentgraph` 0.4.0 requires `oneharness-core 0.13` and `onejudge 0.10.0`,
-# and the `onejudge` pin below is the release *that* requirement resolves to.
-# 0.10.0 requires the same `oneharness-core 0.13`, so the pins below let the
-# graph resolve **one** turn engine. A split one is invisible to a currency
-# check, which reads each copy separately and calls both current. The `onejudge`
-# pin moved with the graph rather than lagging it: pre-1.0 the minor is the
-# breaking position, so `^0.8.1` admitted no 0.9.x or 0.10.x and the two copies
-# could only be ended by moving the pin — which is how the graph came to carry
-# two copies of the turn engine once before, when `^0.6.2` admitted no 0.7.x, and
-# again when `^0.7.0` admitted no 0.8.x.
+# and 0.10.0 requires the same core, so the pins below resolve **one** turn
+# engine. The `onejudge` pin moves *with* the graph: pre-1.0 the minor is the
+# breaking position, so a pin left at `^0.8.1` would resolve a second copy — and
+# a split engine is invisible to a currency check, which calls each copy current.
 #
 # `oneharness-core` 0.13 runs a **controlled codex turn under the model the
 # candidate's config names**. Below it a `--control` turn let `codex app-server`
@@ -368,12 +357,11 @@ resolver = "2"
 # as the ninth `FailureKind`, `model_mismatch`, before any token is spent, and
 # steps a fallback chain past that refusal as `model-mismatch`. A **requirement**
 # and not a lock floor for the reason 0.8.0, 0.11.0 and 0.12.0 of `onevcs` were:
-# `^0.12` excludes it. `oneagentgraph` 0.3.17 and `onejudge` 0.8.1 were the
-# releases that first required that core, and `oneagentgraph` 0.4.0 and
-# `onejudge` 0.10.0 — the pair linked now — require the same `^0.13.0`, so the
-# three floors move together or the graph carries two turn engines — and the
-# lock is the whole of the fix, because a dispatched node runs the engines
-# *this* crate links, never the CLI pins beside them. `tests/e2e/dispatch.rs`'s
+# `^0.12` excludes it. `oneagentgraph` 0.4.0 and `onejudge` 0.10.0 both require
+# `^0.13.0`, so the three floors move together or the graph carries two turn
+# engines — and the lock is the whole of the fix, because a dispatched node runs
+# the engines *this* crate links, never the CLI pins beside them.
+# `tests/e2e/dispatch.rs`'s
 # `a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_record`
 # drives a misrouted candidate through the linked releases to the settled node's
 # record and its rendered line.
@@ -477,23 +465,16 @@ onevcs = "0.21.0"
 # match over that library's closed enum, so a pin beside a 0.13 core that lagged
 # it would not compile.
 #
-# 0.10.0 is the release that **stacks judges**: 0.9.0 runs several judges over
-# one worker turn as a panel, in parallel and answered together, and publishes
-# what each decided as `Observation::JudgeDecided` — which `oneagentgraph` 0.4.0
-# relays as `judge-decided`, and which this crate relays on whole — and 0.10.0
-# adds the `llmlint` judge kind beside `oneharness` and `command`, a judge that
-# hands the worker llmlint's own verdict. The report a settled member stores is
-# **schema 12**, which adds `judge_decisions` — one `JudgedTurn` per worker turn,
-# each judge's `JudgeDecision` in the panel's list order — and a `judge` label
-# on the telemetry's attribution, sessions and processes naming which judge of a
-# panel an invocation belonged to. Both are additive, so `src/report.rs` reads a
-# settled member's verdicts and transcript off it unchanged; `crates/testfakes`
-# writes that document through `JudgedTurn` and `SCHEMA_VERSION` rather than by
-# hand, so it is the shape this release reads and not a copy of it.
-# `oneagentgraph` 0.4.0 requires exactly this release, so the one resolution
-# rule above already holds the pair together — and it is a **requirement** here
-# and not a lock floor, because `^0.8.1` admitted neither 0.9.x nor 0.10.x, the
-# breaking position pre-1.0.
+# 0.10.0 **stacks judges**: several judges answer one worker turn as a panel,
+# each publishing `Observation::JudgeDecided` — relayed by `oneagentgraph` 0.4.0
+# as `judge-decided`, and by this crate whole — and `llmlint` is a judge kind
+# beside `oneharness` and `command`. A settled member's report is **schema 12**,
+# which adds `judge_decisions` (one `JudgedTurn` per worker turn) and a `judge`
+# label on the telemetry's attribution; both are additive, so `src/report.rs`
+# reads the verdicts and transcript unchanged, and `crates/testfakes` writes the
+# document through `JudgedTurn` and `SCHEMA_VERSION` rather than by hand.
+# `oneagentgraph` 0.4.0 requires exactly this release; it is a **requirement**
+# here rather than a lock floor because `^0.8.1` admits no 0.10.x pre-1.0.
 onejudge = "0.10.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is

@@ -326,22 +326,12 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
 }
 
 /// What each judge of a **panel** decided reaches the merged store, payload
-/// intact, and the report that records the same decisions still reads.
+/// intact, and the schema-12 report recording the same decisions still reads.
 ///
-/// The relay is total — `src/agentgraph.rs` crosses every envelope through the
-/// sibling's own `Serialize` and matches on no kind — which is exactly why it is
+/// The relay in `src/agentgraph.rs` matches on no kind, which is why this is
 /// proven rather than assumed: a relay that dropped a kind it had never seen
-/// would fail nothing else in this suite, because every other journey asks for
-/// a kind the relay was written beside. So the producer is the double, the one
-/// place a panel's decisions can be made to arrive without a real panel, and
-/// what is held is that a kind this crate never named reaches the journal whole.
-///
-/// The second half is the report. A member a panel judged records what it
-/// decided as `judge_decisions` on a schema-12 onejudge report, and that is the
-/// document `src/report.rs` reads a settled member's verdicts and transcript
-/// out of. The addition is additive, and this is where that is proven rather
-/// than read off the schema note: a failed verdict beside the decisions is still
-/// named as the reason the node failed, and the transcript still renders.
+/// would fail nothing else in this suite. The double is the one producer a
+/// panel's decisions can be made to arrive from without a real panel.
 #[test]
 fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_reads() {
     let world = World::new("judge-decided");
@@ -475,15 +465,8 @@ fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_read
 }
 
 /// A `.judged` line naming no judge is refused at the double's boundary, and
-/// the refusal is what the dispatch settles on.
-///
-/// The double is the one producer a panel's decisions can be scripted for, so
-/// its script is external input to the suite: a line read leniently would
-/// publish a decision nobody wrote, and the journey above would pass on it. So
-/// the refusal is driven the way a test author would meet it — through a real
-/// dispatch — and what is held is that nothing judged reaches the journal and
-/// the node fails naming the line, rather than settling on a decision the
-/// author did not script.
+/// the refusal is what the dispatch settles on: a script read leniently would
+/// publish a decision nobody wrote, and the journey above would pass on it.
 #[test]
 fn a_judged_line_naming_no_judge_fails_the_dispatch_and_publishes_no_decision() {
     let world = World::new("judged-nameless");

@@ -2296,22 +2296,12 @@ fn judge_kinds() -> [&'static str; 3] {
     ]
 }
 
-/// What each judge of this member's panel decided about its one worker turn.
+/// What each judge of this member's panel decided about its one worker turn:
+/// scripted `<key>.judged`, one `JUDGE|KIND|DECISION|REASON` per line in the
+/// panel's list order; nothing scripted is a member no panel judged.
 ///
-/// Scripted `<key>.judged`, one `JUDGE|KIND|DECISION|REASON` per line, in the
-/// panel's list order. Nothing scripted is a member judged by a bare harness
-/// side — the shipped node-scope graph's — which publishes no decision and
-/// records none on its report.
-///
-/// Built through the sibling's **own** [`JudgeDecided`], like every other
-/// sibling-owned payload this double writes, and the decision word through
-/// onejudge's own [`Decision`]: a line naming a decision that library does not
-/// spell, a kind outside [`judge_kinds`], an empty judge label, or fewer than
-/// four columns, is fatal, because a script read leniently would publish a
-/// decision the test author did not write.
-///
-/// [`JudgeDecided`]: oneagentgraph::event::JudgeDecided
-/// [`Decision`]: onejudge::Decision
+/// A malformed line is fatal rather than skipped, because a script read
+/// leniently would publish a decision the test author did not write.
 fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::event::JudgeDecided> {
     let Some(script) = fake::node_script(dir, key, "judged") else {
         return Vec::new();
@@ -2499,15 +2489,9 @@ fn publish_oneharness_session(
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
 ///
-/// A two-party report carries what its panel decided, turn by turn — the same
-/// decisions the member published as `judge-decided` — under the key onejudge's
-/// **own** [`Report`] writes them under, built through that library's
-/// [`JudgedTurn`], so both the key and the shape are that library's and not a
-/// copy of either; and it carries nothing, as that library writes nothing, for
+/// `judged` is what the member published as `judge-decided`, recorded on the
+/// report under the key and shape onejudge's own `Report` writes — nothing for
 /// a member no panel judged.
-///
-/// [`Report`]: onejudge::Report
-/// [`JudgedTurn`]: onejudge::JudgedTurn
 fn report_of(
     task: &str,
     verdicts: Vec<serde_json::Value>,
