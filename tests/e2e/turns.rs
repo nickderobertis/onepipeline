@@ -474,6 +474,87 @@ fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_read
         .out_has(ANSWERED);
 }
 
+/// A `.judged` line naming no judge is refused at the double's boundary, and
+/// the refusal is what the dispatch settles on.
+///
+/// The double is the one producer a panel's decisions can be scripted for, so
+/// its script is external input to the suite: a line read leniently would
+/// publish a decision nobody wrote, and the journey above would pass on it. So
+/// the refusal is driven the way a test author would meet it — through a real
+/// dispatch — and what is held is that nothing judged reaches the journal and
+/// the node fails naming the line, rather than settling on a decision the
+/// author did not script.
+#[test]
+fn a_judged_line_naming_no_judge_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-nameless");
+    world.script(&format!("{NODE}.judged"), " |llmlint|continue|no label\n");
+    let path = world.plan("nameless", &plan_of("nameless", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file("nameless", "result.json").is_file()
+    });
+
+    assert_refused(
+        &world,
+        "nameless",
+        "a `.judged` line reads \"|llmlint|continue|no label\", which names no judge",
+    );
+}
+
+/// A `.judged` line naming a kind no judge of a panel can be is refused the
+/// same way: the kinds are the linked sibling's three shapes, and a fourth is
+/// a script the author got wrong rather than a judge to publish.
+#[test]
+fn a_judged_line_naming_a_kind_no_panel_has_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-unkind");
+    world.script(
+        &format!("{NODE}.judged"),
+        "lint|llmlint|continue|two findings\nreviewer|human|done|looks fine to me\n",
+    );
+    let path = world.plan("unkind", &plan_of("unkind", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file("unkind", "result.json").is_file()
+    });
+
+    assert_refused(
+        &world,
+        "unkind",
+        "a `.judged` line names the judge kind \"human\", which is none of [\"oneharness\", \
+         \"llmlint\", \"command\"]",
+    );
+}
+
+/// What a dispatch the double refused at its script boundary settles on: the
+/// node failed its task, the refusal is the detail a reader is shown, and no
+/// decision or settlement reached the journal — a partly read panel published
+/// nothing.
+fn assert_refused(world: &World, run: &str, refusal: &str) {
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(node["outcome"], "task-failed", "{node}");
+    let settled = world.events_of(run, "node-settled");
+    let [settled] = &settled[..] else {
+        panic!("{} settlements, not one: {settled:?}", settled.len());
+    };
+    assert_eq!(settled["payload"]["detail"], refusal, "{settled}");
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("task-failed")
+        .out_has(refusal);
+    assert!(
+        relayed(world, run, EventKind::JudgeDecided).is_empty(),
+        "a refused script still published a decision: {:?}",
+        relayed(world, run, EventKind::JudgeDecided)
+    );
+    assert!(
+        relayed(world, run, EventKind::MemberSettled).is_empty(),
+        "a refused script still settled the member: {:?}",
+        relayed(world, run, EventKind::MemberSettled)
+    );
+}
+
 /// What every turn of the conversation above ends on.
 ///
 /// The double's own answer, restated here because a test binary cannot link
