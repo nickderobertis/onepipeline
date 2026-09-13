@@ -3158,9 +3158,11 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
     let mut emptied = 0;
     for member in config.members.values_mut() {
         if let Member::Onejudge(member) = member {
-            if let JudgeSide::Command(command) = &mut member.judge {
-                command.command.clear();
-                emptied += 1;
+            for side in &mut member.judge {
+                if let JudgeSide::Command(command) = side {
+                    command.command.clear();
+                    emptied += 1;
+                }
             }
         }
     }

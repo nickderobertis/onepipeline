@@ -3638,13 +3638,13 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     let Member::Onejudge(monitor) = monitor else {
         panic!("the monitor is a two-party member");
     };
-    match &monitor.judge {
-        JudgeSide::Command(judge) => assert_eq!(
+    match &monitor.judge[..] {
+        [JudgeSide::Command(judge)] => assert_eq!(
             judge.command[..3],
             ["onepipeline", "channel", "serve"],
             "the monitor's judge side is this crate's channel server"
         ),
-        JudgeSide::Harness(_) => panic!("the contract makes the judge side a command provider"),
+        other => panic!("the contract makes the judge side one command provider, not {other:?}"),
     }
 
     let check_in = graph.members.get("check-in").expect("a check-in member");
@@ -3675,8 +3675,9 @@ fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
         panic!("worker+judge is a two-party member");
     };
     assert!(
-        matches!(worker.judge, JudgeSide::Harness(_)),
-        "the node-scope judge is harness-backed"
+        matches!(worker.judge[..], [JudgeSide::Harness(_)]),
+        "the node-scope judge is one harness-backed side, not a panel: {:?}",
+        worker.judge
     );
     assert_eq!(
         graph.members.len(),
