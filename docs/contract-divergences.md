@@ -1939,12 +1939,12 @@ already calls the equivalent for `oneagentgraph`.**
 
 ## 44. The minimum `onetaskgraph` this build needs is not a released version — RESOLVED
 
-**Resolved as this entry proposed: onetaskgraph released the surface, so the floor
-is a release and the checks install one.** The revision the checks pinned is four
+**Ruling: accept the proposal. onetaskgraph released the surface, so the floor is
+a release and the checks install one.** The revision the checks pinned is four
 commits before onetaskgraph `v0.2.0`, so every release from 0.2.0 carries the
 reserved metadata map and `>= 0.2.0` separates an install carrying it from one that
-does not, exactly. The contract names no version, so nothing in `docs/contract.md`
-changed.
+does not, exactly. The contract states the floor only as the minimum this build
+requires and names no version, so nothing in `docs/contract.md` changed.
 
 **What this crate does today.** `src/taskgraph.rs` declares `CHECKED_MINIMUM`
 0.2.0, and a launch through the released 0.1.0 is refused by version, naming the
