@@ -60,8 +60,11 @@ fn the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in() {
     };
     // Its judge side is this crate's own channel server, so the planner reads
     // what the monitor raises through the same conversation it runs in.
-    let JudgeSide::Command(judge) = &monitor.judge else {
-        panic!("the monitor's judge side is a command provider");
+    let [JudgeSide::Command(judge)] = &monitor.judge[..] else {
+        panic!(
+            "the monitor's judge side is one command provider, not {:?}",
+            monitor.judge
+        );
     };
     assert_eq!(judge.command[0], "onepipeline");
     assert_eq!(judge.command[1], "channel");
@@ -108,9 +111,12 @@ fn the_node_scope_graph_is_the_default_worker_and_judge() {
         "the node-scope graph pins a persona"
     );
     assert!(worker.task.is_none(), "the node-scope graph pins a task");
+    // Exactly one harness side: stacking a judge is the operator's graph to
+    // change, not this shipped one's.
     assert!(
-        matches!(worker.judge, JudgeSide::Harness(_)),
-        "a node's judge is a harness, not a command provider"
+        matches!(worker.judge[..], [JudgeSide::Harness(_)]),
+        "a node's judge is one harness, not a command provider or a panel: {:?}",
+        worker.judge
     );
 }
 

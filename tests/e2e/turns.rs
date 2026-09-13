@@ -18,7 +18,8 @@
 
 use crate::harness::{agent, plan_of, World};
 use oneagentgraph::event::{
-    EventKind, Party, TurnActivity, TurnCompleted, TurnMessage, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+    EventKind, JudgeDecided, Party, TurnActivity, TurnCompleted, TurnMessage, TurnStarted,
+    MAX_PAYLOAD_TEXT_BYTES,
 };
 use serde_json::Value;
 
@@ -321,6 +322,230 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
             .iter()
             .all(|closing| closing.usage.input_tokens == Some(1)),
         "a turn closed on an account that is not its own: {closed:?}"
+    );
+}
+
+/// What each judge of a **panel** decided reaches the merged store, payload
+/// intact, and the schema-12 report recording the same decisions still reads.
+///
+/// The relay in `src/agentgraph.rs` matches on no kind, which is why this is
+/// proven rather than assumed: a relay that dropped a kind it had never seen
+/// would fail nothing else in this suite. The double is the one producer a
+/// panel's decisions can be made to arrive from without a real panel.
+#[test]
+fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_reads() {
+    let world = World::new("judge-decided");
+    // Two judges, in the panel's list order: one of each kind a bare harness
+    // side is not, so a relay that read the kind as an enum of the kinds it
+    // knew would fail on the second.
+    // llmlint: ignore[tests_mirror_real_usage] the double is the one producer a panel's
+    // decisions can be made to arrive from without a harness credential, which is the
+    // credentialled tier's to spend; its `.judged` script says what the member decided the
+    // way `.verdict` and `.fail` say what it settled on in every other journey here, and
+    // everything downstream of it — the binary, the relay, the journal, the report reader
+    // and the rendered views — is the real one.
+    world.script(
+        &format!("{NODE}.judged"),
+        "lint|llmlint|continue|two findings under comments_earn_their_place\n\
+         reviewer|oneharness|done|every criterion is met, and the tree is clean\n",
+    );
+    world.script(
+        &format!("{NODE}.verdict"),
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script(&format!("{NODE}.fail"), "1");
+    let path = world.plan("judged", &plan_of("judged", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file("judged", "result.json").is_file()
+    });
+
+    // The decisions, read back through the producing library's own type — its
+    // `deny_unknown_fields` is what makes this the whole payload rather than
+    // the fields this file thought to name.
+    let decided = relayed(&world, "judged", EventKind::JudgeDecided);
+    let decisions: Vec<JudgeDecided> = decided
+        .iter()
+        .map(|event| payload(event, EventKind::JudgeDecided))
+        .collect();
+    let [lint, reviewer] = &decisions[..] else {
+        panic!(
+            "the panel relayed {} decisions, not one per judge: {decided:?}",
+            decisions.len()
+        );
+    };
+    assert_eq!(
+        lint,
+        &JudgeDecided {
+            turn: 1,
+            judge: "lint".into(),
+            kind: "llmlint".into(),
+            decision: "continue".into(),
+            reason: "two findings under comments_earn_their_place".into(),
+        },
+        "{decided:?}"
+    );
+    assert_eq!(
+        reviewer,
+        &JudgeDecided {
+            turn: 1,
+            judge: "reviewer".into(),
+            kind: "oneharness".into(),
+            decision: "done".into(),
+            reason: "every criterion is met, and the tree is clean".into(),
+        },
+        "{decided:?}"
+    );
+    // Stamped with the node it belongs to, as every relayed envelope is: a
+    // decision nobody can attribute to a dispatch is one no view can render.
+    for event in &decided {
+        assert_eq!(event["labels"]["node"], NODE, "{event}");
+        assert_eq!(event["labels"]["member"], "worker", "{event}");
+    }
+    // And in the producer's own order — the panel's list order, which is the
+    // one thing that says which judge spoke first.
+    let seqs: Vec<u64> = decided
+        .iter()
+        .map(|event| event["seq"].as_u64().expect("a relayed seq"))
+        .collect();
+    assert!(seqs[0] < seqs[1], "the panel's order was lost: {decided:?}");
+
+    // The report half. This run's own copy of the settled report carries the
+    // same decisions at the schema the linked onejudge writes, read back through
+    // that library's own type.
+    let settlements = relayed(&world, "judged", EventKind::MemberSettled);
+    let [settlement] = &settlements[..] else {
+        panic!("{} settlements, not one", settlements.len());
+    };
+    let kept = onepipeline::views::RunPaths::under(&world.runs, "judged").report_for(
+        settlement["stream"].as_str().expect("a stream"),
+        settlement["seq"].as_u64().expect("a seq"),
+    );
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(&kept).expect("this run kept its own copy of the report"),
+    )
+    .expect("the retained report is a document");
+    assert_eq!(
+        report["schema_version"],
+        Value::from(onejudge::SCHEMA_VERSION),
+        "the report is not at the schema the linked onejudge writes: {report}"
+    );
+    let judged: Vec<onejudge::JudgedTurn> =
+        serde_json::from_value(report["judge_decisions"].clone()).unwrap_or_else(|error| {
+            panic!("the report's judge_decisions are not onejudge's: {error}: {report}")
+        });
+    assert_eq!(judged.len(), 1, "{report}");
+    assert_eq!(judged[0].turn, 1, "{report}");
+    let recorded: Vec<(&str, &str, onejudge::Decision)> = judged[0]
+        .decisions
+        .iter()
+        .map(|decision| {
+            (
+                decision.judge.as_str(),
+                decision.kind.as_str(),
+                decision.decision,
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![
+            ("lint", "llmlint", onejudge::Decision::Continue),
+            ("reviewer", "oneharness", onejudge::Decision::Done),
+        ],
+        "the report records decisions the member never published: {report}"
+    );
+
+    // What this crate reads off that report and its settlement is unchanged by
+    // the addition: the verdict that failed the node is still the reason the
+    // node failed, and the transcript still renders the turn's words.
+    world
+        .run(&["results", "judged"])
+        .exited(0)
+        .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs");
+    world
+        .run(&["transcript", "judged"])
+        .exited(0)
+        .out_has("tool_call bash")
+        .out_has(ANSWERED);
+}
+
+/// A `.judged` line naming no judge is refused at the double's boundary, and
+/// the refusal is what the dispatch settles on: a script read leniently would
+/// publish a decision nobody wrote, and the journey above would pass on it.
+#[test]
+fn a_judged_line_naming_no_judge_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-nameless");
+    // llmlint: ignore[tests_mirror_real_usage] the `.judged` script is external input to
+    // this suite, and its refusal is met the way its author would meet it — through a real
+    // dispatch settling the node — rather than by calling into the double.
+    world.script(&format!("{NODE}.judged"), " |llmlint|continue|no label\n");
+    let path = world.plan("nameless", &plan_of("nameless", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file("nameless", "result.json").is_file()
+    });
+
+    assert_refused(
+        &world,
+        "nameless",
+        "a `.judged` line reads \"|llmlint|continue|no label\", which names no judge",
+    );
+}
+
+/// A `.judged` line naming a kind no judge of a panel can be is refused the
+/// same way: the kinds are the linked sibling's three shapes, and a fourth is
+/// a script the author got wrong rather than a judge to publish.
+#[test]
+fn a_judged_line_naming_a_kind_no_panel_has_fails_the_dispatch_and_publishes_no_decision() {
+    let world = World::new("judged-unkind");
+    // llmlint: ignore[tests_mirror_real_usage] the same boundary as the journey above, for
+    // the one refusal that reads the linked sibling's kinds rather than the line's shape.
+    world.script(
+        &format!("{NODE}.judged"),
+        "lint|llmlint|continue|two findings\nreviewer|human|done|looks fine to me\n",
+    );
+    let path = world.plan("unkind", &plan_of("unkind", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file("unkind", "result.json").is_file()
+    });
+
+    assert_refused(
+        &world,
+        "unkind",
+        "a `.judged` line names the judge kind \"human\", which is none of [\"oneharness\", \
+         \"llmlint\", \"command\"]",
+    );
+}
+
+/// What a dispatch the double refused at its script boundary settles on: the
+/// node failed its task, the refusal is the detail a reader is shown, and no
+/// decision or settlement reached the journal — a partly read panel published
+/// nothing.
+fn assert_refused(world: &World, run: &str, refusal: &str) {
+    let node = world.run_json(run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(node["outcome"], "task-failed", "{node}");
+    let settled = world.events_of(run, "node-settled");
+    let [settled] = &settled[..] else {
+        panic!("{} settlements, not one: {settled:?}", settled.len());
+    };
+    assert_eq!(settled["payload"]["detail"], refusal, "{settled}");
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("task-failed")
+        .out_has(refusal);
+    assert!(
+        relayed(world, run, EventKind::JudgeDecided).is_empty(),
+        "a refused script still published a decision: {:?}",
+        relayed(world, run, EventKind::JudgeDecided)
+    );
+    assert!(
+        relayed(world, run, EventKind::MemberSettled).is_empty(),
+        "a refused script still settled the member: {:?}",
+        relayed(world, run, EventKind::MemberSettled)
     );
 }
 

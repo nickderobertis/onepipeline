@@ -818,6 +818,10 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
 /// to, among them that a command judge needs a command, are the sibling's rather
 /// than a second copy kept here. Answers rather than exiting, so the refusal is
 /// the caller's to report at its own boundary and a test can state it.
+///
+/// A member's `judge` is a **list** of sides judged as one panel, and the one
+/// this double supervises with is the first command side in it: a harness or
+/// an llmlint side is a judge this double has no process to stand in for.
 fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), String> {
     use oneagentgraph::config::{JudgeSide, Member};
 
@@ -831,10 +835,10 @@ fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<Strin
         .members
         .values()
         .find_map(|member| match member {
-            Member::Onejudge(member) => match &member.judge {
+            Member::Onejudge(member) => member.judge.iter().find_map(|side| match side {
                 JudgeSide::Command(command) => Some(command.command.clone()),
-                JudgeSide::Harness(_) => None,
-            },
+                JudgeSide::Harness(_) | JudgeSide::Llmlint(_) => None,
+            }),
             _ => None,
         })
         .ok_or_else(|| format!("{graph} declares no command judge to supervise with"))?;
