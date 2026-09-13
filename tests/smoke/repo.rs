@@ -49,16 +49,10 @@ pub fn missing(what: &str) -> String {
 
 /// What a created repository says about itself on its GitHub page.
 ///
-/// Read by whoever finds the repository and wonders whether it is leaked
-/// scratch — which two people have, and each renamed it aside believing they
-/// were retiring it. Neither rename retired anything: a renamed GitHub
-/// repository keeps redirecting from its old name, so the probe in
-/// [`ensure_repo`] succeeds on it and the smoke goes on writing to it. So the
-/// sentence names what is true — kept on purpose, reused by every run, not
-/// cleaned up by deleting or renaming — and the file to read first, and names no
-/// slug, so it stays true whatever the repository is called; the same wording is
-/// pasted onto the existing repository by hand. Under GitHub's 350-character
-/// cap on a description.
+/// Names no slug, so the same wording stays true after a rename — the rename
+/// leaves the old name redirecting, and the probe in [`ensure_repo`] succeeds
+/// through it — and is pasted by hand onto the existing repository. Under
+/// GitHub's 350-character cap; `tests/smoke_repo.rs` holds it there.
 pub const DESCRIPTION: &str = "Intentional, and reused by every run of onepipeline's \
     real-everything smoke, which creates it when absent and never deletes it. Deleting or \
     renaming it is no cleanup (a deleted one is recreated, a renamed one keeps its old name \

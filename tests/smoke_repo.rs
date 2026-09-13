@@ -102,9 +102,6 @@ mod unix {
     fn a_created_scratch_repository_is_told_it_is_kept_and_an_existing_one_is_reused() {
         let scratch = scratch();
 
-        // Absent: the probe fails, so the repository is created, and told what
-        // it is. The other flags are the ones a scratch repository has always
-        // been created with; only the sentence changed.
         let record = stand_in(&scratch.0, "absent", false);
         repo::ensure_repo(THROWAWAY);
         let invocations = recorded(&record);
@@ -166,8 +163,6 @@ mod unix {
             "the description names no slug: {description:?}"
         );
 
-        // Present: the probe succeeds, and nothing is created — the reuse the
-        // description promises.
         let record = stand_in(&scratch.0, "present", true);
         repo::ensure_repo(THROWAWAY);
         let invocations = recorded(&record);
