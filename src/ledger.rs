@@ -1537,8 +1537,10 @@ pub struct LockRecord {
 /// file that says which process it is.
 ///
 /// Taking a claim nobody holds is exclusive, because creating a file exclusively
-/// is what the filesystem decides. Reclaiming the claim of a holder this host can
-/// prove is gone — which is what `adopt` recovers a dead driver's run by, and
+/// is what the filesystem decides — and the file is created **with** its record
+/// already in it, so no reader ever finds the lock without a holder to name. See
+/// [`create_exclusively_filled`] for the operation that gives both on each
+/// platform. Reclaiming the claim of a holder this host can prove is gone — which is what `adopt` recovers a dead driver's run by, and
 /// what a `reply` takes a dead driver's queue over by — is exclusive for the same
 /// reason: the reclaim is contended for by creating a file exclusively, and only
 /// the process that created it may put its own record where the dead one was.
@@ -1564,15 +1566,18 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
 
     loop {
-        if create_exclusively(path, &body)? {
+        if create_exclusively_filled(path, &body)? {
             return Ok(());
         }
-        let held = match read_json_opt::<LockRecord>(path) {
-            Some(held) => held,
+        let held = match read_lock_file(path)? {
+            LockFile::Record(held) => held,
+            // Let go between the create that found it and this read, so there
+            // is nobody to report: it is taken the way a lock nobody holds is.
+            LockFile::Absent => continue,
             // An unreadable lock is still a claim. Refusing is the safe
             // reading: the alternative is a second writer on a run
             // whose first writer cannot be identified.
-            None => return Err(unreadable_lock(run)),
+            LockFile::Unreadable => return Err(unreadable_lock(path, run)),
         };
         // A holder on this host that this host can prove is gone leaves a lock
         // nothing will release. Reclaim it — or report whoever did.
@@ -1582,42 +1587,12 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
         match reclaim(path, &held, &body)? {
             Reclaimed::Won => return Ok(()),
             Reclaimed::HeldBy(holder) => return Err(locked_by(run, &holder)),
-            Reclaimed::Unreadable => return Err(unreadable_lock(run)),
+            Reclaimed::Unreadable(at) => return Err(unreadable_lock(&at, run)),
             // The lock was let go while this process was contending for it,
             // so there is nobody to reclaim it from: it is taken the way a
             // lock nobody holds is taken, exclusively.
             Reclaimed::Released => {}
         }
-    }
-}
-
-/// Create `path` exclusively with `body` in it: `Ok(true)` when this process
-/// created it, `Ok(false)` when something already had.
-///
-/// A file this process created and then could not fill is taken away again: an
-/// empty claim is one no later process can read, and a claim nobody can read is
-/// one nobody can reclaim.
-fn create_exclusively(path: &Path, body: &str) -> Result<bool> {
-    let ledger = |e: io::Error| Error::Ledger {
-        path: path.to_path_buf(),
-        source: e,
-    };
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            if let Err(e) = file.write_all(body.as_bytes()) {
-                drop(file);
-                let _ = fs::remove_file(path);
-                return Err(ledger(e));
-            }
-            Ok(true)
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(ledger(e)),
     }
 }
 
@@ -1627,8 +1602,8 @@ enum Reclaimed {
     Won,
     /// Another process holds the run, or is taking it over at this instant.
     HeldBy(LockRecord),
-    /// A claim on the run exists that this build cannot read.
-    Unreadable,
+    /// A claim on the run exists that this build cannot read, at this path.
+    Unreadable(PathBuf),
     /// The lock was released while this process was contending for it.
     Released,
 }
@@ -1638,17 +1613,41 @@ enum Reclaimed {
 enum LockFile {
     Record(LockRecord),
     Absent,
+    /// Bytes that are not a record this build reads.
     Unreadable,
 }
 
-fn read_lock_file(path: &Path) -> LockFile {
-    match fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str(&counted(text.len(), text)) {
-            Ok(record) => LockFile::Record(record),
-            Err(_) => LockFile::Unreadable,
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => LockFile::Absent,
-        Err(_) => LockFile::Unreadable,
+/// How long a read of a lock the filesystem refuses is tried again before the
+/// refusal is reported as the filesystem said it.
+///
+/// A refusal is not a record nobody can read. Windows refuses to open a name
+/// whose deletion is pending — answering access denied rather than not found —
+/// for as long as another process still has it open, and the reclaim takes its
+/// entries away while its losers are reading them; what the name holds a moment
+/// later is the answer. A refusal that outlasts this is not that.
+const LOCK_READ_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn read_lock_file(path: &Path) -> Result<LockFile> {
+    let deadline = std::time::Instant::now() + LOCK_READ_PATIENCE;
+    loop {
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                return Ok(match serde_json::from_str(&counted(text.len(), text)) {
+                    Ok(record) => LockFile::Record(record),
+                    Err(_) => LockFile::Unreadable,
+                })
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LockFile::Absent),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => {
+                return Err(Error::Ledger {
+                    path: path.to_path_buf(),
+                    source: e,
+                })
+            }
+        }
     }
 }
 
@@ -1676,6 +1675,14 @@ fn read_lock_file(path: &Path) -> LockFile {
 /// once its record is the lock, and never before: with the dead record gone
 /// from the path, a late contender that creates a fresh entry re-reads the lock,
 /// finds the winner, and reports it.
+///
+/// The dead record is replaced by [`write_atomic`]'s rename rather than by a
+/// link, because the name is already there to replace: `rename(2)` on Linux and
+/// macOS, and the replacing `MoveFileExW` or `SetFileInformationByHandle` that
+/// `std::fs::rename` is on Windows, swap which complete file the name refers to,
+/// so a reader finds the dead record or the winner's and never part of either.
+/// A rename is not exclusive on any of the three, and needs not be here: only
+/// the process that created the entry makes it.
 fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
     let key = reclaim_key(dead);
     let mut number = 1u64;
@@ -1685,20 +1692,21 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             // This process alone may replace `dead` — provided it is still
             // what the path holds, which is what an earlier winner changes.
             let outcome = match read_lock_file(path) {
-                LockFile::Record(now) if now == *dead => {
-                    write_atomic(path, body.as_bytes())?;
-                    Reclaimed::Won
+                Ok(LockFile::Record(now)) if now == *dead => {
+                    write_atomic(path, body.as_bytes()).map(|()| Reclaimed::Won)
                 }
-                LockFile::Record(now) => Reclaimed::HeldBy(now),
-                LockFile::Absent => Reclaimed::Released,
-                LockFile::Unreadable => Reclaimed::Unreadable,
+                Ok(LockFile::Record(now)) => Ok(Reclaimed::HeldBy(now)),
+                Ok(LockFile::Absent) => Ok(Reclaimed::Released),
+                Ok(LockFile::Unreadable) => Ok(Reclaimed::Unreadable(path.to_path_buf())),
+                Err(refused) => Err(refused),
             };
-            // Either way the dead record is no longer at the path, so the
-            // entries contending to replace it have nothing left to decide.
+            // Either way this process is done contending, so the entries go: a
+            // live creator's entry left behind would name it the holder of a run
+            // it never took.
             for done in 1..=number {
                 let _ = fs::remove_file(reclaim_entry(path, &key, done));
             }
-            return Ok(outcome);
+            return outcome;
         }
         // Another process created this number. If the lock has moved on, it is
         // that process's — or its successor's — and is reported as it stands.
@@ -1708,15 +1716,15 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
         // beside this file put the entries in place by hand, which needs the private
         // names this file owns. What a user reaches — two replies taking one dead
         // driver's run over — is driven in `tests/e2e/driver.rs`.
-        match read_lock_file(path) {
+        match read_lock_file(path)? {
             LockFile::Record(now) if now == *dead => {}
             LockFile::Record(now) => return Ok(Reclaimed::HeldBy(now)),
             LockFile::Absent => return Ok(Reclaimed::Released),
-            LockFile::Unreadable => return Ok(Reclaimed::Unreadable),
+            LockFile::Unreadable => return Ok(Reclaimed::Unreadable(path.to_path_buf())),
         }
         // The dead record was still in place, so whoever created this number
         // is between that and writing the lock — or died there.
-        match read_lock_file(&entry) {
+        match read_lock_file(&entry)? {
             LockFile::Record(reclaimer)
                 if reclaimer.host == sys::hostname()
                     && !sys::process_may_be_live(reclaimer.pid) =>
@@ -1728,7 +1736,7 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             // lock and taken the entries away. The next look at the lock
             // finds that record.
             LockFile::Absent => {}
-            LockFile::Unreadable => return Ok(Reclaimed::Unreadable),
+            LockFile::Unreadable => return Ok(Reclaimed::Unreadable(entry)),
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
     }
@@ -1737,12 +1745,22 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
 /// Create `path` exclusively, **with** `body` already in it.
 ///
 /// One operation rather than a create followed by a write, because what a
-/// contender learns from an entry is who created it, and it reads the entry at
-/// exactly the moment its creator would be between the two. So the body is
-/// written to a name only this process uses and *linked* to `path`: the link
-/// is refused where `path` exists, and where it is not refused `path` was
-/// never observable empty. `Ok(true)` when this process created it, `Ok(false)`
-/// when something already had.
+/// contender learns from a lock or an entry is who created it, and it reads the
+/// file at exactly the moment its creator would be between the two — which a
+/// reader on Linux finds thousands of times in a few thousand claims, and one on
+/// Windows found in the race it lost. So the body is written to a name only this
+/// process uses and *linked* to `path`: the link is refused where `path` exists,
+/// and where it is not refused `path` was never observable empty. `Ok(true)`
+/// when this process created it, `Ok(false)` when something already had.
+///
+/// The link is **exclusive and atomic in one call** on every platform the merge
+/// path runs: `link(2)` on Linux and macOS, which fails with `EEXIST` where the
+/// name exists, and `CreateHardLinkW` on Windows, which fails with
+/// `ERROR_ALREADY_EXISTS` — and on all three the name, once it appears, is a
+/// second name for a file that was already complete. Neither nearer call gives
+/// both: `create_new` followed by a write is exclusive and exposes the name empty
+/// in between, and a rename exposes no partial file and replaces whatever holds
+/// the name.
 fn create_exclusively_filled(path: &Path, body: &str) -> Result<bool> {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let ledger = |e: io::Error| Error::Ledger {
@@ -1759,7 +1777,10 @@ fn create_exclusively_filled(path: &Path, body: &str) -> Result<bool> {
         NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let temp = path.with_file_name(name);
-    fs::write(&temp, body).map_err(ledger)?;
+    if let Err(e) = fs::write(&temp, body) {
+        let _ = fs::remove_file(&temp);
+        return Err(ledger(e));
+    }
     let linked = match fs::hard_link(&temp, path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
@@ -1804,13 +1825,50 @@ fn locked_by(run: &str, holder: &LockRecord) -> Error {
     }
 }
 
-fn unreadable_lock(run: &str) -> Error {
-    Error::Locked {
-        run: run.to_string(),
-        pid: 0,
-        host: sys::hostname(),
-        verb: "an unreadable lock".to_string(),
+/// What a claim refused over a lock nobody can be named as holding says, as the
+/// source of the [`Error::Ledger`] that reports it.
+///
+/// Not an [`Error::Locked`]: that names a holding process, and the one thing
+/// known here is that no process can be named. Reporting one as pid 0 sent
+/// whoever read the refusal looking for a process that does not exist.
+#[derive(Debug)]
+struct UnreadableLock {
+    run: String,
+}
+
+impl std::fmt::Display for UnreadableLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "run '{}' is claimed by an unreadable lock: what it holds is not a record this \
+             build can read, so no process can be named as its holder",
+            self.run
+        )
     }
+}
+
+impl std::error::Error for UnreadableLock {}
+
+fn unreadable_lock(path: &Path, run: &str) -> Error {
+    Error::Ledger {
+        path: path.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            UnreadableLock {
+                run: run.to_string(),
+            },
+        ),
+    }
+}
+
+/// Whether `error` refused a claim over a lock nobody can be named as holding —
+/// which is still a claim on the run, and answered as one.
+pub(crate) fn is_unreadable_lock(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Ledger { source, .. }
+            if source.get_ref().is_some_and(|inner| inner.is::<UnreadableLock>())
+    )
 }
 
 /// The gate that makes **accepting a command** and **letting the run go** two
@@ -3085,6 +3143,50 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A lock's name is never visible before the record it carries is whole.
+    ///
+    /// A reader that finds the name and cannot read a record in it has nobody to
+    /// report, and a loser of the lock that reports nobody names no process to look
+    /// at. So a reader watching the name while it is taken and let go, over and over,
+    /// reads either no lock or a complete record — never an empty or a partial one.
+    #[test]
+    fn a_lock_is_never_observable_before_its_record_is_complete() {
+        const CLAIMS: usize = 500;
+        let root = scratch("lock-observed");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let taking = std::sync::atomic::AtomicBool::new(true);
+
+        let incomplete = std::thread::scope(|scope| {
+            let observer = scope.spawn(|| {
+                let mut incomplete = Vec::new();
+                while taking.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(text) = fs::read_to_string(paths.lock()) {
+                        if serde_json::from_str::<LockRecord>(&text).is_err() {
+                            incomplete.push(text);
+                        }
+                    }
+                }
+                incomplete
+            });
+            for _ in 0..CLAIMS {
+                OwnershipLock::acquire(&paths, "drive")
+                    .expect("a lock nobody holds is taken")
+                    .release();
+            }
+            taking.store(false, std::sync::atomic::Ordering::Relaxed);
+            observer.join().expect("the observer finishes")
+        });
+
+        assert!(
+            incomplete.is_empty(),
+            "a reader found the lock's name before its record was complete, {} times: {:?}",
+            incomplete.len(),
+            incomplete.iter().take(3).collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// A reclaimer that died between creating its entry and writing the lock
     /// costs the next reclaimer a name, not the run.
     #[test]
@@ -3172,16 +3274,18 @@ mod tests {
         let paths = RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
         let dead = a_dead_holders_lock(&paths);
-        fs::write(
-            reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1),
-            "not json at all",
-        )
-        .expect("a corrupt entry");
+        let entry = reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1);
+        fs::write(&entry, "not json at all").expect("a corrupt entry");
 
-        assert!(matches!(
-            OwnershipLock::acquire(&paths, "adopt"),
-            Err(Error::Locked { pid: 0, .. })
-        ));
+        match OwnershipLock::acquire(&paths, "adopt") {
+            Err(unreadable) if is_unreadable_lock(&unreadable) => {
+                assert!(
+                    matches!(&unreadable, Error::Ledger { path, .. } if *path == entry),
+                    "the refusal did not name the entry nobody can read: {unreadable}"
+                );
+            }
+            other => panic!("an unreadable entry was not reported as one: {other:?}"),
+        }
         let untouched: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
         assert_eq!(untouched, dead);
         fs::remove_dir_all(&root).ok();
@@ -3194,10 +3298,102 @@ mod tests {
         paths.create().expect("the run directory");
         fs::write(paths.lock(), "not json at all").expect("a corrupt lock");
 
-        assert!(matches!(
-            OwnershipLock::acquire(&paths, "start"),
-            Err(Error::Locked { .. })
-        ));
+        match OwnershipLock::acquire(&paths, "start") {
+            Err(unreadable) if is_unreadable_lock(&unreadable) => {
+                let said = unreadable.to_string();
+                assert!(said.contains("an unreadable lock"), "{said}");
+                assert!(said.contains("'demo'"), "{said}");
+                assert!(
+                    !said.contains("pid 0"),
+                    "a holder nobody wrote was named: {said}"
+                );
+                assert!(
+                    matches!(&unreadable, Error::Ledger { path, .. } if *path == paths.lock()),
+                    "the refusal did not name the lock nobody can read: {said}"
+                );
+            }
+            other => panic!("an unreadable lock was not reported as one: {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(paths.lock()).expect("the lock is still there"),
+            "not json at all",
+            "a claim nobody can read was overwritten"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A lock the filesystem refuses to open for a moment is not a lock nobody
+    /// can read: once it opens, the holder it names is the holder reported.
+    ///
+    /// The moment is a mode taken away and given back, which is what this host can
+    /// arrange; what it stands for is a name another process is part way through
+    /// replacing or taking away, which Windows refuses to open while it does.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_the_filesystem_refuses_for_a_moment_names_its_holder_once_it_opens() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("lock-refused-briefly");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let holder = LockRecord {
+            pid: sys::pid(),
+            host: sys::hostname(),
+            acquired_at: sys::now_rfc3339(),
+            verb: "drive".to_string(),
+            started: String::new(),
+        };
+        write_json(&paths.lock(), &holder).expect("a live holder's lock");
+        fs::set_permissions(paths.lock(), fs::Permissions::from_mode(0o000))
+            .expect("the lock's mode is taken away");
+        assert!(
+            fs::read(paths.lock()).is_err(),
+            "this process reads a file whose mode refuses it, so the refusal this is about \
+             cannot be arranged here"
+        );
+
+        let refused = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                fs::set_permissions(paths.lock(), fs::Permissions::from_mode(0o644))
+                    .expect("the lock's mode is given back");
+            });
+            OwnershipLock::acquire(&paths, "reply")
+        });
+
+        match refused {
+            Err(Error::Locked {
+                pid, host, verb, ..
+            }) => {
+                assert_eq!(pid, holder.pid);
+                assert_eq!(host, holder.host);
+                assert_eq!(verb, "drive");
+            }
+            other => {
+                panic!("a lock refused for a moment was not reported by its holder: {other:?}")
+            }
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A lock the filesystem goes on refusing is reported as that refusal: not
+    /// as a holder, and not as a record nobody can read, because nothing was read.
+    #[test]
+    fn a_lock_the_filesystem_goes_on_refusing_is_reported_as_the_refusal() {
+        let root = scratch("lock-refused");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        fs::create_dir(paths.lock()).expect("something that is not a file holds the name");
+
+        match OwnershipLock::acquire(&paths, "start") {
+            Err(refused @ Error::Ledger { .. }) if !is_unreadable_lock(&refused) => {
+                assert!(
+                    matches!(&refused, Error::Ledger { path, .. } if *path == paths.lock()),
+                    "the refusal did not name the lock: {refused}"
+                );
+            }
+            other => panic!("a lock the filesystem refuses was not reported as that: {other:?}"),
+        }
+        assert!(paths.lock().is_dir(), "what held the name was replaced");
         fs::remove_dir_all(&root).ok();
     }
 
