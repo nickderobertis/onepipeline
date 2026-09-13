@@ -2744,6 +2744,51 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
             .collect();
         assert_eq!(fields, BTreeSet::from(["id", "status", "outcome"]));
     }
+
+    // The README is a **second copy** of the operator-facing half, in the prose an
+    // operator meets it in, and nothing compiles that. So it is held to the block
+    // here: every spelling the block names, where a hook's output is kept, the
+    // shipped timeout, and the promises that make the two hooks safe to wire.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for group in ["flags", "config_keys"] {
+        for which in ["success", "failure", "timeout"] {
+            let named = spelled(group, which);
+            assert!(
+                prose.contains(&named),
+                "the README does not name the run-end hooks' {group} `{named}`"
+            );
+        }
+    }
+    let environment: Vec<String> = serde_json::from_value(hooks["environment"].clone())
+        .expect("the block names a hook's environment");
+    for variable in &environment {
+        assert!(
+            prose.contains(variable.as_str()),
+            "the README does not name `{variable}`, which a hook is given"
+        );
+    }
+    let log = hooks["log"].as_str().expect("the block names the log");
+    assert!(
+        prose.contains(log),
+        "the README does not say a hook's output is kept in `{log}`"
+    );
+    assert_eq!(
+        DEFAULT_HOOK_TIMEOUT_SECONDS.get(),
+        600,
+        "the README's shipped timeout is written in words; move them with the constant"
+    );
+    for promise in [
+        "six hundred seconds when unnamed, zero refused",
+        "has not ended and fires neither",
+        "a run fires at most one hook, once",
+        "a hook never changes how the run settled",
+    ] {
+        assert!(
+            prose.contains(promise),
+            "the README no longer states that {promise}"
+        );
+    }
 }
 
 /// The criterion check this build carries **beyond** the contract is exactly what
