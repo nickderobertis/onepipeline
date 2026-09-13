@@ -20,7 +20,7 @@ use onepipeline::channel::{
     allows, Author, Command as Edit, Dependents, Reply, SettleOutcome, SurfaceKind,
 };
 use onepipeline::cli::{
-    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_COMMAND_FLOOR_SECONDS,
     WRITEBACK_ITEM_BUDGET_ENV,
 };
@@ -1951,6 +1951,7 @@ fn summary_fields() -> BTreeSet<String> {
         pid: NonZeroU32::new(4_242),
         host: Some("a-host".into()),
         started: Some("linux-proc-stat:1".into()),
+        let_go_by: Some("a-host-4242".into()),
         timing: serde_json::from_str::<RunTelemetry>(include_str!("golden/telemetry-v2.json"))
             .expect("the telemetry golden reads back into the types"),
         parked: vec!["idle".into()],
@@ -2576,6 +2577,172 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     }
 }
 
+/// The run-end hooks, as the contract's own block names them, are what this
+/// build takes, reads and emits.
+///
+/// The block is the source: the flags are asked of the parser, the keys of the
+/// launch config at the version the block states and at none before it, the
+/// default of the constant a launch resolves to, and the kinds of the enum that
+/// emits them. What a hook is handed and what `results` renders are driven
+/// against the real binary by `tests/e2e/run_end_hooks.rs`, out of this same
+/// block.
+#[test]
+fn the_run_end_hooks_surface_is_what_the_contract_names() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "run_end_hooks"))
+        .expect("the run-end hooks block is JSON");
+    let hooks = &block["run_end_hooks"];
+    let spelled = |group: &str, which: &str| -> String {
+        hooks[group][which]
+            .as_str()
+            .unwrap_or_else(|| panic!("the block names no {group}.{which}"))
+            .to_string()
+    };
+
+    assert!(
+        CONTRACT
+            .contains("[--success-hook COMMAND] [--failure-hook COMMAND] [--hook-timeout SECONDS]"),
+        "the driver invocation no longer names the run-end hook flags"
+    );
+    let parsed = Cli::try_parse_from([
+        "onepipeline".to_string(),
+        "start".to_string(),
+        "plans:demo".to_string(),
+        spelled("flags", "success"),
+        "./follow-up.sh".to_string(),
+        spelled("flags", "failure"),
+        "./report-failure.sh".to_string(),
+        spelled("flags", "timeout"),
+        "30".to_string(),
+    ])
+    .expect("the flags the block names are ones `start` takes");
+    let Command::Start(started) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(started.success_hook.as_deref(), Some("./follow-up.sh"));
+    assert_eq!(started.failure_hook.as_deref(), Some("./report-failure.sh"));
+    assert_eq!(started.hook_timeout, NonZeroU64::new(30));
+    let Command::Start(unset) = Cli::try_parse_from(["onepipeline", "start", "plans:demo"])
+        .expect("it parses")
+        .command
+    else {
+        panic!("that is not a start")
+    };
+    assert_eq!(
+        (unset.success_hook, unset.failure_hook, unset.hook_timeout),
+        (None, None, None),
+        "a launch naming no hook named one"
+    );
+
+    // The keys, at the version the block states and refused by name before it.
+    let at = hooks["config_schema_version"]
+        .as_u64()
+        .expect("the block states the version the keys arrived at");
+    let arrived = u32::try_from(at).expect("a version fits");
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&arrived)
+            && arrived <= LAUNCH_CONFIG_SCHEMA_VERSION,
+        "the block states the hook keys arrived at schema {arrived}, which this build does not read"
+    );
+    let keys = [
+        (spelled("config_keys", "success"), json!("./follow-up.sh")),
+        (
+            spelled("config_keys", "failure"),
+            json!("./report-failure.sh"),
+        ),
+        (spelled("config_keys", "timeout"), json!(45)),
+    ];
+    let mut document = serde_json::Map::new();
+    document.insert("schema_version".into(), json!(at));
+    for (key, value) in &keys {
+        document.insert(key.clone(), value.clone());
+    }
+    let named: LaunchConfig =
+        serde_json::from_value(Value::Object(document)).expect("a config naming both hooks parses");
+    assert_eq!(named.success_hook.as_deref(), Some("./follow-up.sh"));
+    assert_eq!(named.failure_hook.as_deref(), Some("./report-failure.sh"));
+    assert_eq!(named.hook_timeout, NonZeroU64::new(45));
+    let dir =
+        std::env::temp_dir().join(format!("onepipeline-contract-hooks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .into_iter()
+        .filter(|version| *version < arrived)
+    {
+        for (key, value) in &keys {
+            let path = dir.join(format!("{version}-{key}.yaml"));
+            std::fs::write(
+                &path,
+                format!("schema_version: {version}\n{key}: {value}\n"),
+            )
+            .expect("the config is written");
+            let refused = LaunchConfig::load(&path)
+                .expect_err("a version that never had the key refuses it")
+                .to_string();
+            assert!(
+                refused.contains(&format!("`{key}`"))
+                    && refused.contains(&format!("schema {arrived} key")),
+                "schema {version} did not refuse `{key}` by its name: {refused}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut zero = serde_json::Map::new();
+    zero.insert("schema_version".into(), json!(at));
+    zero.insert(spelled("config_keys", "timeout"), json!(0));
+    let refused = serde_json::from_value::<LaunchConfig>(Value::Object(zero))
+        .expect_err("a timeout of zero is refused")
+        .to_string();
+    assert!(refused.contains("zero"), "{refused}");
+    assert_eq!(
+        hooks["default_timeout_seconds"].as_u64(),
+        Some(DEFAULT_HOOK_TIMEOUT_SECONDS.get()),
+        "the block states a different shipped timeout than the code carries"
+    );
+
+    // The kinds are the enum's own and the contract's list names each.
+    let payloads = hooks["payloads"]
+        .as_object()
+        .expect("the block names the payloads");
+    let tokens = backticked();
+    assert_eq!(payloads.len(), 3, "{payloads:?}");
+    for kind in payloads.keys() {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "`{kind}` is not a kind this build emits"
+        );
+        assert!(
+            tokens.contains(kind),
+            "the contract's kind list does not name `{kind}`"
+        );
+    }
+
+    // And the block agrees with itself: the reason a hook is handed is the one its
+    // firing records, in one of the kinds it states, over nodes of one shape.
+    let endings: Vec<String> =
+        serde_json::from_value(hooks["endings"].clone()).expect("the block names the endings");
+    let reason_kinds: Vec<String> = serde_json::from_value(hooks["reason_kinds"].clone())
+        .expect("the block names the reason kinds");
+    assert!(endings.contains(
+        &payloads["run-hook-finished"]["ending"]
+            .as_str()
+            .expect("an ending")
+            .to_string()
+    ));
+    assert_eq!(hooks["stdin"]["success"]["reason"], Value::Null);
+    let failure = &hooks["stdin"]["failure"]["reason"];
+    assert!(reason_kinds.contains(&failure["kind"].as_str().expect("a kind").to_string()));
+    assert_eq!(failure, &payloads["run-hook-fired"]["reason"]);
+    for node in failure["nodes"].as_array().expect("the reason lists nodes") {
+        let fields: BTreeSet<&str> = node
+            .as_object()
+            .expect("a node is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(fields, BTreeSet::from(["id", "status", "outcome"]));
+    }
+}
+
 /// The criterion check this build carries **beyond** the contract is exactly what
 /// the divergence record proposes.
 ///
@@ -3151,7 +3318,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 28, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 31, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -4067,6 +4234,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("31.", "shaped event view beside the surface"),
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
+    ("72.", "holds any node that is not `done`"),
 ];
 
 #[test]

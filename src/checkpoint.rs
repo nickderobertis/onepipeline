@@ -89,7 +89,10 @@ use crate::projection::{self, RunState};
 /// covers the state a writer computed, not the state this build would. Version
 /// 2 has version 1's fields; it was cut when a settlement started ending a
 /// node's park (`projection::settlement_ends_the_park`), so a cached fold that
-/// still holds the park is refolded rather than resumed from.
+/// still holds the park is refolded rather than resumed from. Version 3 was cut
+/// when the fold started recording the driver that let go of a run to fire its
+/// run-end hook (`RunState::let_go_by`): a cached fold from before it read that
+/// record as nothing, so it is refolded rather than resumed from.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -97,7 +100,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 3;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -1405,7 +1408,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v2.json");
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v3.json");
 
     /// The digest of the journal bytes the golden's marker covers.
     const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
@@ -1455,37 +1458,45 @@ mod tests {
         }
     }
 
-    /// The document the build **before** the park-ending fold wrote, kept exactly
-    /// as that build wrote it.
+    /// The documents the builds **before** each fold change wrote, kept exactly as
+    /// those builds wrote them: the one before the park-ending fold, and the one
+    /// before the fold recorded a driver letting go of its run.
     ///
-    /// What proves the fold change is a version and not a quiet re-reading: this
-    /// is a real schema 1 document, byte-for-byte the shape this build writes, and
-    /// the reader has to refuse it rather than resume from a fold it would not
-    /// have computed.
-    const GOLDEN_V1: &str = include_str!("../tests/golden/checkpoint-v1.json");
+    /// What proves each fold change is a version and not a quiet re-reading: each
+    /// is a real document, byte-for-byte the shape this build writes, and the
+    /// reader has to refuse it rather than resume from a fold it would not have
+    /// computed.
+    const GOLDEN_EARLIER: [(u32, &str); 2] = [
+        (1, include_str!("../tests/golden/checkpoint-v1.json")),
+        (2, include_str!("../tests/golden/checkpoint-v2.json")),
+    ];
 
     #[test]
-    fn the_document_the_build_before_this_one_wrote_is_refused_rather_than_read() {
-        let refused = serde_json::from_str::<Checkpoint>(GOLDEN_V1).expect_err("it is refused");
-        assert!(
-            refused.to_string().contains("schema_version 1"),
-            "the refusal does not name the version it met: {refused}"
-        );
+    fn the_documents_earlier_builds_wrote_are_refused_rather_than_read() {
+        for (version, earlier) in GOLDEN_EARLIER {
+            let refused = serde_json::from_str::<Checkpoint>(earlier).expect_err("it is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("schema_version {version}")),
+                "the refusal does not name the version it met: {refused}"
+            );
+        }
     }
 
     #[test]
-    fn a_schema_2_document_is_the_shape_the_golden_pins() {
+    fn a_schema_3_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v2.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v3.json together"
         );
     }
 
     #[test]
-    fn a_schema_2_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_3_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the

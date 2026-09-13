@@ -443,6 +443,24 @@ governed. It is named by `--writeback-item-budget SECONDS`, by
 of seconds — zero is refused at whichever spelling carried it — and naming none
 takes ten seconds per item.
 
+A launch may name **run-end hooks**: `--success-hook COMMAND`, run once when the
+run ends with every node `done`, and `--failure-hook COMMAND`, run once when it
+ends any other way — a failed or skipped node, an unfinished graph with nothing
+left to decide, or a clean `onepipeline stop`. A launch config names the same
+things as `success_hook` and `failure_hook`, and the flag wins; a blank value names
+none. A run **paused** on a decision has not ended and fires neither — the driver
+records `run-hook-withheld` and says so on stderr, and the driver that adopts the
+run once the decision is answered fires the hook the run then reaches — and a run
+fires at most one hook, once, whichever driver, `adopt` or `stop` looks next. A
+hook runs in the launch directory with `ONEPIPELINE_HOOK`, `ONEPIPELINE_RUN_ID`,
+`ONEPIPELINE_RUN_ROOT` and the run owner's `ONEPIPELINE_LAUNCHER` and
+`ONEPIPELINE_LAUNCHER_SESSION` in its environment and one JSON document on its
+stdin; it is awaited for up to `--hook-timeout SECONDS` (or `hook_timeout`, six
+hundred seconds when unnamed, zero refused), its output is kept in
+`hooks/<hook>.log` under the run, and `results` shows how it ended. It starts only
+after the driver has let go of the run, so the run reads as undriven while it runs,
+and **a hook never changes how the run settled**.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

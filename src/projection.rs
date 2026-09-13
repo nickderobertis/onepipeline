@@ -203,6 +203,17 @@ pub struct RunState {
     pub last_write_at: Option<u64>,
     /// What `stop` left the run as.
     pub stop: StopState,
+    /// The journal stream of the driver that let go of this run to fire its
+    /// run-end hook, while no later adoption has driven it since.
+    ///
+    /// A stream names the host and pid that wrote it, so a reader holding the
+    /// launch record can tell whether the driver it names is the one that let go:
+    /// that process is still alive while it awaits the hook, and without this it
+    /// reads as driving a run it has released. Cleared by `driver-adopted`,
+    /// because a driver that adopts the run afterwards is driving it. Omitted when
+    /// absent, so a fold of a run that fired no hook is written as it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub let_go_by: Option<String>,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -1022,6 +1033,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // record clearing it, and the node is pinned there — see
         // [`abandon_the_dispatch_in_flight`].
         Some(journal::PipelineKind::DriverAdopted) => {
+            state.let_go_by = None;
             abandon_the_dispatch_in_flight(state);
             state
                 .recorded
@@ -1090,6 +1102,11 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
             state.last_surface_at = millis_of(&event.ts);
+        }
+        // The firing driver's own stream: it is the process that released the run,
+        // and the only one this record can prove let go. See `RunState::let_go_by`.
+        Some(journal::PipelineKind::RunHookFired) => {
+            state.let_go_by = Some(event.stream.clone());
         }
         Some(journal::PipelineKind::RunStopped) => {
             state.stop = match journal::StopTeardown::of(payload) {

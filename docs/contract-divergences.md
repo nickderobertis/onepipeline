@@ -6,8 +6,8 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32 and 34** have since been **ruled on by the planner who owns
-the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
+Entries **1–9, 23–32, 34 and 72** have since been **ruled on by the planner who
+owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
@@ -3080,7 +3080,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "fields": [
     "schema_version",
     "run_id",
@@ -3101,6 +3101,7 @@ cannot go on describing a document the build stopped writing:
     "pid",
     "host",
     "started",
+    "let_go_by",
     "timing",
     "parked",
     "judge_rejected",
@@ -5217,3 +5218,34 @@ on the launch record an `adopt` replays.
   }
 }
 ```
+
+## 72. The failure hook's `unfinished` rule named only a parked or cancelled node, so a run could end firing neither hook — RESOLVED
+
+**Ruling: widen `unfinished` to any node that is not `done`. The failure hook
+fires with reason kind `unfinished` at a driver's let-go whenever the graph holds
+a node that is not `done` — parked, cancelled, blocked or still pending — holds
+no failed or skipped node, and has no decision outstanding. `awaiting-planner`
+still withholds, a `complete-but-draft` node still means the run has not ended,
+and the payload, the kinds and the views are unchanged.**
+
+The run-end hooks arrived as an approved addition to the driver contract, and as
+approved they stated the `unfinished` reason as a graph that "holds no failed or
+skipped node, holds a `parked` or `cancelled` node, and no decision is
+outstanding". The same addition promises that the two hooks together cover every
+way a run ends. Built as written, those two sentences disagree over a graph the
+engine really lets go of: a node whose upstream never settles `done` without
+anything in the graph being failed, skipped, parked or cancelled. A consumer of a
+cross-DAG `run:<id>#<node>` reference whose upstream run failed, or does not
+exist yet, is the ordinary case — that edge leaves its consumer blocked, never
+failed, by the contract's own cross-DAG rule, so nothing is movable, no decision
+is outstanding, the driver lets go, and the run reads `unattended`. Neither hook's
+condition held, so a run that had plainly ended fired nothing, and a consumer
+wiring its failure hook to surface such a run would never hear of it.
+
+The manager ruled for the wider reading, and `docs/contract.md` states it in those
+terms in its run-end hooks paragraph. Nothing else about the addition moved:
+success still needs every node `done`, a paused run still fires nothing and
+journals `run-hook-withheld`, and `nodes` still lists every node not `done` in
+plan order — which for this reason is the blocked consumer. The journey
+`run_end_hooks::a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfinished`
+drives exactly that let-go against the real binary.

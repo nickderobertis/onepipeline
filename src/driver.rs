@@ -475,9 +475,9 @@ fn start(args: &StartArgs) -> Result<i32> {
 
     // The run-end hooks and their timeout, by two rungs: the flag, then the launch
     // config. A hook rung that is there and blank is this launch naming none, as a
-    // blank drafting graph is, and a timeout of zero is refused by its spelling.
-    // Before the run directory exists, so a launch that could not be honoured mints
-    // nothing.
+    // blank drafting graph is. A timeout of zero never reaches here: the flag's parser
+    // and the config's reader each refuse one by its own spelling, before the run
+    // directory exists, so a launch that could not be honoured mints nothing.
     let success_hook = crate::hooks::named(
         args.success_hook.as_deref(),
         declared.success_hook.as_deref(),
@@ -486,13 +486,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         args.failure_hook.as_deref(),
         declared.failure_hook.as_deref(),
     );
-    let hook_timeout: NonZeroU64 = match args.hook_timeout {
-        Some(seconds) => NonZeroU64::new(seconds)
-            .ok_or_else(|| Error::Invalid(crate::hooks::refused_zero_timeout("--hook-timeout")))?,
-        None => declared
-            .hook_timeout
-            .unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS),
-    };
+    let hook_timeout: NonZeroU64 = args
+        .hook_timeout
+        .or(declared.hook_timeout)
+        .unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS);
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -915,7 +912,12 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     if let Some(run) = observer.as_mut() {
         run.cancel();
     }
-    Ok(settled.exit_code())
+    // The run's end is judged by the driver that let go of it, with the lock
+    // already released — a detached one exactly as an attached one.
+    if settled.released {
+        crate::hooks::at_let_go(&paths, crate::hooks::Relay::Quiet);
+    }
+    Ok(settled.state.exit_code())
 }
 
 /// Keep the run watched, and reap the graph that stopped watching it.
@@ -1425,7 +1427,7 @@ fn attach(
             }
             // Whatever the loop reported is this launch's failure to report: a
             // lock it could not take, a ledger it could not read.
-            engine.join().map_err(|_| {
+            let driven = engine.join().map_err(|_| {
                 Error::Invalid(format!("the engine loop for '{}' panicked", paths.run))
             })??;
             // The authoritative final summary write, with the engine joined above
@@ -1443,6 +1445,11 @@ fn attach(
                 "{}",
                 json!({"run_id": paths.run, "settlement": settlement.as_str()})
             );
+            // After the settlement is decided and said, so nothing a hook does —
+            // however it ends, and whatever it launches — can change either.
+            if driven.released {
+                crate::hooks::at_let_go(paths, crate::hooks::Relay::Stderr);
+            }
             return Ok(settlement.exit_code());
         }
         std::thread::sleep(ATTACH_POLL);
@@ -1569,7 +1576,15 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
     // still being driven was refused, and this is the same taking-over `adopt`
     // has always been. A dead one is signalled to no effect, which is the
     // ordinary case.
-    displace_the_parked_driver(&record);
+    // Except a driver that let go of the run to fire its run-end hook: it holds
+    // nothing, and the process it awaits that hook in is not one to end.
+    if !views::let_go(
+        record.recorded_host(),
+        record.driver_pid(),
+        view.state.let_go_by.as_deref(),
+    ) {
+        displace_the_parked_driver(&record);
+    }
     Ok((record, view))
 }
 
@@ -1795,6 +1810,9 @@ fn stop(args: &StopArgs) -> Result<i32> {
             journal::STOP_TEARDOWN: established,
         })
     );
+    // Only a clean teardown reaches here, after `run-stopped` is journaled and the
+    // stop said, so a hook changes neither this verb's answer nor its status.
+    crate::hooks::at_stop(&paths);
     Ok(EXIT_SUCCESS)
 }
 

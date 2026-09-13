@@ -266,10 +266,11 @@ pub struct StartArgs {
     /// How long a run-end hook is awaited, in seconds, before its process tree is
     /// ended.
     ///
-    /// A positive whole number: zero is refused. Given here it beats the launch
-    /// config's own field; naming none takes the shipped six hundred seconds.
+    /// A positive whole number: zero is refused where the flag is parsed, before a
+    /// run exists. Given here it beats the launch config's own field; naming none
+    /// takes the shipped six hundred seconds.
     #[arg(long, value_name = "SECONDS")]
-    pub hook_timeout: Option<u64>,
+    pub hook_timeout: Option<NonZeroU64>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]
