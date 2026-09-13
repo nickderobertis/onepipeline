@@ -289,11 +289,22 @@ fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
     // The read above wrote exactly one record, and it is the `planner-surfaced`
     // the **channel** records for the consumption — nothing the profile shaped
     // was written back, and nothing it left out was removed.
-    // `monitor` ends with a trailer line about the run rather than an event, so
-    // the events are everything before it — and the one line that appeared is the
-    // consumption.
+    // `monitor` ends with a trailer rather than events — the run's state, then the
+    // cursor a resume starts from, each a `-- ` line — so the events are everything
+    // before the first of them, and the one line that appeared is the consumption.
     let consumed = store();
-    let events = |lines: &[String]| lines[..lines.len() - 1].to_vec();
+    let events = |lines: &[String]| {
+        let trailer = lines
+            .iter()
+            .position(|line| line.starts_with("-- "))
+            .expect("`monitor` ends its pass with a trailer");
+        assert_eq!(
+            lines[trailer..].last().map(|line| line.starts_with("-- cursor ")),
+            Some(true),
+            "`monitor` ended on something other than its resume line: {lines:?}"
+        );
+        lines[..trailer].to_vec()
+    };
     let (was, now) = (events(&before), events(&consumed));
     assert_eq!(
         now[..was.len()],
