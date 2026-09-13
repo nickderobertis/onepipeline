@@ -2814,6 +2814,142 @@ fn renamed_within(from: &Path, to: &Path, what: &str, within: std::time::Duratio
     );
 }
 
+/// Take a store away so that nothing can put it back until [`restored`] does.
+///
+/// A move alone is not that while the run under test is still writing to the store.
+/// `onetaskgraph` writes each document by its path, creating the folders that path names
+/// on the way, and `project copy` writes the project's own document again after its tasks
+/// — so a copy the move lands inside puts a folder back under the store's old name,
+/// holding that project, and every command after it is answered by the store the move was
+/// meant to take away. A Windows leg met exactly that: the run's projection never failed,
+/// and the journey waiting for the failure timed out.
+///
+/// So once the folder has moved, a plain file holds its name. A store whose root is a file
+/// is refused by every command, and nothing can create a path beneath a file. A folder a
+/// writer put back before the file was placed is moved aside as well: what it holds is
+/// that writer's last word, not the store.
+pub fn unreachable(store: &Path, aside: &Path, what: &str) {
+    renamed(store, aside, what);
+    let mut put_back = 0;
+    let mut refused = None;
+    let held = waited_for(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(20),
+        || match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(store)
+        {
+            Ok(_) => true,
+            Err(why) => {
+                if store.is_dir() {
+                    let mut beside = aside.as_os_str().to_owned();
+                    beside.push(format!("-put-back-{put_back}"));
+                    if std::fs::rename(store, PathBuf::from(beside)).is_ok() {
+                        put_back += 1;
+                    }
+                }
+                refused = Some(why);
+                false
+            }
+        },
+    );
+    assert!(
+        held,
+        "{what}: nothing could hold {} once the store moved to {}: {}",
+        store.display(),
+        aside.display(),
+        refused.expect("a wait that ran out asked at least once"),
+    );
+}
+
+/// Put back a store [`unreachable`] took away, once whatever still has its name open
+/// lets go of it.
+pub fn restored(aside: &Path, store: &Path, what: &str) {
+    let mut refused = None;
+    let cleared = waited_for(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(20),
+        || match std::fs::remove_file(store) {
+            Ok(()) => true,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => true,
+            Err(why) => {
+                refused = Some(why);
+                false
+            }
+        },
+    );
+    assert!(
+        cleared,
+        "{what}: the file holding {} never let go: {}",
+        store.display(),
+        refused.expect("a wait that ran out asked at least once"),
+    );
+    renamed(aside, store, what);
+}
+
+/// A store taken away stays away from a writer that was already writing to it, and comes
+/// back whole.
+///
+/// The writer does what a `project copy` the move lands inside does: it resolved the
+/// store's path before the move and goes on writing a document beneath it, creating the
+/// folders that document names. A move alone lets it put the store back, which is how this
+/// fails against [`renamed`]; what reads the store on either side is the real
+/// `onetaskgraph`, which is what a journey's run reads it through.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the harness's own outage,
+// which the journeys built on it cannot assert about themselves; the writer stands in for
+// a sibling process caught mid-copy, an interval no real command can be held inside.
+#[test]
+fn a_store_taken_away_stays_away_from_a_writer_already_writing_to_it() {
+    let world = World::new("harness-store-unreachable");
+    let project = world.plan("held", &plan_of("held", vec![agent("only", &[])]));
+    let store = world.store();
+    let aside = world.root.join("plan-store-unavailable");
+    let writing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let writer = {
+        let store = store.clone();
+        let writing = std::sync::Arc::clone(&writing);
+        std::thread::spawn(move || {
+            while writing.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::fs::create_dir_all(store.join("projects")).and_then(|()| {
+                    std::fs::write(
+                        store.join("projects").join("written-late.md"),
+                        "---\ntitle: late\n---\n",
+                    )
+                });
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+
+    unreachable(&store, &aside, "the store becomes unreachable");
+    // Long enough for a writer that got in after the move to have put the store back.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    writing.store(false, std::sync::atomic::Ordering::SeqCst);
+    writer.join().expect("the writer ends");
+
+    assert!(
+        !store.is_dir(),
+        "a writer that was already writing put the store back under its old name"
+    );
+    let refused = world
+        .store_cmd(&["project", "show", &project, "--json"])
+        .output()
+        .expect("the real onetaskgraph runs");
+    assert!(
+        !refused.status.success(),
+        "the real onetaskgraph still read a store that was taken away: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+
+    restored(&aside, &store, "the store returns");
+    assert_eq!(
+        world.store_project(&project)["items"][0]["id"],
+        json!(project),
+        "the store came back without the project it held"
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A move something still holds happens once the holder lets go.
 ///
 /// The holder here is a name that is occupied rather than a handle that is open,
