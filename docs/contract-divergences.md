@@ -1937,7 +1937,27 @@ say in the contract that it is not passed through, or move it to a name outside
 that product's namespace — `ONEPIPELINE_ONETASKGRAPH_BIN` is what this crate
 already calls the equivalent for `oneagentgraph`.**
 
-## 44. The minimum `onetaskgraph` this build needs is not a released version — OPEN
+## 44. The minimum `onetaskgraph` this build needs is not a released version — RESOLVED
+
+**Resolved as this entry proposed: onetaskgraph released the surface, so the floor
+is a release and the checks install one.** The revision the checks pinned is four
+commits before onetaskgraph `v0.2.0`, so every release from 0.2.0 carries the
+reserved metadata map and `>= 0.2.0` separates an install carrying it from one that
+does not, exactly. The contract names no version, so nothing in `docs/contract.md`
+changed.
+
+**What this crate does today.** `src/taskgraph.rs` declares `CHECKED_MINIMUM`
+0.2.0, and a launch through the released 0.1.0 is refused by version, naming the
+minimum, rather than reading every task as one with no `onepipeline.id`;
+`FIRST_REVISION` is gone. `justfile`'s `_ensure-onetaskgraph` installs the published
+release named once, in `onetaskgraph-version`.
+`taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
+fails if that release falls below the floor or the recipe stops reading it,
+`provisioning::unix::provisioning_replaces_a_wrong_version_on_path_with_the_pinned_release`
+drives the recipe and requires the release it names, and
+`store::an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions`
+drives the refusal of 0.1.0 against the real binary. The entry as it was opened
+follows, for the record.
 
 `src/taskgraph.rs` declares `CHECKED_MINIMUM = "0.1.0"`, which is the version the
 binary carrying the surface this mapping reads **reports**, and the launch refuses
@@ -3602,8 +3622,9 @@ merely updated; and because the value differs, an item nothing else about the
 projection would change is written anyway. Measured in all three forms — a source
 item declaring the destination's own origin, one declaring none, and `--match-by
 onepipeline.id` — against `onetaskgraph` 0.2.18 and against revision
-`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which is the revision
-`taskgraph::FIRST_REVISION` pins and the one every check here installs.
+`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which was the revision
+`taskgraph::FIRST_REVISION` pinned and every check here installed when this was
+measured; entry 44 records its retirement for a release.
 
 So a destination item this crate projects onto is left carrying
 `onetaskgraph.origin: onepipeline-writeback:<hex>` — a source that exists only as

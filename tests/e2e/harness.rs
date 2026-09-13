@@ -81,8 +81,8 @@ struct StoreQualified<T> {
 /// unknown key is an unknown *variant*, which is refused here exactly as an unknown
 /// field is refused on the structs around it — so this widens what the boundary accepts
 /// by the one shape `onetaskgraph` documents and by nothing else. It is read *forward*:
-/// the revision the checks pin predates the field, and this is what lets the suite read
-/// a store served by the newer install a real host has.
+/// an install that predates the field reads as one carrying none, and this is what lets
+/// the suite read a store served by one that has it.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StoreLocation {
@@ -233,18 +233,19 @@ fn a_task_page_is_read_whether_the_source_placed_the_task_or_not() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// This boundary reads every `location` the real `onetaskgraph` declares — and the
-/// revision this suite pins declares none, which is why the field is optional here.
+/// This boundary reads every `location` the real `onetaskgraph` declares — and an
+/// install that predates the field declares none, which is why the field is optional
+/// here.
 ///
 /// This suite carries a hand-written copy of a two-variant enum, and a copy of an
 /// external schema is exactly the thing that rots silently. But the copy is a *forward*
-/// tolerance rather than a mirror: `taskgraph::FIRST_REVISION`, which is the
-/// `onetaskgraph` every check here installs and drives, predates the field entirely, and
-/// the field arrived from the newer install a real host shells out to — as a whole suite
-/// going red. So what is asked of the authoritative source is the one thing that holds
-/// either way: whatever `onetaskgraph schema` declares, this boundary reads. Against the
-/// pinned revision that is an empty set beside a `Task` carrying no `location` at all;
-/// against a newer one it is the two spellings, and a third would fail here.
+/// tolerance rather than a mirror: the unreleased revision these checks once installed
+/// predated the field entirely, and the field arrived from the newer install a real host
+/// shells out to — as a whole suite going red. So what is asked of the authoritative
+/// source is the one thing that holds either way: whatever `onetaskgraph schema`
+/// declares, this boundary reads. Against an install older than the field that is an
+/// empty set beside a `Task` carrying no `location` at all; against one that has it — the
+/// release the checks install now — it is the two spellings, and a third would fail here.
 ///
 /// **The copy is this suite's alone.** `src/writeback.rs` names `location` too, but no
 /// longer as a second copy of this shape: those types stopped denying unknown fields, and
@@ -286,7 +287,7 @@ fn this_boundary_reads_every_location_onetaskgraph_declares() {
                     .collect::<Vec<String>>()
             })
             .collect(),
-        // The pinned revision predates the field, which leaves nothing to reconcile
+        // An install older than the field declares none, which leaves nothing to reconcile
         // against but is not nothing to assert: a task it declares carries no `location`
         // either, so the two halves of its schema agree and the absent form this
         // boundary reads is the only form this `onetaskgraph` can produce.

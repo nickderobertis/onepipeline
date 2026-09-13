@@ -23,20 +23,21 @@ set positional-arguments := true
 # recipes whose failure needs project-level context (_crate-fmt-check,
 # _crate-coverage, msrv) add one explicitly.
 
-# The revision of `onetaskgraph` this build's own checks read their plans
-# through. A plan is one project of that store and this crate *drives* the
-# binary rather than linking it, so cargo cannot bring it into the build graph
-# and `bootstrap` installs it instead — pinned to a revision, because the surface
-# the mapping reads (a task's custom metadata) landed after that repository's
-# 0.1.0 release and there is no published version carrying it yet.
+# The released `onetaskgraph` this build's own checks read their plans through.
+# A plan is one project of that store and this crate *drives* the binary rather
+# than linking it, so cargo cannot bring it into the build graph and `bootstrap`
+# installs it instead — pinned to a published release, so a green check says
+# something about what a host that installs one runs. It is the newest release
+# when it was pinned, and the one the engine's store journeys were run against
+# and pass through: installed by this recipe, not merely read. Any release from
+# 0.2.0 carries the custom metadata the mapping reads, which is
+# `src/taskgraph.rs`'s floor.
 #
-# **Read out of `src/taskgraph.rs`, which is where it is declared**, beside the
-# version floor it is the other half of: a copy here could go stale against that
-# floor without anything saying so, and
-# `taskgraph::tests::the_revision_the_checks_install_is_read_out_of_this_file`
-# fails if one appears. `docs/contract-divergences.md` entry 44 is the proposal
-# to retire it for a version once one carries the surface.
-onetaskgraph-rev := `sed -n 's/^pub const FIRST_REVISION: &str = "\([0-9a-f]*\)".*/\1/p' src/taskgraph.rs`
+# **This is the only place the release is named.** `_ensure-onetaskgraph` reads
+# it, and `taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
+# fails if it falls below that floor, is named twice, or stops being what the
+# recipe installs.
+onetaskgraph-version := "0.2.28"
 
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
@@ -79,15 +80,13 @@ _ensure-onetaskgraph:
       if [[ "$resolved" == */bin/onetaskgraph ]]; then \
         resolved_root="${resolved%/bin/onetaskgraph}"; \
         if [[ "$resolved_root" != "$cargo_root" ]]; then \
-          cargo install onetaskgraph --locked --quiet --force --root "$resolved_root" \
-            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+          cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force \
+            --root "$resolved_root"; \
         else \
-          cargo install onetaskgraph --locked --quiet --force \
-            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+          cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force; \
         fi; \
       else \
-        cargo install onetaskgraph --locked --quiet --force \
-          --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+        cargo install onetaskgraph --version {{onetaskgraph-version}} --locked --quiet --force; \
       fi; \
       if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
         cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
