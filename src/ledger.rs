@@ -60,6 +60,7 @@
 // decided, and `unknown` is never anybody's.
 
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -1567,9 +1568,12 @@ pub struct LockRecord {
 ///
 /// Taking a claim nobody holds is exclusive, because creating a file exclusively
 /// is what the filesystem decides. Reclaiming the claim of a holder this host can
-/// prove is gone is not one operation and cannot be — which is this lock's own
-/// long-standing shape, and what `adopt` recovers a dead driver's run by.
-/// [`Handover`] does not rest on it, and says there why.
+/// prove is gone — which is what `adopt` recovers a dead driver's run by, and
+/// what a `reply` takes a dead driver's queue over by — is exclusive for the same
+/// reason: the reclaim is contended for by creating a file exclusively, and only
+/// the process that created it may put its own record where the dead one was.
+/// See [`reclaim`] for the shape, and why two processes that both proved the
+/// same holder dead at the same instant cannot both end up holding the run.
 fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::Ledger {
@@ -1589,6 +1593,45 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
     let body = serde_json::to_string(&record)
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
 
+    loop {
+        if create_exclusively(path, &body)? {
+            return Ok(());
+        }
+        let held = match read_json_opt::<LockRecord>(path) {
+            Some(held) => held,
+            // An unreadable lock is still a claim. Refusing is the safe
+            // reading: the alternative is a second writer on a run
+            // whose first writer cannot be identified.
+            None => return Err(unreadable_lock(run)),
+        };
+        // A holder on this host that this host can prove is gone leaves a lock
+        // nothing will release. Reclaim it — or report whoever did.
+        if !(held.host == sys::hostname() && !sys::process_may_be_live(held.pid)) {
+            return Err(locked_by(run, &held));
+        }
+        match reclaim(path, &held, &body)? {
+            Reclaimed::Won => return Ok(()),
+            Reclaimed::HeldBy(holder) => return Err(locked_by(run, &holder)),
+            Reclaimed::Unreadable => return Err(unreadable_lock(run)),
+            // The lock was let go while this process was contending for it,
+            // so there is nobody to reclaim it from: it is taken the way a
+            // lock nobody holds is taken, exclusively.
+            Reclaimed::Released => {}
+        }
+    }
+}
+
+/// Create `path` exclusively with `body` in it: `Ok(true)` when this process
+/// created it, `Ok(false)` when something already had.
+///
+/// A file this process created and then could not fill is taken away again: an
+/// empty claim is one no later process can read, and a claim nobody can read is
+/// one nobody can reclaim.
+fn create_exclusively(path: &Path, body: &str) -> Result<bool> {
+    let ledger = |e: io::Error| Error::Ledger {
+        path: path.to_path_buf(),
+        source: e,
+    };
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1596,71 +1639,207 @@ fn claim_or_report_the_holder(path: &Path, run: &str, verb: &str) -> Result<()> 
     {
         Ok(mut file) => {
             use std::io::Write;
-            file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let held_by: Option<LockRecord> = read_json_opt(path);
-            match held_by {
-                // A holder on this host that this host can prove is gone
-                // leaves a lock nothing will release. Reclaim it.
-                // llmlint: ignore-block[changed_behavior_has_e2e] two processes reclaiming
-                // one dead driver's run at the same instant is not a state a journey can
-                // place them in — `adopt` is what reaches this, and a suite can start two
-                // but not decide which microsecond each reads the record in. What this
-                // build does about it is stated above rather than promised away, and the
-                // gate that had to be exclusive does not rest on it.
-                Some(held)
-                    if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
-                {
-                    // Read back rather than written and assumed: a contender
-                    // that arrives after the winner reads the winner's record and
-                    // is refused, exactly as a live holder would have refused it.
-                    // Two that write at the same moment can each read their own
-                    // back — this narrows that window rather than closing it, and
-                    // the doc above says what rests on it and what does not.
-                    write_atomic(path, body.as_bytes())?;
-                    match read_json_opt::<LockRecord>(path) {
-                        Some(now) if now.pid == record.pid && now.host == record.host => Ok(()),
-                        Some(won_by) => Err(Error::Locked {
-                            run: run.to_string(),
-                            pid: won_by.pid,
-                            host: won_by.host,
-                            verb: won_by.verb,
-                        }),
-                        None => Err(Error::Locked {
-                            run: run.to_string(),
-                            pid: 0,
-                            host: sys::hostname(),
-                            verb: "an unreadable lock".to_string(),
-                        }),
-                    }
-                }
-                // llmlint: ignore-end[changed_behavior_has_e2e]
-                Some(held) => Err(Error::Locked {
-                    run: run.to_string(),
-                    pid: held.pid,
-                    host: held.host,
-                    verb: held.verb,
-                }),
-                // An unreadable lock is still a claim. Refusing is the safe
-                // reading: the alternative is a second writer on a run
-                // whose first writer cannot be identified.
-                None => Err(Error::Locked {
-                    run: run.to_string(),
-                    pid: 0,
-                    host: sys::hostname(),
-                    verb: "an unreadable lock".to_string(),
-                }),
+            if let Err(e) = file.write_all(body.as_bytes()) {
+                drop(file);
+                let _ = fs::remove_file(path);
+                return Err(ledger(e));
             }
+            Ok(true)
         }
-        Err(e) => Err(Error::Ledger {
-            path: path.to_path_buf(),
-            source: e,
-        }),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(ledger(e)),
+    }
+}
+
+/// How a reclaim of a dead holder's lock ended for the process that attempted it.
+enum Reclaimed {
+    /// This process's record is now the lock.
+    Won,
+    /// Another process holds the run, or is taking it over at this instant.
+    HeldBy(LockRecord),
+    /// A claim on the run exists that this build cannot read.
+    Unreadable,
+    /// The lock was released while this process was contending for it.
+    Released,
+}
+
+/// What the lock path holds, told apart three ways because a reclaim answers
+/// each differently.
+enum LockFile {
+    Record(LockRecord),
+    Absent,
+    Unreadable,
+}
+
+fn read_lock_file(path: &Path) -> LockFile {
+    match fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str(&counted(text.len(), text)) {
+            Ok(record) => LockFile::Record(record),
+            Err(_) => LockFile::Unreadable,
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => LockFile::Absent,
+        Err(_) => LockFile::Unreadable,
+    }
+}
+
+/// Put this process's record where a dead holder's is, or say who got there
+/// first.
+///
+/// Two processes that both read `dead` and both proved it gone would, each
+/// writing its own record and reading it back, each be able to read its own —
+/// the moment the driver of a run dies with two replies queued behind it is
+/// exactly the moment two processes do that, and the run's queue was then
+/// reconciled twice. So the write is never what decides. The dead record is
+/// replaced by the process that **created its reclaim entry**, exclusively — a
+/// file named after the dead record, so every process that proved *that* record
+/// dead contends under one name and the filesystem picks one — and that process
+/// re-reads the lock before it writes, so a record already put there by an
+/// earlier winner is reported rather than overwritten. A loser reads the winner's
+/// record, or the winner's entry while its record is on the way, and reports it
+/// as the holder: it never writes.
+///
+/// The entries are numbered, and a number is stepped over only when the process
+/// that created it is one this host can prove is gone with the dead record still
+/// in place — the shape [`Handover`] describes, keyed to one dead record. A
+/// reclaimer that dies between creating its entry and writing the lock therefore
+/// costs the next one a name, not the run. The winner takes the entries away
+/// once its record is the lock, and never before: with the dead record gone
+/// from the path, a late contender that creates a fresh entry re-reads the lock,
+/// finds the winner, and reports it.
+fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
+    let key = reclaim_key(dead);
+    let mut number = 1u64;
+    loop {
+        let entry = reclaim_entry(path, &key, number);
+        if create_exclusively_filled(&entry, body)? {
+            // This process alone may replace `dead` — provided it is still
+            // what the path holds, which is what an earlier winner changes.
+            let outcome = match read_lock_file(path) {
+                LockFile::Record(now) if now == *dead => {
+                    write_atomic(path, body.as_bytes())?;
+                    Reclaimed::Won
+                }
+                LockFile::Record(now) => Reclaimed::HeldBy(now),
+                LockFile::Absent => Reclaimed::Released,
+                LockFile::Unreadable => Reclaimed::Unreadable,
+            };
+            // Either way the dead record is no longer at the path, so the
+            // entries contending to replace it have nothing left to decide.
+            for done in 1..=number {
+                let _ = fs::remove_file(reclaim_entry(path, &key, done));
+            }
+            return Ok(outcome);
+        }
+        // Another process created this number. If the lock has moved on, it is
+        // that process's — or its successor's — and is reported as it stands.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the states below are a
+        // reclaimer dying, or the run being let go, between one filesystem operation
+        // and the next, and no journey can place a subprocess there; the unit tests
+        // beside this file put the entries in place by hand, which needs the private
+        // names this file owns. What a user reaches — two replies taking one dead
+        // driver's run over — is driven in `tests/e2e/driver.rs`.
+        match read_lock_file(path) {
+            LockFile::Record(now) if now == *dead => {}
+            LockFile::Record(now) => return Ok(Reclaimed::HeldBy(now)),
+            LockFile::Absent => return Ok(Reclaimed::Released),
+            LockFile::Unreadable => return Ok(Reclaimed::Unreadable),
+        }
+        // The dead record was still in place, so whoever created this number
+        // is between that and writing the lock — or died there.
+        match read_lock_file(&entry) {
+            LockFile::Record(reclaimer)
+                if reclaimer.host == sys::hostname()
+                    && !sys::process_may_be_live(reclaimer.pid) =>
+            {
+                number += 1;
+            }
+            LockFile::Record(reclaimer) => return Ok(Reclaimed::HeldBy(reclaimer)),
+            // Gone since the create was refused: its creator has written the
+            // lock and taken the entries away. The next look at the lock
+            // finds that record.
+            LockFile::Absent => {}
+            LockFile::Unreadable => return Ok(Reclaimed::Unreadable),
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+}
+
+/// Create `path` exclusively, **with** `body` already in it.
+///
+/// One operation rather than a create followed by a write, because what a
+/// contender learns from an entry is who created it, and it reads the entry at
+/// exactly the moment its creator would be between the two. So the body is
+/// written to a name only this process uses and *linked* to `path`: the link
+/// is refused where `path` exists, and where it is not refused `path` was
+/// never observable empty. `Ok(true)` when this process created it, `Ok(false)`
+/// when something already had.
+fn create_exclusively_filled(path: &Path, body: &str) -> Result<bool> {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ledger = |e: io::Error| Error::Ledger {
+        path: path.to_path_buf(),
+        source: e,
+    };
+    let mut name = path
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(format!(
+        ".tmp.{}.{}",
+        sys::pid(),
+        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temp = path.with_file_name(name);
+    fs::write(&temp, body).map_err(ledger)?;
+    let linked = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(ledger(e)),
+    };
+    let _ = fs::remove_file(&temp);
+    linked
+}
+
+/// The name every reclaim of one dead record contends under.
+///
+/// Spelled from the record itself — the pid, the instant it was taken, and the
+/// start token beside it — so two processes that read the same record derive the
+/// same name without agreeing on anything else, and two records never share one.
+fn reclaim_key(dead: &LockRecord) -> String {
+    let plain =
+        |text: &str| -> String { text.chars().filter(char::is_ascii_alphanumeric).collect() };
+    format!(
+        "{}-{}-{}",
+        dead.pid,
+        plain(&dead.acquired_at),
+        plain(&dead.started)
+    )
+}
+
+/// One numbered entry of one dead record's reclaim, beside the lock it is for.
+fn reclaim_entry(path: &Path, key: &str, number: u64) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(format!(".reclaim.{key}.{number}"));
+    path.with_file_name(name)
+}
+
+fn locked_by(run: &str, holder: &LockRecord) -> Error {
+    Error::Locked {
+        run: run.to_string(),
+        pid: holder.pid,
+        host: holder.host.clone(),
+        verb: holder.verb.clone(),
+    }
+}
+
+fn unreadable_lock(run: &str) -> Error {
+    Error::Locked {
+        run: run.to_string(),
+        pid: 0,
+        host: sys::hostname(),
+        verb: "an unreadable lock".to_string(),
     }
 }
 
@@ -2859,6 +3038,205 @@ mod tests {
         .expect("a stale lock");
 
         OwnershipLock::acquire(&paths, "start").expect("a dead holder's lock is reclaimed");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    fn a_dead_holders_lock(paths: &RunPaths) -> LockRecord {
+        let dead = LockRecord {
+            pid: sys::reaped_pid(),
+            host: sys::hostname(),
+            acquired_at: sys::now_rfc3339(),
+            verb: "drive".to_string(),
+            started: String::new(),
+        };
+        write_json(&paths.lock(), &dead).expect("a dead holder's lock");
+        dead
+    }
+
+    fn reclaim_entries_beside(paths: &RunPaths) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&paths.dir)
+            .expect("the run directory lists")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains(".reclaim."))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Several processes proving one holder dead at the same instant is the
+    /// state a run's driver dying with replies queued behind it puts them in, and
+    /// what came of it once was both replies taking the run over and one edit
+    /// committed twice. Real contenders — threads doing the real filesystem
+    /// operations, released together — against one dead lock, over enough rounds
+    /// that a reclaim which merely narrows the window is caught: exactly one of
+    /// them holds the lock afterwards and every other one is told who does.
+    #[test]
+    fn racing_reclaimers_of_one_dead_lock_leave_exactly_one_holder() {
+        const CONTENDERS: usize = 16;
+        const ROUNDS: usize = 25;
+        let root = scratch("reclaim-race");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        for round in 0..ROUNDS {
+            a_dead_holders_lock(&paths);
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS));
+            let outcomes: Vec<Result<OwnershipLock>> = (0..CONTENDERS)
+                .map(|_| {
+                    let gate = gate.clone();
+                    let paths = paths.clone();
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        OwnershipLock::acquire(&paths, "reply")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|contender| contender.join().expect("a contender finishes"))
+                .collect();
+
+            let winners = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+            assert_eq!(
+                winners, 1,
+                "round {round}: {winners} contenders each believe they hold the run"
+            );
+            for lost in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
+                match lost {
+                    Error::Locked {
+                        pid, host, verb, ..
+                    } => {
+                        assert_eq!(*pid, sys::pid(), "round {round}: {lost}");
+                        assert_eq!(*host, sys::hostname(), "round {round}: {lost}");
+                        assert_eq!(verb, "reply", "round {round}: {lost}");
+                    }
+                    other => {
+                        panic!("round {round}: a loser was not told who holds the run: {other}")
+                    }
+                }
+            }
+            let held: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+            assert_eq!(
+                held.pid,
+                sys::pid(),
+                "round {round}: the lock does not name the winner"
+            );
+            assert_eq!(
+                reclaim_entries_beside(&paths),
+                Vec::<String>::new(),
+                "round {round}: the reclaim left its entries behind"
+            );
+            // Drop the winner's lock, which releases it, so the next round
+            // starts from a dead holder's lock and not a live one.
+            drop(outcomes);
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A reclaimer that died between creating its entry and writing the lock
+    /// costs the next reclaimer a name, not the run.
+    #[test]
+    fn a_dead_reclaimers_entry_is_stepped_over_and_taken_away() {
+        let root = scratch("reclaim-stale");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+
+        let key = reclaim_key(&dead);
+        let abandoned = reclaim_entry(&paths.lock(), &key, 1);
+        write_json(
+            &abandoned,
+            &LockRecord {
+                pid: sys::reaped_pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "reply".to_string(),
+                started: String::new(),
+            },
+        )
+        .expect("an entry a reclaimer died holding");
+
+        let held = OwnershipLock::acquire(&paths, "adopt")
+            .expect("a dead reclaimer's entry does not keep the run from being reclaimed");
+        let record: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(record.pid, sys::pid());
+        assert_eq!(record.verb, "adopt");
+        assert!(
+            !abandoned.exists(),
+            "the dead reclaimer's entry was left behind"
+        );
+        assert_eq!(reclaim_entries_beside(&paths), Vec::<String>::new());
+        held.release();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A reclaimer that is between creating its entry and writing the lock is
+    /// the run's holder to anyone arriving then, named with what it is doing —
+    /// which is how a second reply learns to wait for the first's answer rather
+    /// than reporting the edit queued behind a driver that is gone.
+    #[test]
+    fn a_live_reclaimers_entry_names_it_as_the_holder() {
+        let root = scratch("reclaim-live");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+
+        let key = reclaim_key(&dead);
+        let taking_over = reclaim_entry(&paths.lock(), &key, 1);
+        write_json(
+            &taking_over,
+            &LockRecord {
+                pid: sys::pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "reply".to_string(),
+                started: String::new(),
+            },
+        )
+        .expect("an entry a live reclaimer holds");
+
+        match OwnershipLock::acquire(&paths, "adopt") {
+            Err(Error::Locked { run, pid, verb, .. }) => {
+                assert_eq!(run, "demo");
+                assert_eq!(pid, sys::pid());
+                assert_eq!(verb, "reply");
+            }
+            other => panic!("a run being taken over was not reported as held: {other:?}"),
+        }
+        let untouched: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(untouched, dead, "the loser wrote the lock");
+        assert!(
+            taking_over.exists(),
+            "the loser took away an entry it did not create"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// An entry this build cannot read is a claim on the run, for the reason an
+    /// unreadable lock is.
+    #[test]
+    fn an_unreadable_reclaim_entry_is_still_a_claim() {
+        let root = scratch("reclaim-unreadable");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let dead = a_dead_holders_lock(&paths);
+        fs::write(
+            reclaim_entry(&paths.lock(), &reclaim_key(&dead), 1),
+            "not json at all",
+        )
+        .expect("a corrupt entry");
+
+        assert!(matches!(
+            OwnershipLock::acquire(&paths, "adopt"),
+            Err(Error::Locked { pid: 0, .. })
+        ));
+        let untouched: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(untouched, dead);
         fs::remove_dir_all(&root).ok();
     }
 
