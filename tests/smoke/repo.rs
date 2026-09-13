@@ -52,7 +52,7 @@ pub fn missing(what: &str) -> String {
 /// Names no slug, so the same wording stays true after a rename — the rename
 /// leaves the old name redirecting, and the probe in [`ensure_repo`] succeeds
 /// through it — and is pasted by hand onto the existing repository. Under
-/// GitHub's 350-character cap; `tests/smoke_repo.rs` holds it there.
+/// GitHub's cap on a description, which `tests/smoke_repo.rs` spells and holds.
 pub const DESCRIPTION: &str = "Intentional, and reused by every run of onepipeline's \
     real-everything smoke, which creates it when absent and never deletes it. Deleting or \
     renaming it is no cleanup (a deleted one is recreated, a renamed one keeps its old name \

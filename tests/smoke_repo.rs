@@ -26,7 +26,17 @@ mod unix {
     /// is ever looked up.
     const THROWAWAY: &str = "nobody/onepipeline-throwaway-smoke";
 
-    /// GitHub's cap on a repository description.
+    /// GitHub's cap on a repository description, as its API states it when it
+    /// refuses a longer one: "description is too long (maximum is 350
+    /// characters)". Nothing offline can read it from GitHub, and the smoke's
+    /// create call would only learn it on an account with no scratch
+    /// repository yet, so it is spelled once, here.
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the source is GitHub's
+    // live API, which the offline tier cannot ask by design, and the one call that would
+    // find a drift — `gh repo create` refusing a description over the cap — runs only on an
+    // account with no scratch repository yet. This constant is the repository's single
+    // spelling of the number; the doc comment on `DESCRIPTION` points here rather than
+    // restating it.
     const DESCRIPTION_CAP: usize = 350;
 
     struct Scratch(PathBuf);
@@ -45,6 +55,29 @@ mod unix {
         Scratch(root)
     }
 
+    /// Where the stand-in records what it was asked, and how it answers the
+    /// probe: read from the environment `ensure_repo` hands every `gh`, so the
+    /// script is one fixed program and no path is ever spliced into shell source.
+    const RECORD_ENV: &str = "ONEPIPELINE_SMOKE_GH_RECORD";
+    const PROBE_ENV: &str = "ONEPIPELINE_SMOKE_GH_PROBE";
+
+    /// The `gh` stand-in: one fixed program, reading the two variables above.
+    /// One invocation per line, arguments separated by the unit separator: no
+    /// argument here carries either, and a description with spaces in it has
+    /// to come back as one argument.
+    fn stand_in_program() -> String {
+        format!(
+            "#!/bin/sh\n\
+             printf '%s\\037' \"$@\" >> \"${RECORD_ENV}\"\n\
+             printf '\\n' >> \"${RECORD_ENV}\"\n\
+             case \"$1 $2\" in\n  \
+               'repo view') echo 'GraphQL: Could not resolve to a Repository' >&2; \
+             exit \"${PROBE_ENV}\" ;;\n  \
+               *) exit 0 ;;\n\
+             esac\n"
+        )
+    }
+
     /// A `gh` that records what it was asked and answers the `repo view` probe
     /// as `present` says, and everything else — the create, the readme wait —
     /// as done. Put first on `PATH`, so `ensure_repo`'s own `Command::new("gh")`
@@ -52,23 +85,15 @@ mod unix {
     fn stand_in(root: &Path, name: &str, present: bool) -> PathBuf {
         let bin = root.join(name);
         fs::create_dir(&bin).expect("the stand-in has a bin directory");
-        let record = bin.join("record");
-        let probe = if present { 0 } else { 1 };
-        // One invocation per line, arguments separated by the unit separator:
-        // no argument here carries either, and a description with spaces in it
-        // has to come back as one argument.
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\037' \"$@\" >> '{record}'\nprintf '\\n' >> '{record}'\n\
-             case \"$1 $2\" in\n  'repo view') echo 'GraphQL: Could not resolve to a Repository' \
-             >&2; exit {probe} ;;\n  *) exit 0 ;;\nesac\n",
-            record = record.display()
-        );
         let gh = bin.join("gh");
-        fs::write(&gh, script).expect("the stand-in is written");
+        fs::write(&gh, stand_in_program()).expect("the stand-in is written");
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755))
             .expect("the stand-in is runnable");
+        let record = bin.join("record");
+        std::env::set_var(RECORD_ENV, &record);
+        std::env::set_var(PROBE_ENV, if present { "0" } else { "1" });
         let host_path = std::env::var_os("PATH").expect("the host has a PATH");
-        let mut paths = vec![bin.clone()];
+        let mut paths = vec![bin];
         paths.extend(std::env::split_paths(&host_path));
         std::env::set_var(
             "PATH",
