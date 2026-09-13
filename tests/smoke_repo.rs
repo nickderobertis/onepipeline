@@ -28,15 +28,8 @@ mod unix {
 
     /// GitHub's cap on a repository description, as its API states it when it
     /// refuses a longer one: "description is too long (maximum is 350
-    /// characters)". Nothing offline can read it from GitHub, and the smoke's
-    /// create call would only learn it on an account with no scratch
-    /// repository yet, so it is spelled once, here.
-    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the source is GitHub's
-    // live API, which the offline tier cannot ask by design, and the one call that would
-    // find a drift — `gh repo create` refusing a description over the cap — runs only on an
-    // account with no scratch repository yet. This constant is the repository's single
-    // spelling of the number; the doc comment on `DESCRIPTION` points here rather than
-    // restating it.
+    /// characters)".
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the source is GitHub's live API, which the offline tier cannot ask by design, and the one call that would find a drift — `gh repo create` refusing a description over the cap — runs only on an account with no scratch repository yet. This is the repository's single spelling of the number; the doc comment on `DESCRIPTION` points here rather than restating it.
     const DESCRIPTION_CAP: usize = 350;
 
     struct Scratch(PathBuf);
