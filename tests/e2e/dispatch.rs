@@ -2268,24 +2268,20 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
 /// directory. All three only work out for the id `oneagentgraph` minted, never
 /// for this crate's, so a reset that lands there was addressed correctly.
 ///
-/// What happens to the signal *after* it lands is the sibling's. The pacemaker
-/// defers its first turn, so the sibling starts its clock at launch, and that
-/// clock consumes a reset within a tick of its landing and records `cron-reset`
-/// for the member — for as long as the run is alive. Once the run's foreground
-/// is quiescent the clock stops and a reset is consumed by nothing, and the
-/// monitor's single turn settles within a few hundred milliseconds of launch,
-/// so which of those a reset meets is the host's timing: this host met the file
-/// left on disk, and macOS met the clock and an empty directory. The monitor is
-/// held for the whole journey so that the clock is the one that meets it, and
-/// the clock's own record is what the journey reads, because that record is
-/// durable where the file it consumed is not.
+/// What happens to the signal *after* it lands is the sibling's, and which graph
+/// run it lands in is the host's timing. The monitor's single turn settles within
+/// about a hundred milliseconds of launch; that quiesces the graph run, which
+/// stops its clock and settles, and the driver starts the next observer and
+/// records it as the launch's `graph_run`. `next` addresses whichever run the
+/// record names when it reads it, so a reset may meet a clock that consumes it
+/// and records `cron-reset`, a quiesced run that leaves it on disk, or the
+/// replacement run. The journey accepts either record under any graph run this
+/// launch has recorded — and no such record exists for an id the sibling did not
+/// mint.
 #[test]
 fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
     world.write_graphs_with_pacemaker();
-    // The observing turn is held, so the run it paces is alive — and its clock
-    // counting — when the reset lands.
-    world.script("observer.wait", "hold");
     let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
     world
         .run_on_agentgraph(&[
@@ -2329,24 +2325,48 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     // llmlint: ignore-block[tests_mirror_real_usage] a pacemaker reset has no product-facing
     // result: `next` returns the surface either way, by design, because a clock that could
     // not be restarted must not cost the planner the update they asked for. The sibling's
-    // event log is where the restart *is* recorded, at a documented location its own
-    // `history` API derives — so this is the outcome, read where the outcome lives, and
-    // asserting only on the absent error would pass against a reset that went to the wrong
-    // run.
-    // The clock that consumed it is the graph run's own, watching a directory
-    // derived from that run's id and nothing else. A reset addressed with this
-    // crate's run id never reaches it: `signal` refuses a run its history has no
-    // record of, which is the failure this journey used to characterise.
+    // signal directory and its event log are where the reset *is* — one before a clock
+    // consumes it, the other after — and both are documented locations its own
+    // `signal`/`history` APIs derive, so this is the outcome, read where the outcome lives,
+    // and asserting only on the absent error would pass against a reset that went to the
+    // wrong run.
+    // Both derived from a graph run's id and nothing else, and read for every
+    // graph run the launch record names, re-read on each look because the driver
+    // may have replaced the observer since. A reset addressed with this crate's run
+    // id reaches none of them: `signal` refuses a run its history has no record of,
+    // which is the failure this journey used to characterise.
     world.until(
-        "the run's own check-in clock to record its restart",
+        "the reset to reach a check-in clock or signal directory of this launch's graph runs",
         |world| {
-            world.graph_journal(&graph_run).iter().any(|event| {
-                event["kind"] == "cron-reset" && event["labels"]["member"] == "check-in"
+            // A look that meets the record mid-replacement looks again: Windows
+            // refuses to open a file a rename is landing on.
+            let Some(launch) = std::fs::read_to_string(world.run_file("paced", "launch.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            else {
+                return false;
+            };
+            let recorded: Vec<String> = launch["observer_runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(std::iter::once(&launch["graph_run"]))
+                .filter_map(|run| run.as_str().map(str::to_string))
+                .collect();
+            recorded.iter().any(|run| {
+                world
+                    .graph_state()
+                    .join(run)
+                    .join("signals")
+                    .join("check-in.reset")
+                    .is_file()
+                    || world.graph_journal(run).iter().any(|event| {
+                        event["kind"] == "cron-reset" && event["labels"]["member"] == "check-in"
+                    })
             })
         },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
-    world.release("observer.go");
 }
 
 /// A view still renders when the provider-health block comes from the library.
