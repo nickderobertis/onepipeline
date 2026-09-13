@@ -126,14 +126,57 @@ pub(crate) struct Reason {
     nodes: Vec<Unsettled>,
 }
 
+/// Which hook fires, and why: a success carries no reason and a failure always
+/// carries one, so neither can be recorded or handed over the other way round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Firing {
+    /// Every node settled `done`.
+    Success,
+    /// The run ended any other way, for this reason.
+    Failure(Reason),
+}
+
+impl Firing {
+    fn hook(&self) -> Hook {
+        match self {
+            Self::Success => Hook::Success,
+            Self::Failure(_) => Hook::Failure,
+        }
+    }
+
+    /// The reason as the marker and the document write it: `null` for success.
+    fn reason(&self) -> Option<&Reason> {
+        match self {
+            Self::Success => None,
+            Self::Failure(reason) => Some(reason),
+        }
+    }
+}
+
 /// The one document a hook reads on its stdin.
-#[derive(Serialize)]
+///
+/// Its `hook` and `reason` are one [`Firing`], written out as the two fields the
+/// contract states.
 struct Document<'a> {
-    version: u32,
-    hook: Hook,
     run_id: &'a str,
     run_root: String,
-    reason: Option<&'a Reason>,
+    firing: &'a Firing,
+}
+
+impl Serialize for Document<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut document = serializer.serialize_struct("Document", 5)?;
+        document.serialize_field("version", &DOCUMENT_VERSION)?;
+        document.serialize_field("hook", &self.firing.hook())?;
+        document.serialize_field("run_id", self.run_id)?;
+        document.serialize_field("run_root", &self.run_root)?;
+        document.serialize_field("reason", &self.firing.reason())?;
+        document.end()
+    }
 }
 
 /// How a hook ended.
@@ -149,8 +192,8 @@ enum Ending {
 /// What a driver letting go of a run owes it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Judged {
-    /// The run has ended, and this hook is the one it ended under.
-    Fire(Hook, Option<Reason>),
+    /// The run has ended, and this is the hook it ended under.
+    Fire(Firing),
     /// A decision is outstanding: the run is paused, not ended.
     Withhold,
     /// The run has not ended and is not paused on a decision either — a
@@ -180,7 +223,7 @@ pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
         return Judged::NotEnded;
     }
     if statuses.values().all(|status| *status == NodeStatus::Done) {
-        return Judged::Fire(Hook::Success, None);
+        return Judged::Fire(Firing::Success);
     }
     if views::decision_outstanding(state, paths) {
         return Judged::Withhold;
@@ -199,13 +242,10 @@ pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
     } else {
         ReasonKind::Unfinished
     };
-    Judged::Fire(
-        Hook::Failure,
-        Some(Reason {
-            kind,
-            nodes: unsettled(state, &statuses),
-        }),
-    )
+    Judged::Fire(Firing::Failure(Reason {
+        kind,
+        nodes: unsettled(state, &statuses),
+    }))
 }
 
 /// Every node not `done`, in plan order, as a hook is handed it.
@@ -237,7 +277,7 @@ pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
         return;
     };
     match judge(&view.state, paths) {
-        Judged::Fire(hook, reason) => fire(paths, &view.launch, hook, reason.as_ref(), relay),
+        Judged::Fire(firing) => fire(paths, &view.launch, &firing, relay),
         Judged::Withhold => withhold(paths),
         Judged::NotEnded => {}
     }
@@ -253,17 +293,11 @@ pub(crate) fn at_stop(paths: &RunPaths) {
         return;
     };
     let statuses = view.state.statuses();
-    let reason = Reason {
+    let firing = Firing::Failure(Reason {
         kind: ReasonKind::Stopped,
         nodes: unsettled(&view.state, &statuses),
-    };
-    fire(
-        paths,
-        &view.launch,
-        Hook::Failure,
-        Some(&reason),
-        Relay::Quiet,
-    );
+    });
+    fire(paths, &view.launch, &firing, Relay::Quiet);
 }
 
 /// The run, read once, where its record names a hook at all.
@@ -313,19 +347,14 @@ fn withhold(paths: &RunPaths) {
 }
 
 /// Fire one hook, once per run: mark it, run it, and record how it ended.
-fn fire(
-    paths: &RunPaths,
-    record: &LaunchRecord,
-    hook: Hook,
-    reason: Option<&Reason>,
-    relay: Relay,
-) {
+fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) {
+    let hook = firing.hook();
     // An ending whose hook the record does not name fires nothing, and marks
     // nothing — so a hook it does name is still reachable later.
     let Some(command) = hook.command(record) else {
         return;
     };
-    match mark(paths, hook, command, reason) {
+    match mark(paths, firing, command) {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
@@ -338,7 +367,7 @@ fn fire(
         }
     }
     let log = log_path(paths, hook);
-    let ran = run(paths, record, hook, command, reason, &log, relay);
+    let ran = run(paths, record, firing, command, &log, relay);
     if let Err(error) = Journal::open(paths).emit(
         PipelineKind::RunHookFinished,
         journal::labels(&paths.run, None),
@@ -361,7 +390,7 @@ fn fire(
 /// The check and the append are one section, under the gate a driver lets go of
 /// the run under: a `stop` and a driver that let go on another host are two
 /// processes that may both judge the run, and exactly one of them fires.
-fn mark(paths: &RunPaths, hook: Hook, command: &str, reason: Option<&Reason>) -> Result<bool> {
+fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
     let handover = ledger::Handover::hold(paths)?;
     let marked = if fired(paths) {
         Ok(false)
@@ -371,9 +400,9 @@ fn mark(paths: &RunPaths, hook: Hook, command: &str, reason: Option<&Reason>) ->
                 PipelineKind::RunHookFired,
                 journal::labels(&paths.run, None),
                 journal::payload(&[
-                    ("hook", json!(hook)),
+                    ("hook", json!(firing.hook())),
                     ("command", json!(command)),
-                    ("reason", json!(reason)),
+                    ("reason", json!(firing.reason())),
                 ]),
             )
             .map(|()| true)
@@ -415,12 +444,12 @@ struct Ran {
 fn run(
     paths: &RunPaths,
     record: &LaunchRecord,
-    hook: Hook,
+    firing: &Firing,
     command: &str,
-    reason: Option<&Reason>,
     log: &Path,
     relay: Relay,
 ) -> Ran {
+    let hook = firing.hook();
     let could_not_start = Ran {
         exit: None,
         ending: Ending::CouldNotStart,
@@ -442,11 +471,9 @@ fn run(
         }
     };
     let document = Document {
-        version: DOCUMENT_VERSION,
-        hook,
         run_id: &paths.run,
         run_root: run_root(paths).to_string_lossy().into_owned(),
-        reason,
+        firing,
     };
     let mut spawning = std::process::Command::new(command);
     // The launch directory. A record from before the field existed names none, and
@@ -754,7 +781,7 @@ mod tests {
                 &holding(&[("build", NodeStatus::Done), ("lift", NodeStatus::Done)]),
                 &paths
             ),
-            Judged::Fire(Hook::Success, None)
+            Judged::Fire(Firing::Success)
         );
         let _ = std::fs::remove_dir_all(&root);
     }
