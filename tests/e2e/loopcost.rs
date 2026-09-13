@@ -643,12 +643,10 @@ fn a_projection_that_fails_while_the_run_records_nothing_still_reaches_the_plann
     world.until("the node to settle", |world| {
         recorded(world, "unprojected", "node-settled", "first")
     });
-    // How soon is the engine's to bound, not this wait's: a store that is not
-    // there refuses the worker's first command outright, the failure is
-    // recorded one `FIRST_RETRY_AFTER` (a quarter of a second) after that
-    // refusal, and the loop asks for it every `CHANNEL_POLL` (a fifth of one) —
-    // the sum `src/writeback.rs` states where the failure is recorded. The
-    // deadline is the backstop for a host that has not scheduled the worker.
+    // How soon is the engine's to bound, not this wait's: the sum
+    // `src/writeback.rs` states where the failure is recorded, of
+    // `FIRST_RETRY_AFTER` and `CHANNEL_POLL`. The deadline is the backstop for a
+    // host that has not scheduled the worker.
     world.until("the failed projection to reach the planner", |world| {
         world
             .events_of("unprojected", "planner-surface-queued")
