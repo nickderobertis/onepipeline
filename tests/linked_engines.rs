@@ -141,6 +141,26 @@ fn a_release_past(name: &str) -> String {
     format!("{major_minor}.100")
 }
 
+/// A release past the version the lock resolves that its own requirement does
+/// **not** admit: the next minor at patch `0`, minor being the breaking
+/// position pre-1.0.
+///
+/// Derived for the reason [`a_release_past`] is. `0.4.0` was written down as the
+/// release outside `^0.3.0`; when the `oneagentgraph` floor moved to `0.4` it
+/// became the linked version itself, and a fixture serving the linked version
+/// serves nothing the check could wrongly take.
+fn a_release_outside(name: &str) -> String {
+    let linked = &linked(name)[0];
+    let mut parts = linked.splitn(3, '.');
+    let (Some(major), Some(minor), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        panic!("the lock's `{name}` version has three components: {linked}");
+    };
+    let minor: u64 = minor
+        .parse()
+        .unwrap_or_else(|_| panic!("the lock's `{name}` minor is a number: {linked}"));
+    format!("{major}.{}.0", minor + 1)
+}
+
 /// The requirement `[workspace.dependencies]` states for one engine.
 ///
 /// Read from the manifest for the reason [`linked`] reads the lock: written
@@ -432,16 +452,18 @@ fn said(output: &Output) -> String {
 /// A lock holding nothing back passes, and says what it holds.
 ///
 /// The index here serves three newer `oneagentgraph` releases that are *not*
-/// candidates — one yanked, one outside `^0.3.0`, one a prerelease — so a check
-/// that took the highest number it saw would fail this rather than pass it.
+/// candidates — one yanked, one outside the window the requirement admits, one
+/// a prerelease — so a check that took the highest number it saw would fail this
+/// rather than pass it.
 #[test]
 fn the_currency_check_passes_when_every_engine_is_the_newest_its_requirement_permits() {
+    let past = a_release_past("oneagentgraph");
     let index = index_serving(
         "current",
         &[
-            served("oneagentgraph", "0.3.99").yanked(),
-            served("oneagentgraph", "0.4.0"),
-            served("oneagentgraph", "0.3.98-rc.1"),
+            served("oneagentgraph", &past).yanked(),
+            served("oneagentgraph", &a_release_outside("oneagentgraph")),
+            served("oneagentgraph", &format!("{past}-rc.1")),
         ],
     );
     let run = linked_engines(&["--index", &index]);
@@ -664,9 +686,10 @@ fn a_release_held_back_by_this_manifests_own_requirement_is_reported_and_is_not_
 #[test]
 fn a_dev_requirement_of_a_newer_release_holds_nothing_back() {
     let stale_graph = &linked("oneagentgraph")[0];
+    let newer_graph = a_release_past("oneagentgraph");
     let index = index_serving(
         "dev-requirement",
-        &[served("oneagentgraph", "0.3.100").requiring(&[("onevcs", "^0.1.0", "dev")])],
+        &[served("oneagentgraph", &newer_graph).requiring(&[("onevcs", "^0.1.0", "dev")])],
     );
     let run = linked_engines(&["--index", &index]);
     assert_eq!(
@@ -1225,7 +1248,8 @@ fn the_release_note_records_the_version_of_every_engine_the_build_links() {
 fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
     let pinned = required("oneagentgraph");
-    let index = index_serving("notes-stale", &[served("oneagentgraph", "0.3.100")]);
+    let newer_graph = a_release_past("oneagentgraph");
+    let index = index_serving("notes-stale", &[served("oneagentgraph", &newer_graph)]);
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
     assert!(
         run.status.success(),
@@ -1236,8 +1260,8 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let notes = String::from_utf8_lossy(&run.stdout);
     assert!(
         notes.contains(&format!(
-            "| `oneagentgraph` | **{stale_graph}** | `{pinned}` | **0.3.100** — this release \
-             is behind it |"
+            "| `oneagentgraph` | **{stale_graph}** | `{pinned}` | **{newer_graph}** — this \
+             release is behind it |"
         )),
         "the note records the version without saying it is behind what the requirement \
          permits:\n{}",
@@ -1245,7 +1269,8 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     );
     assert!(
         notes.contains(&format!(
-            "- `oneagentgraph` links {stale_graph}; the requirement already permitted 0.3.100."
+            "- `oneagentgraph` links {stale_graph}; the requirement already permitted \
+             {newer_graph}."
         )),
         "the note carries no warning naming the engine that is behind, so a reader still has \
          to diff the lock to learn it:\n{}",
