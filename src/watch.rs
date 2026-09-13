@@ -246,6 +246,7 @@ pub(crate) fn monitor(
     // panicked on: a caller that closed the pipe early is not this run's failure,
     // and it is the end of what this pass can report.
     let mut out = std::io::stdout();
+    // llmlint: ignore-block[cli_output_contract] `monitor` has no machine form to keep this apart from: its whole stdout is a line-oriented text document, and the resume line is a trailer of that document exactly as the `-- <run>` summary above it is. Its spelling and its place — one `-- cursor 1:<run>:<byte>` line, last on stdout, after the trailer — are the contract this change was dispatched to build and that the host's observer persona is rewritten onto, which reads the final line back rather than a second stream. The NDJSON form a caller branches on is `watch`'s, on its own descriptor, and it carries this same token.
     writeln!(
         out,
         "{}-- cursor {cursor}",
@@ -257,6 +258,7 @@ pub(crate) fn monitor(
             "the monitor could not write to standard output: {e}"
         ))
     })?;
+    // llmlint: ignore-end[cli_output_contract]
     Ok(EXIT_SUCCESS)
 }
 
