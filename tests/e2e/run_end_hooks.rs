@@ -920,6 +920,33 @@ fn a_launch_resolves_its_hooks_flag_over_config_refuses_a_zero_timeout_and_adopt
     assert_eq!(launch["hook_timeout"], 5);
     assert_eq!(invocations(&world, run), ["success"]);
 
+    // A blank key names none, as a blank flag does, and a launch naming a hook
+    // and no timeout retains the contract's default.
+    let blank = world.root.join("blank.yaml");
+    std::fs::write(
+        &blank,
+        format!("schema_version: 6\nsuccess_hook: \"  \"\nfailure_hook: {hook:?}\n"),
+    )
+    .expect("the config is written");
+    let run = "blankkey";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--launch-config", &blank.to_string_lossy()],
+    )
+    .exited(0)
+    .settled();
+    let launch = world.run_json(run, "launch.json");
+    assert!(launch.get("success_hook").is_none(), "{launch}");
+    assert_eq!(launch["failure_hook"], hook);
+    assert_eq!(
+        launch["hook_timeout"],
+        contract_block()["default_timeout_seconds"]
+    );
+    assert!(hook_kinds(&world, run).is_empty());
+    assert!(invocations(&world, run).is_empty());
+
     // Naming none writes none of the three and journals nothing about hooks.
     let run = "unhooked";
     attached(&world, run, vec![agent("build", &[])], &[])
