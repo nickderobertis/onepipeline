@@ -3373,17 +3373,6 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
 /// truncate. A store replaces a document once per projection and moves on; a writer
 /// that truncates again the instant it has written is harsher than any store, and on a
 /// loaded runner it kept the document empty for longer than the rule is patient.
-///
-/// **Measured over this tree at 640 runs, none refused**, 200 of them on a contended
-/// CPU or under `fsync` pressure; its teeth re-checked there too, `settled_title` cut
-/// to a single read calling this sound fixture a defect 106 to 190 times in 200.
-///
-/// **Count what the runner reports ran, never exit codes.** This test's libtest name
-/// carries its module, so `--exact` over the bare function name matches nothing, runs
-/// nothing, and *exits 0* — a shell loop counting exit codes reads 200 iterations of
-/// that as 200 passes, which is how a reliability figure with nothing behind it gets
-/// reported. Either qualify the name with `store::` or filter by substring, as the
-/// nextest filterset above does.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is the fixture rule itself
 // and the only way to show it can be asked mid-write is to write underneath it. The
 // projection this stands in for is driven for real by the journeys above.
