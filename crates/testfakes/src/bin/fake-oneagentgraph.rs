@@ -2312,6 +2312,13 @@ fn judge_kinds() -> [&'static str; 3] {
 /// A malformed line is fatal rather than skipped, because a script read
 /// leniently would publish a decision the test author did not write.
 fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::event::JudgeDecided> {
+    // llmlint: ignore[changed_behavior_has_e2e] every refusal below is of a test author's
+    // script at this double's own boundary, not behaviour a user of onepipeline can reach.
+    // Two of them — a nameless judge and a kind no panel has — are driven through a real
+    // dispatch in `tests/e2e/turns.rs` to prove the path itself: the node fails naming the
+    // line and nothing judged reaches the journal. The other three take that same path
+    // through `fake::fail`, so a journey per malformed column would prove this parser and
+    // not the product.
     let Some(script) = fake::node_script(dir, key, "judged") else {
         return Vec::new();
     };
