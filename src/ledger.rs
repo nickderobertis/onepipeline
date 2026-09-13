@@ -1702,6 +1702,12 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
         }
         // Another process created this number. If the lock has moved on, it is
         // that process's — or its successor's — and is reported as it stands.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the states below are a
+        // reclaimer dying, or the run being let go, between one filesystem operation
+        // and the next, and no journey can place a subprocess there; the unit tests
+        // beside this file put the entries in place by hand, which needs the private
+        // names this file owns. What a user reaches — two replies taking one dead
+        // driver's run over — is driven in `tests/e2e/driver.rs`.
         match read_lock_file(path) {
             LockFile::Record(now) if now == *dead => {}
             LockFile::Record(now) => return Ok(Reclaimed::HeldBy(now)),
@@ -1724,6 +1730,7 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str) -> Result<Reclaimed> {
             LockFile::Absent => {}
             LockFile::Unreadable => return Ok(Reclaimed::Unreadable),
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 
@@ -2981,7 +2988,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// The record a driver that has died leaves at `paths.lock()`.
     fn a_dead_holders_lock(paths: &RunPaths) -> LockRecord {
         let dead = LockRecord {
             pid: sys::reaped_pid(),
@@ -2994,7 +3000,6 @@ mod tests {
         dead
     }
 
-    /// The reclaim entries left beside a lock, by name.
     fn reclaim_entries_beside(paths: &RunPaths) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&paths.dir)
             .expect("the run directory lists")
