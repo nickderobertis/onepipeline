@@ -4,10 +4,9 @@
 # <base>`, which resolves the base ref to the commit this reads and keys the cache
 # on.
 #
-# Nothing here records or replays a verdict. llmlint runs, what it concluded is this
-# task's terminal output, and its exit status is this task's exit status — so Nx
-# caches a clean run and replays its verdict verbatim, while a run with findings and
-# a run that never reached a verdict both stay uncached and are judged again.
+# llmlint runs, and its exit status is this task's exit status — so Nx caches a
+# clean run and restores the verdict it recorded verbatim, while a run with findings
+# and a run that never reached a verdict both stay uncached and are judged again.
 #
 # The base arrives as `LLMLINT_DIFF_BASE_SHA` rather than as an argument because Nx
 # hashes declared environment variables but not target arguments: keying and
@@ -17,9 +16,9 @@
 # llmlint's own status, which is this task's status and so the cache's verdict.
 #
 # A clean run says one line — the verdict, and where the run behind it is readable
-# in full — because that line is what Nx stores and replays in place of a verdict
-# record. A run with findings says everything llmlint said, since nobody replays it
-# and the operator has to clear it.
+# in full — and records that same line as this target's declared output, which is
+# what Nx stores and restores for a replay. A run with findings says everything
+# llmlint said, since nobody replays it and the operator has to clear it.
 set -euo pipefail
 
 # Every caller runs this from the repository root: `just` from the justfile's own

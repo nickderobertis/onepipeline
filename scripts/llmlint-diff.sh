@@ -30,10 +30,10 @@
 # judge configuration it could not fingerprint. 3 is this checkout or host being
 # unable to support a run at all, which says nothing about the diff.
 #
-# The judge's report is this tier's product — Nx replays this task's terminal output
-# in place of a verdict record — so it is handed through whole. What this script
-# adds to it is one line saying whether the verdict was judged or replayed, and the
-# refusals below, which each name the one thing to fix.
+# The judge's report is this tier's product: a failing one is handed through whole,
+# and a clean one is the one verdict line the judge records and Nx restores for a
+# replay. What this script adds to it is one line saying whether the verdict was
+# judged or replayed, and the refusals below, which each name the one thing to fix.
 set -euo pipefail
 
 # Every caller runs this from the repository root: `just` from the justfile's own
