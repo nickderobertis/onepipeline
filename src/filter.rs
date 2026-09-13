@@ -103,11 +103,8 @@ const WRITEBACK_ITEM_BUDGET_KEY: &str = "writeback_item_budget";
 /// How a document carries one of the keys [`KEYS_BY_VERSION`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Carried {
-    /// The key is not in the document.
     Absent,
-    /// The key is there and holds nothing but whitespace.
     Blank,
-    /// The key is there and names something.
     Named,
 }
 
