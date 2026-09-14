@@ -40,11 +40,12 @@
 //!   verb for as long as it is there.
 //! * `<refusal>.stdout` and `<refusal>.exit`, beside any of the refusals above but
 //!   `onetaskgraph.refuse` — what that refusal writes on stdout and the status it exits
-//!   under, `1` where none is scripted. This is the install of a release **newer** than
-//!   the one the checks pin, which answers a failed verb with a failure document naming
-//!   its class: the pinned release writes none, so a journey about what this build does
-//!   with one states the document that release writes, and every call it does not refuse
-//!   is still the delegated real store's.
+//!   under, `1` where none is scripted. The real store answers a failed verb with a
+//!   failure document naming its class, but an offline store cannot be made to fail most
+//!   of the ways a hosted one does — a rate limit, a source that refused a write, one
+//!   refusing command of three — so a journey about what this build does with one of those
+//!   states the document the store writes for it, and every call it does not refuse is
+//!   still the delegated real store's.
 //! * `onetaskgraph.<verb>.rendezvous` — the address this double meets the test at
 //!   before it answers that verb, and holds until the test lets go — written by
 //!   `World::rendezvous("onetaskgraph.<verb>")`, read by `fake::meet`. The one way

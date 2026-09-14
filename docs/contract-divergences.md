@@ -5322,16 +5322,14 @@ after a refusal, because it is a different snapshot, and does not re-attempt the
 refused one; stopping stays prompt; no store read feeds back into scheduling, and no
 store command delays closeout, a settlement, or an edit ruling.
 
-One consequence arrives with the store rather than with this crate, and is named so
-nobody mistakes it for a regression when it does: `onetaskgraph` classes a
-`local-md` source whose root has gone as a `config` failure, which is `refused`. The
-release this repository's checks pin, 0.2.28, predates the failure document, so
-every failure it reports is unclassified and keeps today's schedule — a store taken
-away mid-run is still asked again on the timer. Once the pin moves to a release that
-writes the document, such a store is reported once and attempted again on the next
-change to the graph, a terminal projection refused while it is gone is not
-re-attempted inside closeout, and the store-outage journeys in `tests/e2e/store.rs`
-move with that pin.
+One consequence is the store's call rather than this crate's, and is named so nobody
+mistakes it for a regression: `onetaskgraph` classes a `local-md` source whose root
+has gone as a `config` failure, which is `refused`. The release this repository's
+checks pin, 0.2.29, is the first to write the failure document, so a store taken away
+mid-run is reported once and attempted again on the next change to the graph rather
+than asked every minute until it returns, and a terminal projection refused while it
+is gone is not re-attempted inside closeout. A host still running 0.2.28 or earlier
+writes no document, so every failure there is unclassified and keeps today's schedule.
 
 The six constants the worker branches on — `WRITEBACK_CLASSIFIED_COMMANDS`,
 `WRITEBACK_FAILURE_CLASS_MEMBER`, `WRITEBACK_PARTIAL_CLASS_MEMBER`,
@@ -5340,15 +5338,18 @@ published from `cli` beside entry 71's, and are part of this proposal for the sa
 reason: a gate outside the crate has to be able to reach what it holds.
 `tests/contract.rs` holds the block against them; `writeback::tests` holds it against
 the type and the classifier the worker actually reads through; and
-`tests/e2e/store.rs` drives the compiled binary through the store double in front of
-the real `onetaskgraph` at the pinned release, the double writing the failure
-document the store's newer release writes for the one command it is scripted to
-refuse. It proves a refusal from each of the three commands, and from a partial
-answer every entry of which is refused, is not attempted again across a window the
-old schedule would have retried in and is attempted again when the graph next
-changes; that a document classed `transient`, and a partial answer with an entry a
-wait could change, are retried on today's schedule; and the retry journeys keep
-that schedule for a failure with no document at all.
+`tests/e2e/store.rs` drives the compiled binary against the real `onetaskgraph` at
+the pinned release. There the store itself refuses — a destination project it no
+longer holds, and a source whose root has gone — and a refused projection is not
+attempted again across a window the old schedule would have retried in, and is
+attempted again when the graph next changes. For what an offline store cannot be
+made to answer, the store double stands in front of that same real binary and
+writes the failure document the store writes for the one command it is scripted to
+refuse: a refusal from a page of tasks, from the copy, and from an all-refused partial
+answer; a document classed `transient`, a partial answer with an entry a wait could
+change, and a class this build does not know, each retried on today's schedule; and
+closeout over a refusal. The retry journeys keep that schedule for a failure with no
+document at all.
 
 ```json
 {
