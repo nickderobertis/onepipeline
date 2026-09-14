@@ -1193,12 +1193,8 @@ fn a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknow
     // the change — which is the state this journey is about, so it is established
     // from the sibling itself rather than assumed.
     releases_at(&answer, "0.2.0");
-    // llmlint: ignore[tests_mirror_real_usage] this is the journey's precondition, read from the
-    // sibling that owns it, and no surface of this run can state it: a wait records the word
-    // `not-answered` and never the sibling's reason, and a probe that could not answer at all
-    // records the same word. `onevcs release status` is this same library call against the same
-    // sandboxed `ONEVCS_HOME`, and `harness.rs` reaches that sibling in-process by design.
-    match world.on_onevcs(|| onevcs::release_status(&landed, None)) {
+    let printed = onevcs_release(&world, &["status", &landed, "--json"]);
+    match serde_json::from_str::<onevcs::ReleaseStatus>(printed.trim()) {
         Ok(onevcs::ReleaseStatus::NotAnswered { reason }) => assert!(
             reason.contains("no baseline"),
             "the landing is unanswerable for some reason other than a missing baseline: {reason}"
@@ -1221,23 +1217,19 @@ fn a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknow
         "a published node started on a landing no answer could say was released"
     );
 
-    // The person who can see the release records it, the way `onevcs release
-    // acknowledge` does — and that is what starts the node.
-    // llmlint: ignore[tests_mirror_real_usage] `onevcs release acknowledge` is exactly this
-    // call — onevcs 0.23.0's `app.rs` hands its parsed reference, target, version and supersede
-    // flag straight to `onevcs::acknowledge_release` — made against this world's sandboxed
-    // `ONEVCS_HOME`, which is where the operator's record lands too. `harness.rs` reaches that
-    // sibling in-process by design and builds no binary of it, as this file's other
-    // acknowledgements do.
-    world.on_onevcs(|| {
-        onevcs::acknowledge_release(
+    // The person who can see the release records it with `onevcs release
+    // acknowledge` — and that is what starts the node.
+    onevcs_release(
+        &world,
+        &[
+            "acknowledge",
             &landed,
-            &"crate".parse().expect("a target name"),
+            "--target",
+            "crate",
+            "--version",
             "0.2.0",
-            false,
-        )
-        .expect("the release of a landing with no baseline is acknowledged")
-    });
+        ],
+    );
     world.until("the acknowledgement to start the held node", |world| {
         world.events_of(&run, "node-settled").len() == 2
     });
@@ -3032,6 +3024,30 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
 
 /// The branch one node's work was published from, as its settlement recorded it.
 ///
+/// One `onevcs release` verb, through the sibling's own executable against this
+/// world's state root — what an operator types — and what it printed.
+///
+/// Refused unless it succeeded, naming what it said: a verb that failed would
+/// otherwise reach a journey as a release nobody recorded.
+fn onevcs_release(world: &World, args: &[&str]) -> String {
+    let output = std::process::Command::new(crate::harness::onevcs_binary())
+        .arg("release")
+        .args(args)
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the onevcs binary runs");
+    assert!(
+        output.status.success(),
+        "`onevcs release {}` failed: {}{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// The spelling `onevcs` resolves landed work by, which is what a person's own
 /// `onevcs release acknowledge` is given.
 fn branch_of(world: &World, run: &str, node: &str) -> String {

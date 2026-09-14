@@ -6075,6 +6075,73 @@ fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change()
     world.run(&["results", &run]).exited(0).out_has(url);
 }
 
+/// A journey this suite runs from **inside a lifecycle dispatch** hands none of
+/// that outer dispatch's `ONEVCS_SESSION` to the run it drives.
+///
+/// Which is where the suite runs whenever this repository is worked on by the
+/// system it is a library for: the outer dispatch exports its own session, and
+/// every command the world spawned inherited it. A direct node's dispatch then
+/// read it as a session it works in, so
+/// [`every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_runs_root`]
+/// failed on every host running the suite that way and passed everywhere else.
+///
+/// The variable is set in this test's own process, exactly as a dispatch hands it
+/// to the suite, rather than on the command a journey builds — that would be a
+/// journey choosing the value, not inheriting it. Nextest runs each test in a
+/// process of its own, so it reaches no other journey.
+#[test]
+fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
+    const OUTER: &str = "s-the-dispatch-running-this-suite";
+    std::env::set_var("ONEVCS_SESSION", OUTER);
+    let world = World::new("lifecycle-outer-session");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    let plan = plan_of(
+        "outersession",
+        vec![lifecycle("service", &[]), agent("direct", &[])],
+    );
+    let path = world.plan("outersession", &plan);
+    world.run(&["start", &path, "--attach"]).settled();
+    let run = "outersession";
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "{}",
+        why(&world, run)
+    );
+
+    let token = world
+        .journal(run)
+        .iter()
+        .find(|event| event["kind"] == "session-opened" && event["labels"]["node"] == "service")
+        .and_then(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("the lifecycle node opened no session\n{}", why(&world, run)));
+    let turn_of = |node: &str| -> serde_json::Value {
+        world
+            .journal(run)
+            .into_iter()
+            .find(|event| event["kind"] == "turn-activity" && event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("{node} ran no turn\n{}", why(&world, run)))
+    };
+
+    let direct = turn_of("direct");
+    assert!(
+        direct["payload"]["session"].is_null(),
+        "a direct node's dispatch was handed the session of the dispatch running this suite: \
+         {direct}"
+    );
+    let service = turn_of("service");
+    assert_eq!(
+        service["payload"]["session"],
+        json!(token),
+        "a lifecycle node's dispatch was not told the session it opened: {service}"
+    );
+    assert_ne!(
+        token, OUTER,
+        "the run opened the outer dispatch's session as its own"
+    );
+}
+
 /// Every dispatch of a lifecycle node's agent steps, first and later, and its
 /// drafting dispatch, carries `ONEVCS_SESSION` naming the session whose worktree
 /// it runs in; a direct node's dispatch carries none; and every dispatch carries
