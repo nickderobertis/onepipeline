@@ -13,7 +13,15 @@
 //! [`crate::watchers`], and `onepipeline unwatched` is what reads it.
 
 use std::io::Write;
+use std::num::NonZeroU32;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
+
+use onemessagebus::{
+    Batch, Changed, ConsumerName, DocumentName, Fingerprint, LocalTransport, Position, QueueName,
+    Transport, TransportError,
+};
 
 use crate::cli::{MonitorArgs, WatchArgs, WatchTimeout, WatchUntil, WATCH_CURSOR_VERSION};
 use crate::error::{
@@ -26,14 +34,6 @@ use crate::graph::{self, GraphState, NodeStatus};
 use crate::journal;
 use crate::ledger::RunPaths;
 use crate::views::{self, RunView, Unread};
-
-/// How often the wait re-reads the run.
-///
-/// A supervisory latency rather than an interactive one: a second is below any
-/// interval a heartbeat is worth stating and far below the time it takes to act
-/// on what a line says, and each pass costs a read of the run's ledger — which a
-/// watch left open for an hour pays three and a half thousand times.
-const POLL: Duration = Duration::from_secs(1);
 
 /// The events a supervisor acts on: a closed set of *this crate's* own kinds.
 ///
@@ -152,12 +152,17 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
     let mut quiet_since = Instant::now();
     let mut out = Emitter::new();
 
+    // What the wait watches is fingerprinted before the first read, so anything
+    // written while that read runs moves it past what the read saw.
+    let changes = RunChanges::of(paths);
+    let mut follow = Follow::from_now(&changes, RunChanges::queue())?;
+
     // The first pass's reads, taken before anything is emitted, because the
     // conditions are validated against them: what this watch will read is what
     // decides whether a condition the run has already met returns immediately or
     // could never be met at all.
-    let mut view = RunView::open(paths)?;
-    let mut fresh = tail(paths, &mut cursor);
+    let (mut view, mut fresh) = read_run(paths, &mut cursor)?;
+    changes.observe(&view);
     let selectors = Selectors::resolve(&args.until, &view, &fresh)?;
 
     // The record that says this run is being watched, written once every refusal
@@ -170,17 +175,24 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
     // may never be relied upon.
     let _armed = crate::watchers::Armed::arm(paths);
 
+    // Whether the last wait saw the run move. Only a pass over a run that moved
+    // emits or asks whether the wait is over: everything those decide from is in
+    // what `RunChanges` fingerprints, so a run that did not move is neither read
+    // nor reported on again.
+    let mut moved = true;
     loop {
-        for event in fresh
-            .iter()
-            .filter(|event| meaningful(event) && filter.matches(event))
-        {
-            out.event(&view, event)?;
-            quiet_since = Instant::now();
-        }
+        if moved {
+            for event in fresh
+                .iter()
+                .filter(|event| meaningful(event) && filter.matches(event))
+            {
+                out.event(&view, event)?;
+                quiet_since = Instant::now();
+            }
 
-        if let Some(ending) = concluded(&view, paths, &selectors, &fresh) {
-            return out.returned(&view, ending, &cursor);
+            if let Some(ending) = concluded(&view, paths, &selectors, &fresh) {
+                return out.returned(&view, ending, &cursor);
+            }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return out.returned(&view, Ending::Elapsed, &cursor);
@@ -189,9 +201,307 @@ pub(crate) fn watch(args: &WatchArgs, paths: &RunPaths, filter: &EventFilter) ->
             out.heartbeat(&view)?;
             quiet_since = Instant::now();
         }
-        std::thread::sleep(POLL);
-        view = RunView::open(paths)?;
-        fresh = tail(paths, &mut cursor);
+        let within = wake_within(deadline, tick, quiet_since);
+        moved = match follow.next(within, || read_run(paths, &mut cursor))? {
+            Some((read, tailed)) => {
+                view = read;
+                fresh = tailed;
+                changes.observe(&view);
+                true
+            }
+            None => false,
+        };
+    }
+}
+
+/// One read of the run: its view, and the records past the cursor.
+///
+/// Recorded as one render of the watch where [`crate::rendercost`] is asked to
+/// record, which is how a journey counts that a watch reads the run only when it
+/// moved.
+fn read_run(paths: &RunPaths, cursor: &mut Cursor) -> Result<(RunView, Vec<Envelope>)> {
+    let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Watch, &paths.run);
+    let view = RunView::open(paths)?;
+    Ok((view, tail(paths, cursor)))
+}
+
+/// How long the wait may block before this watch has something of its own to
+/// do: reach its deadline, or write the heartbeat a quiet interval owes.
+///
+/// Unbounded where it has neither, because a change is what ends that wait.
+fn wake_within(deadline: Option<Instant>, tick: Duration, quiet_since: Instant) -> Duration {
+    let until_deadline = deadline.map_or(Duration::MAX, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    });
+    let until_heartbeat = match tick.is_zero() {
+        true => Duration::MAX,
+        false => tick.saturating_sub(quiet_since.elapsed()),
+    };
+    until_deadline.min(until_heartbeat)
+}
+
+/// A wait on one queue of a transport that reads what it follows again only when
+/// that queue moved.
+///
+/// Over any [`Transport`] rather than tied to [`RunChanges`], so the property the
+/// watch rests on — one read per change the wait reports, and none across a wait
+/// that reports nothing — is held over the bus's memory transport, where a change
+/// is an append a test makes.
+struct Follow<'a> {
+    changes: &'a dyn Transport,
+    queue: QueueName,
+    since: Fingerprint,
+}
+
+impl<'a> Follow<'a> {
+    /// Follow `queue` from how it stands now.
+    fn from_now(changes: &'a dyn Transport, queue: QueueName) -> Result<Self> {
+        let since = changes.fingerprint(&queue).map_err(unwatchable)?;
+        Ok(Self {
+            changes,
+            queue,
+            since,
+        })
+    }
+
+    /// Wait up to `within` for the queue to move, and `reread` once if it did.
+    ///
+    /// The fingerprint is taken as moved **before** the read, so a change landing
+    /// while `reread` runs is the next wait's change rather than a lost one.
+    fn next<T>(
+        &mut self,
+        within: Duration,
+        reread: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        match self
+            .changes
+            .wait_for_change(&self.queue, &self.since, within)
+            .map_err(unwatchable)?
+        {
+            Changed::Moved(now) => {
+                self.since = now;
+                reread().map(Some)
+            }
+            Changed::Unchanged(_) => Ok(None),
+        }
+    }
+}
+
+fn unwatchable(failure: TransportError) -> Error {
+    Error::Invalid(format!(
+        "the watch could not tell whether the run changed: {failure}"
+    ))
+}
+
+/// Everything a pass of a watch decides from, as one queue whose fingerprint
+/// moves whenever any of it does.
+///
+/// A [`Transport`] so the wait is the bus's own: a watch blocks in
+/// [`Transport::wait_for_change`] over this fingerprint and keeps no clock of its
+/// own. What it covers is what the lines and [`concluded`] are decided from — the
+/// journal, the launch record, the channel's queues — and the two answers about
+/// the driver that move with no file moving: the process a record names having
+/// ended, and the run falling quiet past the parked bound. Those two are asked of
+/// the host through the same readings [`views`] decides liveness with, from what
+/// the last read said about the driver.
+///
+/// Read-only: it is a view over files other processes write, so every read and
+/// write of records is refused.
+struct RunChanges {
+    paths: RunPaths,
+    /// The channel's transport, opened once its directory exists — never
+    /// before, so a watch makes no channel directory in a run that has none.
+    channel: OnceLock<LocalTransport>,
+    observed: Mutex<Observed>,
+}
+
+/// What the last read of the run said about its driver.
+#[derive(Debug, Default)]
+struct Observed {
+    host: Option<String>,
+    pid: Option<NonZeroU32>,
+    started: Option<String>,
+    last_write_at: Option<u64>,
+}
+
+/// The one queue [`RunChanges`] answers for.
+const RUN_CHANGES: &str = "run";
+
+impl RunChanges {
+    fn of(paths: &RunPaths) -> Self {
+        Self {
+            paths: paths.clone(),
+            channel: OnceLock::new(),
+            observed: Mutex::new(Observed::default()),
+        }
+    }
+
+    fn queue() -> QueueName {
+        QueueName::try_from(RUN_CHANGES)
+            .unwrap_or_else(|_| unreachable!("`{RUN_CHANGES}` is a queue name"))
+    }
+
+    /// Keep what `view` says about the driver, for the parts of the fingerprint
+    /// no file carries.
+    fn observe(&self, view: &RunView) {
+        *self.observed.lock().unwrap_or_else(PoisonError::into_inner) = Observed {
+            host: view.launch.recorded_host().map(str::to_owned),
+            pid: view.launch.driver_pid(),
+            started: view.launch.driver_stamp().map(str::to_owned),
+            last_write_at: view.state.last_write_at,
+        };
+    }
+
+    fn refused(queue: &QueueName, why: &str) -> TransportError {
+        TransportError::Backend {
+            transport: "run-changes".to_owned(),
+            detail: format!("{queue}: {why}"),
+        }
+    }
+
+    fn read_only(queue: &QueueName) -> TransportError {
+        Self::refused(
+            queue,
+            "a watch reads what a run's writers wrote, and writes and reads no records",
+        )
+    }
+
+    fn channel(&self) -> std::result::Result<Option<&LocalTransport>, TransportError> {
+        if let Some(channel) = self.channel.get() {
+            return Ok(Some(channel));
+        }
+        let dir = self.paths.channel_dir();
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        let opened = LocalTransport::open(dir)?;
+        Ok(Some(self.channel.get_or_init(|| opened)))
+    }
+}
+
+/// A file's length and modification time, or that it is absent — the same
+/// observation the local transport fingerprints a queue with.
+fn mark(path: &Path, parts: &mut Vec<u64>) {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or_default();
+            parts.extend([
+                1,
+                metadata.len(),
+                modified.as_secs(),
+                u64::from(modified.subsec_nanos()),
+            ]);
+        }
+        Err(_) => parts.push(0),
+    }
+}
+
+impl Transport for RunChanges {
+    fn append(
+        &self,
+        queue: &QueueName,
+        _record: &[u8],
+    ) -> std::result::Result<Position, TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn read(
+        &self,
+        queue: &QueueName,
+        _from: Option<&Position>,
+        _limit: usize,
+    ) -> std::result::Result<Batch, TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn cursor(
+        &self,
+        queue: &QueueName,
+        _consumer: &ConsumerName,
+    ) -> std::result::Result<Option<Position>, TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn commit(
+        &self,
+        queue: &QueueName,
+        _consumer: &ConsumerName,
+        _at: &Position,
+    ) -> std::result::Result<(), TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn exclusive(
+        &self,
+        queue: &QueueName,
+        _body: &mut dyn FnMut(&dyn Transport) -> std::result::Result<(), TransportError>,
+    ) -> std::result::Result<(), TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn fingerprint(&self, queue: &QueueName) -> std::result::Result<Fingerprint, TransportError> {
+        if queue.to_string() != RUN_CHANGES {
+            return Err(Self::refused(
+                queue,
+                "a watch fingerprints one run, as the queue `run`",
+            ));
+        }
+        let mut parts = Vec::new();
+        mark(&self.paths.journal(), &mut parts);
+        mark(&self.paths.launch(), &mut parts);
+        match self.channel()? {
+            Some(channel) => {
+                for name in [
+                    onemessagebus_agent::channel::SURFACES,
+                    onemessagebus_agent::channel::REPLIES,
+                    onemessagebus_agent::channel::COMMANDS,
+                    onemessagebus_agent::channel::COMMAND_OUTCOMES,
+                ] {
+                    let name = QueueName::try_from(name)
+                        .map_err(|failure| Self::refused(queue, &failure.to_string()))?;
+                    parts.extend_from_slice(channel.fingerprint(&name)?.parts());
+                }
+            }
+            None => parts.push(0),
+        }
+        let observed = self.observed.lock().unwrap_or_else(PoisonError::into_inner);
+        parts.push(u64::from(views::driver_claim_is_over(
+            observed.host.as_deref(),
+            observed.pid,
+            observed.started.as_deref(),
+        )));
+        parts.push(u64::from(views::quiet_past_parked(observed.last_write_at)));
+        Ok(Fingerprint::from_parts(parts))
+    }
+
+    fn wait_for_change(
+        &self,
+        queue: &QueueName,
+        since: &Fingerprint,
+        timeout: Duration,
+    ) -> std::result::Result<Changed, TransportError> {
+        onemessagebus::transport::poll_for_change(self, queue, since, timeout)
+    }
+
+    fn document(
+        &self,
+        queue: &QueueName,
+        _name: &DocumentName,
+    ) -> std::result::Result<Option<Vec<u8>>, TransportError> {
+        Err(Self::read_only(queue))
+    }
+
+    fn replace_document(
+        &self,
+        queue: &QueueName,
+        _name: &DocumentName,
+        _bytes: &[u8],
+    ) -> std::result::Result<(), TransportError> {
+        Err(Self::read_only(queue))
     }
 }
 
@@ -802,6 +1112,121 @@ fn unread_phrase(unread: &Unread) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wait reads what it follows once per change it reports, and never across
+    /// a wait that reports none — over the bus's memory transport, where a change
+    /// is an append made here.
+    #[test]
+    fn a_follow_reads_again_once_per_reported_change_and_never_across_an_unchanged_wait() {
+        let memory = onemessagebus::MemoryTransport::new();
+        let queue = QueueName::try_from("run").expect("a queue name");
+        let mut follow = Follow::from_now(&memory, queue.clone()).expect("the queue fingerprints");
+        let reads = std::cell::Cell::new(0_u32);
+        let read = || {
+            reads.set(reads.get() + 1);
+            Ok(reads.get())
+        };
+        let quiet = Duration::from_millis(60);
+        let change = |n: u32| {
+            memory
+                .append(&queue, format!("{{\"change\":{n}}}").as_bytes())
+                .expect("the change is appended");
+        };
+
+        assert_eq!(follow.next(quiet, read).expect("waited"), None);
+        assert_eq!(reads.get(), 0, "a wait nothing moved across read again");
+        for n in 1..=3 {
+            change(n);
+            assert_eq!(
+                follow.next(Duration::from_secs(30), read).expect("waited"),
+                Some(n),
+                "change {n} was not read exactly once"
+            );
+            assert_eq!(follow.next(quiet, read).expect("waited"), None);
+        }
+        // Two changes before one wait are one change reported, and one read.
+        change(4);
+        change(5);
+        assert_eq!(
+            follow.next(Duration::from_secs(30), read).expect("waited"),
+            Some(4)
+        );
+        assert_eq!(follow.next(quiet, read).expect("waited"), None);
+        assert_eq!(reads.get(), 4);
+    }
+
+    /// The run's fingerprint moves with each thing a pass of the watch decides
+    /// from — the files, and the driver's two answers no file carries — and the
+    /// transport it is written as reads and writes no records.
+    #[test]
+    fn a_runs_fingerprint_moves_with_everything_a_pass_reads_and_it_writes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-watch-changes-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "watched");
+        paths.create().expect("the run directory");
+        // A run whose channel nothing has opened yet, as one written before its
+        // first surface was.
+        std::fs::remove_dir(paths.channel_dir()).expect("an empty channel directory");
+        let changes = RunChanges::of(&paths);
+        let queue = RunChanges::queue();
+        let mut seen = changes.fingerprint(&queue).expect("a fingerprint");
+        let mut moved = |what: &str| {
+            let now = changes.fingerprint(&queue).expect("a fingerprint");
+            assert_ne!(now, seen, "{what} did not move the run's fingerprint");
+            assert_eq!(
+                changes.fingerprint(&queue).expect("a fingerprint"),
+                now,
+                "{what}"
+            );
+            seen = now;
+        };
+
+        std::fs::write(paths.journal(), "{}\n").expect("written");
+        moved("the journal growing");
+        std::fs::write(paths.launch(), "{}").expect("written");
+        moved("the launch record being written");
+        assert!(
+            !paths.channel_dir().exists(),
+            "a fingerprint made a channel"
+        );
+        crate::channel::ChannelState::new(&paths)
+            .push(crate::channel::Surface {
+                id: 0,
+                kind: "finding".to_owned(),
+                message: "raised while nobody was reading".to_owned(),
+                source: crate::channel::source::MONITOR.to_owned(),
+                blocking: false,
+                queued_at: 1,
+                workstream: None,
+                abandoned: false,
+                asker: None,
+                correlation: None,
+            })
+            .expect("the surface is queued");
+        moved("a surface being queued");
+        *changes.observed.lock().expect("unpoisoned") = Observed {
+            host: Some(crate::sys::hostname()),
+            pid: NonZeroU32::new(3_999_999),
+            started: Some("not a process".to_owned()),
+            last_write_at: None,
+        };
+        moved("the recorded driver being over");
+        changes.observed.lock().expect("unpoisoned").last_write_at = Some(0);
+        moved("the run falling quiet past the parked bound");
+
+        let other = QueueName::try_from("surfaces").expect("a queue name");
+        let consumer = ConsumerName::try_from("watch").expect("a consumer name");
+        let document = DocumentName::try_from("queue.json").expect("a document name");
+        assert!(changes.fingerprint(&other).is_err());
+        assert!(changes.append(&queue, b"{}").is_err());
+        assert!(changes.read(&queue, None, 1).is_err());
+        assert!(changes.cursor(&queue, &consumer).is_err());
+        assert!(changes.document(&queue, &document).is_err());
+        assert!(changes.replace_document(&queue, &document, b"{}").is_err());
+        assert!(changes.exclusive(&queue, &mut |_| Ok(())).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Entry 58 of the divergence record, which is where this verb's surface is
     /// *proposed*.

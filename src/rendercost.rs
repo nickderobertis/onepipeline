@@ -43,10 +43,10 @@ thread_local! {
 
 /// Which view is rendering.
 ///
-/// A closed set rather than a string: these are the three places a landing is
-/// reported, and a fourth is a decision somebody makes here rather than a name
-/// a caller can spell. `tests/e2e/landing.rs` reads them off the record by these
-/// words, so they are the wire as well as the vocabulary.
+/// A closed set rather than a string: the first three are the places a landing
+/// is reported, and a fourth is a decision somebody makes here rather than a name
+/// a caller can spell. `tests/e2e/landing.rs` and `tests/e2e/watch.rs` read them
+/// off the record by these words, so they are the wire as well as the vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rendered {
     /// `onepipeline results` — the per-node lines.
@@ -55,6 +55,9 @@ pub(crate) enum Rendered {
     Summary,
     /// `onepipeline status`.
     Status,
+    /// One read of the run by `onepipeline watch`: a watch reads the run again
+    /// only when it changed, and this is how a journey counts that it did.
+    Watch,
 }
 
 impl Rendered {
@@ -63,6 +66,7 @@ impl Rendered {
             Rendered::Results => "results",
             Rendered::Summary => "summary",
             Rendered::Status => "status",
+            Rendered::Watch => "watch",
         }
     }
 }
@@ -305,10 +309,11 @@ mod tests {
             (Rendered::Results, "results"),
             (Rendered::Summary, "summary"),
             (Rendered::Status, "status"),
+            (Rendered::Watch, "watch"),
         ] {
-            // Exhaustive, so a fourth view cannot be added without a word.
+            // Exhaustive, so a fifth view cannot be added without a word.
             match view {
-                Rendered::Results | Rendered::Summary | Rendered::Status => {}
+                Rendered::Results | Rendered::Summary | Rendered::Status | Rendered::Watch => {}
             }
             assert_eq!(view.as_str(), word, "{view:?} is read by another name");
         }

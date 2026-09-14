@@ -378,27 +378,41 @@ fn driver_liveness(
     if undriven_by_record {
         return DriverLiveness::DriverDead;
     }
-    let ours = recorded_host == Some(sys::hostname().as_str());
-    if ours
-        && pid.is_some_and(|pid| sys::claim_on(pid.get(), started.unwrap_or_default()).is_over())
-    {
+    if driver_claim_is_over(recorded_host, pid, started) {
         return DriverLiveness::DriverDead;
     }
     // A live pid is ownership, not progress.
-    let quiet_for = last_write_at.map(|last| sys::now_millis().saturating_sub(last) / 1_000);
-    match quiet_for {
-        // A run holding an outstanding decision point is *waiting*, not parked:
-        // the loop that would be writing is deliberately holding a subtree back
-        // until a person answers, and a driver reported dead there sends an
-        // operator to intervene in work that is doing exactly what it should.
-        Some(seconds)
-            if seconds > parked_after_seconds()
-                && !(awaiting_human_action || blocking_surface(paths)) =>
-        {
-            DriverLiveness::Parked
-        }
-        _ => DriverLiveness::Driving,
+    //
+    // A run holding an outstanding decision point is *waiting*, not parked: the
+    // loop that would be writing is deliberately holding a subtree back until a
+    // person answers, and a driver reported dead there sends an operator to
+    // intervene in work that is doing exactly what it should.
+    if quiet_past_parked(last_write_at) && !(awaiting_human_action || blocking_surface(paths)) {
+        return DriverLiveness::Parked;
     }
+    DriverLiveness::Driving
+}
+
+/// Whether the driver a record names is proved, on this host, to be over.
+///
+/// A pid recorded on another host means nothing here, so it is never over.
+/// Apart from [`driver_liveness`] because a watch asks it between reads: a
+/// driver ending moves no file, so what a wait watches for has to ask the host.
+pub(crate) fn driver_claim_is_over(
+    recorded_host: Option<&str>,
+    pid: Option<std::num::NonZeroU32>,
+    started: Option<&str>,
+) -> bool {
+    recorded_host == Some(sys::hostname().as_str())
+        && pid.is_some_and(|pid| sys::claim_on(pid.get(), started.unwrap_or_default()).is_over())
+}
+
+/// Whether a run last written at `last_write_at` has been quiet past
+/// [`parked_after_seconds`] — the other half of a liveness that moves with the
+/// clock rather than with a file.
+pub(crate) fn quiet_past_parked(last_write_at: Option<u64>) -> bool {
+    last_write_at
+        .is_some_and(|last| sys::now_millis().saturating_sub(last) / 1_000 > parked_after_seconds())
 }
 
 /// Take the landings the run's **own settled report** recorded, where they say

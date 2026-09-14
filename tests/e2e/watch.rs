@@ -21,8 +21,196 @@ use serde_json::{json, Value};
 
 use crate::harness::{
     agent, ended, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED,
-    SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
+    RENDER_COST_ENV, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
 };
+
+/// A window long enough that the tree before `watch` waited on the bus — which
+/// read the run once a second whatever it did — would have read it again inside.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(2_500);
+
+/// How soon a watch reports what moved: the local transport looks for a change
+/// every 20ms, and what a watch adds is one read of the run and the lines it
+/// writes. Stated with room for a loaded host, and still under the second the
+/// tree before this change slept between reads.
+const REPORTED_WITHIN: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// A watch reads the run again only when something it decides from moved, and a
+/// blocking surface raised while it waits is reported within the local
+/// transport's change latency.
+///
+/// The reads are counted as work rather than inferred from time: a watch records
+/// each read of the run where `ONEPIPELINE_RENDER_COST` names a file, so a window
+/// in which none of the run's own files moved is a window in which that count may
+/// not move either, and nothing may be written to either stream.
+#[test]
+fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::time::Instant;
+
+    let world = World::new("watch-changes");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchchanges", vec![agent("build", &[])]);
+    let renders = world.root.join("watch.renders");
+    let reads = || {
+        std::fs::read_to_string(&renders)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|act| act["view"] == json!("watch") && act["act"] == json!("render"))
+            .count()
+    };
+    let surfaces = world.run_file(&run, "channel/surfaces.jsonl");
+    let marks = || -> Vec<Option<(u64, std::time::SystemTime)>> {
+        [
+            world.run_file(&run, "events.jsonl"),
+            world.run_file(&run, "launch.json"),
+            surfaces.clone(),
+            world.run_file(&run, "channel/replies.jsonl"),
+            world.run_file(&run, "channel/commands.jsonl"),
+        ]
+        .iter()
+        .map(|file| {
+            std::fs::metadata(file)
+                .ok()
+                .map(|meta| (meta.len(), meta.modified().expect("a modification time")))
+        })
+        .collect()
+    };
+
+    let mut watching = world
+        .cmd(&[
+            "watch",
+            &run,
+            "--until",
+            "surface",
+            "--timeout",
+            "600",
+            "--tick-interval",
+            "0",
+        ])
+        .env(RENDER_COST_ENV, &renders)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    let (printed, lines) = std::sync::mpsc::channel::<(Instant, String)>();
+    let stdout = watching.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let _ = printed.send((Instant::now(), line.expect("the watch's output reads")));
+        }
+    });
+    world.until("the watch to read the run", |_| reads() >= 1);
+
+    // A window the run did not move across. The held dispatch writes nothing, but
+    // a driver settling in may still record something, so a window in which a
+    // file moved is taken again rather than counted. The count is read after a
+    // settle, so a change the watch was already reading when the window opened is
+    // not counted against it.
+    let mut held_still = false;
+    for _ in 0..10 {
+        let before = marks();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let read_before = reads();
+        std::thread::sleep(QUIET);
+        if marks() == before {
+            assert_eq!(
+                reads(),
+                read_before,
+                "the watch read the run again across {QUIET:?} in which nothing it reads moved"
+            );
+            held_still = true;
+            break;
+        }
+    }
+    assert!(
+        held_still,
+        "the run never held still for {QUIET:?}:\n{}",
+        world.dump()
+    );
+    let quiet_until = Instant::now();
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        // Nobody answers this one, and the server's own wait is not under test —
+        // only long enough that the question is still open when the watch reads it.
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "5")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let length = || std::fs::metadata(&surfaces).map_or(0, |meta| meta.len());
+    let unraised = length();
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"raised while the watch waits","blocking":true,"node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(120);
+    let mut raised_at = None;
+    let exited = loop {
+        if raised_at.is_none() && length() > unraised {
+            raised_at = Some(Instant::now());
+        }
+        if let Some(status) = watching.try_wait().expect("the watch is waited on") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the watch never returned:\n{}",
+            world.dump()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    let exited_at = Instant::now();
+    reader.join().expect("the reader finishes");
+    let mut said = String::new();
+    watching
+        .stderr
+        .take()
+        .expect("stderr is piped")
+        .read_to_string(&mut said)
+        .expect("the human form reads");
+    let raised_at = raised_at.expect("the surface reached the channel before the watch returned");
+
+    assert_eq!(exited.code(), Some(SURFACE_WAITING), "{said}");
+    let latency = exited_at.saturating_duration_since(raised_at);
+    assert!(
+        latency < REPORTED_WITHIN,
+        "a surface raised while the watch waited was reported {latency:?} after it was \
+         queued, past {REPORTED_WITHIN:?}"
+    );
+    let records: Vec<(Instant, Value)> = lines
+        .try_iter()
+        .map(|(at, line)| {
+            let record = serde_json::from_str(&line).unwrap_or_else(|e| {
+                panic!("the watch wrote a line that is not JSON ({e}): {line}")
+            });
+            (at, record)
+        })
+        .collect();
+    assert!(
+        records.iter().all(|(at, _)| *at > quiet_until),
+        "the watch wrote while the run was not moving: {records:?}"
+    );
+    let last = &records.last().expect("the watch says why it returned").1;
+    assert_eq!(last["condition"], json!("surface-waiting"), "{last}");
+    assert!(
+        records
+            .iter()
+            .any(|(_, record)| record["watch"] == json!("event")
+                && record["event"]["kind"] == json!("planner-surface-queued")),
+        "the surface raised while the watch waited never reached it: {records:?}"
+    );
+
+    drop(stdin);
+    ended(serving);
+    world.release("build.go");
+}
 
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
