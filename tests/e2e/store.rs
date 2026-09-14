@@ -1449,8 +1449,6 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         streaks_reported(world, run) >= 1
     });
 
-    // One line, carrying the store's own class and kind, and saying when to expect the next
-    // attempt — which is not on a timer.
     let said = the_line_reported(&world, run);
     for expected in [
         project.as_str(),
@@ -1468,11 +1466,8 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         "the line an operator reads says a refused projection is being retried: {said}"
     );
 
-    // Nothing asks the store again: not a timer, and not the store being put right halfway
-    // through the window either.
     asked_nothing_more(&world, run, REFUSAL_WINDOW, || stops_refusing(&world));
 
-    // One surface, carrying the same class and kind, and no promise of a retry.
     let raised = surfaces_raised(&world, run);
     assert_eq!(
         raised.len(),
@@ -1494,7 +1489,6 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         raised[0]
     );
 
-    // The graph changes, so the projection is attempted again, and lands.
     noted(
         &world,
         run,
@@ -1599,23 +1593,31 @@ fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
 
 /// A failure the store classes as one a wait can change keeps today's schedule exactly: a
 /// document classed `transient`, and a partial answer with any entry a wait could change even
-/// beside one that refused. The first retry stays prompt, the interval grows, and the one line
-/// and one surface say it is being retried.
+/// beside one that refused. So does a document carrying a class this build has never heard of,
+/// which it does not read as a refusal. The first retry stays prompt, the interval grows, and
+/// the one line and one surface say it is being retried.
 #[test]
 fn a_failure_the_store_classes_transient_is_retried_on_the_schedule() {
+    let unknown_class =
+        RATE_LIMITED_DOCUMENT.replace(r#""class":"transient""#, r#""class":"deferred""#);
+    assert_ne!(
+        unknown_class, RATE_LIMITED_DOCUMENT,
+        "the unknown-class document names the class it was built from"
+    );
     for (scenario, document, exit, kind) in [
         (
             "transient",
             RATE_LIMITED_DOCUMENT,
             1,
-            "class: transient, kind: rate-limited",
+            Some("class: transient, kind: rate-limited"),
         ),
         (
             "mixed-partial",
             PARTIAL_MIXED,
             4,
-            "class: transient, kind: config, unavailable",
+            Some("class: transient, kind: config, unavailable"),
         ),
+        ("unknown-class", unknown_class.as_str(), 1, None),
     ] {
         let run = format!("writeback-{scenario}");
         let (world, _project) = a_run_whose_destination_can_start_refusing(
@@ -1642,15 +1644,105 @@ fn a_failure_the_store_classes_transient_is_retried_on_the_schedule() {
         }
         let line = the_line_reported(&world, &run);
         assert!(
-            line.contains(kind) && line.contains("retrying") && line.contains(RATE_LIMITED),
-            "{scenario}: the line does not report a retried `{kind}` failure: {line}"
+            line.contains("retrying") && line.contains(RATE_LIMITED),
+            "{scenario}: the line does not report a retried failure: {line}"
         );
+        match kind {
+            Some(kind) => assert!(
+                line.contains(kind),
+                "{scenario}: the line does not carry the store's `{kind}`: {line}"
+            ),
+            None => assert!(
+                !line.contains("class:"),
+                "{scenario}: a class this build does not know was reported as one: {line}"
+            ),
+        }
         assert_eq!(
             surfaces_raised(&world, &run).len(),
             1,
             "{scenario}: one streak raised other than one surface"
         );
     }
+}
+
+/// Closeout attempts a terminal snapshot published after a refusal, because it is a different
+/// snapshot, and never asks the store about a refused one again; and a run whose projections
+/// the store keeps refusing settles without its closeout waiting on any of them.
+#[test]
+fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_again() {
+    let run = "writeback-refused-then-put-right";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-refused-then-put-right", run);
+    refusing(
+        &world,
+        "onetaskgraph.refuse-reads",
+        NO_SUCH_ITEM_SAID,
+        NO_SUCH_ITEM,
+        1,
+    );
+    noted(&world, run, "later", "refused before the run ends");
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    stops_refusing(&world);
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    world.until_store("the terminal settlement to reach the board", |world| {
+        world.store_tasks(&project).iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the run did not settle complete"
+    );
+
+    let run = "writeback-refused-to-the-end";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
+    let asked_before = projections_asked_for(&world);
+    refusing(
+        &world,
+        "onetaskgraph.refuse-reads",
+        NO_SUCH_ITEM_SAID,
+        NO_SUCH_ITEM,
+        1,
+    );
+    noted(&world, run, "later", "refused until the run ends");
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let released = Instant::now();
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert!(
+        released.elapsed() < Duration::from_secs(15),
+        "a run whose projections were refused took {:?} to settle",
+        released.elapsed()
+    );
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the refusals changed what executed"
+    );
+    // Every attempt since the store began refusing was a snapshot of its own, reported once:
+    // one asked again — on a timer, or inside closeout, where the old schedule asked as fast as
+    // the store refused — is an attempt with no line of its own.
+    let attempts = projections_asked_for(&world) - asked_before;
+    let reported = streaks_reported(&world, run);
+    assert!(
+        attempts <= reported,
+        "the store was asked {attempts} times for {reported} refused snapshots, so a refused \
+         one was asked about again"
+    );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 

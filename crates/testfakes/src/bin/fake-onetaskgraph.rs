@@ -321,11 +321,13 @@ fn code(code: Option<i32>) -> ExitCode {
 /// the unclassified failure while it asserted against a classified one.
 fn refused(dir: &Path, script: &str, reason: &str) -> ExitCode {
     let status = match std::fs::read_to_string(dir.join(format!("{script}.exit"))) {
+        // Zero is refused with the rest: a refusal acted out under success would hand the
+        // caller a failure's words and document beside a status saying nothing failed.
         Ok(scripted) => match scripted.trim().parse::<u8>() {
-            Ok(status) => status,
-            Err(_) => {
+            Ok(status) if status != 0 => status,
+            _ => {
                 return fake::refuse(&format!(
-                    "`{script}.exit` states `{}`, which is not an exit status",
+                    "`{script}.exit` states `{}`, which is not a failing exit status (1 to 255)",
                     scripted.trim()
                 ))
             }
