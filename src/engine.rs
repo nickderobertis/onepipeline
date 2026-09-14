@@ -2091,7 +2091,7 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
     }
     TurnAddress::of(
         envelope.labels.run_id.as_deref()?,
-        envelope.labels.extra.get("member")?.as_str()?,
+        envelope.labels.member.as_deref()?,
     )
 }
 
@@ -4484,15 +4484,14 @@ impl TurnRecords {
 /// record contradict a real member's death — `projection::member_label` keeps the
 /// same three apart, for the same reason on the rendering side.
 fn member_of(envelope: &Envelope) -> Option<&str> {
-    match envelope.labels.extra.get("member") {
+    match envelope.labels.member.as_deref() {
         None => Some(UNSTAMPED_MEMBER),
         // The same token check every other relayed string in this module crosses,
         // for the same reason: this is another process's JSON, and a member name
         // is a graph identifier — `worker`, `check-in` — so a paragraph or a
         // control character is not one, whatever it is. Bounded here because the
         // value becomes a map key held for the life of the dispatch.
-        Some(Value::String(member)) => is_a_classification(member).then_some(member.as_str()),
-        Some(_) => None,
+        Some(member) => is_a_classification(member).then_some(member),
     }
 }
 
@@ -6233,8 +6232,10 @@ mod tests {
         use crate::event::Source;
         use oneagentgraph::event::Role;
         let relayed = |kind: oneagentgraph::event::EventKind, member: &str, payload: Value| {
-            let mut labels = Labels::default();
-            labels.extra.insert("member".into(), json!(member));
+            let labels = Labels {
+                member: Some(member.into()),
+                ..Labels::default()
+            };
             Envelope {
                 v: crate::event::ENVELOPE_VERSION,
                 ts: "2026-09-10T00:00:00.000Z".into(),
@@ -6541,7 +6542,7 @@ mod tests {
                 artifacts: Vec::new(),
             };
             if let Some(member) = member {
-                envelope.labels.extra.insert("member".into(), json!(member));
+                envelope.labels.member = Some(member.into());
             }
             envelope
         };
@@ -6597,21 +6598,20 @@ mod tests {
 
         // A label present and unreadable is refused rather than folded onto the
         // unstamped key: a stranger's record would otherwise contradict a real
-        // member's death. Every way of not being a member name, including the two
-        // that are strings.
+        // member's death. Every way a label can be text and not a member name; one
+        // that is not text at all refuses its line where the bus reader reads it.
         for label in [
-            json!(7),
-            json!(""),
-            json!("a name with spaces in it"),
-            json!("worker\n"),
-            json!("m".repeat(CLASSIFICATION_LIMIT + 1)),
+            String::new(),
+            "a name with spaces in it".to_string(),
+            "worker\n".to_string(),
+            "m".repeat(CLASSIFICATION_LIMIT + 1),
         ] {
             let mut unreadable = TurnRecords::default();
             let mut opened = of(started, None, json!({"turn": 1}));
-            opened.labels.extra.insert("member".into(), label.clone());
+            opened.labels.member = Some(label.clone());
             unreadable.read(&opened);
             let mut closed = of(completed, None, billed.clone());
-            closed.labels.extra.insert("member".into(), label);
+            closed.labels.member = Some(label);
             unreadable.read(&closed);
             assert!(!unreadable.contradicts_a_death_of(UNSTAMPED_MEMBER));
             assert!(!unreadable.contradicts_a_death_of("worker"));
@@ -6953,7 +6953,7 @@ mod tests {
                 ..Labels::default()
             };
             if let Some(member) = member {
-                labels.extra.insert("member".into(), member.into());
+                labels.member = Some(member.into());
             }
             Envelope {
                 v: crate::event::ENVELOPE_VERSION,

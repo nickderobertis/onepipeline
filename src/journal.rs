@@ -1225,13 +1225,17 @@ mod tests {
     /// Each stream written to a file of its own, in the order its records
     /// arrived, and merged by the bus.
     fn merged_by_the_bus(name: &str, arrived: &[Envelope]) -> Vec<Envelope> {
-        let dir = std::env::temp_dir().join(format!("onepipeline-merge-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-merge-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let mut files: BTreeMap<String, String> = BTreeMap::new();
         for event in arrived {
             let line = serde_json::to_string(event).expect("an envelope serializes");
-            files.entry(event.stream.clone()).or_default().push_str(&format!("{line}\n"));
+            files
+                .entry(event.stream.clone())
+                .or_default()
+                .push_str(&format!("{line}\n"));
         }
         let paths: Vec<_> = files
             .into_iter()
@@ -1319,11 +1323,19 @@ mod tests {
         };
         assert_eq!(
             order(&ours),
-            vec![("b".to_string(), 1), ("a".to_string(), 1), ("a".to_string(), 2)]
+            vec![
+                ("b".to_string(), 1),
+                ("a".to_string(), 1),
+                ("a".to_string(), 2)
+            ]
         );
         assert_eq!(
             order(&merged_by_the_bus("stepped", &arrived)),
-            vec![("a".to_string(), 2), ("b".to_string(), 1), ("a".to_string(), 1)]
+            vec![
+                ("a".to_string(), 2),
+                ("b".to_string(), 1),
+                ("a".to_string(), 1)
+            ]
         );
     }
 
@@ -1340,18 +1352,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let path = dir.join("events.jsonl");
-        let line = |seq| serde_json::to_string(&stamped("a", seq, "2026-09-01T00:00:01.000Z")).expect("serializes");
+        let line = |seq| {
+            serde_json::to_string(&stamped("a", seq, "2026-09-01T00:00:01.000Z"))
+                .expect("serializes")
+        };
         let torn = line(4);
         std::fs::write(
             &path,
-            format!("{}\n\n{{\"hello\":1}}\n{}\n{}", line(1), line(2), &torn[..30]),
+            format!(
+                "{}\n\n{{\"hello\":1}}\n{}\n{}",
+                line(1),
+                line(2),
+                &torn[..30]
+            ),
         )
         .expect("a journal");
 
         let reader = onemessagebus_agent::Reader::open(&path)
             .expect("the journal opens")
             .collect_all();
-        let reported = reader.torn.clone().expect("the reader reports the torn tail");
+        let reported = reader
+            .torn
+            .clone()
+            .expect("the reader reports the torn tail");
 
         let read_whole = read(&path);
         assert_eq!(
@@ -1362,7 +1385,10 @@ mod tests {
                 .map(|record| record.envelope.clone())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(read_whole.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            read_whole.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
 
         let found = integrity(&path);
         assert_eq!(

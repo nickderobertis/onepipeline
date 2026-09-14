@@ -3755,7 +3755,7 @@ mod tests {
             run_id: Some("elsewhere".into()),
             ..Labels::default()
         };
-        labels.extra.insert("member".into(), "worker".into());
+        labels.member = Some("worker".into());
         let untouched = labels.clone();
         adopt_labels(&mut labels);
         assert_eq!(labels, untouched);
