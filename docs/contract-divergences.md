@@ -5519,7 +5519,12 @@ is at a version this build reads — so a record at version 3 is reported exactl
 it was. Every `PipelineKind` payload is a registered bus message,
 `agent.pipeline.<kind>@2`, in the registry this crate constructs when it starts. A
 relayed `onevcs` envelope is the bus value itself, so the arm-by-arm conversions of
-its phase, source and labels are gone. What stays this crate's: `PipelineKind`,
+its phase, source and labels are gone. Each payload document admits a closed word only as the
+type that owns it spells it — a settlement's status and landing, a reply's author,
+a release note's delivery, a criterion's answer, a drafting dispatch's ending, and a
+shown note's addressee, delivery, party and evidence — and a debug build of the binary
+checks every record an emitter writes against its document before appending it, so an
+emit site that drifts from its document fails the journeys that drive that build. What stays this crate's: `PipelineKind`,
 `Filters`, `LaunchConfig`, `DEFAULT_PROFILE`, `MONITOR_PROFILE`, and the shipped
 profiles' contents.
 
