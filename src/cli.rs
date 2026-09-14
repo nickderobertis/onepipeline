@@ -249,8 +249,9 @@ pub struct StartArgs {
     /// The command every op that introduces or changes a node's task is offered
     /// to before it is applied.
     ///
-    /// The node crosses as JSON on its stdin; exit 0 accepts the edit and a
-    /// non-zero exit refuses it, with the command's own stderr as the reason.
+    /// The node crosses as JSON on its stdin; exit 0 accepts the edit, exit 1
+    /// refuses it with the command's own stderr as the reason, and any other
+    /// ending gives no verdict and refuses it naming the validator.
     /// Naming none is the shipped default and is exactly what a launch did
     /// before this flag existed. Given here it beats `ONEPIPELINE_NODE_VALIDATOR`
     /// and the launch config's own field — including when what it names is
@@ -264,7 +265,7 @@ pub struct StartArgs {
     ///
     /// One document crosses its stdin: every node the envelope introduces or
     /// changes with the op that produced each, the plan they are being edited
-    /// into, and the run's goal. Exit 0 accepts the envelope and a non-zero exit
+    /// into, and the run's goal. Exit 0 accepts the envelope and exit 1
     /// refuses it whole, with the command's own stderr as the reason and the
     /// node it declared on an `objection: ID` line of that stderr named as the
     /// one it objected to. Naming

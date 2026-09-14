@@ -385,7 +385,7 @@ fn an_unstartable_reviewer_fails_closed_and_a_launch_naming_none_is_unchanged() 
         .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
         .exited(REFUSED)
         .err_has("reviewed by nothing")
-        .err_has("could not be started");
+        .err_has("could not be run");
     world.run(&["results", &run]).exited(0).out_lacks("cover");
     world.release("slow.go");
 
@@ -711,7 +711,7 @@ fn a_refusal_carries_what_the_reviewer_said_without_its_escape_codes_or_its_trac
         .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
         .exited(REFUSED)
         .err_has("exited 5")
-        .err_has("said nothing on stderr");
+        .err_has("neither a pass (0) nor a refusal (1)");
 
     // And the edits are still refused rather than lost in the noise.
     world.run(&["results", &run]).exited(0).out_lacks("cover");

@@ -403,8 +403,9 @@ running now — is a decomposition decision rather than an observation.
 A launch may also name a **node validator** — a command of the host's own, which
 every op that introduces or changes a node's task (`add`, `retry`, a `requeue`
 whose amendment touches `task`, and `amend`) is offered the resulting node to, as
-JSON on its stdin. Exit `0` accepts the edit; a non-zero exit refuses it with the
-command's own stderr as the reason. It is named by `--node-validator COMMAND`, by
+JSON on its stdin. Exit `0` accepts the edit; exit `1` refuses it with the
+command's own stderr as the reason; any other exit, a command that cannot be run,
+or one a signal ended gives no verdict, and refuses the edit naming the validator. It is named by `--node-validator COMMAND`, by
 `ONEPIPELINE_NODE_VALIDATOR`, or by a launch config's `node_validator`, in that
 order of precedence; naming none is the default and runs no validator at all.
 
@@ -416,8 +417,8 @@ node the envelope introduces or changes with the op that produced each, and the
 plan they are being edited into, as the envelope leaves it. That is the review no
 per-node check can make — two added nodes that duplicate each other, a contract
 seam between two nodes of one edit, the dependency edges the edit introduces, or
-whether the edited graph still delivers the goal. Exit `0` accepts it; a non-zero
-exit **refuses the whole envelope**, so no command of it half-applies, with the
+whether the edited graph still delivers the goal. Exit `0` accepts it; exit `1`
+**refuses the whole envelope**, so no command of it half-applies, with the
 command's own stderr as the reason and every op and node the envelope carried
 named beside it. The refusal also names the node the reviewer **objected to**,
 which is not the same set: the reviewer declares it on a line of its stderr

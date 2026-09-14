@@ -2744,12 +2744,14 @@ fn submit_envelope(
     // than half of it. The graph it is handed is the one the envelope leaves
     // behind, which is what a review of the *edit* rather than of one node is
     // about, and the plan it came from is where the run's goal is stated.
-    edits::offer_envelope_to_reviewer(
+    if let Some(review) = edits::EnvelopeReview::of(
         view.launch.envelope_reviewer(),
         &envelope.commands,
         &projected,
         view.state.plan.as_ref(),
-    )?;
+    )? {
+        channel.judge_reply(envelope, review)?;
+    }
 
     // Whether a reconciler is running is asked by *taking the run's lock*, which
     // is the same question and the only answer that cannot be raced: with a

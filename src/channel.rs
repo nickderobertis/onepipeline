@@ -1685,6 +1685,29 @@ impl ChannelState {
             .map_err(|failure| crate::Error::Refused(failure.to_string()))
     }
 
+    /// Judge a reply envelope as the reply queue judges one offered to it,
+    /// appending nothing: the layout's routing and the author's grants, `review`
+    /// registered on the reply queue as a validator of it, and each queue the
+    /// envelope would be routed to by that queue's own validators.
+    pub(crate) fn judge_reply(
+        &self,
+        reply: &Reply,
+        review: impl onemessagebus::Validator<Value> + 'static,
+    ) -> crate::Result<()> {
+        let replies = queue_name(REPLIES);
+        let offered = serde_json::to_value(reply)
+            .map_err(|failure| crate::Error::Invalid(format!("reply: {failure}")))?;
+        let bus = self
+            .bus()?
+            .with_validator::<Value>(&replies, review)
+            .map_err(bus_failure)?;
+        QueueError::of_verdict(
+            &replies,
+            bus.validate(&replies, offered).map_err(bus_failure)?,
+        )
+        .map_err(queue_failure)
+    }
+
     /// Append one envelope of edits to the durable command queue.
     ///
     /// Offered through the bus, so the layout checks each op against the
