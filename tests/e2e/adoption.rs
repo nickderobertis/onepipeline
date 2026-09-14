@@ -1193,6 +1193,11 @@ fn a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknow
     // the change — which is the state this journey is about, so it is established
     // from the sibling itself rather than assumed.
     releases_at(&answer, "0.2.0");
+    // llmlint: ignore[tests_mirror_real_usage] this is the journey's precondition, read from the
+    // sibling that owns it, and no surface of this run can state it: a wait records the word
+    // `not-answered` and never the sibling's reason, and a probe that could not answer at all
+    // records the same word. `onevcs release status` is this same library call against the same
+    // sandboxed `ONEVCS_HOME`, and `harness.rs` reaches that sibling in-process by design.
     match world.on_onevcs(|| onevcs::release_status(&landed, None)) {
         Ok(onevcs::ReleaseStatus::NotAnswered { reason }) => assert!(
             reason.contains("no baseline"),
@@ -1218,6 +1223,12 @@ fn a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknow
 
     // The person who can see the release records it, the way `onevcs release
     // acknowledge` does — and that is what starts the node.
+    // llmlint: ignore[tests_mirror_real_usage] `onevcs release acknowledge` is exactly this
+    // call — onevcs 0.23.0's `app.rs` hands its parsed reference, target, version and supersede
+    // flag straight to `onevcs::acknowledge_release` — made against this world's sandboxed
+    // `ONEVCS_HOME`, which is where the operator's record lands too. `harness.rs` reaches that
+    // sibling in-process by design and builds no binary of it, as this file's other
+    // acknowledgements do.
     world.on_onevcs(|| {
         onevcs::acknowledge_release(
             &landed,

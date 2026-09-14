@@ -3206,6 +3206,9 @@ fn a_persona_naming_artifacts_gives_its_judge_a_prompt_naming_them() {
         let mut node = agent(run, &[]);
         node["persona"] = Value::from(format!("./{persona}.yaml"));
         let path = world.plan(run, &plan_of(run, vec![node]));
+        // This crate's own `onepipeline start`, dispatching through the real
+        // `oneagentgraph` rather than the double every other journey puts on its
+        // path: the harness below onejudge is the only thing stood in for.
         world
             .run_on_agentgraph(&["start", &path, "--attach"])
             .exited(0)

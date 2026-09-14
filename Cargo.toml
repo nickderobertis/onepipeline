@@ -440,7 +440,7 @@ resolver = "2"
 # ends `checks-unsettled` rather than `checks-failed` when nothing later answers,
 # which `tests/e2e/lifecycle.rs`'s
 # `a_required_check_the_host_cancelled_is_read_again_and_never_settles_checks_failed`
-# drives through `crates/testfakes`'s host. And an automated target whose landing
+# and its `stale` twin drive through `crates/testfakes`'s host. And an automated target whose landing
 # has no baseline answers *released* once `onevcs release acknowledge` records
 # it, where before it answered *not answered* for ever and held a `published`
 # node with no timeout; `tests/e2e/adoption.rs`'s
