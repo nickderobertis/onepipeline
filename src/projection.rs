@@ -512,8 +512,6 @@ pub enum MemberLabel {
     /// The producer stamped none. A single-sided member's envelope is the
     /// ordinary case.
     Unstamped,
-    /// The producer stamped something this build cannot read as a member.
-    Unreadable,
 }
 
 /// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
@@ -879,7 +877,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     // `a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported`.
     // What a user *can* reach — a journal at version 1 — is driven end to end by
     // `tests/e2e/compatibility.rs`.
-    if !event.written_at_a_known_version() {
+    if !crate::event::written_at_a_known_version(event) {
         state.strict = false;
         return;
     } // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1714,17 +1712,15 @@ fn fold_invocation(state: &mut RunState, event: &Envelope) {
         .push(served);
 }
 
-/// The member an envelope's labels named, as far as this build can read it.
+/// The member an envelope's labels named.
 ///
-/// The label arrives in `extra`, because this crate's own envelope does not
-/// declare `member` — so it is checked here rather than by a schema. A value
-/// that is not a member name is kept apart from a producer that stamped none:
-/// they are different facts about the record.
+/// The agent profile's `Labels` declares `member`, so a label that is not text
+/// never reaches a fold: the bus reader refuses the line, and the store's
+/// integrity report names it as one this build cannot read.
 fn member_label(event: &Envelope) -> MemberLabel {
-    match event.labels.extra.get("member") {
+    match &event.labels.member {
         None => MemberLabel::Unstamped,
-        Some(Value::String(member)) => MemberLabel::Named(member.clone()),
-        Some(_) => MemberLabel::Unreadable,
+        Some(member) => MemberLabel::Named(member.clone()),
     }
 }
 
@@ -1854,7 +1850,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: kind.into(),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 node: node.map(str::to_string),
                 ..labels("demo", None)
@@ -3210,9 +3206,7 @@ mod tests {
                 Value::Object(fields) => fields,
                 other => panic!("a payload is not an object: {other:?}"),
             };
-            if let Some(member) = member {
-                event.labels.extra.insert("member".into(), member);
-            }
+            event.labels.member = member.and_then(|member| member.as_str().map(str::to_string));
             event
         };
         let whole = || {
@@ -3223,24 +3217,18 @@ mod tests {
             })
         };
 
-        // A member the producer stamped, one it did not, and one that is not a
-        // member name: three different facts about the record, kept apart
-        // exactly as an advance's are.
+        // A member the producer stamped and one it did not: two different facts
+        // about the record, kept apart exactly as an advance's are.
         let state = fold(&[
             published(Some(json!("worker")), Some("build"), whole()),
             published(None, Some("build"), whole()),
-            published(Some(json!(7)), Some("build"), whole()),
         ]);
         assert_eq!(
             state.served["build"]
                 .iter()
                 .map(|served| served.member.clone())
                 .collect::<Vec<_>>(),
-            vec![
-                MemberLabel::Named("worker".into()),
-                MemberLabel::Unstamped,
-                MemberLabel::Unreadable,
-            ]
+            vec![MemberLabel::Named("worker".into()), MemberLabel::Unstamped,]
         );
         let first = &state.served["build"][0].session;
         assert_eq!(first.role, oneagentgraph::event::Role::Judge);

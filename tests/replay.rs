@@ -81,7 +81,7 @@ fn recorded(
         seq: 0,
         source: Source::Pipeline,
         kind: EventKind(kind.as_str().into()),
-        phase: None,
+        dimensions: Default::default(),
         labels: Labels {
             node: node.map(str::to_string),
             ..Labels::default()
@@ -315,4 +315,85 @@ fn a_delivered_surface_recorded_before_the_queued_instant_existed_still_reads() 
          one recorded after it"
     );
     std::fs::remove_dir_all(&root).ok();
+}
+
+/// Lay a journal down as a run of its own under a fresh root, and render the view a planner reads
+/// its outcome through. The launch record names a process that
+/// cannot exist and a host that is not this one, so liveness answers the same on
+/// every read.
+fn rendered_through_the_views(name: &str, journal: &str) -> String {
+    let root = std::env::temp_dir().join(format!("onepipeline-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).expect("a run directory");
+    std::fs::write(
+        dir.join("launch.json"),
+        serde_json::json!({
+            "run_id": name,
+            "plan": "plan.json",
+            "launcher": "claude-code",
+            "session": "session-replay",
+            "pid": 2_147_483_000u32,
+            "host": "replay",
+            "started_at": "2026-09-11T12:45:40.333Z",
+            "heartbeat_interval": 1_800,
+        })
+        .to_string(),
+    )
+    .expect("a launch record");
+    std::fs::write(dir.join("events.jsonl"), journal).expect("a journal");
+    let survey = onepipeline::views::Survey::of(&root);
+    assert!(
+        survey.skipped.is_empty(),
+        "the run was refused: {:?}",
+        survey.skipped
+    );
+    let view = survey.views.first().expect("the run under the root");
+    let rendered = onepipeline::views::results(view);
+    std::fs::remove_dir_all(&root).ok();
+    rendered
+}
+
+/// A journal the release before the bus wrote, and the reading that release gave
+/// it: a settled run of the operator's host, written by the build this change
+/// replaces — every record of this crate's own at envelope version 2, and the
+/// relayed `oneagentgraph` and `onevcs` envelopes stamped with both `member` and
+/// `persona`, which is where the bus's `Labels` and this crate's old copy
+/// disagreed about byte order. Free text and host paths are stood in for, and the
+/// node names no repository or checkout of that host, so nothing it renders is a
+/// read taken now against a repository only that host has.
+const BEFORE_BUS: &str = include_str!("golden/journal-before-bus-adoption.jsonl");
+
+/// What that release rendered the journal as, through the same call below, run
+/// against the tree before the wire moved onto the bus. Committed and never
+/// regenerated: a rendering remade by this build proves nothing about the last.
+const BEFORE_BUS_RENDERED: &str = include_str!("golden/journal-before-bus-adoption.rendered");
+
+/// The journal still reads whole through the bus's envelope, and folds and renders
+/// exactly as the release that wrote it did.
+#[test]
+fn a_journal_the_release_before_the_bus_wrote_folds_and_renders_as_it_did() {
+    let mut relayed_with_both = 0;
+    for line in BEFORE_BUS.lines() {
+        let envelope: Envelope = serde_json::from_str(line)
+            .unwrap_or_else(|why| panic!("a line of the journal is refused: {why}: {line}"));
+        if envelope.source == Source::Pipeline {
+            assert_eq!(
+                envelope.v, ENVELOPE_VERSION,
+                "a record from another version: {line}"
+            );
+        } else if envelope.labels.member.is_some() && envelope.labels.persona.is_some() {
+            relayed_with_both += 1;
+        }
+    }
+    assert!(
+        relayed_with_both > 0,
+        "the journal holds no relayed record stamped with both labels"
+    );
+
+    assert_eq!(
+        rendered_through_the_views("before-bus", BEFORE_BUS),
+        BEFORE_BUS_RENDERED,
+        "this build reads a journal the release before it wrote differently from that release"
+    );
 }

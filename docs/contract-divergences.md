@@ -6,12 +6,12 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34 and 74** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74 and 75** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–73 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73 and 76 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
@@ -21,8 +21,8 @@ general integration hooks only and nothing in them may know about this one; the
 rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
-`onevcs`'s. An open entry is recorded here and never resolved from this
-repository.
+`onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
+open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -475,6 +475,10 @@ not hand it back when the terminator lands. That half is sound.
 `tests/e2e/lifecycle.rs` holds the part that is this crate's: a line it cannot
 read does not fail the node, and the loss is said out loud rather than folded
 into an empty stream.
+
+Half of it is answered by `onevcs` 0.24.0, which reads its stream through the bus
+reader and hands back the whole records before a torn line. The other half — the
+line is not reported — is what entry 75 proposes it expose.
 
 ## 18. No lifecycle journey runs on Windows — OPEN
 
@@ -941,14 +945,13 @@ answered with a window while `monitor` answered with the whole store would make
 the two verbs disagree about what "the event view" means.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
-*describes* the duplication rather than introducing it: `docs/contract.md` fixes the
-filter grammar — like the envelope beside it — as duplicated per repository by design,
-with the committed grammar text as the one source and each producer's own contract test as
-the drift gate. `tests/contract.rs` is this repository's, and it fails `just check` the
-moment `src/filter.rs` stops matching the document. Building a cross-repository generation
-step or drift gate instead is a change to three independently-released tools and to the
-approved contract, which is a proposal to the planner who owns it — which is what this
-entry is. -->
+*describes* a duplication rather than introducing one: it records how the filter grammar
+was held while each producer kept its own copy, and entry 75 records the ruling that ended
+that — the filter and the envelope are `onemessagebus-agent`'s, re-exported, with
+`onemessagebus`'s `docs/contract.md` the one source and `tests/contract.rs` driving this
+repository's marked copy through the re-exported types. What remains here is history, and
+rewriting it to read as though the copies never existed would lose why the corners below
+were settled the way they were. -->
 
 ## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — RESOLVED
 
@@ -961,9 +964,9 @@ that.** The source is the committed grammar text, which the approved contract
 fixes as authoritative for all three producers; the gate is `tests/contract.rs`,
 which drives that text's own example through `src/filter.rs`'s types and fails
 this repository's `just check` the moment its copy stops matching. `oneagentgraph`
-and `onevcs` each carry the same text and the same gate. There is deliberately no
-shared crate — the same decision the envelope beside it is under, and for the same
-reason: a shared crate would make three independently-released tools co-version.
+and `onevcs` each carry the same text and the same gate. That this grammar had no
+shared crate is superseded by entry 75: the filter and the envelope are now
+`onemessagebus-agent`'s, re-exported by all three producers.
 
 What this entry is about is narrower. Three corners of that text do not settle a question
 an implementation has to answer anyway, so each producer answers it — and two
@@ -3595,8 +3598,8 @@ nothing. A length check cannot see it, because a byte from a longer journal is a
 plausible byte of a shorter one. The run is what makes it refusable by name. The
 tail
 read behind it (`journal::finished_after`) stops at a record whose writer has not
-finished it rather than accounting for it, which is the one place it differs from
-the summary maintainer's `read_after` beside it: a tailer that advanced past a
+finished it rather than accounting for it, as the summary maintainer's tail read
+beside it (`journal::finished_records_after`) does too: a tailer that advanced past a
 half-written line would never come back for the rest of it, and on a live run
 that line is the newest thing there is to say.
 
@@ -5540,3 +5543,188 @@ journals `run-hook-withheld`, and `nodes` still lists every node not `done` in
 plan order — which for this reason is the blocked consumer. The journey
 `run_end_hooks::a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfinished`
 drives exactly that let-go against the real binary.
+## 75. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the
+dated record of a ruling, decided against `onemessagebus` 0.4.0, and not a live contract:
+it says what moved and why, which is a restatement by nature. The live shape it describes
+has its gate in `tests/contract.rs` — the re-exported types are the bus's own by type
+identity, and `the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus`
+holds `docs/contract.md`'s marked copy to the release `Cargo.lock` resolves, its matcher
+fields to the bus's own `Matcher` document, and its sources to the bus's `Source` set. -->
+**Ruling: the envelope and filter types are `onemessagebus-agent`'s, re-exported
+here at the paths this crate always published them at, with `onemessagebus`'s own
+`docs/contract.md` the one source of the text `docs/contract.md` keeps as a marked
+copy. Ruled by the planner's task that moved this crate's wire layer onto the bus
+(`onepipeline-adopt-bus-wire`), and on four questions that task's worker asked over
+the ask seam: keep `journal::merge_order` as the one merge, holding it equal to
+the bus's `Merge` wherever the two agree; decode journal lines through the bus
+`Reader` and classify what it refuses as before; keep `ArtifactId` as this crate's
+own; and take the bus's byte order and its refusal of an unknown top-level field
+as the wire's rule, proven over a committed journal written before the change.**
+
+Numbered 74 when it was written. The run-end hooks reached `main` first and took
+74, so on the merge of that change this entry became 75 and the next became 76.
+Any record from before that merge that cites entry 74 for the bus means this one.
+The three run-hook kinds that merge added are registered like every other kind:
+`agent.pipeline.run-hook-fired@2`, `agent.pipeline.run-hook-finished@2` and
+`agent.pipeline.run-hook-withheld@2`, each held to envelopes the run-end hook
+journeys wrote. `run-hook-fired` is recorded once for each hook, because its
+`reason` is `null` for success and lists the unsettled nodes for failure.
+
+What moved, and what it replaced. `event::{Envelope, Labels, Source, Phase,
+ArtifactRef}` are `onemessagebus_agent::event`'s, `event::EventKind` is
+`onemessagebus::Kind`, and `filter::{EventFilter, Matcher}` are the agent profile's
+filter and matcher. `ENVELOPE_VERSION` and `ENVELOPE_VERSIONS_READ` are the agent
+profile's write version for `pipeline` and its registry's read-set for
+`agent.event-envelope`, and the fold asks that registry's `read_at` whether a record
+is at a version this build reads — so a record at version 3 is reported exactly as
+it was. Every `PipelineKind` payload is a registered bus message,
+`agent.pipeline.<kind>@2`, in the registry this crate constructs when it starts. A
+relayed `onevcs` envelope is the bus value itself, so the arm-by-arm conversions of
+its phase, source and labels are gone. Each payload document admits a closed word only as the
+type that owns it spells it — a settlement's status and landing, a reply's author,
+a release note's delivery, a criterion's answer, a drafting dispatch's ending, and a
+shown note's addressee, delivery, party and evidence — and a debug build of the binary
+checks every record an emitter writes against its document before appending it, so an
+emit site that drifts from its document fails the journeys that drive that build. What stays this crate's: `PipelineKind`,
+`Filters`, `LaunchConfig`, `DEFAULT_PROFILE`, `MONITOR_PROFILE`, and the shipped
+profiles' contents.
+
+Where the result is not what this crate did before, each one named so nobody reads
+it as a regression:
+
+- **The merge is seq-first; the bus's is not.** `onemessagebus::Merge` stably sorts
+  every record by `(ts, stream, seq)`. `journal::merge_order` keeps each stream in
+  its own `seq` and interleaves streams by `ts`. The two agree on every store whose
+  producers stamp each stream's clock in `seq` order, and part where a stream's
+  clock steps back against its own `seq` — the one ordering promise an envelope
+  carries, and the one `src/checkpoint.rs`'s coverage marker and `src/summary.rs`'s
+  open instant are proved over. So the in-memory merge stays this crate's, and
+  `journal::tests` holds both halves: three interleaved streams merge as the bus
+  merges them, and a stream whose clock stepped back keeps its own order where the
+  bus's does not. The bus-side sort is recorded against `onemessagebus`.
+- **Journal lines are decoded by the bus `Reader`.** It reports an unterminated
+  final line as torn and refuses every other line that is not an envelope, blank
+  lines included; this crate then classes a refused line as blank (no loss), a
+  fragment with a whole record glued after it (the record is recovered), a record
+  that stops early, or a line this build cannot read. The integrity report places a
+  torn tail where the reader does.
+- **An unknown top-level key, or a `member` label that is not text, refuses the
+  line.** The bus's envelope refuses a key it does not declare and its `Labels` reads
+  `member` into a text slot, where this crate's derive ignored the one and carried the
+  other among the extras; such a line is now a line this build cannot read, and the
+  views' "a side this build cannot read" attribution has no input left to name. No
+  producer writes either: every v2 pipeline record on the operator's host validates
+  against its registered payload document; `tests/replay.rs` reads a journal the
+  release before this one wrote on that host — relayed envelopes stamped with both
+  `member` and `persona` included — and renders it exactly as that release did,
+  against a rendering taken from the tree before the change; and
+  `tests/e2e/compatibility.rs` does the same for its committed version-1 journal.
+- **A relayed envelope is written in its producer's byte order.** The bus's `Labels`
+  carries `member` in a slot of its own ahead of `persona`, as `oneagentgraph` and
+  `onevcs` write it; this crate's copy kept it among the extras, after `persona`.
+- **The matcher names `phase`.** It is the agent profile's one reserved top-level
+  dimension; a spec naming it was refused here before.
+- **A filter's refusal is the bus's sentence**, naming the list and the position as
+  `include[0]`, and `EventFilter::{parse, read, validate}` answer the bus's
+  `FilterError`; a `Filters` block still validates every filter it carries where it
+  is read.
+- **A torn session stream is read for its whole records, and the tear is not
+  reported — proposal (for `onevcs`).** `onevcs` 0.24.0 reads its stream through
+  the bus reader, so the whole records before a torn final line are handed back
+  rather than the batch being refused (half of entry 17's proposal), and the torn
+  line is held back until its newline lands. Its library seam hands back the
+  records and nothing about the line it held back. So a session whose last record
+  is torn now answers `SessionTip::Unmoved` where it answered `Unknown`: the
+  property lost is that a reader deciding on the **absence** of a record cannot
+  tell *nothing was written* from *a record was torn* at that seam. This crate
+  takes the narrowing as forced — it reads the stream through that seam and writes
+  no second reader of the file beside it — and it is confined to the tip read:
+  `src/lifecycle.rs`'s republication comparison is unchanged.
+  `a_session_tip_tells_a_branch_that_did_not_move_from_one_nothing_could_read` and
+  `a_session_stream_that_is_not_whole_is_read_for_what_it_holds` in `src/vcs.rs`
+  hold the new answer. What would restore it: `EventStream` exposing the reader's
+  own `Torn` report — whether the read stopped before an unterminated final line,
+  and where it begins — beside the records it hands back, so `session_tip` answers
+  `Unknown` for a stream holding a torn tail and `Unmoved` only for one that holds
+  none.
+- **Three shapes of the public surface moved with the types.** An envelope carries
+  its phase as `dimensions.phase`; `ArtifactRef.id` is a `String`, while `ArtifactId`
+  stays this crate's own newtype, as it stays `onevcs`'s; and
+  `Envelope::written_at_a_known_version` is no longer a public method, because an
+  inherent method cannot be declared on another crate's type.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+```json
+{
+  "wire_types_from": "onemessagebus-agent",
+  "bus_release": "0.4.0",
+  "payload_schema": "agent.pipeline.<kind>@2",
+  "merge": "journal::merge_order",
+  "line_reader": "onemessagebus::Reader"
+}
+```
+
+## 76. The bus reader decodes a line twice, and a summary rebuild pays that for the whole store several times a dispatch — OPEN
+
+**Proposal (for `onemessagebus`): decode an envelope line in one typed pass.
+Proposal (for this crate): stop the summary maintainer reading the whole store
+again for a relayed record stamped behind the newest instant. Recorded on the
+manager's ruling over the ask seam during `onepipeline-adopt-bus-wire`. That ruling
+kept the wire adoption as it is and sized one journey's backstop wait rather than
+change either algorithm in that task.**
+
+Numbered 75 when it was written, and renumbered 76 when the run-end hooks took
+entry 74 (see entry 75).
+
+What happens today. `onemessagebus` 0.4.0 reads an envelope in two passes. It first
+parses the line into a `serde_json::Map`. It then runs `serde_json::from_value`
+again for each key it takes, and once more for the dimensions left over (`impl
+Deserialize for Envelope<V>` in its `envelope.rs`). It reads that way so it can
+refuse an unknown top-level key by name.
+
+Measured in a debug build over one 1,900-record journal:
+
+- one `Reader` read takes 70 ms;
+- the decoder this crate had before the adoption took 28.6 ms over the same records;
+- parsing each line into a bare `Value` alone takes 38 ms.
+
+`journal::read` adds nothing measurable around the reader. `Reader` and `Envelope`
+are type aliases over the bus's generics, so the decode is compiled into this crate
+at its own optimisation level, and a profile override on the bus crates does not
+reach it.
+
+`summary::Maintainer` multiplies that cost. It rebuilds from a whole read of the
+store when a record lands stamped behind the newest instant any stream has reached,
+or behind a `seq` its own stream has already settled. Its documentation calls both
+rare. Relaying `oneagentgraph` makes them routine. In
+`loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on`, five records of
+every dispatch arrive behind: `turn-activity`, `turn-message`, `oneharness-session`,
+`turn-completed` and `member-settled`. So the 100-node run rebuilds 503 times. The
+tree before the adoption rebuilt exactly 503 times too; what grew is the read each
+rebuild makes.
+
+What it cost. Timings for that journey:
+
+| tree | macOS | Windows | this host |
+| --- | --- | --- | --- |
+| before the adoption | 99–110 s | 146–160 s | 104 s |
+| the adoption | 125–139 s | timed out at 120 s, 77 of 99 queued dispatches done | 136 s |
+
+A second cause was this crate's own and is fixed. The fold asked `Registry::read_at`
+of every record, and that call rebuilds and sorts the read set each time. The read
+set is now taken once per process, which brings this host to 116 s. What is left is
+the decode above. The journey's wait for its queued node is now sized to the hundred
+dispatches it waits for (`QUEUED_DISPATCHES` in `tests/e2e/loopcost.rs`), and every
+bound the journey asserts is unchanged.
+
+What would close it:
+
+- **For `onemessagebus`:** an `Envelope` decode that reads its declared keys straight
+  from the line, and passes only the keys it does not declare on to the dimensions
+  and to the unknown-key refusal. The refusal stays; the second pass goes.
+- **For this crate:** a `summary::Maintainer` that places a record stamped behind the
+  newest instant without reading the store again, so a relayed burst costs its own
+  records rather than the whole run. That is ordering-sensitive work over the merge
+  `journal::merge_order` states, and it is for a node of its own.

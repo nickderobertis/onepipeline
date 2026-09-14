@@ -2227,13 +2227,10 @@ fn chain_phrase(record: &ChainRecord) -> String {
         // nobody named — which is the failure this line exists to end.
         //
         // llmlint: ignore-block[changed_behavior_has_e2e] `oneagentgraph` labels a
-        // member's envelopes with the member, so no producer reaches either arm; they are
-        // written for one that stamps neither, or stamps something that is not a member
-        // name. The arm a producer does reach is driven in `tests/e2e/views.rs`.
+        // member's envelopes with the member, so no producer reaches this arm; it is
+        // written for one that stamps neither. The arm a producer does reach is driven in
+        // `tests/e2e/views.rs`.
         (None, MemberLabel::Unstamped) => "a side the record does not name".to_string(),
-        // Stamped, and not readable as a member. Saying the record names no
-        // side would be denying a record that does name one.
-        (None, MemberLabel::Unreadable) => "a side this build cannot read".to_string(),
         // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     // llmlint: ignore-block[changed_behavior_has_e2e] `FallbackAdvanced::reason` is a
@@ -3624,7 +3621,7 @@ mod tests {
             seq: 0,
             source,
             kind,
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 run_id: Some("demo".into()),
                 round: Some(1),
@@ -4300,7 +4297,7 @@ mod tests {
             &fields,
         );
         envelope.stream = "oneagentgraph-1".into();
-        envelope.labels.extra.insert("member".into(), member.into());
+        envelope.labels.member = Some(member.into());
         envelope
     }
 
@@ -4326,6 +4323,7 @@ mod tests {
             history_dir: "/store".into(),
             history_project: "project".into(),
             history_session: "record-1".into(),
+            truncated: false,
         };
         let mut envelope = relayed(
             EventKind("oneharness-session".into()),
@@ -4338,7 +4336,7 @@ mod tests {
             Ok(serde_json::Value::Object(payload)) => payload,
             other => panic!("a session is not an object: {other:?}"),
         };
-        envelope.labels.extra.insert("member".into(), member.into());
+        envelope.labels.member = Some(member.into());
         envelope
     }
 
@@ -4515,6 +4513,7 @@ mod tests {
             reason: reason.into(),
             role: None,
             turn: None,
+            truncated: false,
         };
         let single = Refusal {
             advanced: advance("auth"),
@@ -4551,22 +4550,6 @@ mod tests {
             phrase.contains("for a reason the record does not carry"),
             "{phrase}"
         );
-        let unreadable = Refusal {
-            advanced: advance("auth"),
-            member: MemberLabel::Unreadable,
-            records: std::num::NonZeroU64::MIN,
-        };
-        let phrase = chain_phrase(&ChainRecord {
-            refusal: &unreadable,
-            became: Fallthrough::Served("codex:alternate".into()),
-            records: std::num::NonZeroU64::new(2).expect("two records"),
-        });
-        assert_eq!(
-            phrase,
-            "a side this build cannot read fell through 'codex' (auth) → served by \
-             'codex:alternate', recorded 2 times"
-        );
-
         // An advance carrying no identity names nothing to act on. It is not an
         // advance the producing library's own type accepts, so nothing here
         // assembles an attribution out of what is left of it.
@@ -4867,6 +4850,7 @@ mod tests {
                 reason: "quota".into(),
                 role: Some(oneagentgraph::event::Role::Agent),
                 turn: Some(1),
+                truncated: false,
             },
             member: MemberLabel::Named("worker".into()),
             records: std::num::NonZeroU64::MIN,

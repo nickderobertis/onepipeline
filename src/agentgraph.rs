@@ -2306,6 +2306,7 @@ fn published(
         delivered: reason.is_none(),
         input_bytes,
         reason,
+        truncated: false,
     };
     emitter.emit(
         oneagentgraph::event::EventKind::TurnInterrupted,
@@ -3415,7 +3416,8 @@ mod tests {
             stream: "node-scope-1786304152340-19".into(),
             seq: 7,
             source: oneagentgraph::event::Source::Agentgraph,
-            kind: oneagentgraph::event::EventKind::TurnActivity,
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
             labels,
             payload: serde_json::Map::new(),
             artifacts: Vec::new(),
@@ -3439,6 +3441,76 @@ mod tests {
         // Not a vacuous comparison: the enrichment both paths apply really ran.
         assert_eq!(in_process.labels.node.as_deref(), Some("build"));
         assert_eq!(in_process.labels.step.as_deref(), Some("implement"));
+    }
+
+    /// A relayed envelope is written into the run's journal as the bytes its
+    /// producer serialised, whichever path relayed it.
+    ///
+    /// The bus's `Labels` holds `member` in a slot of its own ahead of `persona`
+    /// and every key nobody reserves, which is where `oneagentgraph` writes it;
+    /// this crate's copy before the bus kept `member` among the extras, after
+    /// `persona`. Entry 75 of `docs/contract-divergences.md` records the move as
+    /// the bus's wire rule, and this holds it at the one place a relayed record
+    /// reaches the store: the line the journal appends is compared with the
+    /// producer's line byte for byte, not decoded and compared as a value.
+    #[test]
+    fn a_relayed_envelope_is_journalled_in_its_producers_own_byte_order() {
+        let mut labels = oneagentgraph::event::Labels {
+            run_id: Some("node-scope-1786304152340-20".into()),
+            member: Some("worker".into()),
+            persona: Some("engineer".into()),
+            ..oneagentgraph::event::Labels::default()
+        };
+        labels.extra.insert("attempt".into(), "1".into());
+        let mut payload = serde_json::Map::new();
+        payload.insert("text".into(), "reading the task".into());
+        payload.insert("exit".into(), 0.into());
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-08-13T09:15:00.123Z".into(),
+            stream: "node-scope-1786304152340-20".into(),
+            seq: 8,
+            source: oneagentgraph::event::Source::Agentgraph,
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
+            labels,
+            payload,
+            artifacts: Vec::new(),
+        };
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        assert!(
+            line.contains(r#""labels":{"run_id":"node-scope-1786304152340-20","member":"worker","persona":"engineer","attempt":"1"}"#),
+            "the producer no longer writes `member` before `persona`, so this compares \
+             nothing about that order: {line}"
+        );
+
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-relayed-bytes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "relayed-bytes");
+        paths.create().expect("a scratch run root");
+        let mut journal = crate::journal::Journal::open(&paths);
+        journal
+            .relay(&off_the_wire)
+            .expect("the journal appends the envelope relayed as a line");
+        journal
+            .relay(&in_process)
+            .expect("the journal appends the envelope relayed as a value");
+
+        let written = std::fs::read_to_string(paths.journal()).expect("the journal reads");
+        assert_eq!(
+            written,
+            format!("{line}\n{line}\n"),
+            "a relayed envelope reached the journal in bytes its producer did not write"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `oneagentgraph` publishes its terminal event before its final process
@@ -3672,6 +3744,7 @@ mod tests {
             round: Some(2),
             node: Some("build".into()),
             step: Some("implement".into()),
+            member: None,
             persona: Some("engineer".into()),
             extra: serde_json::Map::new(),
         };
@@ -3752,7 +3825,7 @@ mod tests {
             run_id: Some("elsewhere".into()),
             ..Labels::default()
         };
-        labels.extra.insert("member".into(), "worker".into());
+        labels.member = Some("worker".into());
         let untouched = labels.clone();
         adopt_labels(&mut labels);
         assert_eq!(labels, untouched);

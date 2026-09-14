@@ -344,7 +344,7 @@ fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
     }
     let named = args.filter.as_deref().unwrap_or(filter::DEFAULT_PROFILE);
     if named.trim_start().starts_with('{') {
-        return EventFilter::read(named);
+        return Ok(EventFilter::read(named)?);
     }
     match view.launch.filters.profile(named) {
         Ok(filter) => Ok(filter),
@@ -353,7 +353,7 @@ fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
         // hides it — a name that is neither a profile nor a readable file is
         // answered with the profile refusal, which names the ones this run has.
         Err(unknown) => match Path::new(named).is_file() {
-            true => EventFilter::read(named),
+            true => Ok(EventFilter::read(named)?),
             false => Err(unknown),
         },
     }

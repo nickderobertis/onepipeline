@@ -2,31 +2,25 @@
 //!
 //! `onepipeline` merges the three libraries' streams into one, so it both
 //! *relays* envelopes produced by `oneagentgraph` and `onevcs` and *emits* its
-//! own. The shape is the stack's one NDJSON envelope, duplicated here on purpose
-//! — there is deliberately no shared util crate, so each producer owns its copy
-//! and the contract fixtures hold them together.
+//! own. The envelope, its labels, sources and phases, the artifact reference and
+//! the kind are `onemessagebus-agent`'s, over the `onemessagebus` core, and are
+//! re-exported here at the paths this crate has always published them at — the
+//! same types both siblings re-export, so a relayed envelope is one value on
+//! every side of a relay. `onemessagebus`'s `docs/contract.md` is the one source
+//! of that shape; `docs/contract.md` here keeps a marked copy of the text, and
+//! `tests/contract.rs` drives it through these re-exports.
 //!
-//! Nothing here emits, orders, merges, truncates, or redacts anything: this is
-//! the wire shape and its documented bounds, not the machinery that honours
-//! them.
+//! What stays this crate's is its vocabulary: the closed set of kinds it emits
+//! ([`PipelineKind`]), and the payload each carries, every one a registered bus
+//! message in the registry this crate constructs.
 
-// llmlint: ignore-file[invalid_states_unrepresentable, boundary_inputs_validated] two
-// things here are deliberately not narrowed at the interface-only stage (see AGENTS.md).
-// `EventKind` is the wire string because this crate relays another library's kinds as
-// well as its own and `docs/contract.md` enumerates neither set — an enum here would
-// invent the interface rather than compile it, and would reject a kind a sibling already
-// emits. And the envelope's semantic checks — that `ts` is millisecond-precision UTC
-// RFC 3339, that a text field was truncated at `MAX_PAYLOAD_TEXT_BYTES` — belong to the
-// reader seam that parses a stream, which is exactly what this stage does not implement.
-// The structural boundary *is* enforced: an unknown `source`, a `seq` that is not a
-// `u64`, or a missing field is rejected by serde and asserted in `tests/contract.rs`.
-// `v` is deliberately **not** refused here either: a runs root holds journals from every
-// build that ever wrote into it, so a version this build does not read is a record to
-// report rather than a line to reject — `Envelope::written_at_a_known_version` is the
-// question, and `src/projection.rs`'s fold is what answers it.
+use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use onemessagebus::{Read, Registry};
+use onemessagebus_agent::registry::{EVENT_ENVELOPE_FAMILY, EVENT_ENVELOPE_READS};
+
+pub use onemessagebus::{Kind as EventKind, MAX_PAYLOAD_TEXT_BYTES};
+pub use onemessagebus_agent::event::{ArtifactRef, Envelope, Labels, Phase, Source};
 
 /// The envelope version this crate stamps on everything it writes.
 ///
@@ -34,179 +28,66 @@ use serde_json::{Map, Value};
 /// be an accepted command that changed nothing; at `2` it means something changed,
 /// an accepted command that did not is [`PipelineKind::CommandAccepted`], and both
 /// kinds carry `operation_kinds` so a reader keys on what happened without
-/// deserializing the command. A runs root outlives the build that wrote into it,
-/// which is why the number is the question a reader of one has. Entry 65 of
-/// `docs/contract-divergences.md` proposes the move.
+/// deserializing the command. Entry 65 of `docs/contract-divergences.md` proposes
+/// the move.
 ///
-/// A **relayed** envelope keeps its producer's own number, exactly as it keeps
-/// that producer's `stream`, `seq`, `source` and kind: the version says which
-/// build wrote the envelope, and a sibling's is that library's to declare. So one
-/// run's journal carries both, and that is not a disagreement.
-pub const ENVELOPE_VERSION: u32 = 2;
+/// The number is the agent profile's for the `pipeline` source, and the newest
+/// version its registry reads of `agent.event-envelope`: a test beside this holds
+/// all three to one another. A **relayed** envelope keeps its producer's own
+/// number, exactly as it keeps that producer's `stream`, `seq`, `source` and kind.
+pub const ENVELOPE_VERSION: u32 = EVENT_ENVELOPE_READS[0];
 
 /// Every envelope version this build reads, newest first.
 ///
-/// The number an envelope declares is the schema its author wrote it against;
-/// what a reader asks is whether this build knows that schema. A runs root holds
-/// journals from every build that ever wrote into it, so reading the older one is
-/// not a courtesy — it is the ordinary case, and
-/// [`Envelope::written_at_a_known_version`] is where it is asked.
-///
-/// Version `1` is read whole: nothing was removed from the envelope or from a
-/// record's payload, so a `1` folds exactly as it always did. What `2` adds is
-/// what a v1 record cannot promise, which is why the number is worth carrying at
-/// all.
-pub const ENVELOPE_VERSIONS_READ: &[u32] = &[ENVELOPE_VERSION, 1];
+/// The agent profile's read-set for `agent.event-envelope`, which is what its
+/// registry registers and what the fold asks that registry of a record. Version
+/// `1` is read whole: nothing was removed from the envelope or from a record's
+/// payload, so a `1` folds exactly as it always did.
+pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
 
-/// The byte bound on a payload text field, past which it is truncated and the
-/// payload carries `truncated: true`.
-pub const MAX_PAYLOAD_TEXT_BYTES: usize = 4096;
-
-/// One NDJSON event.
+/// Whether this build knows the envelope schema a record was written at.
 ///
-/// A stream is merged in its own [`seq`](Self::seq) — the producer's statement
-/// of the order it wrote things in, and the only ordering promise an envelope
-/// carries — and the streams interleave with each other by [`ts`](Self::ts). A
-/// consumer detects loss through per-stream `seq` gaps; there are no
-/// cross-stream ordering promises beyond the timestamps.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Envelope {
-    /// Envelope version: [`ENVELOPE_VERSION`] for anything this crate writes, and
-    /// the producer's own for anything it relayed.
-    pub v: u32,
-    /// RFC 3339 timestamp, millisecond precision, UTC.
-    pub ts: String,
-    /// Unique id of the producing process.
-    pub stream: String,
-    /// Monotonic per [`stream`](Self::stream).
-    pub seq: u64,
-    /// Which of the three libraries produced the event.
-    pub source: Source,
-    /// What happened, as the producing library named it.
-    pub kind: EventKind,
-    /// Which part of a change's life the event belongs to, as its producer
-    /// classified it.
-    ///
-    /// Stamped by the producer and never derived here: one kind's phase is not a
-    /// fact about the kind — `onevcs` classifies a push of the session's own
-    /// branch and a push of the base it landed on differently, and only the
-    /// thing that made the push knows which it was — so this is relayed exactly
-    /// as it arrived.
-    ///
-    /// `None` for a producer that stamps none, which is every `oneagentgraph`
-    /// envelope, everything this crate emits, and every `onevcs` record written
-    /// before that library stamped one. Omitted from the wire when absent, so a
-    /// store written before this field round-trips as its writer wrote it. See
-    /// `docs/contract-divergences.md` entry 40.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<Phase>,
-    /// Where in the run the producer stamped the event.
-    #[serde(default)]
-    pub labels: Labels,
-    /// Kind-specific detail. Text fields are bounded by
-    /// [`MAX_PAYLOAD_TEXT_BYTES`]; large evidence is an [`ArtifactRef`] instead.
-    #[serde(default)]
-    pub payload: Map<String, Value>,
-    /// Evidence stored by the producing library and referenced by id.
-    #[serde(default)]
-    pub artifacts: Vec<ArtifactRef>,
+/// Asked of **this library's own** records and never of a relayed one: a
+/// sibling's version is that library's own vocabulary, and judging it by this
+/// crate's table would refuse a producer for moving at its own pace.
+///
+/// Answered by the registry's [`Registry::read_at`] for `agent.event-envelope`:
+/// a version it reads at is one in the read set the registry declares, and that
+/// set is taken from the registry once per process rather than rebuilt for every
+/// record folded — the registry derives it by walking every document it holds,
+/// and a fold asks this of each record of a run. A
+/// reader that meets `false` has met a record a *newer* build wrote, whose kinds
+/// or payload may mean something this build would read wrongly. What the fold
+/// does with that is report rather than guess — it marks the run as one it could
+/// not read whole, and a driver says so before it converges.
+#[must_use]
+pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
+    static READ_AT: OnceLock<Vec<u32>> = OnceLock::new();
+    READ_AT
+        .get_or_init(|| {
+            registry()
+                .read_set(EVENT_ENVELOPE_FAMILY)
+                .into_iter()
+                .filter(|version| {
+                    matches!(
+                        registry().read_at(EVENT_ENVELOPE_FAMILY, *version),
+                        Read::At(_)
+                    )
+                })
+                .collect()
+        })
+        .contains(&envelope.v)
 }
 
-impl Envelope {
-    /// Whether this build knows the envelope schema this record was written at.
-    ///
-    /// Asked of **this library's own** records and never of a relayed one: a
-    /// sibling's version is that library's own vocabulary, and judging it by this
-    /// crate's table would refuse a producer for moving at its own pace.
-    ///
-    /// A reader that meets `false` has met a record a *newer* build wrote, whose
-    /// kinds or payload may mean something this build would read wrongly. What
-    /// the fold does with that is report rather than guess — it marks the run as
-    /// one it could not read whole, and a driver says so before it converges —
-    /// because a record mis-folded silently is worse than a run said to be
-    /// incompletely understood.
-    #[must_use]
-    pub fn written_at_a_known_version(&self) -> bool {
-        ENVELOPE_VERSIONS_READ.contains(&self.v)
-    }
-}
-
-/// Which part of a change's life an event belongs to.
+/// The registry this crate constructs: the agent profile's, with every payload
+/// this crate emits registered beside the envelope that carries it.
 ///
-/// `onevcs`'s own four, relayed as that library stamps them: the work is made
-/// ([`Development`](Self::Development)), it is brought together with the base it
-/// is going onto ([`Integrate`](Self::Integrate)), it is proposed and ruled on
-/// ([`Review`](Self::Review)), and what carries it is released
-/// ([`Release`](Self::Release)).
-///
-/// A closed set here where [`EventKind`] is a wire string, and the difference is
-/// which side owns the vocabulary: a kind is one of three libraries' and this
-/// crate relays all three, while a phase is `onevcs`'s alone and `src/vcs.rs`
-/// converts it arm by arm — so a phase that library adds fails to compile here
-/// rather than arriving as a string nothing folds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Phase {
-    /// The work is being made.
-    Development,
-    /// The work is being brought together with the base.
-    Integrate,
-    /// The change request is open and being ruled on.
-    Review,
-    /// What carries the landed change is being released.
-    Release,
-}
-
-/// The library that produced an event — one per merged stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Source {
-    /// `oneagentgraph`.
-    Agentgraph,
-    /// `onevcs`.
-    Vcs,
-    /// This crate.
-    Pipeline,
-}
-
-/// What an [`Envelope`] reports, as its producer named it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct EventKind(pub String);
-
-/// Where in the run an event happened.
-///
-/// The reserved keys are the ones `docs/contract.md` names on a
-/// [`DispatchRequest`](crate::executor::DispatchRequest); anything else a
-/// producer stamps rides in [`extra`](Self::extra). Enrichers never rewrite what
-/// is already there.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Labels {
-    /// The run this event belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    /// The round within the run. **Deprecated and never stamped:** execution is
-    /// continuous, so there is no round to name.
-    ///
-    /// The field survives because this envelope is duplicated across the three
-    /// libraries and the siblings still declare it — dropping it here would make
-    /// one copy of a shared wire shape reject what another one writes. It is
-    /// read and re-serialized as it arrives and is `None` on everything this
-    /// crate produces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub round: Option<u64>,
-    /// The graph node being executed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-    /// The step within a node that runs several in sequence on one branch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step: Option<String>,
-    /// The persona the dispatch is running under.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
-    /// Free-form extras beyond the reserved keys above.
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+/// Built once per process, on first use; `main` asks for it before anything
+/// else so a build whose own payload documents do not register fails at start
+/// rather than on the first record it folds.
+pub(crate) fn registry() -> &'static Registry {
+    static REGISTRY: OnceLock<Registry> = OnceLock::new();
+    REGISTRY.get_or_init(crate::payload::registry)
 }
 
 /// Every event kind this library emits, and exactly those.
@@ -443,19 +324,14 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunHookWithheld,
 ];
 
-/// A reference to evidence stored beside the stream rather than inside it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactRef {
-    /// The id the producing library's CLI fetches this artifact by.
-    pub id: ArtifactId,
-    /// What the artifact is, e.g. `log`.
-    pub kind: String,
-    /// Its size in bytes.
-    pub bytes: u64,
-}
-
 /// The id of a stored artifact.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// This crate's own rather than the bus's, as it is `onevcs`'s: `onemessagebus`
+/// 0.4.0 carries an artifact's id as a plain string on [`ArtifactRef`], and a
+/// publication's failure evidence names a typed one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct ArtifactId(pub String);
 
@@ -471,7 +347,7 @@ mod tests {
     const GOLDEN_BEFORE: &str = include_str!("../tests/golden/envelope-v1.json");
 
     /// The shape this build stamps its own records with, held to a committed
-    /// document.
+    /// document — through the re-exported types, byte for byte.
     ///
     /// A runs root outlives the build that wrote into it and is read by things
     /// outside this repository, so the envelope is a published document rather
@@ -489,14 +365,14 @@ mod tests {
              read-compatibility reference"
         );
 
-        let envelope: Envelope = serde_json::from_value(golden.clone()).expect("it parses");
+        let envelope: Envelope = serde_json::from_str(GOLDEN).expect("it parses");
         assert_eq!(envelope.v, ENVELOPE_VERSION);
         assert_eq!(envelope.source, Source::Pipeline);
         assert_eq!(envelope.kind, EventKind("edit-committed".into()));
-        assert!(envelope.written_at_a_known_version());
+        assert!(written_at_a_known_version(&envelope));
         assert_eq!(
-            serde_json::to_value(&envelope).expect("it serializes"),
-            golden,
+            serde_json::to_string_pretty(&envelope).expect("it serializes"),
+            GOLDEN.trim_end(),
             "the envelope changed shape. Bump ENVELOPE_VERSION, add the golden for the new \
              one, and keep this file as what the older version looked like"
         );
@@ -519,12 +395,12 @@ mod tests {
             "this build no longer reads the version its committed fixture is written at"
         );
 
-        let envelope: Envelope = serde_json::from_value(before.clone()).expect("it parses");
-        assert!(envelope.written_at_a_known_version());
+        let envelope: Envelope = serde_json::from_str(GOLDEN_BEFORE).expect("it parses");
+        assert!(written_at_a_known_version(&envelope));
         assert_eq!(envelope.v, 1, "a version this build read was rewritten");
         assert_eq!(
-            serde_json::to_value(&envelope).expect("it serializes"),
-            before
+            serde_json::to_string_pretty(&envelope).expect("it serializes"),
+            GOLDEN_BEFORE.trim_end()
         );
 
         // And a version nothing has published is not read, which is what makes
@@ -541,7 +417,41 @@ mod tests {
             "artifacts": []
         }))
         .expect("a newer build's record still parses structurally");
-        assert!(!ahead.written_at_a_known_version());
+        assert!(!written_at_a_known_version(&ahead));
+    }
+
+    /// The version this build writes and the versions it reads are the agent
+    /// profile's registry's answer, not a second table kept here.
+    ///
+    /// Three statements of one number — the constant a writer stamps, the
+    /// profile's write version for the `pipeline` source, and the newest version
+    /// the registry this crate constructs reads — so a bus release that moved one
+    /// without the others fails here rather than in a store.
+    #[test]
+    fn the_registry_answers_the_envelope_versions_this_build_writes_and_reads() {
+        let registry = registry();
+        assert_eq!(
+            registry.read_set(EVENT_ENVELOPE_FAMILY),
+            ENVELOPE_VERSIONS_READ.to_vec()
+        );
+        assert_eq!(
+            registry.writes(EVENT_ENVELOPE_FAMILY),
+            Some(ENVELOPE_VERSION)
+        );
+        assert_eq!(Source::Pipeline.write_version(), ENVELOPE_VERSION);
+        for version in ENVELOPE_VERSIONS_READ {
+            assert_eq!(
+                registry.read_at(EVENT_ENVELOPE_FAMILY, *version),
+                Read::At(ENVELOPE_VERSION)
+            );
+        }
+        match registry.read_at(EVENT_ENVELOPE_FAMILY, ENVELOPE_VERSION + 1) {
+            Read::Unknown(unknown) => {
+                assert_eq!(unknown.declared, ENVELOPE_VERSION + 1);
+                assert_eq!(unknown.read_set, ENVELOPE_VERSIONS_READ.to_vec());
+            }
+            Read::At(at) => panic!("a version nothing published was read at {at}"),
+        }
     }
 
     /// The optional fields are optional in both directions: absent stays absent
@@ -565,13 +475,13 @@ mod tests {
             "artifacts": []
         });
         let envelope: Envelope = serde_json::from_value(bare.clone()).expect("it parses");
-        assert_eq!(envelope.phase, None);
+        assert_eq!(envelope.dimensions.phase, None);
         assert_eq!(serde_json::to_value(&envelope).expect("serializes"), bare);
 
         let mut with = bare.clone();
         with["phase"] = json!("release");
         let envelope: Envelope = serde_json::from_value(with.clone()).expect("it parses");
-        assert_eq!(envelope.phase, Some(Phase::Release));
+        assert_eq!(envelope.dimensions.phase, Some(Phase::Release));
         assert_eq!(serde_json::to_value(&envelope).expect("serializes"), with);
 
         // The three defaulted containers are the same promise: a record that

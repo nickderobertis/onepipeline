@@ -2121,7 +2121,7 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
     }
     TurnAddress::of(
         envelope.labels.run_id.as_deref()?,
-        envelope.labels.extra.get("member")?.as_str()?,
+        envelope.labels.member.as_deref()?,
     )
 }
 
@@ -2483,6 +2483,18 @@ fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Er
         delivered.push(commits_of(step).map(Delivery::Committed));
     }
     delivered
+}
+
+/// The word a `release-adopted` record names a release note's delivery with.
+///
+/// Spelled once, for the emitter and for the payload document that admits it:
+/// a note delivered into the running turn is `live`, and one deferred to the
+/// node's next dispatch is `next`.
+pub(crate) fn adoption_delivery(delivery: edits::Delivery) -> &'static str {
+    match delivery {
+        edits::Delivery::Live => "live",
+        edits::Delivery::Deferred => "next",
+    }
 }
 
 /// What the delivery phase did with one validated command.
@@ -3179,13 +3191,7 @@ fn adopt_releases(
             journal::labels(&paths.run, Some(&node)),
             journal::payload(&[
                 ("node", json!(node)),
-                (
-                    "delivery",
-                    json!(match delivery {
-                        edits::Delivery::Live => "live",
-                        edits::Delivery::Deferred => "next",
-                    }),
-                ),
+                ("delivery", json!(adoption_delivery(delivery))),
                 (
                     "versions",
                     json!(released
@@ -4514,15 +4520,14 @@ impl TurnRecords {
 /// record contradict a real member's death — `projection::member_label` keeps the
 /// same three apart, for the same reason on the rendering side.
 fn member_of(envelope: &Envelope) -> Option<&str> {
-    match envelope.labels.extra.get("member") {
+    match envelope.labels.member.as_deref() {
         None => Some(UNSTAMPED_MEMBER),
         // The same token check every other relayed string in this module crosses,
         // for the same reason: this is another process's JSON, and a member name
         // is a graph identifier — `worker`, `check-in` — so a paragraph or a
         // control character is not one, whatever it is. Bounded here because the
         // value becomes a map key held for the life of the dispatch.
-        Some(Value::String(member)) => is_a_classification(member).then_some(member.as_str()),
-        Some(_) => None,
+        Some(member) => is_a_classification(member).then_some(member),
     }
 }
 
@@ -4862,6 +4867,7 @@ pub(crate) fn dispatch_labels(
         round: None,
         node: Some(node.to_string()),
         step: step.map(str::to_string),
+        member: None,
         persona: persona.map(str::to_string),
         extra: serde_json::Map::new(),
     }
@@ -6185,7 +6191,7 @@ mod tests {
             seq: 0,
             source,
             kind: crate::event::EventKind(kind.into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: match cause {
                 Some(cause) => serde_json::json!({"rule": "provider-failure", "cause": cause})
@@ -6262,8 +6268,10 @@ mod tests {
         use crate::event::Source;
         use oneagentgraph::event::Role;
         let relayed = |kind: oneagentgraph::event::EventKind, member: &str, payload: Value| {
-            let mut labels = Labels::default();
-            labels.extra.insert("member".into(), json!(member));
+            let labels = Labels {
+                member: Some(member.into()),
+                ..Labels::default()
+            };
             Envelope {
                 v: crate::event::ENVELOPE_VERSION,
                 ts: "2026-09-10T00:00:00.000Z".into(),
@@ -6271,7 +6279,7 @@ mod tests {
                 seq: 0,
                 source: Source::Agentgraph,
                 kind: crate::event::EventKind(kind.as_str().into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels,
                 payload: payload.as_object().cloned().expect("an object"),
                 artifacts: Vec::new(),
@@ -6290,6 +6298,7 @@ mod tests {
                     history_dir: "/h".into(),
                     history_project: "p".into(),
                     history_session: "s".into(),
+                    truncated: false,
                 })
                 .expect("it serialises"),
             )
@@ -6304,6 +6313,7 @@ mod tests {
                         reason: reason.into(),
                         role: side.map(|(role, _)| role),
                         turn: side.map(|(_, turn)| turn),
+                        truncated: false,
                     })
                     .expect("it serialises"),
                 )
@@ -6520,7 +6530,7 @@ mod tests {
             kind: crate::event::EventKind(
                 oneagentgraph::event::EventKind::MemberDied.as_str().into(),
             ),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: written.as_object().cloned().expect("an object"),
             artifacts: Vec::new(),
@@ -6559,7 +6569,7 @@ mod tests {
                 seq: 0,
                 source: crate::event::Source::Agentgraph,
                 kind: crate::event::EventKind(kind.into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels: Labels::default(),
                 payload: payload
                     .as_object()
@@ -6568,7 +6578,7 @@ mod tests {
                 artifacts: Vec::new(),
             };
             if let Some(member) = member {
-                envelope.labels.extra.insert("member".into(), json!(member));
+                envelope.labels.member = Some(member.into());
             }
             envelope
         };
@@ -6624,21 +6634,20 @@ mod tests {
 
         // A label present and unreadable is refused rather than folded onto the
         // unstamped key: a stranger's record would otherwise contradict a real
-        // member's death. Every way of not being a member name, including the two
-        // that are strings.
+        // member's death. Every way a label can be text and not a member name; one
+        // that is not text at all refuses its line where the bus reader reads it.
         for label in [
-            json!(7),
-            json!(""),
-            json!("a name with spaces in it"),
-            json!("worker\n"),
-            json!("m".repeat(CLASSIFICATION_LIMIT + 1)),
+            String::new(),
+            "a name with spaces in it".to_string(),
+            "worker\n".to_string(),
+            "m".repeat(CLASSIFICATION_LIMIT + 1),
         ] {
             let mut unreadable = TurnRecords::default();
             let mut opened = of(started, None, json!({"turn": 1}));
-            opened.labels.extra.insert("member".into(), label.clone());
+            opened.labels.member = Some(label.clone());
             unreadable.read(&opened);
             let mut closed = of(completed, None, billed.clone());
-            closed.labels.extra.insert("member".into(), label);
+            closed.labels.member = Some(label);
             unreadable.read(&closed);
             assert!(!unreadable.contradicts_a_death_of(UNSTAMPED_MEMBER));
             assert!(!unreadable.contradicts_a_death_of("worker"));
@@ -6980,7 +6989,7 @@ mod tests {
                 ..Labels::default()
             };
             if let Some(member) = member {
-                labels.extra.insert("member".into(), member.into());
+                labels.member = Some(member.into());
             }
             Envelope {
                 v: crate::event::ENVELOPE_VERSION,
@@ -6989,7 +6998,7 @@ mod tests {
                 seq: 0,
                 source,
                 kind: crate::event::EventKind("turn-started".into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels,
                 payload: serde_json::Map::new(),
                 artifacts: Vec::new(),

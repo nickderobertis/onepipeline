@@ -382,6 +382,7 @@ fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_read
             kind: "llmlint".into(),
             decision: "continue".into(),
             reason: "two findings under comments_earn_their_place".into(),
+            truncated: false,
         },
         "{decided:?}"
     );
@@ -393,6 +394,7 @@ fn a_panels_decisions_are_relayed_whole_and_the_report_recording_them_still_read
             kind: "oneharness".into(),
             decision: "done".into(),
             reason: "every criterion is met, and the tree is clean".into(),
+            truncated: false,
         },
         "{decided:?}"
     );

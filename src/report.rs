@@ -322,12 +322,7 @@ pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
                 .filter(|path| !path.is_empty())?;
             Some(Evidence {
                 node: event.labels.node.clone(),
-                member: event
-                    .labels
-                    .extra
-                    .get("member")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                member: event.labels.member.clone(),
                 named: PathBuf::from(named),
                 kept: paths.report_for(&event.stream, event.seq),
             })
@@ -840,7 +835,7 @@ mod tests {
             node: node.map(str::to_string),
             ..Labels::default()
         };
-        labels.extra.insert("member".into(), "worker".into());
+        labels.member = Some("worker".into());
         Envelope {
             v: ENVELOPE_VERSION,
             ts: "2026-08-08T00:00:00.000Z".into(),
@@ -848,7 +843,7 @@ mod tests {
             seq: 4,
             source: Source::Agentgraph,
             kind: EventKind(MEMBER_SETTLED.into()),
-            phase: None,
+            dimensions: Default::default(),
             labels,
             payload: crate::journal::payload(&[(REPORT_PATH, json!(path))]),
             artifacts: Vec::new(),

@@ -77,6 +77,7 @@ mod journal;
 mod ledger;
 mod lifecycle;
 mod loopstats;
+mod payload;
 mod plancheck;
 mod projection;
 mod refusal;
@@ -108,6 +109,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// journey a user can reach is reachable from a test that drives the same
 /// entry point the binary does.
 pub fn run(cli: cli::Cli) -> Result<i32> {
+    // The registry every record this process writes or folds is declared in,
+    // built before any of them: a payload document of this build's own that did
+    // not register is a build fault, and it is met here rather than mid-fold.
+    event::registry();
     // Reaching here *is* the proof that this process's executable answers this
     // crate's command line, which is what a dispatch given a process of its own
     // is retained with. Nothing else can know it: `current_exe` names whatever

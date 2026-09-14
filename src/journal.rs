@@ -69,6 +69,18 @@ impl Journal {
         labels: Labels,
         payload: Map<String, Value>,
     ) -> Result<()> {
+        // Every record an emitter writes is held to its registered document in a
+        // debug build of the binary — the build every end-to-end and note journey
+        // drives — so an emit site that drifts from its document in `payload` fails
+        // those journeys instead of reaching a reader. A unit test builds a partial
+        // payload on purpose, and a release build pays nothing.
+        #[cfg(all(debug_assertions, not(test)))]
+        if let Err(refusal) = crate::event::registry().check(
+            &crate::payload::schema_of(kind),
+            &Value::Object(payload.clone()),
+        ) {
+            panic!("an emitter wrote a {kind} record its own document refuses: {refusal}");
+        }
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),
@@ -79,7 +91,7 @@ impl Journal {
             // This crate's own kinds, which no producer classifies into one of
             // `onevcs`'s phases: a phase here would be a classification invented
             // rather than relayed.
-            phase: None,
+            dimensions: Default::default(),
             labels,
             payload,
             artifacts: Vec::new(),
@@ -117,16 +129,17 @@ impl Journal {
         // trusting a length another appender may have moved. See
         // `summary::Stamp`.
         let bytes = line.len() as u64 + 1;
-        // And what the same call cut off in front of it, which the summary's own
-        // count is a byte offset past: `ledger::append_line_healed`.
-        let healed = ledger::append_line_healed(&self.paths.journal(), &line)?;
+        // A fragment the same call cut off in front of it is the ledger's to report,
+        // and the summary needs nothing from it: its count is a record boundary, and a
+        // heal cuts only what follows the last one. See `summary::Maintainer::appended`.
+        ledger::append_line_healed(&self.paths.journal(), &line)?;
         // After the record has reached the file, so the summary never describes a
         // store that does not hold what it describes — and so a read of the
         // store, which is the answer to a record this state cannot place, reads
         // a store that already holds it. An append that failed took its own
         // bytes back off the file and returned above, with no summary written
         // for them.
-        self.summary.appended(envelope, healed, bytes);
+        self.summary.appended(envelope, bytes);
         Ok(())
     }
 }
@@ -210,9 +223,9 @@ pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
 /// whole one: it is a record the store really holds, and losing it was how the
 /// event reporting that writer's death disappeared.
 pub fn read(path: &Path) -> Vec<Envelope> {
-    ledger::read_records(path)
-        .iter()
-        .filter_map(|record| match reading(record) {
+    ledger::read_envelope_lines(path, 0)
+        .into_iter()
+        .filter_map(|line| match reading(line, path) {
             Reading::Whole(envelope) => Some(envelope),
             Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
@@ -220,48 +233,30 @@ pub fn read(path: &Path) -> Vec<Envelope> {
         .collect()
 }
 
-/// Every record a run's journal has grown by since its first `from` bytes, each
-/// with how many bytes of the file it occupies.
-///
-/// A record this build cannot read comes back as `None` **with its size**, and
-/// that is the point of the pairing: the caller is counting the store's bytes,
-/// and a line it could not parse is still a line the file holds. Dropping it
-/// would leave the count short for ever and every later read of that run would
-/// re-read the whole store.
-pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
-    ledger::read_records_from(path, from)
-        .iter()
-        .map(|record| {
-            let whole = match reading(record) {
-                Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
-                Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
-            };
-            (whole, record.bytes + u64::from(record.terminated))
-        })
-        .collect()
-}
-
 /// Every **finished** record a run's journal has grown by since its first
 /// `from` bytes, each with how many bytes of the file it occupies.
 ///
-/// [`read_after`] and [`finished_after`] at once, because a checkpoint needs
-/// exactly one half of each. Like the tailer, it **stops** at a record whose
-/// writer has not finished it: the byte it hands back becomes the byte a later
-/// read resumes at, and a boundary inside a half-written line loses the record
-/// it lands in once that writer finishes. Like [`read_after`], it hands back a
-/// record this build cannot read **with its size**, because that line is one the
-/// file holds and a boundary that skipped it would be short for ever.
+/// What the checkpoint and the summary maintainer both count the store by. Like
+/// the tailer, it **stops** at a record whose writer has not finished it: the bytes
+/// it hands back add up to the byte a later read resumes at, and a count inside a
+/// half-written line is a position the bus reader refuses to resume from once that
+/// writer finishes, so the record it lands in would never be read. A record this
+/// build cannot read comes back as `None` **with its size**, and that is the point
+/// of the pairing: a line it could not parse is still a line the file holds, and a
+/// count that skipped it would be short for ever, so every later read of that run
+/// would read the whole store again.
 pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let mut grown = Vec::new();
-    for record in ledger::read_records_from(path, from) {
-        if !record.terminated {
+    for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
             break;
         }
-        let whole = match reading(&record) {
+        let occupies = line.bytes + 1;
+        let whole = match reading(line, path) {
             Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
         };
-        grown.push((whole, record.bytes + 1));
+        grown.push((whole, occupies));
     }
     grown
 }
@@ -269,13 +264,12 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
 /// Every **finished** record a run's journal has grown by since its first `from`
 /// bytes, and the byte a later read resumes at.
 ///
-/// The tailer's counterpart of [`read_after`], and the difference is the last
-/// line. That one accounts for every line the file holds, because a byte count
-/// that skipped one would be short for ever; this one **stops** at a record
-/// whose writer has not finished it and reports the byte that record begins at,
-/// because a tailer that advanced past a half-written line would never come back
-/// for the rest of it — and the record it lost is the one the driver was in the
-/// middle of appending, which on a live run is the newest thing there is to say.
+/// The tailer's counterpart of [`finished_records_after`]: it **stops** at a
+/// record whose writer has not finished it and reports the byte that record
+/// begins at, because a tailer that advanced past a half-written line would never
+/// come back for the rest of it — and the record it lost is the one the driver was
+/// in the middle of appending, which on a live run is the newest thing there is to
+/// say.
 ///
 /// A line this build cannot parse is skipped and still accounted for, exactly as
 /// [`read`] skips it: a record from a schema this build does not know is not a
@@ -283,12 +277,12 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
 pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     let mut at = from;
     let mut events = Vec::new();
-    for record in ledger::read_records_from(path, from) {
-        if !record.terminated {
+    for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
             break;
         }
-        at += record.bytes + 1;
-        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(&record) {
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
             events.push(envelope);
         }
     }
@@ -303,12 +297,14 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
 /// schema this build does not know — what strict replay is about is that
 /// *something* the graph may have turned on is not there.
 pub fn has_unreadable_lines(path: &Path) -> bool {
-    ledger::read_records(path).iter().any(|record| {
-        matches!(
-            reading(record),
-            Reading::Glued { .. } | Reading::Truncated | Reading::Unparseable
-        )
-    })
+    ledger::read_envelope_lines(path, 0)
+        .into_iter()
+        .any(|line| {
+            matches!(
+                reading(line, path),
+                Reading::Glued { .. } | Reading::Truncated | Reading::Unparseable
+            )
+        })
 }
 
 /// What one line of the journal turned out to be.
@@ -334,31 +330,41 @@ enum Reading {
 
 /// Which of the five a line is.
 ///
-/// The distinction a reader could not previously draw. An unterminated final
-/// line is a fragment whatever its parse says — the writer had not finished it —
-/// and among the terminated ones `serde_json`'s own `is_eof` separates a record
-/// that stops early from one that is whole and unreadable.
+/// The distinction a reader could not previously draw. The bus reader decides
+/// the first half: a line it read whole is a record, and the one it reports torn
+/// is a fragment whatever its bytes say — the writer had not finished it. What
+/// is left is every line it refused, and that is where this crate's own classes
+/// are drawn: a blank line, a fragment with a whole record glued after it, a
+/// record that stops early — told apart by `serde_json`'s own `is_eof` over the
+/// line as JSON — and a line that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
-fn reading(record: &ledger::Record) -> Reading {
-    if record.text.trim().is_empty() {
+fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
+    if let Some(envelope) = line.envelope {
+        return Reading::Whole(envelope);
+    }
+    // A line the reader refused whose bytes cannot be read again is one this build
+    // cannot read, and is reported as that rather than skipped as blank.
+    let Some(text) = line.text(path) else {
+        return Reading::Unparseable;
+    };
+    if text.trim().is_empty() {
         return Reading::Blank;
     }
-    // The terminator first, and before the parse, because a record is finished
-    // when its newline lands and not before: an append writes the record and its
-    // terminator in one call, so a line that parses whole and ends without one
-    // is a write that stopped in the middle — and the next append discards it as
-    // exactly that. A reader that counted it as a record would hand back a
-    // record the store is about to say it lost.
-    if !record.terminated {
+    // The terminator before anything else the line holds, because a record is
+    // finished when its newline lands and not before: an append writes the record
+    // and its terminator in one call, so a line that parses whole and ends
+    // without one is a write that stopped in the middle — and the next append
+    // discards it as exactly that. The reader reports that line torn rather than
+    // handing it back, which is the same rule.
+    if !line.terminated {
         return Reading::Truncated;
     }
-    match serde_json::from_str::<Envelope>(&record.text) {
-        Ok(envelope) => Reading::Whole(envelope),
-        Err(e) => match glued_tail(&record.text) {
-            Some((lost, envelope)) => Reading::Glued { lost, envelope },
-            None if e.is_eof() => Reading::Truncated,
-            None => Reading::Unparseable,
-        },
+    match glued_tail(&text) {
+        Some((lost, envelope)) => Reading::Glued { lost, envelope },
+        None if serde_json::from_str::<Value>(&text).is_err_and(|e| e.is_eof()) => {
+            Reading::Truncated
+        }
+        None => Reading::Unparseable,
     }
 }
 
@@ -482,23 +488,23 @@ pub fn integrity(path: &Path) -> Integrity {
         healed: ledger::torn_tails(path),
         ..Integrity::default()
     };
-    for record in ledger::read_records(path) {
-        let bytes = record.bytes;
-        match reading(&record) {
+    for line in ledger::read_envelope_lines(path, 0) {
+        let (number, offset, bytes) = (line.line, line.offset, line.bytes);
+        match reading(line, path) {
             Reading::Whole(_) | Reading::Blank => {}
             Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes: lost,
             }),
             Reading::Truncated => integrity.truncated.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes,
             }),
             Reading::Unparseable => integrity.unparseable.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes,
             }),
         }
@@ -737,7 +743,7 @@ mod tests {
             seq: 3,
             source: Source::Agentgraph,
             kind: EventKind("turn-message".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload,
             artifacts: Vec::new(),
@@ -1061,7 +1067,7 @@ mod tests {
             seq: 7,
             source: Source::Agentgraph,
             kind: EventKind("turn-finished".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: labels("demo", Some("build")),
             payload: payload(&[]),
             artifacts: Vec::new(),
@@ -1083,7 +1089,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: EventKind("k".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: Map::new(),
             artifacts: Vec::new(),
@@ -1197,5 +1203,247 @@ mod tests {
         let full = settled_payload("failed", Some("infrastructure-failure"), Some("OOM"));
         assert_eq!(full["outcome"], json!("infrastructure-failure"));
         assert_eq!(full["detail"], json!("OOM"));
+    }
+
+    /// One envelope of the three streams below, as a producer stamps it.
+    fn stamped(stream: &str, seq: u64, ts: &str) -> Envelope {
+        serde_json::from_value(json!({
+            "v": 1,
+            "ts": ts,
+            "stream": stream,
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": "turn-activity",
+        }))
+        .expect("an envelope")
+    }
+
+    /// Each stream written to a file of its own, in the order its records
+    /// arrived, and merged by the bus.
+    fn merged_by_the_bus(name: &str, arrived: &[Envelope]) -> Vec<Envelope> {
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-merge-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
+        for event in arrived {
+            let line = serde_json::to_string(event).expect("an envelope serializes");
+            files
+                .entry(event.stream.clone())
+                .or_default()
+                .push_str(&format!("{line}\n"));
+        }
+        let paths: Vec<_> = files
+            .into_iter()
+            .map(|(stream, lines)| {
+                let path = dir.join(format!("{stream}.ndjson"));
+                std::fs::write(&path, lines).expect("a stream is written");
+                path
+            })
+            .collect();
+        let merged = onemessagebus_agent::Merge::open(&paths)
+            .expect("the streams read")
+            .into_records();
+        let _ = std::fs::remove_dir_all(&dir);
+        merged
+    }
+
+    /// Streams are merged in `(ts, stream, seq)` order, and this crate's one
+    /// in-memory merge puts a store in exactly the order the bus's `Merge` puts
+    /// the same records in.
+    ///
+    /// Three streams whose timestamps interleave, two records of different
+    /// streams stamped at the same instant — broken by stream id — two of one
+    /// stream at one instant — broken by `seq` — and every record arriving out of
+    /// the order it belongs in, within its stream and across them. The order is
+    /// also spelled out, because it is the one this merge produced before the
+    /// wire moved onto the bus.
+    #[test]
+    fn three_streams_merge_in_the_order_the_buss_merge_gives_them() {
+        let arrived = vec![
+            stamped("c", 2, "2026-09-01T00:00:03.000Z"),
+            stamped("a", 3, "2026-09-01T00:00:04.000Z"),
+            stamped("b", 1, "2026-09-01T00:00:01.000Z"),
+            stamped("a", 1, "2026-09-01T00:00:01.000Z"),
+            stamped("c", 1, "2026-09-01T00:00:02.000Z"),
+            stamped("b", 3, "2026-09-01T00:00:03.000Z"),
+            stamped("a", 2, "2026-09-01T00:00:02.000Z"),
+            stamped("b", 2, "2026-09-01T00:00:03.000Z"),
+            stamped("c", 3, "2026-09-01T00:00:05.000Z"),
+        ];
+        let mut ours = arrived.clone();
+        merge_order(&mut ours);
+
+        assert_eq!(ours, merged_by_the_bus("agree", &arrived));
+        let order: Vec<(&str, u64)> = ours.iter().map(|e| (e.stream.as_str(), e.seq)).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("a", 1),
+                ("b", 1),
+                ("a", 2),
+                ("c", 1),
+                ("b", 2),
+                ("b", 3),
+                ("c", 2),
+                ("a", 3),
+                ("c", 3),
+            ]
+        );
+        let mut keys: Vec<_> = ours.iter().map(|e| e.order_key()).collect();
+        keys.sort();
+        assert_eq!(ours.iter().map(|e| e.order_key()).collect::<Vec<_>>(), keys);
+    }
+
+    /// Where a stream's clock steps back against its own `seq`, the two merges
+    /// part, and this one keeps the producer's order.
+    ///
+    /// The difference `docs/contract-divergences.md` entry 75 records: `seq` is
+    /// the only ordering promise an envelope carries, and the checkpoint's
+    /// coverage marker and the summary's open instant are both proved over a
+    /// merge that honours it, while the bus sorts every record by its stamp.
+    #[test]
+    fn a_stream_whose_clock_stepped_back_keeps_its_own_order_where_the_buss_merge_does_not() {
+        let arrived = vec![
+            stamped("a", 1, "2026-09-01T00:00:05.000Z"),
+            stamped("a", 2, "2026-09-01T00:00:01.000Z"),
+            stamped("b", 1, "2026-09-01T00:00:03.000Z"),
+        ];
+        let mut ours = arrived.clone();
+        merge_order(&mut ours);
+        let order = |events: &[Envelope]| {
+            events
+                .iter()
+                .map(|e| (e.stream.clone(), e.seq))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&ours),
+            vec![
+                ("b".to_string(), 1),
+                ("a".to_string(), 1),
+                ("a".to_string(), 2)
+            ]
+        );
+        assert_eq!(
+            order(&merged_by_the_bus("stepped", &arrived)),
+            vec![
+                ("a".to_string(), 2),
+                ("b".to_string(), 1),
+                ("a".to_string(), 1)
+            ]
+        );
+    }
+
+    /// A journal whose final line is torn reads every whole record before it,
+    /// and what it reports lost is the line the bus reader reports torn.
+    ///
+    /// Beside the tear, the leniency every reader here follows: a blank line is
+    /// skipped and is no loss, and a whole line that is not an envelope is
+    /// skipped and reported as a line this build cannot read — none of it
+    /// failing the read.
+    #[test]
+    fn a_torn_final_line_is_reported_as_the_readers_torn_line_and_ends_nothing() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("events.jsonl");
+        let line = |seq| {
+            serde_json::to_string(&stamped("a", seq, "2026-09-01T00:00:01.000Z"))
+                .expect("serializes")
+        };
+        let torn = line(4);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n\n{{\"hello\":1}}\n{}\n{}",
+                line(1),
+                line(2),
+                &torn[..30]
+            ),
+        )
+        .expect("a journal");
+
+        let reader = onemessagebus_agent::Reader::open(&path)
+            .expect("the journal opens")
+            .collect_all();
+        let reported = reader
+            .torn
+            .clone()
+            .expect("the reader reports the torn tail");
+
+        let read_whole = read(&path);
+        assert_eq!(
+            read_whole,
+            reader
+                .records
+                .iter()
+                .map(|record| record.envelope.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read_whole.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let found = integrity(&path);
+        assert_eq!(
+            found.truncated,
+            vec![Loss {
+                line: 5,
+                offset: reported.at,
+                bytes: reported.bytes,
+            }]
+        );
+        let refused_line = reader
+            .refused
+            .iter()
+            .find(|refused| refused.position - refused.at > 1)
+            .expect("the reader refuses the line that is not an envelope");
+        assert_eq!(
+            found.unparseable,
+            vec![Loss {
+                line: 3,
+                offset: refused_line.at,
+                bytes: refused_line.position - refused_line.at - 1,
+            }]
+        );
+        assert!(has_unreadable_lines(&path));
+
+        // And a tailer stops at the torn line, resuming where the reader says to.
+        let (events, at) = finished_after(&path, 0);
+        assert_eq!(events.len(), 2);
+        assert_eq!(at, reported.at);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line the reader refused is read again to say what it is, and a reread
+    /// that fails — the file shrank or was replaced under the read — is a line
+    /// this build cannot read, never a blank line skipped as no loss.
+    #[test]
+    fn a_refused_line_that_cannot_be_read_again_is_unreadable_and_not_blank() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-reread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("events.jsonl");
+        let whole = serde_json::to_string(&stamped("a", 1, "2026-09-01T00:00:01.000Z"))
+            .expect("serializes");
+        std::fs::write(&path, format!("{whole}\n{{\"hello\":1}}\n")).expect("a journal");
+
+        let refused = ledger::read_envelope_lines(&path, 0)
+            .pop()
+            .expect("the line after the record");
+        assert!(
+            refused.envelope.is_none(),
+            "the reader refuses the line that is not an envelope"
+        );
+        // The file loses the refused line between the read and the reread.
+        std::fs::write(&path, format!("{whole}\n")).expect("the journal shrinks");
+        assert!(
+            matches!(reading(refused, &path), Reading::Unparseable),
+            "a refused line whose bytes could not be read again was classed as something \
+             this build read"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

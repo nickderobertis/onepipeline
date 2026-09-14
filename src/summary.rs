@@ -775,12 +775,16 @@ impl Maintainer {
     /// read already did: a journal writer opens by reading the store to find the
     /// sequence number it may claim.
     pub(crate) fn of(paths: &RunPaths) -> Self {
-        // Bracketed, so what is accounted for is what was read: the two agree
-        // unless another appender landed across the read, and where they do not
-        // the shorter is taken, which reads as stale rather than as an answer.
-        let (before, _) = journal_stamp(paths);
-        let mut events = journal::read(&paths.journal());
-        let (after, _) = journal_stamp(paths);
+        // What is accounted for is exactly what was read: the finished records the
+        // bus reader handed back, up to the boundary after the last of them. A final
+        // line whose writer had not finished it is left out of both, so the count is
+        // always a position that reader resumes from — counting its bytes would put
+        // the next tail read inside that record once its writer finished it, which
+        // the reader refuses as no boundary at all. An appender that landed across
+        // the read is past the count, which reads as stale rather than as an answer.
+        let read = journal::finished_records_after(&paths.journal(), 0);
+        let accounted: u64 = read.iter().map(|(_, bytes)| *bytes).sum();
+        let mut events: Vec<Envelope> = read.into_iter().filter_map(|(record, _)| record).collect();
         journal::merge_order(&mut events);
 
         // The last instant's records are held open rather than folded, because
@@ -818,7 +822,7 @@ impl Maintainer {
                 .cloned()
                 .unwrap_or_default(),
             open_ts,
-            accounted: before.min(after),
+            accounted,
             settled_seq,
         }
     }
@@ -846,26 +850,24 @@ impl Maintainer {
     /// the answer to a record this state cannot place — reads a store that
     /// already holds it.
     ///
-    /// `healed` is what the same append cut off the file *before* writing that
-    /// record — a fragment a dead writer left, which
-    /// [`ledger::append_line_healed`] reports. It is subtracted first, because
-    /// this state's count is a byte offset into the store and a heal moves every
-    /// boundary past it: counting on regardless would leave the offset inside a
-    /// record, and the tail read from there drops the record it starts in and
-    /// then stamps the document **fresh** — a run recorded as never stopped, on
-    /// a store whose last record says it was. Where the arithmetic does not come
-    /// out exactly — a fragment this state never counted, or an appender that
-    /// landed across the heal — the store is read again rather than folded from
-    /// an offset nothing can place. That is a whole read on the rarest path
-    /// there is, and the alternative is a wrong row served as a current one.
-    pub(crate) fn appended(&mut self, event: &Envelope, healed: u64, bytes: u64) {
+    /// `bytes` is the record's own size, terminator included. This state's count is
+    /// always a record boundary the bus reader handed back — it never counts a line
+    /// whose writer had not finished it — and that is what makes the arithmetic
+    /// below sound. The append that wrote this record may first have healed a
+    /// fragment a dead writer left ([`ledger::append_line_healed`] reports it), but a
+    /// heal cuts only what follows the file's last boundary, which is never in front
+    /// of this count, so the count needs nothing from it. And a line that was
+    /// half-written when this state last read, and has been finished since, is read
+    /// whole from that boundary rather than resumed from inside. A store shorter than
+    /// the count plus this record is not the store this state was holding, and is
+    /// read again rather than folded from an offset nothing can place.
+    pub(crate) fn appended(&mut self, event: &Envelope, bytes: u64) {
         let len = journal_stamp(&self.paths).0;
-        self.accounted = self.accounted.saturating_sub(healed);
         if len == self.accounted + bytes {
             // Ours alone: the file grew by exactly this record, so what is folded
             // here and what the file holds are the same store.
             self.fold(event, bytes);
-        } else if healed == 0 && len > self.accounted {
+        } else if len > self.accounted + bytes {
             // Somebody else appended beside us, which is the ordinary shape of a
             // run being driven: the relay thread writes the observer's envelopes
             // while the engine thread writes the graph's. What the store grew by
@@ -876,9 +878,9 @@ impl Maintainer {
             self.catch_up();
         } else {
             // The file is not the file this state was holding: it is shorter than
-            // what was accounted for — replaced, or healed of a fragment nobody
-            // here counted — or a heal has moved the boundaries a tail read would
-            // start from. Nothing here can be placed against it.
+            // what was accounted for and the record just written to it — replaced,
+            // or cut back past a boundary this state counted. Nothing here can be
+            // placed against it.
             *self = Self::of(&self.paths);
         }
         self.write();
@@ -924,17 +926,21 @@ impl Maintainer {
         Rebuilt::No
     }
 
-    /// Fold everything the store has grown by since this state last accounted
-    /// for it.
+    /// Fold every finished record the store has grown by since this state last
+    /// accounted for it.
     ///
     /// Bounded by what arrived rather than by what the run has ever recorded: the
     /// tail is read from the byte this state stopped at. A record in it stamped
     /// behind the newest instant takes the whole store again, which is the same
     /// answer [`fold`](Self::fold) gives for one appended here — and one this
     /// build cannot read still advances the count, because it is still a line the
-    /// file holds.
+    /// file holds. A final line whose writer has not finished it does not: the
+    /// count stays at the boundary in front of it, which is where the next read
+    /// resumes once its newline lands.
     fn catch_up(&mut self) {
-        for (record, bytes) in journal::read_after(&self.paths.journal(), self.accounted) {
+        for (record, bytes) in
+            journal::finished_records_after(&self.paths.journal(), self.accounted)
+        {
             match record {
                 // A read answered the whole tail; there is nothing left of it
                 // this state has not already taken.
@@ -1831,7 +1837,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: EventKind(kind.as_str().into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 run_id: Some(run.to_string()),
                 node: Some("build".into()),

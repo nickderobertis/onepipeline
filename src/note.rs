@@ -1005,7 +1005,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: kind.into(),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 node: node.map(str::to_string),
                 ..labels("demo", None)
@@ -1240,7 +1240,7 @@ mod tests {
             kind: crate::event::EventKind(
                 oneagentgraph::event::EventKind::TurnStarted.as_str().into(),
             ),
-            phase: None,
+            dimensions: Default::default(),
             labels: labels("demo", Some("build")),
             payload,
             artifacts: Vec::new(),

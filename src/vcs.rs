@@ -426,7 +426,7 @@ pub fn evidence_in(token: &SessionToken) -> Vec<Evidence> {
         for artifact in envelope.artifacts {
             let found = Evidence {
                 kind: envelope.kind.clone(),
-                id: artifact.id,
+                id: crate::event::ArtifactId(artifact.id),
             };
             if !evidence.iter().any(|kept| kept.id == found.id) {
                 evidence.push(found);
@@ -1118,14 +1118,22 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
     };
     let preserved = kind_of(onevcs::EventKind::CommitPreserved);
     // The last one wins: a session that committed twice was left at the second.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the only change here is what a stream
+    // whose final line is torn answers, and a torn line exists only between two writes of
+    // one record by `onevcs` — a library this crate links, with no subprocess boundary a
+    // journey could hold that instant at. Reaching it end to end would mean the suite
+    // truncating a live session's stream underneath the binary, which is a fixture and not
+    // a user's journey. The unit test beside this reads real stream files through the real
+    // `onevcs` reader, and the one consumer, `lifecycle.rs`'s republication comparison, is
+    // unchanged and keeps its own journeys.
     let Some(envelope) = batch
         .into_iter()
         .rev()
-        .map(relayed)
         .find(|envelope| envelope.kind == preserved)
     else {
         return SessionTip::Unmoved;
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     envelope
         .payload
         .get("sha")
@@ -1251,7 +1259,11 @@ fn opened(token: &SessionToken, filter: Option<&EventFilter>) -> Option<EventStr
     }
 }
 
-/// The next batch of a stream, relayed into this crate's envelope.
+/// The next batch of a stream, for relaying into the merged one.
+///
+/// The sibling's envelope is the agent profile's, which is this crate's, so a
+/// batch is relayed as the values it was read as: `stream`, `seq`, `source`,
+/// kind, phase and labels exactly as the producer wrote them.
 ///
 /// [`EventStream::read`] refuses a whole batch over one line it cannot parse, and
 /// its cursor has already moved past that line — so a refusal here is events
@@ -1260,7 +1272,7 @@ fn opened(token: &SessionToken, filter: Option<&EventFilter>) -> Option<EventStr
 /// record.
 fn next_batch(stream: &mut EventStream, token: &SessionToken) -> Vec<Envelope> {
     match stream.read() {
-        Ok(events) => events.into_iter().map(relayed).collect(),
+        Ok(events) => events,
         Err(error) => {
             eprintln!(
                 "onepipeline: cannot read session {}'s events: {error}",
@@ -1297,71 +1309,16 @@ fn sibling_filter(filter: &EventFilter) -> Result<onevcs::EventFilter> {
     })
 }
 
-/// One of the sibling's envelopes, as one of this crate's.
-///
-/// Field for field, out of `onevcs`'s own type: the merged stream keeps a
-/// relayed envelope's producer `stream`, `seq`, `source`, kind, and phase
-/// exactly as they were written, which is what lets a consumer detect loss per
-/// stream and read a change's life without enumerating the kinds in it.
-fn relayed(envelope: onevcs::Envelope) -> Envelope {
-    Envelope {
-        v: envelope.v,
-        ts: envelope.ts,
-        stream: envelope.stream,
-        seq: envelope.seq,
-        source: source_of(envelope.source),
-        kind: kind_of(envelope.kind),
-        phase: Some(phase_of(envelope.phase)),
-        labels: labels_of(envelope.labels),
-        payload: envelope.payload,
-        artifacts: envelope
-            .artifacts
-            .into_iter()
-            .map(|artifact| crate::event::ArtifactRef {
-                id: crate::event::ArtifactId(artifact.id.0),
-                kind: artifact.kind,
-                bytes: artifact.bytes,
-            })
-            .collect(),
-    }
-}
-
-/// Which part of a change's life a relayed envelope belongs to.
-///
-/// Arm by arm rather than through the sibling's serializer, unlike
-/// [`kind_of`] beside it, and the difference is which side owns the vocabulary:
-/// a *kind* is one of three libraries' and this crate relays all three, so an
-/// enum here would reject a kind a newer sibling already emits. A phase is
-/// `onevcs`'s alone and this crate's readers fold a closed set of them — so a
-/// phase that library adds has to arrive here as a compile error rather than as
-/// a string every reader silently declines.
-fn phase_of(phase: onevcs::Phase) -> crate::event::Phase {
-    match phase {
-        onevcs::Phase::Development => crate::event::Phase::Development,
-        onevcs::Phase::Integrate => crate::event::Phase::Integrate,
-        onevcs::Phase::Review => crate::event::Phase::Review,
-        onevcs::Phase::Release => crate::event::Phase::Release,
-    }
-}
-
 /// The phase the sibling stamps on an event of one of its kinds.
 ///
 /// For the envelopes this crate writes *beside* the sibling's own records about
 /// one session: they carry the sibling's kind, so they carry the phase that
 /// library puts that kind in rather than a second classification made here.
 /// `None` for the one kind whose phase its producer decides — a push, which this
-/// crate never records.
+/// crate never records. The phase is the agent profile's on both sides, so what
+/// the sibling answers is this crate's value with no conversion between.
 fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
-    onevcs::Phase::of(kind).map(phase_of)
-}
-
-/// Which library produced a relayed envelope.
-fn source_of(source: onevcs::Source) -> crate::event::Source {
-    match source {
-        onevcs::Source::Agentgraph => crate::event::Source::Agentgraph,
-        onevcs::Source::Vcs => crate::event::Source::Vcs,
-        onevcs::Source::Pipeline => crate::event::Source::Pipeline,
-    }
+    <crate::event::Phase as onevcs::PhaseOf>::of(kind)
 }
 
 /// A kind as the sibling spells it on the wire.
@@ -1381,27 +1338,6 @@ fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
         // unfamiliar kind in the store.
         .unwrap_or_else(|| format!("{kind:?}"));
     crate::event::EventKind(wire)
-}
-
-/// The labels a relayed envelope arrived with.
-///
-/// `onevcs` names one the merged envelope does not reserve — `member` — so it
-/// rides in [`Labels::extra`](crate::event::Labels::extra), which is where the
-/// contract puts anything a producer stamps beyond the reserved keys. Dropping
-/// it would lose a producer's own attribution in the relay.
-fn labels_of(labels: onevcs::Labels) -> crate::event::Labels {
-    let mut extra = labels.extra;
-    if let Some(member) = labels.member {
-        extra.insert("member".to_owned(), serde_json::json!(member));
-    }
-    crate::event::Labels {
-        run_id: labels.run_id,
-        round: labels.round,
-        node: labels.node,
-        step: labels.step,
-        persona: labels.persona,
-        extra,
-    }
 }
 
 /// How often a follow asks the stream for what has been appended since.
@@ -1617,7 +1553,7 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
         // reader that folds one of them has to fold both.
         kind: kind_of(onevcs::EventKind::SessionOpened),
         // And the phase that library puts that kind in, for the same reason.
-        phase: phase_of_kind(onevcs::EventKind::SessionOpened),
+        dimensions: phase_of_kind(onevcs::EventKind::SessionOpened).into(),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("token", serde_json::json!(session.token.0)),
@@ -1645,7 +1581,7 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
         // `published` is this crate's own kind rather than one of the sibling's,
         // so there is no producer's classification to carry: a phase here would
         // be this crate inventing one.
-        phase: None,
+        dimensions: Default::default(),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("branch", serde_json::json!(published.branch)),
@@ -2897,15 +2833,28 @@ mod tests {
             SessionTip::Unmoved
         );
 
-        // A stream cut mid-record: the sibling's typed reader refuses the whole
-        // batch, so the commit that *is* in it is one this crate never saw.
+        // A stream cut mid-record. This answered `Unknown` before `onevcs` 0.24.0:
+        // its typed reader refused the whole batch, so the session was one this
+        // crate could not read. That release reads its stream through the bus
+        // reader, which hands back the whole records before a line no newline has
+        // ended and holds that line back without saying so — so the branch stands
+        // where the whole records put it, and the commit is read the moment its
+        // line is. What is lost is telling a torn record from no record at all:
+        // entry 75 of `docs/contract-divergences.md` proposes `onevcs` expose the
+        // reader's torn report so this can answer `Unknown` again.
         let torn = "s-tip-torn";
         let whole = committed(torn, "decaf");
         write(torn, format!("{}\n{}", opened(torn), &whole[..20]));
         assert_eq!(
             session_tip(&SessionToken(torn.into())),
-            SessionTip::Unknown,
-            "a batch the reader refused was read as a session that committed nothing"
+            SessionTip::Unmoved,
+            "the records before a torn line were not read for what they hold"
+        );
+        write(torn, format!("{}\n{whole}\n", opened(torn)));
+        assert_eq!(
+            session_tip(&SessionToken(torn.into())),
+            SessionTip::At(Commit::of("decaf").expect("a commit this crate carries")),
+            "a commit whose line was finished was not read"
         );
 
         // A stream nothing wrote at all: refused by name, and equally unknown.
@@ -2938,7 +2887,11 @@ mod tests {
             Some("c0ffee".to_string())
         );
         assert_eq!(branch_head_in(&SessionToken(unmoved.into())), None);
-        assert_eq!(branch_head_in(&SessionToken(torn.into())), None);
+        // And the torn stream, once its writer finished the line, is the commit.
+        assert_eq!(
+            branch_head_in(&SessionToken(torn.into())),
+            Some("decaf".to_string())
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2984,9 +2937,10 @@ mod tests {
         };
         let seqs = |envelopes: &[Envelope]| envelopes.iter().map(|e| e.seq).collect::<Vec<_>>();
 
-        // A whole record whose newline has not been written yet. It is read —
-        // and read *once*: the cursor that consumed it does not hand it back
-        // when the terminator and the next record arrive.
+        // A whole record whose newline has not been written yet. It is read when
+        // its newline lands — the bus reader's torn-line rule, which the sibling
+        // reads through — and read *once*: the cursor that stopped before it hands
+        // it back with the record after it, and never again.
         let torn = "s-unterminated";
         let followed = SessionToken(torn.to_owned());
         write(
@@ -3000,8 +2954,8 @@ mod tests {
         let mut stream = opened(&followed, None).expect("the stream opens");
         assert_eq!(
             seqs(&next_batch(&mut stream, &followed)),
-            vec![1, 2],
-            "a record whose newline was still unwritten was lost"
+            vec![1],
+            "a record whose newline was still unwritten was handed over unfinished"
         );
         write(
             torn,
@@ -3014,24 +2968,25 @@ mod tests {
         );
         assert_eq!(
             seqs(&next_batch(&mut stream, &followed)),
-            vec![3],
-            "the terminator arriving handed a record back a second time"
+            vec![2, 3],
+            "the terminator arriving lost the record or handed one back a second time"
         );
 
-        // A line that is not a whole envelope — a stream cut mid-record. The
-        // sibling's typed reader refuses the **batch**, and its cursor has
-        // already moved past the line, so the whole records before it in the
-        // same read are refused with it. Reported out loud rather than folded
-        // into an empty stream, and recorded as a proposal for `onevcs` in
-        // `docs/contract-divergences.md`.
+        // A line that is not a whole envelope — a stream cut mid-record. Before
+        // `onevcs` 0.24.0 this handed back nothing: its typed reader refused the
+        // batch, and the whole record before the tear was lost with it (entry 17
+        // of `docs/contract-divergences.md`). That release reads through the bus
+        // reader, so the whole records before it are handed back and the torn one
+        // alone is not — held back as the line its writer has not finished, and
+        // reported nowhere this crate can read, which entry 75 proposes it expose.
         let cut = "s-cutmidline";
         let whole = record(cut, 1, "session-opened");
         let partial = record(cut, 2, "push");
         write(cut, format!("{whole}\n{}", &partial[..20]));
-        assert!(
-            events(&SessionToken(cut.to_owned()), None).is_empty(),
-            "the typed reader now hands back the whole records before a torn one; \
-             narrow this assertion to the torn record alone"
+        assert_eq!(
+            seqs(&events(&SessionToken(cut.to_owned()), None)),
+            vec![1],
+            "the records before a torn one were not read for what they hold"
         );
 
         // And a stream nothing wrote at all is not an empty one: it is refused
@@ -3063,7 +3018,7 @@ mod tests {
             seq,
             source: crate::event::Source::Vcs,
             kind: crate::event::EventKind("release-observed".into()),
-            phase: Some(crate::event::Phase::Release),
+            dimensions: crate::event::Phase::Release.into(),
             labels: crate::event::Labels::default(),
             payload: serde_json::Map::new(),
             artifacts: Vec::new(),
@@ -3089,6 +3044,14 @@ mod tests {
         assert!(marks.beyond(&wrote("releases-def", 0)));
     }
 
+    /// A relayed `onevcs` envelope is the same value whether it crossed as a
+    /// value or as a line.
+    ///
+    /// The sibling's envelope is the agent profile's, which is this crate's, so
+    /// there is no conversion left to lose a field in: the value a session's
+    /// stream hands over is the value this crate journals, and the line it wrote
+    /// reads back as that value — kind, phase, the `member` attribution and a key
+    /// nobody reserves, and the artifact, all as the producer stamped them.
     #[test]
     fn a_relayed_envelope_keeps_the_kind_and_attribution_its_producer_wrote() {
         let mut labels = onevcs::Labels {
@@ -3098,30 +3061,40 @@ mod tests {
         labels
             .extra
             .insert("session".into(), serde_json::json!("s-1"));
-        let envelope = relayed(onevcs::Envelope {
+        let produced = onevcs::Envelope {
             v: 1,
             ts: "2026-01-01T00:00:00.000Z".into(),
             stream: "s-1".into(),
             seq: 4,
             source: onevcs::Source::Vcs,
-            kind: onevcs::EventKind::ChangeOpened,
-            phase: onevcs::Phase::Review,
+            kind: kind_of(onevcs::EventKind::ChangeOpened),
+            dimensions: onevcs::Phase::Review.into(),
             labels,
             payload: serde_json::Map::new(),
             artifacts: vec![onevcs::ArtifactRef {
-                id: onevcs::ArtifactId("a-1".into()),
+                id: "a-1".into(),
                 kind: "log".into(),
                 bytes: 12,
             }],
-        });
-        assert_eq!(envelope.kind.0, "change-opened");
-        assert_eq!(envelope.source, crate::event::Source::Vcs);
-        assert_eq!(envelope.seq, 4);
-        // A key the merged envelope does not reserve rides in `extra` rather
-        // than being dropped in the relay.
-        assert_eq!(envelope.labels.extra["member"], "worker");
-        assert_eq!(envelope.labels.extra["session"], "s-1");
-        assert_eq!(envelope.artifacts[0].id.0, "a-1");
+        };
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serializes");
+        let as_line: Envelope = serde_json::from_str(&line).expect("the line reads back");
+        let as_value: Envelope = produced;
+        assert_eq!(as_line, as_value);
+
+        assert_eq!(as_value.kind.0, "change-opened");
+        assert_eq!(as_value.source, crate::event::Source::Vcs);
+        assert_eq!(as_value.seq, 4);
+        assert_eq!(as_value.dimensions.phase, Some(crate::event::Phase::Review));
+        assert_eq!(as_value.labels.member.as_deref(), Some("worker"));
+        assert_eq!(as_value.labels.extra["session"], "s-1");
+        assert_eq!(as_value.artifacts[0].id, "a-1");
+        // And in the producer's own byte order: the reserved `member` before a key
+        // nobody reserves.
+        assert!(
+            line.contains(r#""labels":{"member":"worker","session":"s-1"}"#),
+            "{line}"
+        );
     }
 
     /// A read that did not get an answer says what refused, on one line.

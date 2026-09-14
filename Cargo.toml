@@ -42,9 +42,10 @@ resolver = "2"
 # pin**, because a revision is content this host cannot reproduce from crates.io
 # and a crate that itself ships there cannot publish against one.
 #
-# The filter grammar this crate passes through to them — a *cross-repository*
-# contract with no shared crate — is carried by both pins: `oneagentgraph` merged
-# it at v0.2.13 and `onevcs` at v0.2.7, and each pin below is above its own.
+# The filter grammar this crate passes through to them is carried by both pins:
+# `oneagentgraph` merged it at v0.2.13 and `onevcs` at v0.2.7, and each pin below
+# is above its own. Since `oneagentgraph` 0.4.2 and `onevcs` 0.24.0 the grammar's
+# one implementation is `onemessagebus-agent`'s, which all three re-export.
 # `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
 # the real siblings, so a pin moved below one fails rather than reads differently.
 #
@@ -448,9 +449,23 @@ resolver = "2"
 # admits no version of — is neither: the check names it and the pin holding it,
 # prints no update (the one that takes it resolves `onevcs` twice), and passes.
 # Only moving the pin lifts it, and that is a host-wide move another plan owns.
+# One MSRV floor for both members, so the test-support crate cannot declare a
+# different one. `just msrv`, CI's `msrv` job, and `clippy.toml` read this line.
+[workspace.package]
+rust-version = "1.89"
+
 [workspace.dependencies]
-oneagentgraph = "0.4.1"
-onevcs = "0.23.0"
+oneagentgraph = "0.4.2"
+onevcs = "0.24.0"
+# The wire both siblings above now re-export: the envelope, its labels, sources
+# and phases, the filter grammar, the reader, the merge and the schema registry
+# are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
+# and `src/filter.rs` re-export them rather than keeping a copy. One copy or
+# none: `oneagentgraph` 0.4.2, `onevcs` 0.24.0 and `onejudge` 0.12.0 each require
+# exactly these, so a lock carrying a second one would make a relayed envelope
+# two different types.
+onemessagebus = "0.4.0"
+onemessagebus-agent = "0.4.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -487,7 +502,13 @@ onevcs = "0.23.0"
 # dispatched judge is told where work git cannot show it lives. `oneagentgraph`
 # 0.4.1 requires exactly this release, so the two move together, and it is a
 # requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
-onejudge = "0.11.0"
+#
+# 0.12.0 is the release that adopted the bus: its command-provider frames are the
+# agent profile's registered messages. `oneagentgraph` 0.4.2 requires exactly it,
+# and the three of them resolve the one `onemessagebus` and `onemessagebus-agent`
+# the pins above name, so the four move together or a relayed envelope is two
+# types. A requirement for the same reason again: `^0.11` admits no 0.12.x.
+onejudge = "0.12.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -519,7 +540,7 @@ onevcs-testing = "0.6.2"
 name = "onepipeline"
 version = "0.30.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
 license = "MIT"
 repository = "https://github.com/nickderobertis/onepipeline"
@@ -610,6 +631,13 @@ oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 # Read-only vocabulary, not a composed sibling — see `[workspace.dependencies]`.
 onejudge = { workspace = true }
+# The wire layer, re-exported — see `[workspace.dependencies]`.
+onemessagebus = { workspace = true }
+onemessagebus-agent = { workspace = true }
+# Each payload this crate emits is a registered bus `Message`, whose document is
+# generated from its type; `preserve_order` is the feature the bus builds it
+# with, so the one copy in the graph is the one the registry compiled against.
+schemars = { version = "1", features = ["preserve_order"] }
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are

@@ -839,7 +839,8 @@ fn publish_deaths(
             // dies, and a producer's seq is its own statement of that order.
             seq: 200 + offset as u64,
             source: oneagentgraph::event::Source::Agentgraph,
-            kind: oneagentgraph::event::EventKind::MemberDied,
+            kind: oneagentgraph::event::EventKind::MemberDied.into(),
+            dimensions: Default::default(),
             labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
                 .unwrap_or_else(|error| fake::fail(&format!("the labels are not labels: {error}"))),
             payload: match serde_json::to_value(&payload) {
@@ -944,6 +945,7 @@ fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, 
                 "-" => None,
                 other => Some(scripted_turn(".refused", other)),
             },
+            truncated: false,
         };
         // The sibling's **own** envelope, serialized through the sibling's own
         // type: a hand-rolled object here would be an independent copy of a
@@ -957,7 +959,8 @@ fn refuse_candidates_under(labels: &serde_json::Map<String, serde_json::Value>, 
             stream: stream(),
             seq: 100 + offset as u64,
             source: oneagentgraph::event::Source::Agentgraph,
-            kind: oneagentgraph::event::EventKind::FallbackAdvanced,
+            kind: oneagentgraph::event::EventKind::FallbackAdvanced.into(),
+            dimensions: Default::default(),
             labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
                 .unwrap_or_else(|error| fake::fail(&format!("the labels are not labels: {error}"))),
             payload: match serde_json::to_value(&advanced) {
@@ -1332,9 +1335,10 @@ fn session_records(args: &[String], script: &str) {
             // from and cannot hide a record the session really wrote.
             seq: 0,
             source: onevcs::Source::Vcs,
-            kind: onevcs::EventKind::SessionOpened,
-            phase: onevcs::Phase::of(onevcs::EventKind::SessionOpened)
-                .unwrap_or(onevcs::Phase::Development),
+            kind: onevcs::EventKind::SessionOpened.into(),
+            dimensions: <onevcs::Phase as onevcs::PhaseOf>::of(onevcs::EventKind::SessionOpened)
+                .unwrap_or(onevcs::Phase::Development)
+                .into(),
             labels: onevcs::Labels {
                 node: named("node").map(str::to_owned),
                 ..onevcs::Labels::default()
@@ -2365,6 +2369,7 @@ fn scripted_decisions(dir: &std::path::Path, key: &str) -> Vec<oneagentgraph::ev
                 kind: kind.to_string(),
                 decision: decision.as_str().to_string(),
                 reason: reason.trim().to_string(),
+                truncated: false,
             }
         })
         .collect();
@@ -2452,6 +2457,7 @@ fn publish_oneharness_session(
         history_dir: store.display().to_string(),
         history_project: project.to_string(),
         history_session: record.clone(),
+        truncated: false,
     };
     let artifact = oneagentgraph::event::Artifact {
         // The payload's own `history_id`, because the sibling's contract is that

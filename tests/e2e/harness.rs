@@ -2211,6 +2211,32 @@ impl World {
         );
     }
 
+    /// Wait until a predicate holds within `patience`, or fail with what was seen
+    /// instead.
+    ///
+    /// [`until`](Self::until)'s answer, with a deadline the journey sizes to the
+    /// work it is waiting on — a node queued behind a hundred dispatches is that
+    /// many dispatches away, not one step. It looks every quarter second rather
+    /// than every twentieth, because a predicate over a run's journal re-reads
+    /// that journal each time, and a wait this long would otherwise spend a core
+    /// beside the driver it is waiting on.
+    pub fn until_within(
+        &self,
+        patience: std::time::Duration,
+        what: &str,
+        mut ready: impl FnMut(&Self) -> bool,
+    ) {
+        if waited_for(patience, std::time::Duration::from_millis(250), || {
+            ready(self)
+        }) {
+            return;
+        }
+        panic!(
+            "timed out after {patience:?} waiting for {what}; the runs root held:\n{}",
+            self.dump()
+        );
+    }
+
     /// Wait for a predicate that reads the store through a real sibling process.
     ///
     /// Each store observation starts `onetaskgraph`, so this yields between
