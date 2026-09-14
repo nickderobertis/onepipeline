@@ -491,6 +491,74 @@ fn a_validator_a_bus_config_names_refuses_a_reply_in_its_own_words_and_queues_it
     world.release("slow.go");
 }
 
+/// A validator the configuration names on the commands queue judges the edits a
+/// reply carries: an envelope whose commands it refuses is refused in its words
+/// with nothing queued, while a verdict carrying no commands is never offered to
+/// it.
+#[test]
+fn a_validator_on_the_commands_queue_judges_the_edits_a_reply_carries() {
+    let world = World::new("bus-config-commands");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: commands, kind: command, command: [{validator:?}]}}\n"
+        ),
+    );
+    let path = plan(&world, "buscommands");
+    launched(&world, &path, "buscommands", &["--bus-config", &file]);
+    let judged = || -> Vec<Value> {
+        std::fs::read_to_string(world.fakes.join("bus-validator.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("the validator records JSON"))
+            .collect()
+    };
+
+    let reason = "an edit has to name the node it corrects";
+    world.script("bus-validator.refuse", reason);
+    let edit = json!({"version": 3, "commands": [
+        {"op": "finding", "message": "the fixture is slow"}
+    ]})
+    .to_string();
+    world
+        .run_with_stdin(&["reply", "buscommands"], &edit)
+        .exited(REFUSED)
+        .err_has(reason);
+    assert_eq!(
+        channel_file(&world, "buscommands", "commands.jsonl"),
+        "",
+        "an edit the commands validator refused was queued"
+    );
+    let offered = judged();
+    assert!(
+        !offered.is_empty()
+            && offered
+                .iter()
+                .all(|record| record["queue"] == json!("commands")),
+        "the edit was not offered to the commands queue's validator: {offered:?}"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", "buscommands"],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(0);
+    assert!(
+        channel_file(&world, "buscommands", "replies.jsonl").contains("carry on"),
+        "a verdict carrying no commands was not queued"
+    );
+    assert_eq!(
+        judged().len(),
+        offered.len(),
+        "a verdict carrying no commands was offered to the commands queue's validator"
+    );
+    world.release("slow.go");
+}
+
 /// The reply window the configuration's `codecs.onejudge` block sets is how long
 /// `channel serve` waits, with no variable overriding it: a question nobody
 /// answers is answered with the elapsed wait no earlier than the window and

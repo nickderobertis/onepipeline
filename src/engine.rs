@@ -3422,7 +3422,7 @@ fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<A
         });
     }
     let journal = journal::read(&paths.journal());
-    let standing = crate::note::adopt_carried(paths, node, crate::note::standing(&journal, node)?)?;
+    let standing = crate::note::drain_carried(paths, node, crate::note::standing(&journal, node)?)?;
     let mut spent = standing.read();
     for superseded in supersedes {
         spent.extend(crate::note::standing(&journal, superseded)?.notes());

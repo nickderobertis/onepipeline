@@ -25,5 +25,5 @@ if [ "$reported" != "onepipeline $release" ]; then
 fi
 
 ONEPIPELINE_RECORD_CHANNEL_ANSWERS_WITH="$program" \
-    cargo nextest run --locked -E 'binary(e2e) and test(/^recorded_channel::/)'
+    just test-e2e 'test(/^recorded_channel::/)'
 echo "record-channel-answers: captured $reported's answers under tests/recorded/answers/"

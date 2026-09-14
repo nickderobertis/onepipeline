@@ -141,7 +141,7 @@ pub fn execute(
         // rules on the next. Read here, once, and handed to both the record and
         // the composition, so the two cannot name different notes.
         notes = match crate::note::standing_for(paths, &node.id)
-            .and_then(|standing| crate::note::adopt_carried(paths, &node.id, standing))
+            .and_then(|standing| crate::note::drain_carried(paths, &node.id, standing))
         {
             Ok(standing) => standing.notes(),
             // A record this build cannot read is refused rather than read past:

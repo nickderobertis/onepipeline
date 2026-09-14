@@ -4473,6 +4473,133 @@ fn a_wait_nobody_answers_is_answered_with_the_wait_and_never_with_a_ruling() {
     world.release("build.go");
 }
 
+/// A listener re-armed on a question nobody listens for any more is told so, in
+/// the bus's own word, rather than left waiting on an answer nobody will send.
+///
+/// The question's own session raised it with no asker, was told the wait
+/// elapsed, and ended — which marks the question abandoned. A later session
+/// naming its correlation attends nothing, so its answer is `abandoned`, naming
+/// the question, and carries none of a ruling's fields.
+#[test]
+fn a_listener_re_armed_on_an_abandoned_question_is_answered_abandoned() {
+    let world = World::new("channel-serve-abandoned");
+    world.script("build.wait", "hold");
+    let run = running(&world, "abandonedask", vec![agent("build", &[])]);
+    let session = |window: &str| {
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", window)
+            .env_remove("ONEPIPELINE_CHANNEL_ASKER");
+        command
+    };
+    let first_line = |stdout: &str| -> Value {
+        serde_json::from_str(stdout.lines().next().expect("the server answered"))
+            .expect("the answer is JSON")
+    };
+
+    let asked = world.run_with_stdin_on(
+        session("1"),
+        "{\"kind\":\"blocker\",\"message\":\"left behind\"}\n",
+    );
+    asked.exited(0);
+    let told = first_line(&asked.stdout);
+    assert_eq!(told["answer"], json!("timeout"), "{told}");
+    let correlation = told["correlation"]
+        .as_str()
+        .expect("the question is named")
+        .to_owned();
+    let surfaces = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    assert!(
+        surfaces
+            .lines()
+            .any(|line| line.contains("\"event\":\"abandoned\"") && line.contains(&correlation)),
+        "the session that ended left its question unmarked: {surfaces}"
+    );
+
+    let relistened = world.run_with_stdin_on(
+        session("30"),
+        &format!("{{\"correlation\":\"{correlation}\"}}\n"),
+    );
+    relistened.exited(0);
+    let answered = first_line(&relistened.stdout);
+    assert_eq!(answered["answer"], json!("abandoned"), "{answered}");
+    assert_eq!(answered["correlation"], json!(correlation), "{answered}");
+    for field in ["completion", "message", "reason"] {
+        assert!(
+            answered.get(field).is_none(),
+            "an abandoned question was answered with a ruling's `{field}`: {answered}"
+        );
+    }
+    world.release("build.go");
+}
+
+/// A record on the reply log echoing a question's correlation that is not a
+/// reply this build reads is refused by the listener waiting on that question,
+/// naming the question, and is never relayed to the member as a ruling.
+#[test]
+fn a_reply_record_the_listener_cannot_read_is_refused_rather_than_relayed() {
+    use std::io::Write;
+
+    let world = World::new("channel-serve-unreadable-reply");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unreadablereply", vec![agent("build", &[])]);
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "60");
+    let mut serving = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let question = "is this answer readable?";
+    writeln!(stdin, r#"{{"kind":"blocker","message":"{question}"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+
+    let mut correlation = String::new();
+    world.until("the question to be queued", |world| {
+        correlation = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["message"] == json!(question))
+            .and_then(|record| record["correlation"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        !correlation.is_empty()
+    });
+
+    // Written by hand, as nothing this crate writes would be: a record echoing
+    // the question whose verdict's `completion` is not a boolean.
+    let mut replies = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(world.run_file(&run, "channel/replies.jsonl"))
+        .expect("the reply log opens");
+    writeln!(
+        replies,
+        "{}",
+        json!({"id": 0, "reply": {"completion": "not a boolean"}, "at": 1, "correlation": correlation})
+    )
+    .expect("the record is appended");
+    drop(replies);
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(REFUSED), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains(&correlation),
+        "the refusal does not name the question: {stderr}"
+    );
+    assert!(
+        !stdout.contains("not a boolean"),
+        "the unreadable record was relayed to the member: {stdout}"
+    );
+    world.release("build.go");
+}
+
 /// A ruling the planner sends after the wait elapsed reaches the listener that
 /// re-arms on the question, rather than being lost.
 ///

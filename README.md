@@ -354,18 +354,12 @@ waiting for something to drive the run, and never an instruction to send again,
 which the reply says in words on stderr — and `2` when it was refused. A
 non-zero status from this verb is a rejection to correct.
 
-A verdict answers one question. Each question `onepipeline channel serve` raises
-carries a correlation, and `reply --correlation C` binds a verdict to the question
-`C` names, refusing by name a correlation no pending question holds. A verdict
-naming none is bound to the question whose `ask-manager-token:` its `message`
-echoes, then to the question the pending slot holds, then to the oldest one a live
-listener waits on; with none of those it is queued unbound, for the next listener
-to read. A question nobody answers within the server's reply window is answered
-on its stdout with `{"answer": "timeout", "correlation": C}`, which carries no
-completion and appends no reply: the question stays queued, and a frame
-`{"correlation": C}` waits for its answer again. The window is
-`ONEPIPELINE_REPLY_TIMEOUT_SECONDS`, else the run's bus configuration's
-`codecs.onejudge.reply_window_seconds`, else the shipped default.
+A verdict answers one question: `reply --correlation C` names it, and one naming
+none binds first to the question whose `ask-manager-token:` its `message` echoes.
+The whole binding order is the channel section of
+[`docs/contract.md`](docs/contract.md), and what `channel serve` answers when
+nobody rules in time is entry 77 of
+[`docs/contract-divergences.md`](docs/contract-divergences.md).
 
 Two of those ops reach a node that is already running, and they are deliberately
 not the same lever:
@@ -446,32 +440,15 @@ submission check is the only place a refusal is still whole. It is named by
 config's `envelope_reviewer`, in that order of precedence; naming none is the
 default and runs no reviewer at all.
 
-A reviewer may be given a **bar**: a command whose output fingerprints what the
-reviewer judges against, such as its prompt or a criteria revision. With one, each
-pass is kept under `validator-passes/` in the run's own directory, keyed on the
-envelope's document and on what the bar prints when the pass is looked for. An
-identical envelope under an unmoved bar is not offered to the reviewer again, and a
-bar that prints something else runs the reviewer again. Only a pass is kept: a
-refusal, and a reviewer that gives no verdict, record nothing. A bar that fails or
-prints nothing keeps no pass and says so on stderr, and that envelope is reviewed
-uncached. It is named by `--envelope-reviewer-bar COMMAND`, by
-`ONEPIPELINE_ENVELOPE_REVIEWER_BAR`, or by a launch config's
-`envelope_reviewer_bar`, in that order of precedence. The node validator keeps no
-passes.
+A reviewer may also be given a **bar** — a command whose output fingerprints what
+the reviewer judges against — so that an envelope it already passed under an
+unmoved bar is not offered to it again. Entry 77 of
+[`docs/contract-divergences.md`](docs/contract-divergences.md) says how the bar is
+named and what is kept.
 
-A launch may also keep its channel under an **`onemessagebus` configuration**,
-named by `--bus-config PATH` or by a launch config's `bus_config` and resolved
-against the launch directory as a graph is. It is read and checked before the run
-exists, and the launch record keeps it. Its `authors` block may narrow what an
-author may issue and never widen it: an op it took away is refused naming the
-author, the op and the reason, and nothing is queued. Its `validators` judge what
-a reply and a `channel serve` question offer the channel's queues, and a refusal
-carries the validator's own stderr. Its `codecs.onejudge.reply_window_seconds` sets
-how long `channel serve` waits for an answer. The transport is always the local one
-over the run's own channel directory and the layout always `planner-channel`, so a
-configuration naming another transport, a `transport.dir`, another profile, queues
-of its own, or an `authors` block that widens a grant is refused at the launch,
-naming the key and its value, and no run is created.
+A launch may also keep its channel under an **`onemessagebus` configuration**
+(`--bus-config PATH`). What that configuration may set, and what the launch
+refuses, is the channel section of [`docs/contract.md`](docs/contract.md).
 
 A launch may also set the **write-back item budget** — how long the settlement
 write-back allows its store's `project copy` per item it writes. The copy's

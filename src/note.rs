@@ -705,7 +705,7 @@ pub(crate) fn carry(
 ///
 /// [`Error::Invalid`] naming the store when it is not one this build can read,
 /// which ends the dispatch as an unreadable journal record does.
-pub(crate) fn adopt_carried(paths: &RunPaths, node: &str, standing: Standing) -> Result<Standing> {
+pub(crate) fn drain_carried(paths: &RunPaths, node: &str, standing: Standing) -> Result<Standing> {
     let store = carry_store(paths, node);
     let inbox = onemessagebus::Inbox::<Note, Accepted>::new();
     inbox.adopt_carried(&store).map_err(|why| {
@@ -1134,7 +1134,7 @@ mod tests {
             delivered(2, "later", "second", Reached::Carried),
         ];
         let owed = standing(&journal, "later").expect("the fold reads");
-        let adopted = adopt_carried(&paths, "later", owed.clone()).expect("the store reads");
+        let adopted = drain_carried(&paths, "later", owed.clone()).expect("the store reads");
         assert_eq!(texts(&adopted), vec!["first", "second"]);
         assert_eq!(
             adopted, owed,
@@ -1152,14 +1152,14 @@ mod tests {
         );
 
         // Drained already, the fold still owes both until a dispatch is announced.
-        let again = adopt_carried(&paths, "later", owed).expect("an empty store reads");
+        let again = drain_carried(&paths, "later", owed).expect("an empty store reads");
         assert_eq!(texts(&again), vec!["first", "second"]);
         // A node nothing was carried to has no store, and that is no refusal.
-        let none = adopt_carried(&paths, "never", Standing::default()).expect("no store");
+        let none = drain_carried(&paths, "never", Standing::default()).expect("no store");
         assert!(none.held.is_empty());
 
         std::fs::write(carry_store(&paths, "later"), "not a carry store\n").expect("written");
-        let refused = adopt_carried(&paths, "later", Standing::default())
+        let refused = drain_carried(&paths, "later", Standing::default())
             .expect_err("a store this build cannot read is refused");
         assert!(
             refused.to_string().contains("node 'later'")

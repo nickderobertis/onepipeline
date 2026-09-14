@@ -281,9 +281,10 @@ smoke-real:
     @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all
 
 # Drives the compiled binary — never an in-process `main()`.
-# The end-to-end binary journeys in isolation (also run by `test`/`check`).
-test-e2e:
-    @cargo nextest run --locked -E 'binary(e2e)'
+# The end-to-end binary journeys in isolation (also run by `test`/`check`),
+# narrowed to the journeys a nextest filter names when one is given.
+test-e2e filter="":
+    @cargo nextest run --locked -E 'binary(e2e){{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
 
 # Each journey starts a real two-party conversation and holds one side's turn
 # open, which is what makes them their own binary and their own Nx project.
