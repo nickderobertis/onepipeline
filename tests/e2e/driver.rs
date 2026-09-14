@@ -4342,7 +4342,7 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
     // states the same fixture the same way. It is here because the close-out has to stay
     // open long enough for a planner to type a reply into it, and how long a store takes to
     // refuse is not something the CLI exposes an input for.
-    let capture = world.run_file(run, "writeback-task-list.stdout");
+    let capture = world.run_file(run, "writeback-project-show.stdout");
     world.until("the first projection to leave its capture behind", |_| {
         capture.is_file()
     });
@@ -4433,7 +4433,7 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
     // states the same fixture the same way. It is here because the driver has to hold the
     // run without claiming its queue for long enough for a planner to type a reply into
     // that window, and how long a store takes to refuse is not an input the CLI exposes.
-    let capture = world.run_file(&run, "writeback-task-list.stdout");
+    let capture = world.run_file(&run, "writeback-project-show.stdout");
     world.until("the first projection to leave its capture behind", |_| {
         capture.is_file()
     });

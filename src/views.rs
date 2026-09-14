@@ -117,6 +117,18 @@ pub use crate::watchers::{Watch, WatchStanding, WatcherRecord, Watchers, WATCHER
 /// this.
 pub use crate::telemetry::{Bucket, BucketName, Party, RunTelemetry, Usage};
 
+/// One settlement write-back projection attempt, as a run records it.
+///
+/// Re-exported where the views are, because it is read the way a view is: what a run's
+/// projections carried, how each ended and what it spent, off the run's own directory rather
+/// than off a store. The six types beside it are what one line is made of — a field a
+/// consumer cannot name is a field it cannot read — and entry 73 of
+/// `docs/contract-divergences.md` is the one statement of the line's shape.
+pub use crate::writeback::{
+    FailureClass, ProjectionActions, ProjectionEnded, ProjectionFailure, ProjectionRecord,
+    ProjectionScope, WholeBecause,
+};
+
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).
 ///
