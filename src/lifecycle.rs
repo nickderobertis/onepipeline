@@ -140,7 +140,9 @@ pub fn execute(
         // ruling issued during one attempt is in the hands of the judge that
         // rules on the next. Read here, once, and handed to both the record and
         // the composition, so the two cannot name different notes.
-        notes = match crate::note::standing_for(paths, &node.id) {
+        notes = match crate::note::standing_for(paths, &node.id)
+            .and_then(|standing| crate::note::adopt_carried(paths, &node.id, standing))
+        {
             Ok(standing) => standing.notes(),
             // A record this build cannot read is refused rather than read past:
             // continuing without the notes would compose the very dispatch this

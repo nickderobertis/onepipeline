@@ -3422,7 +3422,7 @@ fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<A
         });
     }
     let journal = journal::read(&paths.journal());
-    let standing = crate::note::standing(&journal, node)?;
+    let standing = crate::note::adopt_carried(paths, node, crate::note::standing(&journal, node)?)?;
     let mut spent = standing.read();
     for superseded in supersedes {
         spent.extend(crate::note::standing(&journal, superseded)?.notes());
@@ -5107,6 +5107,25 @@ pub(crate) fn record_operation_facts(
                     Some(evidence),
                 ),
             )?,
+            // A note no turn took is owed to the node's next dispatch: the commit
+            // just journalled says so, and the bus's carry store is what hands it
+            // over when that dispatch is composed.
+            edits::Operation::NoteDelivered {
+                node,
+                addressee,
+                text,
+                criterion,
+                reached: crate::note::Reached::Carried,
+                ..
+            } => {
+                let note =
+                    crate::note::of(*addressee, text, criterion.as_ref()).map_err(|why| {
+                        Error::Invalid(format!(
+                            "note: node '{node}': the note to carry could not be built: {why}"
+                        ))
+                    })?;
+                crate::note::carry(paths, node, note)?;
+            }
             _ => {}
         }
     }

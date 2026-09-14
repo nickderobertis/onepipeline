@@ -984,6 +984,15 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         "the dispatch a note was carried to reported it spent: {}",
         records[0]
     );
+    // It was carried through the bus's carry store, and the dispatch it reached
+    // drained it: what is left is the store's header line and no note.
+    let store = std::fs::read_to_string(world.run_file(run, "notes/later.carried.jsonl"))
+        .expect("the note was carried through a carry store");
+    let lines: Vec<&str> = store.lines().collect();
+    assert!(
+        lines.len() == 1 && lines[0].contains("onemessagebus-carry-store"),
+        "the dispatch a note was carried to did not drain its carry store:\n{store}"
+    );
     // The carried record is not the last word on the note: the dispatch it was
     // carried to shows it — the opening turn as the task, the judge's answer
     // after — and each presentation is recorded as its stream showed it.
