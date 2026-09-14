@@ -476,6 +476,10 @@ not hand it back when the terminator lands. That half is sound.
 read does not fail the node, and the loss is said out loud rather than folded
 into an empty stream.
 
+Half of it is answered by `onevcs` 0.24.0, which reads its stream through the bus
+reader and hands back the whole records before a torn line. The other half — the
+line is not reported — is what entry 74 proposes it expose.
+
 ## 18. No lifecycle journey runs on Windows — OPEN
 
 **Proposal (for `onevcs`): store, or hand git, a path git will clone from on
@@ -5567,10 +5571,25 @@ it as a regression:
   `include[0]`, and `EventFilter::{parse, read, validate}` answer the bus's
   `FilterError`; a `Filters` block still validates every filter it carries where it
   is read.
-- **A torn session stream is read for its whole records.** `onevcs` 0.24.0 reads its
-  stream through the same reader, so an unterminated record is handed over once its
-  newline lands rather than refusing the batch, and a session whose last commit
-  record is half written answers the branch its whole records put it at.
+- **A torn session stream is read for its whole records, and the tear is not
+  reported — proposal (for `onevcs`).** `onevcs` 0.24.0 reads its stream through
+  the bus reader, so the whole records before a torn final line are handed back
+  rather than the batch being refused (half of entry 17's proposal), and the torn
+  line is held back until its newline lands. Its library seam hands back the
+  records and nothing about the line it held back. So a session whose last record
+  is torn now answers `SessionTip::Unmoved` where it answered `Unknown`: the
+  property lost is that a reader deciding on the **absence** of a record cannot
+  tell *nothing was written* from *a record was torn* at that seam. This crate
+  takes the narrowing as forced — it reads the stream through that seam and writes
+  no second reader of the file beside it — and it is confined to the tip read:
+  `src/lifecycle.rs`'s republication comparison is unchanged.
+  `a_session_tip_tells_a_branch_that_did_not_move_from_one_nothing_could_read` and
+  `a_session_stream_that_is_not_whole_is_read_for_what_it_holds` in `src/vcs.rs`
+  hold the new answer. What would restore it: `EventStream` exposing the reader's
+  own `Torn` report — whether the read stopped before an unterminated final line,
+  and where it begins — beside the records it hands back, so `session_tip` answers
+  `Unknown` for a stream holding a torn tail and `Unmoved` only for one that holds
+  none.
 - **Three shapes of the public surface moved with the types.** An envelope carries
   its phase as `dimensions.phase`; `ArtifactRef.id` is a `String`, while `ArtifactId`
   stays this crate's own newtype, as it stays `onevcs`'s; and

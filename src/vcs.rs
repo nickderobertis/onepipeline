@@ -2824,11 +2824,15 @@ mod tests {
             SessionTip::Unmoved
         );
 
-        // A stream cut mid-record: the sibling's reader is the bus reader, which
-        // reads a line no newline has ended as a record its writer has not
-        // finished — not handed over, and not a refusal of the records before it
-        // — so the branch stands where the whole records put it, and the commit
-        // is read the moment its line is.
+        // A stream cut mid-record. This answered `Unknown` before `onevcs` 0.24.0:
+        // its typed reader refused the whole batch, so the session was one this
+        // crate could not read. That release reads its stream through the bus
+        // reader, which hands back the whole records before a line no newline has
+        // ended and holds that line back without saying so — so the branch stands
+        // where the whole records put it, and the commit is read the moment its
+        // line is. What is lost is telling a torn record from no record at all:
+        // entry 74 of `docs/contract-divergences.md` proposes `onevcs` expose the
+        // reader's torn report so this can answer `Unknown` again.
         let torn = "s-tip-torn";
         let whole = committed(torn, "decaf");
         write(torn, format!("{}\n{}", opened(torn), &whole[..20]));
@@ -2959,9 +2963,13 @@ mod tests {
             "the terminator arriving lost the record or handed one back a second time"
         );
 
-        // A line that is not a whole envelope — a stream cut mid-record. The
-        // whole records before it are handed back, and the torn one alone is
-        // not: it is the line its writer has not finished.
+        // A line that is not a whole envelope — a stream cut mid-record. Before
+        // `onevcs` 0.24.0 this handed back nothing: its typed reader refused the
+        // batch, and the whole record before the tear was lost with it (entry 17
+        // of `docs/contract-divergences.md`). That release reads through the bus
+        // reader, so the whole records before it are handed back and the torn one
+        // alone is not — held back as the line its writer has not finished, and
+        // reported nowhere this crate can read, which entry 74 proposes it expose.
         let cut = "s-cutmidline";
         let whole = record(cut, 1, "session-opened");
         let partial = record(cut, 2, "push");
