@@ -567,6 +567,7 @@ fn this_build_reads_a_journal_the_release_before_the_bus_wrote_as_it_did() {
     )
     .expect("a launch record");
     std::fs::write(dir.join("events.jsonl"), BEFORE_BUS).expect("a journal");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world
         .cmd(&["results", "before-bus"])
