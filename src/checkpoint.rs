@@ -891,7 +891,7 @@ mod tests {
             seq,
             source: Source::Agentgraph,
             kind: EventKind("turn-activity".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 run_id: Some(paths.run.clone()),
                 node: Some(node.to_string()),

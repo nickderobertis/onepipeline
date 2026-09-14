@@ -2429,7 +2429,7 @@ mod tests {
             seq,
             source: crate::event::Source::Vcs,
             kind: crate::event::EventKind("session-closed".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: serde_json::Map::new(),
             artifacts: Vec::new(),

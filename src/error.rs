@@ -101,6 +101,14 @@ impl Error {
     }
 }
 
+/// A filter spec the grammar refused is external input this crate does not
+/// accept, carrying the grammar's own sentence about which matcher and why.
+impl From<onemessagebus::FilterError> for Error {
+    fn from(refusal: onemessagebus::FilterError) -> Self {
+        Self::Invalid(refusal.0)
+    }
+}
+
 /// The result of anything in this crate that can fail.
 pub type Result<T> = std::result::Result<T, Error>;
 

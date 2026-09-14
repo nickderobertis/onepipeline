@@ -79,7 +79,7 @@ impl Journal {
             // This crate's own kinds, which no producer classifies into one of
             // `onevcs`'s phases: a phase here would be a classification invented
             // rather than relayed.
-            phase: None,
+            dimensions: Default::default(),
             labels,
             payload,
             artifacts: Vec::new(),
@@ -210,9 +210,9 @@ pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
 /// whole one: it is a record the store really holds, and losing it was how the
 /// event reporting that writer's death disappeared.
 pub fn read(path: &Path) -> Vec<Envelope> {
-    ledger::read_records(path)
-        .iter()
-        .filter_map(|record| match reading(record) {
+    ledger::read_envelope_lines(path, 0)
+        .into_iter()
+        .filter_map(|line| match reading(line, path) {
             Reading::Whole(envelope) => Some(envelope),
             Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
@@ -229,14 +229,15 @@ pub fn read(path: &Path) -> Vec<Envelope> {
 /// would leave the count short for ever and every later read of that run would
 /// re-read the whole store.
 pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
-    ledger::read_records_from(path, from)
-        .iter()
-        .map(|record| {
-            let whole = match reading(record) {
+    ledger::read_envelope_lines(path, from)
+        .into_iter()
+        .map(|line| {
+            let occupies = line.bytes + u64::from(line.terminated);
+            let whole = match reading(line, path) {
                 Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
                 Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
             };
-            (whole, record.bytes + u64::from(record.terminated))
+            (whole, occupies)
         })
         .collect()
 }
@@ -253,15 +254,16 @@ pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)>
 /// file holds and a boundary that skipped it would be short for ever.
 pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let mut grown = Vec::new();
-    for record in ledger::read_records_from(path, from) {
-        if !record.terminated {
+    for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
             break;
         }
-        let whole = match reading(&record) {
+        let occupies = line.bytes + 1;
+        let whole = match reading(line, path) {
             Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
         };
-        grown.push((whole, record.bytes + 1));
+        grown.push((whole, occupies));
     }
     grown
 }
@@ -283,12 +285,12 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
 pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     let mut at = from;
     let mut events = Vec::new();
-    for record in ledger::read_records_from(path, from) {
-        if !record.terminated {
+    for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
             break;
         }
-        at += record.bytes + 1;
-        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(&record) {
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
             events.push(envelope);
         }
     }
@@ -303,12 +305,14 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
 /// schema this build does not know — what strict replay is about is that
 /// *something* the graph may have turned on is not there.
 pub fn has_unreadable_lines(path: &Path) -> bool {
-    ledger::read_records(path).iter().any(|record| {
-        matches!(
-            reading(record),
-            Reading::Glued { .. } | Reading::Truncated | Reading::Unparseable
-        )
-    })
+    ledger::read_envelope_lines(path, 0)
+        .into_iter()
+        .any(|line| {
+            matches!(
+                reading(line, path),
+                Reading::Glued { .. } | Reading::Truncated | Reading::Unparseable
+            )
+        })
 }
 
 /// What one line of the journal turned out to be.
@@ -334,31 +338,37 @@ enum Reading {
 
 /// Which of the five a line is.
 ///
-/// The distinction a reader could not previously draw. An unterminated final
-/// line is a fragment whatever its parse says — the writer had not finished it —
-/// and among the terminated ones `serde_json`'s own `is_eof` separates a record
-/// that stops early from one that is whole and unreadable.
+/// The distinction a reader could not previously draw. The bus reader decides
+/// the first half: a line it read whole is a record, and the one it reports torn
+/// is a fragment whatever its bytes say — the writer had not finished it. What
+/// is left is every line it refused, and that is where this crate's own classes
+/// are drawn: a blank line, a fragment with a whole record glued after it, a
+/// record that stops early — told apart by `serde_json`'s own `is_eof` over the
+/// line as JSON — and a line that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
-fn reading(record: &ledger::Record) -> Reading {
-    if record.text.trim().is_empty() {
+fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
+    if let Some(envelope) = line.envelope {
+        return Reading::Whole(envelope);
+    }
+    let text = line.text(path);
+    if text.trim().is_empty() {
         return Reading::Blank;
     }
-    // The terminator first, and before the parse, because a record is finished
-    // when its newline lands and not before: an append writes the record and its
-    // terminator in one call, so a line that parses whole and ends without one
-    // is a write that stopped in the middle — and the next append discards it as
-    // exactly that. A reader that counted it as a record would hand back a
-    // record the store is about to say it lost.
-    if !record.terminated {
+    // The terminator before anything else the line holds, because a record is
+    // finished when its newline lands and not before: an append writes the record
+    // and its terminator in one call, so a line that parses whole and ends
+    // without one is a write that stopped in the middle — and the next append
+    // discards it as exactly that. The reader reports that line torn rather than
+    // handing it back, which is the same rule.
+    if !line.terminated {
         return Reading::Truncated;
     }
-    match serde_json::from_str::<Envelope>(&record.text) {
-        Ok(envelope) => Reading::Whole(envelope),
-        Err(e) => match glued_tail(&record.text) {
-            Some((lost, envelope)) => Reading::Glued { lost, envelope },
-            None if e.is_eof() => Reading::Truncated,
-            None => Reading::Unparseable,
-        },
+    match glued_tail(&text) {
+        Some((lost, envelope)) => Reading::Glued { lost, envelope },
+        None if serde_json::from_str::<Value>(&text).is_err_and(|e| e.is_eof()) => {
+            Reading::Truncated
+        }
+        None => Reading::Unparseable,
     }
 }
 
@@ -482,23 +492,23 @@ pub fn integrity(path: &Path) -> Integrity {
         healed: ledger::torn_tails(path),
         ..Integrity::default()
     };
-    for record in ledger::read_records(path) {
-        let bytes = record.bytes;
-        match reading(&record) {
+    for line in ledger::read_envelope_lines(path, 0) {
+        let (number, offset, bytes) = (line.line, line.offset, line.bytes);
+        match reading(line, path) {
             Reading::Whole(_) | Reading::Blank => {}
             Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes: lost,
             }),
             Reading::Truncated => integrity.truncated.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes,
             }),
             Reading::Unparseable => integrity.unparseable.push(Loss {
-                line: record.line,
-                offset: record.offset,
+                line: number,
+                offset,
                 bytes,
             }),
         }
@@ -737,7 +747,7 @@ mod tests {
             seq: 3,
             source: Source::Agentgraph,
             kind: EventKind("turn-message".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload,
             artifacts: Vec::new(),
@@ -1061,7 +1071,7 @@ mod tests {
             seq: 7,
             source: Source::Agentgraph,
             kind: EventKind("turn-finished".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: labels("demo", Some("build")),
             payload: payload(&[]),
             artifacts: Vec::new(),
@@ -1083,7 +1093,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: EventKind("k".into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: Map::new(),
             artifacts: Vec::new(),

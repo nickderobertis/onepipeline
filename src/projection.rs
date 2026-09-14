@@ -805,7 +805,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     // `a_record_written_at_an_envelope_version_this_build_does_not_read_is_reported`.
     // What a user *can* reach — a journal at version 1 — is driven end to end by
     // `tests/e2e/compatibility.rs`.
-    if !event.written_at_a_known_version() {
+    if !crate::event::written_at_a_known_version(event) {
         state.strict = false;
         return;
     } // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1774,7 +1774,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: kind.into(),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 node: node.map(str::to_string),
                 ..labels("demo", None)

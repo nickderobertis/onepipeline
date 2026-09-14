@@ -945,7 +945,7 @@ impl Watch {
                     .and_then(|node| node.persona.as_deref()),
             );
             for mut envelope in crate::vcs::events(session.token(), filter) {
-                if envelope.phase != Some(crate::event::Phase::Release) {
+                if envelope.dimensions.phase != Some(crate::event::Phase::Release) {
                     continue;
                 }
                 if !relayed.beyond(&envelope) {

@@ -97,7 +97,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
     assert!(
         opening
             .iter()
-            .any(|envelope| envelope.kind == onevcs::EventKind::SessionOpened),
+            .any(|envelope| envelope.kind
+                == onemessagebus::Kind::from(onevcs::EventKind::SessionOpened)),
         "the session's own opening is not on its stream: {opening:?}"
     );
     assert!(
@@ -157,13 +158,15 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
     assert!(
         publishing
             .iter()
-            .any(|envelope| envelope.kind == onevcs::EventKind::ChangeOpened),
+            .any(|envelope| envelope.kind
+                == onemessagebus::Kind::from(onevcs::EventKind::ChangeOpened)),
         "the change request the publication opened is not on the stream: {publishing:?}"
     );
     assert!(
         !publishing
             .iter()
-            .any(|envelope| envelope.kind == onevcs::EventKind::SessionOpened),
+            .any(|envelope| envelope.kind
+                == onemessagebus::Kind::from(onevcs::EventKind::SessionOpened)),
         "a second read handed back records the first already relayed: {publishing:?}"
     );
 

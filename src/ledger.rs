@@ -1502,6 +1502,98 @@ pub fn read_records_from(path: &Path, from: u64) -> Vec<Record> {
     records_of(&bytes, from)
 }
 
+/// One line of a run's journal as the bus [`Reader`](onemessagebus::Reader) read
+/// it, and where in the file it is.
+///
+/// The journal's envelope lines are decoded by that reader and by nothing here:
+/// a line it read whole carries the envelope, and any other line carries only its
+/// place, for a caller deciding what a line that is not an envelope is.
+pub(crate) struct EnvelopeLine {
+    /// The 1-based line number, counted from where the read began.
+    pub(crate) line: usize,
+    /// Where the line begins in the file.
+    pub(crate) offset: u64,
+    /// How many bytes of the file the line is, without its terminator.
+    pub(crate) bytes: u64,
+    /// Whether a newline ended it: the reader's own torn report is the one line
+    /// that is `false`.
+    pub(crate) terminated: bool,
+    /// The envelope, where the reader read the line as a whole one.
+    pub(crate) envelope: Option<crate::event::Envelope>,
+}
+
+impl EnvelopeLine {
+    /// The line's own bytes, decoded leniently and without a trailing `\r`.
+    ///
+    /// Asked only of a line the reader did not read as an envelope — a torn tail
+    /// or a refused line — which is rare, so it is read again from the file
+    /// rather than held for every line of every read.
+    pub(crate) fn text(&self, path: &Path) -> String {
+        read_range(path, self.offset, self.bytes)
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .trim_end_matches('\r')
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Every line of a run's journal from its first `from` bytes, as the bus reader
+/// read each one, or nothing where the file cannot be read from there.
+///
+/// The one decoder of journal envelope lines. `from` is a record boundary, as
+/// [`read_records_from`] requires; a file that does not exist, cannot be opened,
+/// or is shorter than `from` reads as holding nothing past it, which is the rule
+/// every ledger reader here follows.
+pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
+    // ledger reader here follows, stated on `read_records` above: a file this process
+    // cannot open reads as one that is not there.
+    let Ok(reader) = onemessagebus_agent::Reader::open_at(path, from) else {
+        return Vec::new();
+    };
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
+    let mut lines = Vec::new();
+    let mut start = from;
+    for (index, reading) in reader.enumerate() {
+        let line = index + 1;
+        match reading {
+            onemessagebus::Reading::Record(record) => {
+                lines.push(EnvelopeLine {
+                    line,
+                    offset: start,
+                    bytes: record.position - start - 1,
+                    terminated: true,
+                    envelope: Some(record.envelope),
+                });
+                start = record.position;
+            }
+            onemessagebus::Reading::Refused(refused) => {
+                lines.push(EnvelopeLine {
+                    line,
+                    offset: refused.at,
+                    bytes: refused.position - refused.at - 1,
+                    terminated: true,
+                    envelope: None,
+                });
+                start = refused.position;
+            }
+            onemessagebus::Reading::Torn(torn) => {
+                lines.push(EnvelopeLine {
+                    line,
+                    offset: torn.at,
+                    bytes: torn.bytes,
+                    terminated: false,
+                    envelope: None,
+                });
+                start = torn.at + torn.bytes;
+            }
+        }
+    }
+    counted(usize::try_from(start - from).unwrap_or(usize::MAX), lines)
+}
+
 /// The **raw bytes** of a byte range of a file, or `None` where the file does not
 /// hold all of them.
 ///

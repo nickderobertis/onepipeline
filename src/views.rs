@@ -3575,7 +3575,7 @@ mod tests {
             seq: 0,
             source,
             kind,
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 run_id: Some("demo".into()),
                 round: Some(1),
@@ -4277,6 +4277,7 @@ mod tests {
             history_dir: "/store".into(),
             history_project: "project".into(),
             history_session: "record-1".into(),
+            truncated: false,
         };
         let mut envelope = relayed(
             EventKind("oneharness-session".into()),
@@ -4466,6 +4467,7 @@ mod tests {
             reason: reason.into(),
             role: None,
             turn: None,
+            truncated: false,
         };
         let single = Refusal {
             advanced: advance("auth"),
@@ -4818,6 +4820,7 @@ mod tests {
                 reason: "quota".into(),
                 role: Some(oneagentgraph::event::Role::Agent),
                 turn: Some(1),
+                truncated: false,
             },
             member: MemberLabel::Named("worker".into()),
             records: std::num::NonZeroU64::MIN,

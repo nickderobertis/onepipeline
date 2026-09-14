@@ -4832,6 +4832,7 @@ pub(crate) fn dispatch_labels(
         round: None,
         node: Some(node.to_string()),
         step: step.map(str::to_string),
+        member: None,
         persona: persona.map(str::to_string),
         extra: serde_json::Map::new(),
     }
@@ -6155,7 +6156,7 @@ mod tests {
             seq: 0,
             source,
             kind: crate::event::EventKind(kind.into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: match cause {
                 Some(cause) => serde_json::json!({"rule": "provider-failure", "cause": cause})
@@ -6241,7 +6242,7 @@ mod tests {
                 seq: 0,
                 source: Source::Agentgraph,
                 kind: crate::event::EventKind(kind.as_str().into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels,
                 payload: payload.as_object().cloned().expect("an object"),
                 artifacts: Vec::new(),
@@ -6260,6 +6261,7 @@ mod tests {
                     history_dir: "/h".into(),
                     history_project: "p".into(),
                     history_session: "s".into(),
+                    truncated: false,
                 })
                 .expect("it serialises"),
             )
@@ -6274,6 +6276,7 @@ mod tests {
                         reason: reason.into(),
                         role: side.map(|(role, _)| role),
                         turn: side.map(|(_, turn)| turn),
+                        truncated: false,
                     })
                     .expect("it serialises"),
                 )
@@ -6490,7 +6493,7 @@ mod tests {
             kind: crate::event::EventKind(
                 oneagentgraph::event::EventKind::MemberDied.as_str().into(),
             ),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels::default(),
             payload: written.as_object().cloned().expect("an object"),
             artifacts: Vec::new(),
@@ -6529,7 +6532,7 @@ mod tests {
                 seq: 0,
                 source: crate::event::Source::Agentgraph,
                 kind: crate::event::EventKind(kind.into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels: Labels::default(),
                 payload: payload
                     .as_object()
@@ -6959,7 +6962,7 @@ mod tests {
                 seq: 0,
                 source,
                 kind: crate::event::EventKind("turn-started".into()),
-                phase: None,
+                dimensions: Default::default(),
                 labels,
                 payload: serde_json::Map::new(),
                 artifacts: Vec::new(),

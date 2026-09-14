@@ -642,7 +642,7 @@ fn the_grammar_matches_the_way_the_contract_says_it_does() {
         seq: 0,
         source,
         kind: EventKind(kind.into()),
-        phase: None,
+        dimensions: Default::default(),
         labels,
         payload: Default::default(),
         artifacts: Vec::new(),
@@ -3167,13 +3167,56 @@ fn an_envelope_round_trips_through_the_merged_streams_shape() {
     assert_eq!(
         envelope.artifacts,
         vec![ArtifactRef {
-            id: ArtifactId("gate-log".into()),
+            id: "gate-log".into(),
             kind: "log".into(),
             bytes: 8192
         }]
     );
 
     assert_eq!(serde_json::to_value(&envelope).expect("serializes"), wire);
+}
+
+/// Every item `onepipeline::event` and `onepipeline::filter` published before the
+/// wire moved onto the bus still resolves at the same path, and the envelope, its
+/// labels, source, phase and artifact, the kind, the filter and the matcher are
+/// the bus's own types rather than copies of them.
+///
+/// A type named twice is proven one type by handing both names to a function
+/// that takes one: a copy, however faithful, does not compile here.
+#[test]
+fn the_wire_types_resolve_where_they_did_and_are_the_buss_own() {
+    fn one_type<T>(_: std::marker::PhantomData<T>, _: std::marker::PhantomData<T>) {}
+    use std::marker::PhantomData as Named;
+    one_type(Named::<Envelope>, Named::<onemessagebus_agent::Envelope>);
+    one_type(Named::<Labels>, Named::<onemessagebus_agent::Labels>);
+    one_type(Named::<Source>, Named::<onemessagebus_agent::Source>);
+    one_type(Named::<Phase>, Named::<onemessagebus_agent::Phase>);
+    one_type(Named::<ArtifactRef>, Named::<onemessagebus::ArtifactRef>);
+    one_type(Named::<EventKind>, Named::<onemessagebus::Kind>);
+    one_type(
+        Named::<EventFilter>,
+        Named::<onemessagebus_agent::EventFilter>,
+    );
+    one_type(Named::<Matcher>, Named::<onemessagebus_agent::Matcher>);
+    // And the sibling that relays into this crate holds the same ones.
+    one_type(Named::<Envelope>, Named::<onevcs::Envelope>);
+    one_type(Named::<Envelope>, Named::<oneagentgraph::event::Envelope>);
+
+    // The rest of what the two modules published, at the same paths.
+    assert_eq!(ENVELOPE_VERSIONS_READ.first(), Some(&ENVELOPE_VERSION));
+    assert_eq!(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES, 4096);
+    assert_eq!(
+        PipelineKind::from_wire(&EventKind::from("run-started")),
+        PIPELINE_KINDS.first().copied()
+    );
+    assert_eq!(ArtifactId("gate-log".into()).0, "gate-log");
+    assert_eq!(onepipeline::filter::DEFAULT_PROFILE, "planner");
+    assert_eq!(onepipeline::filter::MONITOR_PROFILE, "monitor");
+    assert_eq!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.first(),
+        Some(&LAUNCH_CONFIG_SCHEMA_VERSION)
+    );
+    assert_eq!(LaunchConfig::default().filters, Filters::default());
 }
 
 #[test]
@@ -3308,7 +3351,7 @@ fn the_envelopes_phase_is_the_siblings_own_vocabulary_and_all_of_it() {
         "artifacts": []
     });
     let envelope: Envelope = serde_json::from_value(without.clone()).expect("parses");
-    assert_eq!(envelope.phase, None);
+    assert_eq!(envelope.dimensions.phase, None);
     assert_eq!(
         serde_json::to_value(&envelope).expect("serializes"),
         without
@@ -3317,7 +3360,7 @@ fn the_envelopes_phase_is_the_siblings_own_vocabulary_and_all_of_it() {
     let mut with = without.clone();
     with["phase"] = json!("release");
     let envelope: Envelope = serde_json::from_value(with.clone()).expect("parses");
-    assert_eq!(envelope.phase, Some(Phase::Release));
+    assert_eq!(envelope.dimensions.phase, Some(Phase::Release));
     assert_eq!(serde_json::to_value(&envelope).expect("serializes"), with);
 }
 

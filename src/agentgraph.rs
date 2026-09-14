@@ -2306,6 +2306,7 @@ fn published(
         delivered: reason.is_none(),
         input_bytes,
         reason,
+        truncated: false,
     };
     emitter.emit(
         oneagentgraph::event::EventKind::TurnInterrupted,
@@ -3415,7 +3416,8 @@ mod tests {
             stream: "node-scope-1786304152340-19".into(),
             seq: 7,
             source: oneagentgraph::event::Source::Agentgraph,
-            kind: oneagentgraph::event::EventKind::TurnActivity,
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
             labels,
             payload: serde_json::Map::new(),
             artifacts: Vec::new(),
@@ -3672,6 +3674,7 @@ mod tests {
             round: Some(2),
             node: Some("build".into()),
             step: Some("implement".into()),
+            member: None,
             persona: Some("engineer".into()),
             extra: serde_json::Map::new(),
         };

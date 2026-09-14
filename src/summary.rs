@@ -1800,7 +1800,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: EventKind(kind.as_str().into()),
-            phase: None,
+            dimensions: Default::default(),
             labels: Labels {
                 run_id: Some(run.to_string()),
                 node: Some("build".into()),
