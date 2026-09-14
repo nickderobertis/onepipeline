@@ -318,9 +318,11 @@ struct RunChanges {
 /// What the last read of the run said about its driver.
 #[derive(Debug, Default)]
 struct Observed {
+    // llmlint: ignore-block[invalid_states_unrepresentable] these are the driver record's own `host` and `started` fields as it recorded them — `String`s in `ledger` — held only to be handed to `views::driver_claim_is_over`, which compares them with what the host answers now. `sys::StartToken` is a token read off a live process and matched against a recorded string, so typing a recorded value as one would claim a reading that never happened.
     host: Option<String>,
     pid: Option<NonZeroU32>,
     started: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     last_write_at: Option<u64>,
 }
 

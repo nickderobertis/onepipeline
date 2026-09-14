@@ -342,6 +342,7 @@ pub struct LaunchConfig {
     ///
     /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
     /// not carry one, refused blank by its own name, and omitted when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] a command line spelled as the launch config document wrote it, exactly as its sibling `envelope_reviewer` and the hook keys are: this is a public field of the type `docs/contract.md`'s launch config names, a blank one is refused by this key's name where the document is read, and a command newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_reviewer_bar: Option<String>,
     /// How long this launch's settlement write-back allows its store's
@@ -405,6 +406,7 @@ pub struct LaunchConfig {
     ///
     /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
     /// not carry one, refused blank by its own name, and omitted when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, resolved against that document's own directory at the launch and read there, where a path that names no configuration is refused naming this key; a blank one is refused by this key's name where the document is read. It is a public field of the type `docs/contract.md`'s launch config names, beside the other keys written as strings, and a path newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_config: Option<String>,
 }

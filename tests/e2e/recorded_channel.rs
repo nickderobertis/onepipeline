@@ -40,6 +40,10 @@ const RUN: &str = "onemessagebus-repair-2";
 const CAPTURE_ENV: &str = "ONEPIPELINE_RECORD_CHANNEL_ANSWERS_WITH";
 
 /// The files of the channel layout, in the order an answer records them.
+///
+/// The one list of them: the write-side journey fails on a channel file either
+/// binary writes that this does not name, and the recorded directories' README
+/// points here rather than restating it.
 const LAYOUT: [&str; 7] = [
     "surfaces.jsonl",
     "queue.json",
@@ -139,7 +143,11 @@ fn recorded_streams() -> BTreeSet<String> {
     std::fs::read_to_string(recorded(&format!("run-root/{RUN}/events.jsonl")))
         .expect("the recorded journal reads")
         .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|error| {
+                panic!("a recorded journal line is not JSON: {error}: {line}")
+            })
+        })
         .filter_map(|event| event["stream"].as_str().map(str::to_owned))
         .collect()
 }
@@ -505,7 +513,7 @@ fn written_by(program: &Path) -> Value {
     )
     .expect("the frame is written");
     frames.flush().expect("flushed");
-    let waited_out = BufReader::new(second.stdout.take().expect("stdout is piped"))
+    let was_told = BufReader::new(second.stdout.take().expect("stdout is piped"))
         .lines()
         .next()
         .is_some();
@@ -545,6 +553,22 @@ fn written_by(program: &Path) -> Value {
     step(&["stop", WRITTEN], "", &[]);
     world.release("slow.go");
 
+    // A file either binary writes that the layout does not name would be compared
+    // by nothing, so it fails here instead. Directories are not the layout's:
+    // the transport's lock files and the handover gate each keep their own.
+    let unnamed: Vec<String> = std::fs::read_dir(&channel)
+        .expect("the channel directory reads")
+        .map(|entry| entry.expect("a channel directory entry"))
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !LAYOUT.contains(&name.as_str()))
+        .collect();
+    assert!(
+        unnamed.is_empty(),
+        "{} wrote channel files `LAYOUT` does not name, so nothing compares them: {unnamed:?}",
+        program.display()
+    );
+
     let files: BTreeMap<&str, Value> = LAYOUT
         .into_iter()
         .filter_map(|file| {
@@ -556,7 +580,7 @@ fn written_by(program: &Path) -> Value {
         "steps": steps,
         "unread": unread,
         "verdict_reached_the_server": answered,
-        "abandoned_session_was_told": waited_out,
+        "abandoned_session_was_told": was_told,
         "channel": files,
     })
 }

@@ -14,6 +14,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 release="${1:-0.28.2}"
+if ! [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "record-channel-answers: RELEASE '$release' is not a MAJOR.MINOR.PATCH version; pass a published onepipeline-cli release, such as 0.28.2" >&2
+    exit 2
+fi
 if ! program=$(uv tool run --from "onepipeline-cli==$release" sh -c 'command -v onepipeline'); then
     echo "record-channel-answers: onepipeline-cli $release could not be installed through uv; check the version exists on PyPI and uv can reach it" >&2
     exit 2

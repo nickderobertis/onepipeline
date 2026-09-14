@@ -22,12 +22,12 @@ use serde_json::{json, Value};
 
 use crate::harness::{agent, double, ended, plan_of, World, REFUSED};
 
-/// A configuration narrowing the monitor to every op the profile grants it but
-/// `cancel`.
+/// A configuration narrowing the monitor to `retry` alone, taking away the
+/// `cancel` the profile grants it beside `retry`.
 const WITHOUT_CANCEL: &str = "version: 1\n\
                               transport: {kind: local}\n\
                               profile: planner-channel\n\
-                              authors:\n  monitor: {capabilities: [retry, requeue, finding, add]}\n";
+                              authors:\n  monitor: {capabilities: [retry]}\n";
 
 /// Write one configuration file into the world's root.
 fn configuration(world: &World, name: &str, body: &str) -> String {
@@ -133,7 +133,7 @@ fn a_bus_config_is_read_at_the_launch_and_kept_in_the_launch_record() {
         assert_eq!(kept["profile"], json!("planner-channel"), "{run}: {launch}");
         assert_eq!(
             kept["authors"]["monitor"]["capabilities"],
-            json!(["retry", "requeue", "finding", "add"]),
+            json!(["retry"]),
             "{run}: {launch}"
         );
     }
@@ -363,7 +363,7 @@ fn channel_serve_reads_its_asker_and_bound_from_the_variables_the_codec_names() 
 /// the channel — and keeps what it left, while the same plan launched without the
 /// file takes the same envelope.
 #[test]
-fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_the_rest() {
+fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_it_left() {
     let world = World::new("bus-config-narrowed");
     let file = configuration(&world, "onemessagebus.yaml", WITHOUT_CANCEL);
     let path = plan(&world, "busnarrowed");

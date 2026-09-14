@@ -38,10 +38,16 @@ fn main() -> std::process::ExitCode {
             "the message did not cross as one JSON document: {error}: {offered}"
         )),
     };
+    let queue = match std::env::var(QUEUE_ENV) {
+        Ok(queue) => queue,
+        Err(error) => fake::fail(&format!(
+            "the bus did not name the queue this message is offered to in {QUEUE_ENV}: {error}"
+        )),
+    };
     fake::append(
         &dir.join("bus-validator.jsonl"),
         &serde_json::json!({
-            "queue": std::env::var(QUEUE_ENV).ok(),
+            "queue": queue,
             "message": message,
         })
         .to_string(),

@@ -315,7 +315,6 @@ fn the_node_validator_judges_the_node_an_edit_produces_and_nothing_else() {
     });
     let committed = |world: &World| world.events_of(run, "edit-committed").len();
 
-    // Refused: the host's own words, and the graph as it was.
     world.script("validator.refuse", RULES);
     world
         .run_with_stdin(
@@ -350,7 +349,6 @@ fn the_node_validator_judges_the_node_an_edit_produces_and_nothing_else() {
     );
     std::fs::remove_file(world.fakes.join("validator.silent")).expect("the scenario is lifted");
 
-    // Passed: applied, and what crossed the stdin is the node the edit carried.
     let fresh = agent("fresh", &[]);
     world
         .run_with_stdin(
@@ -377,7 +375,6 @@ fn the_node_validator_judges_the_node_an_edit_produces_and_nothing_else() {
         "the validator was handed another document than the node"
     );
 
-    // Nothing produced, nothing offered.
     let offerings = offered(&world).len();
     world
         .run_with_stdin(

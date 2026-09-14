@@ -88,6 +88,7 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
             "--tick-interval",
             "0",
         ])
+        // llmlint: ignore[tests_mirror_real_usage] what this journey proves is that a watch reads the run again only when it moved, and a read that prints nothing is invisible on the CLI's streams — so it is counted by the render record the binary itself writes, which `tests/e2e/loopcost.rs` counts a driver's work by for the same reason. Everything else here is the real `watch` over a real run root.
         .env(RENDER_COST_ENV, &renders)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -13,9 +13,9 @@ redacted. `src/channel.rs` was byte-identical from v0.28.0 through the tree this
 node started from (its last change, `bbee552`, first shipped in v0.28.0), so each
 directory is exactly what the 0.28.2 release writes.
 
-Only the files of the channel layout are copied: `surfaces.jsonl`, `queue.json`,
-`replies.jsonl`, `replies-cursor.json`, `commands.jsonl`, `commands-cursor.json`
-and `command-outcomes.jsonl`, where the run has them. Each run's channel
+Only the files of the channel layout are copied, where the run has them — the
+files `LAYOUT` in `tests/e2e/recorded_channel.rs` names, which that journey fails
+on a channel file it does not name. Each run's channel
 directory also held an empty `handover/` directory. That is the ownership
 handover gate, not the channel layout, so it is left out.
 

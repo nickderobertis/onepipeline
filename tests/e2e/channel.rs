@@ -4571,6 +4571,7 @@ fn a_reply_record_the_listener_cannot_read_is_refused_rather_than_relayed() {
 
     // Written by hand, as nothing this crate writes would be: a record echoing
     // the question whose verdict's `completion` is not a boolean.
+    // llmlint: ignore-block[tests_mirror_real_usage] the state under test is a reply log holding a record no `reply` can write — `reply` refuses that envelope before anything is queued — so the only way to put one where a listener reads it is the way another writer of the directory would: appending it. The listener it reaches is still the real `channel serve`, driven over its own stdin and stdout.
     let mut replies = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -4583,6 +4584,7 @@ fn a_reply_record_the_listener_cannot_read_is_refused_rather_than_relayed() {
     )
     .expect("the record is appended");
     drop(replies);
+    // llmlint: ignore-end[tests_mirror_real_usage]
     drop(stdin);
 
     let output = serving.wait_with_output().expect("the server exits");
