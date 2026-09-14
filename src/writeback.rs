@@ -313,9 +313,18 @@ impl Failed {
     }
 
     /// The reason, with the store's class and kind beside it where it gave them.
+    ///
+    /// A classified reason is the store's own stderr, which is several lines ending in its
+    /// `next:` — so it is closed up onto one, or the class, the kind and what the worker does
+    /// next would land on a line nobody scanning the log for the failure reads. An
+    /// unclassified reason is carried exactly as it always was.
     fn said(&self) -> String {
         match &self.classified {
-            Some(classified) => format!("{} ({})", self.reason, classified.said()),
+            Some(classified) => format!(
+                "{} ({})",
+                self.reason.split_whitespace().collect::<Vec<_>>().join(" "),
+                classified.said()
+            ),
             None => self.reason.clone(),
         }
     }
