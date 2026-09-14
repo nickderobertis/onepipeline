@@ -10,6 +10,9 @@
 #   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.exit   the status to exit with (default 0)
 #   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.hold   present: wait for <run>.go before
 #                                             exiting, for up to 300 seconds
+#   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.relink names a file: before saying anything,
+#                                             replace this hook's own log under the
+#                                             run root with a symlink to that file
 #
 # and what it was handed is recorded under
 # $ONEPIPELINE_E2E_HOOK_RECORD/<run>/<n>/, one directory per invocation:
@@ -77,6 +80,15 @@ cat >"$here/stdin" || broke "cannot write $here/stdin"
     printf 'session unset\n'
   fi
 } >"$here/env" || broke "cannot write $here/env"
+
+# What a hook meaning to show a reader of its run some other file would do: its own
+# stdout and stderr still reach the log the engine opened, and the name that log
+# was kept under now points somewhere else.
+if [ -f "$record/$run.relink" ]; then
+  target=$(cat "$record/$run.relink") || broke "cannot read $record/$run.relink"
+  log="${ONEPIPELINE_RUN_ROOT:?the engine named no run root}/hooks/${ONEPIPELINE_HOOK:?the engine named no hook}.log"
+  ln -sf "$target" "$log" || broke "cannot replace $log with a link to $target"
+fi
 
 # llmlint: ignore-block[tool_output_is_signal] this output is the fixture's evidence,
 # not narration: the journeys read these 26 lines back out of the log the engine kept,

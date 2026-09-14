@@ -3,6 +3,10 @@ rem The Windows half of the run-end hook the journeys in `run_end_hooks.rs` name
 rem `run_end_hook.sh` is where what it records, what it reads, what it says, and
 rem why a record it cannot write is refused out loud are written down; this answers
 rem the same way. What is written down here is what cmd makes different.
+rem
+rem `<run>.relink` is the one file this half does not answer: a symlink on Windows
+rem needs a privilege a journey cannot assume, so the journey that scripts one runs
+rem on unix alone.
 setlocal enabledelayedexpansion
 
 if not defined ONEPIPELINE_E2E_HOOK_RECORD (

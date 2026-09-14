@@ -24,6 +24,7 @@ use crate::graph::NodeStatus;
 use crate::journal::{self, Journal, PipelineKind};
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::projection::RunState;
+use crate::report;
 use crate::sys;
 use crate::views::{self, RunView};
 
@@ -593,7 +594,7 @@ fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
 /// Repeat what a hook's log gained since `from` on this process's stderr, and
 /// answer how far that got.
 fn relay_from(log: &Path, from: u64) -> u64 {
-    let Ok(mut file) = std::fs::File::open(log) else {
+    let Ok(mut file) = open_log(log) else {
         return from;
     };
     let mut said = Vec::new();
@@ -656,8 +657,18 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                     views::one_line(reason),
                     log.display()
                 ));
-                for line in tail(&log) {
-                    out.push_str(&format!("      output: {}\n", views::one_line(&line)));
+                match tail(&log) {
+                    Ok(lines) => {
+                        for line in lines {
+                            out.push_str(&format!("      output: {}\n", views::one_line(&line)));
+                        }
+                    }
+                    // A hook that could not start may have had nowhere to log.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => out.push_str(&format!(
+                        "      log not read: {}\n",
+                        views::one_line(&error.to_string())
+                    )),
                 }
             }
             Some(PipelineKind::RunHookWithheld) => out.push_str(&format!(
@@ -677,18 +688,40 @@ pub(crate) fn results_lines(view: &RunView) -> String {
     out
 }
 
+/// Open a hook's log for reading as the plain file this run created — never
+/// through a link, and never as anything else put under its name.
+///
+/// The hook is external and is told the run's own directory, so the name its log
+/// is kept under is one it can replace: a reader shown whatever that name now
+/// points at would be shown a file the hook chose.
+fn open_log(log: &Path) -> std::io::Result<std::fs::File> {
+    let not_plain = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a plain file this run wrote", log.display()),
+        )
+    };
+    // Asked of the name before the open too, so a FIFO put in its place is refused
+    // rather than holding the open on a writer that never comes.
+    if !std::fs::symlink_metadata(log)?.is_file() {
+        return Err(not_plain());
+    }
+    let file = report::open_no_follow(log)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_plain());
+    }
+    Ok(file)
+}
+
 /// The last lines of a hook's log, read from no further back than
 /// [`MAX_TAIL_BYTES`].
-fn tail(log: &Path) -> Vec<String> {
-    let Ok(mut file) = std::fs::File::open(log) else {
-        return Vec::new();
-    };
-    let length = file.metadata().map_or(0, |about| about.len());
+fn tail(log: &Path) -> std::io::Result<Vec<String>> {
+    let mut file = open_log(log)?;
+    let length = file.metadata()?.len();
     let start = length.saturating_sub(MAX_TAIL_BYTES);
     let mut said = Vec::new();
-    if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut said).is_err() {
-        return Vec::new();
-    }
+    file.seek(SeekFrom::Start(start))?;
+    file.read_to_end(&mut said)?;
     let text = String::from_utf8_lossy(&said);
     let mut lines: Vec<&str> = text.lines().collect();
     // A read that began mid-file began mid-line, and half a line is not one.
@@ -696,10 +729,10 @@ fn tail(log: &Path) -> Vec<String> {
         lines.remove(0);
     }
     let from = lines.len().saturating_sub(RESULTS_OUTPUT_LINES);
-    lines[from..]
+    Ok(lines[from..]
         .iter()
         .map(|line| (*line).to_string())
-        .collect()
+        .collect())
 }
 
 /// The hook command a launch names, resolved from its two rungs.
@@ -908,11 +941,44 @@ mod tests {
         let written: String = (1..=10_000).map(|n| format!("said line {n}\n")).collect();
         assert!(written.len() as u64 > MAX_TAIL_BYTES);
         std::fs::write(&log, &written).expect("the log is written");
-        let tail = tail(&log);
+        let tail = tail(&log).expect("a plain log reads");
         assert_eq!(tail.len(), RESULTS_OUTPUT_LINES);
         assert_eq!(tail.first().map(String::as_str), Some("said line 9981"));
         assert_eq!(tail.last().map(String::as_str), Some("said line 10000"));
-        assert!(super::tail(&root.join("absent.log")).is_empty());
+        assert!(super::tail(&root.join("absent.log"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A log whose name no longer holds a plain file is refused rather than read:
+    /// a directory put in its place, and — where this host has them — a link and
+    /// a FIFO, which would otherwise show a reader another file or hold the read.
+    #[test]
+    fn a_log_that_is_not_a_plain_file_is_refused_rather_than_read() {
+        let root = scratch("not-plain");
+        let refused = |path: &Path| {
+            let error = tail(path).expect_err("a log that is not a plain file was read");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{error}");
+            assert!(error.to_string().contains("not a plain file"), "{error}");
+            assert_eq!(relay_from(path, 0), 0, "{} was relayed", path.display());
+        };
+        let directory = root.join("directory.log");
+        std::fs::create_dir_all(&directory).expect("a directory in the log's place");
+        refused(&directory);
+        #[cfg(unix)]
+        {
+            let elsewhere = root.join("elsewhere.txt");
+            std::fs::write(&elsewhere, "not the log\n").expect("the linked file");
+            let link = root.join("link.log");
+            std::os::unix::fs::symlink(&elsewhere, &link).expect("a link in the log's place");
+            refused(&link);
+            let fifo = root.join("fifo.log");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
+                .expect("a path with no NUL");
+            // SAFETY: `name` is a NUL-terminated path this test owns for the call.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+            refused(&fifo);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

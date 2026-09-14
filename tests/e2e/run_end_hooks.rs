@@ -997,6 +997,63 @@ fn a_launch_resolves_its_hooks_flag_over_config_refuses_a_zero_timeout_and_adopt
         .err_has("--success-hook");
 }
 
+/// A hook that swaps its own log for a link to another file shows no reader of the
+/// run what that file holds: not on the attached driver's stderr while it runs, and
+/// not in `results` afterwards, which says the log was not read. The run settles
+/// exactly as it would have.
+///
+/// Unix alone, for the reason `run_end_hook.bat` gives.
+#[cfg(unix)]
+#[test]
+fn a_hook_that_swaps_its_log_for_a_link_shows_no_reader_the_file_it_names() {
+    let world = hooked_world("hooks-relinked");
+    let hook = hook(&world);
+    let elsewhere = world.root.join("not-the-log.txt");
+    let only_there = "a line only the linked file holds";
+    std::fs::write(&elsewhere, format!("{only_there}\n")).expect("the linked file is written");
+    let run = "relinked";
+    std::fs::write(
+        records(&world).join(format!("{run}.relink")),
+        elsewhere.to_string_lossy().as_bytes(),
+    )
+    .expect("the relink is scripted");
+
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"complete\"")
+    .err_lacks(only_there);
+
+    assert_eq!(invocations(&world, run), ["success"]);
+    let log = world.runs.join(run).join("hooks").join("success.log");
+    assert!(
+        std::fs::symlink_metadata(&log)
+            .expect("the log path exists")
+            .file_type()
+            .is_symlink(),
+        "the fixture did not swap its log, so this journey proves nothing"
+    );
+    let finished = &world.events_of(run, "run-hook-finished")[0]["payload"];
+    assert_eq!(finished["ending"], "succeeded");
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("success hook fired — reason: none; ending: succeeded; exit: 0")
+        .out_has("log not read")
+        .out_lacks(only_there);
+    assert!(
+        output_lines(&results.stdout).is_empty(),
+        "{}",
+        results.stdout
+    );
+}
+
 /// A hook whose log cannot be opened could not be started, and is recorded as
 /// that — without its command ever running, and without the run settling any
 /// differently.
