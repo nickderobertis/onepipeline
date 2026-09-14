@@ -434,21 +434,12 @@ resolver = "2"
 # the real sibling. `onevcs-testing` 0.6.0 requires exactly this `onevcs`, so the
 # two floors move together.
 #
-# `onevcs` 0.23.0 is two fixes a dispatch only meets through the library this
-# crate links, never through a CLI a host installs. A required check concluding
-# `cancelled` or `stale` is **no verdict**: the publication keeps reading and
-# ends `checks-unsettled` rather than `checks-failed` when nothing later answers,
-# which `tests/e2e/lifecycle.rs`'s
-# `a_required_check_the_host_cancelled_is_read_again_and_never_settles_checks_failed`
-# and its `stale` twin drive through `crates/testfakes`'s host. And an automated target whose landing
-# has no baseline answers *released* once `onevcs release acknowledge` records
-# it, where before it answered *not answered* for ever and held a `published`
-# node with no timeout; `tests/e2e/adoption.rs`'s
-# `a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknowledgement`
-# drives that hold. `ReleaseStatus::Released` gained the `source` saying which of
-# the two answered, which `src/release.rs` reads past: a release is a release.
-# A **requirement**, because `^0.21` admits no 0.23.x, and `onevcs-testing` 0.6.2
-# requires exactly this `onevcs`, so the two floors move together again.
+# `onevcs` 0.23.0 is what a dispatch publishes and holds through, and a dispatch
+# meets only the library linked here: a `cancelled` or `stale` required check is
+# no verdict rather than `checks-failed`, and an automated landing with no
+# baseline is released by its acknowledgement instead of holding a `published`
+# node for ever. A **requirement**, because `^0.21` admits no 0.23.x; and
+# `onevcs-testing` 0.6.2 requires exactly this `onevcs`, so the two move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -492,15 +483,10 @@ onevcs = "0.23.0"
 # `oneagentgraph` 0.4.0 requires exactly this release; it is a **requirement**
 # here rather than a lock floor because `^0.8.1` admits no 0.10.x pre-1.0.
 #
-# 0.11.0 names a judge's **artifacts**: `user.artifacts`, a list of paths a
-# persona delta carries — a relative one resolved against the judge's evidence
-# worktree — rendered into every judge-side prompt only when it is non-empty, so
-# a judge asked about a design document it cannot see through git is told where
-# it is. `oneagentgraph` 0.4.1 is the release that requires it and threads the
-# list through, so the two move together; `tests/e2e/dispatch.rs`'s
-# `a_persona_naming_artifacts_gives_its_judge_a_prompt_naming_them` drives it
-# through a dispatched member. A requirement for the same pre-1.0 reason as the
-# last: `^0.10` admits no 0.11.x.
+# 0.11.0 renders a persona's `user.artifacts` into its judge's prompts, so a
+# dispatched judge is told where work git cannot show it lives. `oneagentgraph`
+# 0.4.1 requires exactly this release, so the two move together, and it is a
+# requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
 onejudge = "0.11.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
