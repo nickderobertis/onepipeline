@@ -40,7 +40,7 @@ pub const ENVELOPE_VERSION: u32 = EVENT_ENVELOPE_READS[0];
 /// Every envelope version this build reads, newest first.
 ///
 /// The agent profile's read-set for `agent.event-envelope`, which is what its
-/// registry registers and what [`written_at_a_known_version`] asks it. Version
+/// registry registers and what the fold asks that registry of a record. Version
 /// `1` is read whole: nothing was removed from the envelope or from a record's
 /// payload, so a `1` folds exactly as it always did.
 pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
