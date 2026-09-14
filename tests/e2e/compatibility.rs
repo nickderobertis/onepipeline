@@ -544,6 +544,12 @@ fn this_build_reads_a_journal_the_release_before_the_bus_wrote_as_it_did() {
     let world = World::new("compat-before-bus");
     let root = world.fakes.join("before-bus-root");
     let dir = root.join("before-bus");
+    // llmlint: ignore-block[tests_mirror_real_usage] the run root under test was written by
+    // the release **before** the bus adoption, and no invocation of this build can produce
+    // one — which is the whole of what this journey proves. Its journal is the committed
+    // recording, byte for byte; the launch record beside it is the one file a view opens a
+    // run by, written with the recording's own run id and start time because the recording
+    // host's pid and plan path mean nothing here. `run_of` above carries the same argument.
     std::fs::create_dir_all(&dir).expect("a run directory");
     std::fs::write(
         dir.join("launch.json"),

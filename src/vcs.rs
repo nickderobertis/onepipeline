@@ -1118,6 +1118,14 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
     };
     let preserved = kind_of(onevcs::EventKind::CommitPreserved);
     // The last one wins: a session that committed twice was left at the second.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the only change here is what a stream
+    // whose final line is torn answers, and a torn line exists only between two writes of
+    // one record by `onevcs` — a library this crate links, with no subprocess boundary a
+    // journey could hold that instant at. Reaching it end to end would mean the suite
+    // truncating a live session's stream underneath the binary, which is a fixture and not
+    // a user's journey. The unit test beside this reads real stream files through the real
+    // `onevcs` reader, and the one consumer, `lifecycle.rs`'s republication comparison, is
+    // unchanged and keeps its own journeys.
     let Some(envelope) = batch
         .into_iter()
         .rev()
@@ -1125,6 +1133,7 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
     else {
         return SessionTip::Unmoved;
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     envelope
         .payload
         .get("sha")
