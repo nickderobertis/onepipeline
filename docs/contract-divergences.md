@@ -5563,6 +5563,15 @@ the bus's `Merge` wherever the two agree; decode journal lines through the bus
 own; and take the bus's byte order and its refusal of an unknown top-level field
 as the wire's rule, proven over a committed journal written before the change.**
 
+Numbered 74 when it was written. The run-end hooks reached `main` first and took
+74, so on the merge of that change this entry became 75 and the next became 76.
+Any record from before that merge that cites entry 74 for the bus means this one.
+The three run-hook kinds that merge added are registered like every other kind:
+`agent.pipeline.run-hook-fired@2`, `agent.pipeline.run-hook-finished@2` and
+`agent.pipeline.run-hook-withheld@2`, each held to envelopes the run-end hook
+journeys wrote. `run-hook-fired` is recorded once for each hook, because its
+`reason` is `null` for success and lists the unsettled nodes for failure.
+
 What moved, and what it replaced. `event::{Envelope, Labels, Source, Phase,
 ArtifactRef}` are `onemessagebus_agent::event`'s, `event::EventKind` is
 `onemessagebus::Kind`, and `filter::{EventFilter, Matcher}` are the agent profile's
@@ -5665,6 +5674,9 @@ again for a relayed record stamped behind the newest instant. Recorded on the
 manager's ruling over the ask seam during `onepipeline-adopt-bus-wire`. That ruling
 kept the wire adoption as it is and sized one journey's backstop wait rather than
 change either algorithm in that task.**
+
+Numbered 75 when it was written, and renumbered 76 when the run-end hooks took
+entry 74 (see entry 75).
 
 What happens today. `onemessagebus` 0.4.0 reads an envelope in two passes. It first
 parses the line into a `serde_json::Map`. It then runs `serde_json::from_value`
