@@ -1208,4 +1208,190 @@ mod tests {
         assert_eq!(full["outcome"], json!("infrastructure-failure"));
         assert_eq!(full["detail"], json!("OOM"));
     }
+
+    /// One envelope of the three streams below, as a producer stamps it.
+    fn stamped(stream: &str, seq: u64, ts: &str) -> Envelope {
+        serde_json::from_value(json!({
+            "v": 1,
+            "ts": ts,
+            "stream": stream,
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": "turn-activity",
+        }))
+        .expect("an envelope")
+    }
+
+    /// Each stream written to a file of its own, in the order its records
+    /// arrived, and merged by the bus.
+    fn merged_by_the_bus(name: &str, arrived: &[Envelope]) -> Vec<Envelope> {
+        let dir = std::env::temp_dir().join(format!("onepipeline-merge-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
+        for event in arrived {
+            let line = serde_json::to_string(event).expect("an envelope serializes");
+            files.entry(event.stream.clone()).or_default().push_str(&format!("{line}\n"));
+        }
+        let paths: Vec<_> = files
+            .into_iter()
+            .map(|(stream, lines)| {
+                let path = dir.join(format!("{stream}.ndjson"));
+                std::fs::write(&path, lines).expect("a stream is written");
+                path
+            })
+            .collect();
+        let merged = onemessagebus_agent::Merge::open(&paths)
+            .expect("the streams read")
+            .into_records();
+        let _ = std::fs::remove_dir_all(&dir);
+        merged
+    }
+
+    /// Streams are merged in `(ts, stream, seq)` order, and this crate's one
+    /// in-memory merge puts a store in exactly the order the bus's `Merge` puts
+    /// the same records in.
+    ///
+    /// Three streams whose timestamps interleave, two records of different
+    /// streams stamped at the same instant — broken by stream id — two of one
+    /// stream at one instant — broken by `seq` — and every record arriving out of
+    /// the order it belongs in, within its stream and across them. The order is
+    /// also spelled out, because it is the one this merge produced before the
+    /// wire moved onto the bus.
+    #[test]
+    fn three_streams_merge_in_the_order_the_buss_merge_gives_them() {
+        let arrived = vec![
+            stamped("c", 2, "2026-09-01T00:00:03.000Z"),
+            stamped("a", 3, "2026-09-01T00:00:04.000Z"),
+            stamped("b", 1, "2026-09-01T00:00:01.000Z"),
+            stamped("a", 1, "2026-09-01T00:00:01.000Z"),
+            stamped("c", 1, "2026-09-01T00:00:02.000Z"),
+            stamped("b", 3, "2026-09-01T00:00:03.000Z"),
+            stamped("a", 2, "2026-09-01T00:00:02.000Z"),
+            stamped("b", 2, "2026-09-01T00:00:03.000Z"),
+            stamped("c", 3, "2026-09-01T00:00:05.000Z"),
+        ];
+        let mut ours = arrived.clone();
+        merge_order(&mut ours);
+
+        assert_eq!(ours, merged_by_the_bus("agree", &arrived));
+        let order: Vec<(&str, u64)> = ours.iter().map(|e| (e.stream.as_str(), e.seq)).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("a", 1),
+                ("b", 1),
+                ("a", 2),
+                ("c", 1),
+                ("b", 2),
+                ("b", 3),
+                ("c", 2),
+                ("a", 3),
+                ("c", 3),
+            ]
+        );
+        let mut keys: Vec<_> = ours.iter().map(|e| e.order_key()).collect();
+        keys.sort();
+        assert_eq!(ours.iter().map(|e| e.order_key()).collect::<Vec<_>>(), keys);
+    }
+
+    /// Where a stream's clock steps back against its own `seq`, the two merges
+    /// part, and this one keeps the producer's order.
+    ///
+    /// The difference `docs/contract-divergences.md` entry 73 records: `seq` is
+    /// the only ordering promise an envelope carries, and the checkpoint's
+    /// coverage marker and the summary's open instant are both proved over a
+    /// merge that honours it, while the bus sorts every record by its stamp.
+    #[test]
+    fn a_stream_whose_clock_stepped_back_keeps_its_own_order_where_the_buss_merge_does_not() {
+        let arrived = vec![
+            stamped("a", 1, "2026-09-01T00:00:05.000Z"),
+            stamped("a", 2, "2026-09-01T00:00:01.000Z"),
+            stamped("b", 1, "2026-09-01T00:00:03.000Z"),
+        ];
+        let mut ours = arrived.clone();
+        merge_order(&mut ours);
+        let order = |events: &[Envelope]| {
+            events
+                .iter()
+                .map(|e| (e.stream.clone(), e.seq))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&ours),
+            vec![("b".to_string(), 1), ("a".to_string(), 1), ("a".to_string(), 2)]
+        );
+        assert_eq!(
+            order(&merged_by_the_bus("stepped", &arrived)),
+            vec![("a".to_string(), 2), ("b".to_string(), 1), ("a".to_string(), 1)]
+        );
+    }
+
+    /// A journal whose final line is torn reads every whole record before it,
+    /// and what it reports lost is the line the bus reader reports torn.
+    ///
+    /// Beside the tear, the leniency every reader here follows: a blank line is
+    /// skipped and is no loss, and a whole line that is not an envelope is
+    /// skipped and reported as a line this build cannot read — none of it
+    /// failing the read.
+    #[test]
+    fn a_torn_final_line_is_reported_as_the_readers_torn_line_and_ends_nothing() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("events.jsonl");
+        let line = |seq| serde_json::to_string(&stamped("a", seq, "2026-09-01T00:00:01.000Z")).expect("serializes");
+        let torn = line(4);
+        std::fs::write(
+            &path,
+            format!("{}\n\n{{\"hello\":1}}\n{}\n{}", line(1), line(2), &torn[..30]),
+        )
+        .expect("a journal");
+
+        let reader = onemessagebus_agent::Reader::open(&path)
+            .expect("the journal opens")
+            .collect_all();
+        let reported = reader.torn.clone().expect("the reader reports the torn tail");
+
+        let read_whole = read(&path);
+        assert_eq!(
+            read_whole,
+            reader
+                .records
+                .iter()
+                .map(|record| record.envelope.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read_whole.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
+
+        let found = integrity(&path);
+        assert_eq!(
+            found.truncated,
+            vec![Loss {
+                line: 5,
+                offset: reported.at,
+                bytes: reported.bytes,
+            }]
+        );
+        let refused_line = reader
+            .refused
+            .iter()
+            .find(|refused| refused.position - refused.at > 1)
+            .expect("the reader refuses the line that is not an envelope");
+        assert_eq!(
+            found.unparseable,
+            vec![Loss {
+                line: 3,
+                offset: refused_line.at,
+                bytes: refused_line.position - refused_line.at - 1,
+            }]
+        );
+        assert!(has_unreadable_lines(&path));
+
+        // And a tailer stops at the torn line, resuming where the reader says to.
+        let (events, at) = finished_after(&path, 0);
+        assert_eq!(events.len(), 2);
+        assert_eq!(at, reported.at);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
