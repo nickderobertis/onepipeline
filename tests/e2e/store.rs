@@ -2293,9 +2293,16 @@ fn a_projection_that_keeps_failing_is_retried_at_a_ceiling_rather_than_abandoned
         "the operator is told to expect another attempt every {promised:?}, which is not the \
          minutes-scale window a hosted rate limiter refuses over"
     );
+    // Each end of an interval is read when a poll notices it rather than when it happened, so
+    // a poll that ran late at the start shortens the reading by that lateness: a worker that
+    // waited out the full minute has been read as 59.9997s (CI run 34864754127). The slack
+    // is a second — far inside the thirty-second floor above — so a worker asking early by
+    // any amount an operator would notice still fails here.
+    const OBSERVED_WITHIN: Duration = Duration::from_secs(1);
     for waited_at_the_ceiling in ceiling {
         assert!(
-            *waited_at_the_ceiling >= promised && *waited_at_the_ceiling <= promised.mul_f64(1.5),
+            *waited_at_the_ceiling >= promised - OBSERVED_WITHIN
+                && *waited_at_the_ceiling <= promised.mul_f64(1.5),
             "the operator was told to expect another attempt {promised:?} apart, and the \
              destination was actually asked again after {waited_at_the_ceiling:?}: {waited:?}"
         );
