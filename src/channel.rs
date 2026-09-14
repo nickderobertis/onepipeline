@@ -2086,6 +2086,36 @@ mod tests {
         );
     }
 
+    /// Both goldens are envelopes the schema this crate generates admits, and
+    /// each is admitted by the document the agent profile registers for the
+    /// version it was written against — so the type, the profile's documents and
+    /// what a person types are one shape.
+    #[test]
+    fn both_goldens_validate_under_this_crates_schema_and_the_profiles_documents() {
+        let mut own = onemessagebus::Registry::new();
+        own.register::<Reply>()
+            .expect("this crate's envelope schema registers");
+        let profile = onemessagebus_agent::registry();
+        let at = |version: u32| SchemaId::literal("agent", "reply-envelope", version);
+        for (golden, version) in [(ENVELOPE_GOLDEN, 3), (ENVELOPE_GOLDEN_BEFORE, 2)] {
+            let document: Value = serde_json::from_str(golden).expect("the golden is JSON");
+            own.check(&Reply::SCHEMA, &document)
+                .unwrap_or_else(|failure| {
+                    panic!(
+                        "the version {version} golden is refused by this crate's schema: {failure}"
+                    )
+                });
+            profile.check(&at(version), &document).unwrap_or_else(|failure| {
+                panic!("the version {version} golden is refused by the profile's document: {failure}")
+            });
+        }
+        // Neither schema is vacuous: a field no envelope has is refused by both.
+        let mut stray: Value = serde_json::from_str(ENVELOPE_GOLDEN).expect("the golden is JSON");
+        stray["stray"] = json!(true);
+        assert!(own.check(&Reply::SCHEMA, &stray).is_err());
+        assert!(profile.check(&at(3), &stray).is_err());
+    }
+
     /// An envelope written against the version before this one is still read, and
     /// is read at the version this build reads it at.
     ///

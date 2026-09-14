@@ -17,7 +17,8 @@ use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
 use onepipeline::channel::{
-    allows, Author, Command as Edit, Dependents, Reply, SettleOutcome, SurfaceKind,
+    allows, allows_completion, Author, Command as Edit, Dependents, Reply, SettleOutcome,
+    SurfaceKind,
 };
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
@@ -1608,6 +1609,61 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
     assert_eq!(watched.author, Author::Monitor);
     assert_eq!(Author::Monitor.as_str(), "monitor");
     assert_eq!(Author::Planner.as_str(), "planner");
+}
+
+/// Every op the planner channel refuses the monitor is refused in the words
+/// `docs/contract.md` states for it, and the contract states no refusal the
+/// build does not make.
+///
+/// The refusals are the `planner-channel` profile's; the block is what a
+/// monitor reading the contract is told it will meet, so each entry is driven
+/// through this crate's own `allows` and `allows_completion` and compared whole.
+#[test]
+fn each_refusal_the_monitor_meets_is_worded_as_the_contract_states_it() {
+    let block: Vec<Value> = serde_json::from_str(&fenced_block_naming("json", "\"refused\""))
+        .expect("the contract's refusals block is JSON");
+    let mut stated = BTreeSet::new();
+    for entry in &block {
+        let author: Author =
+            serde_json::from_value(entry["author"].clone()).expect("each entry names an author");
+        let refused = entry["refused"]
+            .as_str()
+            .expect("each entry states its refusal");
+        let verdict = match (entry.get("command"), entry.get("verdict")) {
+            (Some(command), None) => {
+                let command: Edit = serde_json::from_value(command.clone())
+                    .unwrap_or_else(|e| panic!("{command} is not a command this build reads: {e}"));
+                stated.insert(op_of(&command).to_owned());
+                allows(author, &command)
+            }
+            (None, Some(verdict)) => {
+                stated.insert("completion".to_owned());
+                allows_completion(author, verdict["completion"].as_bool())
+            }
+            _ => panic!("an entry names a command or a verdict, and only one: {entry}"),
+        };
+        let refusal = verdict.expect_err(&format!(
+            "the contract states a refusal this build does not make: {entry}"
+        ));
+        assert_eq!(
+            refusal.to_string(),
+            format!("refused: {refused}"),
+            "the refusal is not worded as the contract states it"
+        );
+    }
+
+    let profile = onemessagebus_agent::channel::allowlist();
+    let monitor = onemessagebus_agent::channel::ChannelAuthor::Monitor.author();
+    let refused: BTreeSet<String> = onemessagebus_agent::channel::Op::ALL
+        .into_iter()
+        .filter(|op| onemessagebus_agent::channel::allows(&profile, &monitor, op.word()).is_err())
+        .map(|op| op.word().to_owned())
+        .chain(["completion".to_owned()])
+        .collect();
+    assert_eq!(
+        stated, refused,
+        "the contract's refusals block and what the profile refuses the monitor are not the same set"
+    );
 }
 
 /// The contract's op list, less the one entry 60 removed, is exactly what this
