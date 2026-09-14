@@ -84,7 +84,11 @@ use crate::telemetry::{self, RunTelemetry};
 /// know costs a fold and nothing else, and the alternative — reading a document
 /// half of whose meaning is a build's this one is not — is exactly what the
 /// version exists to refuse.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 2;
+///
+/// **3** since a row reads whether the driver its record names let go of the run
+/// to fire a run-end hook: `let_go_by` is a field version 2 never had, and a
+/// version-2 document carries no answer to that question rather than "no".
+pub const SUMMARY_SCHEMA_VERSION: u32 = 3;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -272,6 +276,14 @@ pub struct RunSummary {
     /// this field lets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
+    /// The driver that let go of this run to fire its run-end hook, while no
+    /// adoption has driven it since.
+    ///
+    /// What the listing reads its liveness through beside the claim above, for
+    /// the reason the fold carries it: that driver is alive while it awaits the
+    /// hook and holds nothing. Absent for every run that fired no hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub let_go_by: Option<crate::projection::DriverClaim>,
     /// The run's aggregate wall clock and usage.
     ///
     /// The **whole of [`RunTelemetry`](crate::views::RunTelemetry)**, referenced
@@ -541,6 +553,7 @@ impl RunSummary {
             pid: launch.driver_pid(),
             host: launch.recorded_host().map(str::to_string),
             started: launch.driver_stamp().map(str::to_string),
+            let_go_by: state.let_go_by.clone(),
             timing: timing.clone(),
             parked: with_status(graph::NodeStatus::Parked),
             // The same three records `views::rejected_by_a_judge` reads, taken
@@ -1016,6 +1029,9 @@ impl Maintainer {
             started_at: String::new(),
             heartbeat_interval: 0,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -1131,6 +1147,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -1580,15 +1599,19 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v2.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v3.json");
 
-    /// The document the build **before** the bounded listing wrote, kept exactly
-    /// as that build wrote it.
+    /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
-    /// What proves the growth is a version and not a quiet widening: this is a
-    /// real schema 1 document, and the reader below has to refuse it rather than
-    /// read it as one of its own with five fields missing.
-    const GOLDEN_V1: &str = include_str!("../tests/golden/run-summary-v1.json");
+    /// What proves each growth is a version and not a quiet widening: a real
+    /// schema 1 document, which the bounded listing's build grew five fields past,
+    /// and a real schema 2 document, which carries no answer to whether a driver
+    /// let go of its run — and the reader below has to refuse both rather than
+    /// read either as one of its own with fields missing.
+    const GOLDEN_EARLIER: [(u32, &str); 2] = [
+        (1, include_str!("../tests/golden/run-summary-v1.json")),
+        (2, include_str!("../tests/golden/run-summary-v2.json")),
+    ];
 
     /// The document the golden pins, built through the types.
     ///
@@ -1619,6 +1642,10 @@ mod tests {
             pid: None,
             host: None,
             started: None,
+            let_go_by: Some(
+                crate::projection::DriverClaim::of_stream("golden-host-4242")
+                    .expect("the golden stream names a driver"),
+            ),
             timing: serde_json::from_str(include_str!("../tests/golden/telemetry-v2.json"))
                 .expect("the telemetry golden reads back into the types"),
             // Nothing parked, which is an absent key rather than an empty list on
@@ -1654,13 +1681,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_2_document_is_the_shape_the_golden_pins() {
+    fn a_schema_3_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v2.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v3.json together"
         );
     }
 
@@ -1673,16 +1700,20 @@ mod tests {
     /// nothing outstanding — every one of them an absence standing in for a fact
     /// nobody recorded. A refusal costs a fold and nothing else.
     #[test]
-    fn the_document_the_build_before_this_one_wrote_is_refused_rather_than_read() {
-        let refused = serde_json::from_str::<RunSummary>(GOLDEN_V1).expect_err("it is refused");
-        assert!(
-            refused.to_string().contains("schema_version 1"),
-            "the refusal does not name the version it met: {refused}"
-        );
+    fn the_documents_earlier_builds_wrote_are_refused_rather_than_read() {
+        for (version, earlier) in GOLDEN_EARLIER {
+            let refused = serde_json::from_str::<RunSummary>(earlier).expect_err("it is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("schema_version {version}")),
+                "the refusal does not name the version it met: {refused}"
+            );
+        }
     }
 
     #[test]
-    fn a_schema_2_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_3_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

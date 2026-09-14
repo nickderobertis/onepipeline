@@ -329,6 +329,21 @@ pub enum PipelineKind {
     /// that the second party saw anything. Carries `party`, the `turn` the
     /// presentation opened, and the note.
     NoteShown,
+    /// A run-end hook is about to be started, and this is the run's marker that
+    /// one has fired.
+    ///
+    /// Journaled before the command starts, so a run carrying one fires neither
+    /// hook again whichever process looks next. Carries `hook`, `command`, and
+    /// `reason`.
+    RunHookFired,
+    /// A run-end hook ended, and how: `hook`, `exit`, `ending`, and the `log` its
+    /// output was kept in.
+    RunHookFinished,
+    /// A driver let go of a run paused on a decision, so no run-end hook fired.
+    ///
+    /// Carries the `settlement` it let go at, which is `awaiting-planner`: the run
+    /// has not ended, and the driver that adopts it judges again.
+    RunHookWithheld,
 }
 
 impl PipelineKind {
@@ -363,6 +378,9 @@ impl PipelineKind {
             Self::CriterionChecked => "criterion-checked",
             Self::BodyNotDrafted => "body-not-drafted",
             Self::NoteShown => "note-shown",
+            Self::RunHookFired => "run-hook-fired",
+            Self::RunHookFinished => "run-hook-finished",
+            Self::RunHookWithheld => "run-hook-withheld",
         }
     }
 
@@ -420,6 +438,9 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::CriterionChecked,
     PipelineKind::BodyNotDrafted,
     PipelineKind::NoteShown,
+    PipelineKind::RunHookFired,
+    PipelineKind::RunHookFinished,
+    PipelineKind::RunHookWithheld,
 ];
 
 /// A reference to evidence stored beside the stream rather than inside it.

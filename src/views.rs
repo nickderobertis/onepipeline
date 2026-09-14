@@ -33,8 +33,9 @@
 pub enum DriverLiveness {
     /// A driver holds the run and this host has observed it working.
     Driving,
-    /// This host has proved the recorded driver process is gone. Nothing is
-    /// driving the run; `adopt` is the way back.
+    /// This host has proved the recorded driver process is gone, or the run's own
+    /// journal records that driver letting go of it to fire its run-end hook.
+    /// Nothing is driving the run; `adopt` is the way back.
     DriverDead,
     /// The launch still holds its recorded pid, but nothing is happening — no
     /// child process, no surface, no ledger write. Alive and not working, so
@@ -318,7 +319,12 @@ pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
 /// silence rather than into an answer.
 pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     driver_liveness(
-        state.stop_recorded(),
+        state.stop_recorded()
+            || let_go(
+                launch.recorded_host(),
+                launch.driver_pid(),
+                state.let_go_by.as_ref(),
+            ),
         launch.recorded_host(),
         launch.driver_pid(),
         launch.driver_stamp(),
@@ -326,6 +332,22 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
         state.awaiting_human_action(),
         paths,
     )
+}
+
+/// Whether the driver a record names is the one a run's journal records letting
+/// go of the run to fire its run-end hook.
+///
+/// That driver is still a live process while it awaits the hook, and it holds
+/// nothing: the ownership lock is released before the hook starts. So it is
+/// matched by what the journal stamped — the host and pid of the stream that
+/// wrote the firing — against the claim the record makes, and a driver that
+/// adopted the run since is a different claim.
+pub(crate) fn let_go(
+    recorded_host: Option<&str>,
+    pid: Option<std::num::NonZeroU32>,
+    let_go_by: Option<&crate::projection::DriverClaim>,
+) -> bool {
+    let_go_by.is_some_and(|claim| claim.is(recorded_host, pid))
 }
 
 /// The same verdict, over the six things a record says and the run's own
@@ -339,8 +361,13 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 /// The pid is read with the stamp beside it, through the same
 /// [`sys::claim_on`] a stop aims by; read alone it called a reissued pid a
 /// live driver.
+///
+/// `undriven_by_record` is what the run's own record already says without asking
+/// the host: a stop was recorded, or the driver the record names let go of the
+/// run to fire its run-end hook — that driver is not driving, however alive it
+/// is. See [`let_go`].
 fn driver_liveness(
-    stop_recorded: bool,
+    undriven_by_record: bool,
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
     started: Option<&str>,
@@ -348,7 +375,7 @@ fn driver_liveness(
     awaiting_human_action: bool,
     paths: &RunPaths,
 ) -> DriverLiveness {
-    if stop_recorded {
+    if undriven_by_record {
         return DriverLiveness::DriverDead;
     }
     let ours = recorded_host == Some(sys::hostname().as_str());
@@ -1465,7 +1492,12 @@ impl<'a> Row<'a> {
     /// How the run is being driven, read from the host now.
     fn liveness(&self) -> DriverLiveness {
         driver_liveness(
-            self.summary.stop_recorded,
+            self.summary.stop_recorded
+                || let_go(
+                    self.summary.host.as_deref(),
+                    self.summary.pid,
+                    self.summary.let_go_by.as_ref(),
+                ),
             self.summary.host.as_deref(),
             self.summary.pid,
             self.summary.started.as_deref(),
@@ -3066,6 +3098,8 @@ pub fn results(view: &RunView) -> String {
         }
     }
     out.push_str(&superseded_lines(view));
+    // Under the graph, because a hook is the run's rather than any node's.
+    out.push_str(&crate::hooks::results_lines(view));
     out.push_str(&journal_loss_line(view));
     out
 }
@@ -3449,6 +3483,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
