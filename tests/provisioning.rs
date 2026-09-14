@@ -21,15 +21,17 @@ mod unix {
             .expect("the executable is runnable");
     }
 
-    /// A cached binary is not evidence that it came from the pinned revision.
+    /// A cached binary is not evidence that it is the pinned release.
     ///
-    /// This puts a wrong-revision `onetaskgraph` and Cargo's installer ahead of
+    /// This puts a wrong-version `onetaskgraph` and Cargo's installer ahead of
     /// the host tools, drives the real provisioning recipe, and then resolves
-    /// the binary again. The installer records the requested revision in the
-    /// installed executable, so the final invocation proves which pin the
-    /// provisioning path replaced the stale binary with.
+    /// the binary again. The installer records the requested release in the
+    /// installed executable, and refuses a request for anything but a published
+    /// one, so the final invocation proves which pin the provisioning path
+    /// replaced the stale binary with — and that it is the release the justfile
+    /// names in its one place.
     #[test]
-    fn provisioning_replaces_a_wrong_revision_on_path_with_the_pin() {
+    fn provisioning_replaces_a_wrong_version_on_path_with_the_pinned_release() {
         let root =
             std::env::temp_dir().join(format!("onepipeline-provisioning-{}", std::process::id()));
         fs::create_dir(&root).expect("a fresh provisioning scratch directory");
@@ -38,17 +40,21 @@ mod unix {
         fs::create_dir(&bin).expect("the stale installation has a bin directory");
 
         let binary = bin.join("onetaskgraph");
-        executable(&binary, "#!/bin/sh\nprintf '%s\\n' wrong-revision\n");
+        executable(&binary, "#!/bin/sh\nprintf '%s\\n' wrong-version\n");
         executable(
             &bin.join("cargo"),
             r#"#!/bin/sh
 set -eu
-revision=
+version=
 root=${CARGO_HOME:?}
 force=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--rev" ]; then
-    revision=$2
+  if [ "$1" = "--git" ] || [ "$1" = "--rev" ]; then
+    echo "an unreleased install was requested: $1" >&2
+    exit 1
+  fi
+  if [ "$1" = "--version" ]; then
+    version=$2
     shift 2
     continue
   fi
@@ -62,13 +68,13 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-[ -n "$revision" ]
+[ -n "$version" ]
 [ "$force" = true ]
 [ "$root" = "$CARGO_HOME" ] || [ "$force" = true ]
 mkdir -p "$root/bin"
 cat > "$root/bin/onetaskgraph" <<EOF
 #!/bin/sh
-printf '%s\\n' '$revision'
+printf '%s\\n' '$version'
 EOF
 chmod +x "$root/bin/onetaskgraph"
 "#,
@@ -96,18 +102,15 @@ chmod +x "$root/bin/onetaskgraph"
             .env("PATH", path)
             .output()
             .expect("the provisioned binary resolves");
-        let declaration = include_str!("../src/taskgraph.rs")
+        let pinned = include_str!("../justfile")
             .lines()
-            .find(|line| line.starts_with("pub const FIRST_REVISION"))
-            .expect("taskgraph declares the provisioning revision");
-        let pinned = declaration
-            .split('"')
-            .nth(1)
-            .expect("the revision declaration carries a quoted value");
+            .find_map(|line| line.strip_prefix("onetaskgraph-version := \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the justfile names the onetaskgraph release it provisions");
         assert_eq!(
             String::from_utf8_lossy(&resolved.stdout).trim(),
             pinned,
-            "the wrong-revision binary survived provisioning"
+            "the wrong-version binary survived provisioning"
         );
 
         let cargo_home = root.join("default-cargo-home");
@@ -117,7 +120,7 @@ chmod +x "$root/bin/onetaskgraph"
         fs::create_dir(&tools).expect("the installer tools directory exists");
         executable(
             &cargo_bin.join("onetaskgraph"),
-            "#!/bin/sh\nprintf '%s\\n' wrong-revision\n",
+            "#!/bin/sh\nprintf '%s\\n' wrong-version\n",
         );
         fs::copy(root.join("bin/cargo"), tools.join("cargo"))
             .expect("the same recording installer is ahead of Cargo's bin");
@@ -144,11 +147,11 @@ chmod +x "$root/bin/onetaskgraph"
         assert_eq!(
             String::from_utf8_lossy(&default_resolved.stdout).trim(),
             pinned,
-            "the wrong revision survived in the default Cargo home"
+            "the wrong version survived in the default Cargo home"
         );
 
         let configured = root.join("configured-onetaskgraph");
-        executable(&configured, "#!/bin/sh\nprintf '%s\\n' wrong-revision\n");
+        executable(&configured, "#!/bin/sh\nprintf '%s\\n' wrong-version\n");
         let configured_home = root.join("configured-cargo-home");
         let configured_tools = root.join("configured-tools");
         fs::create_dir(&configured_tools).expect("the configured installer directory exists");
@@ -178,7 +181,7 @@ chmod +x "$root/bin/onetaskgraph"
         assert_eq!(
             String::from_utf8_lossy(&configured_resolved.stdout).trim(),
             pinned,
-            "the configured wrong-revision executable survived provisioning"
+            "the configured wrong-version executable survived provisioning"
         );
     }
 }

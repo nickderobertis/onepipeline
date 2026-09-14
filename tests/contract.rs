@@ -4067,6 +4067,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("31.", "shaped event view beside the surface"),
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
+    ("44.", "the minimum this build requires"),
 ];
 
 #[test]

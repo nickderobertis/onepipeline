@@ -49,36 +49,24 @@ pub const BINARY_ENV: &str = "ONETASKGRAPH_BIN";
 /// The executable's name when the environment names none.
 pub const DEFAULT_BINARY: &str = "onetaskgraph";
 
-/// The version floor a launch **checks**, which is not the whole requirement.
+/// The version floor a launch **checks**: the oldest `onetaskgraph` this build
+/// will read a plan through.
 ///
-/// Named for what it does rather than for what would be useful: it is the oldest
-/// version this build will accept a `--version` from, and no version can say
-/// more than that here. What the mapping actually needs is the reserved metadata
-/// map, which landed *within* this version — see [`FIRST_REVISION`], which is the
-/// rest of the requirement and the half a number cannot express.
+/// What the mapping needs is the reserved metadata map, which landed after that
+/// product's 0.1.0 release and ships in every release from 0.2.0 — so this floor
+/// separates an install carrying the map from one that does not, exactly, and a
+/// host with the released 0.1.0 is refused by version rather than left to work out
+/// why every task of its project reads as unidentified.
+///
+/// `justfile`'s `onetaskgraph-version` is the release the checks install, and
+/// [`the_release_the_checks_install_meets_the_floor_and_is_named_once`](tests::the_release_the_checks_install_meets_the_floor_and_is_named_once)
+/// fails if that release falls below this floor.
 const CHECKED_MINIMUM: Version = Version {
     major: 0,
-    minor: 1,
+    minor: 2,
     patch: 0,
     release: Release::Released,
 };
-
-/// The `onetaskgraph` revision that first carried the surface this mapping
-/// reads, which [`CHECKED_MINIMUM`] cannot express.
-///
-/// The reserved metadata map landed **after** that product's 0.1.0 release and
-/// before its next one, so the released 0.1.0 and this revision report the same
-/// number and answer differently. A version floor cannot separate them, so the
-/// refusal names the revision instead of leaving a host with the released 0.1.0
-/// to work out why every task of its project reads as unidentified.
-///
-/// **This is the only place the revision is written.** `justfile`'s
-/// `_ensure-onetaskgraph` reads it out of this file rather than keeping a second
-/// copy, and
-/// [`the_revision_the_checks_install_is_read_out_of_this_file`](tests::the_revision_the_checks_install_is_read_out_of_this_file)
-/// fails if a copy appears. `docs/contract-divergences.md` entry 44 is the
-/// proposal to retire it for a version once one carries the surface.
-pub const FIRST_REVISION: &str = "d8051ac20140e45b0b9f1747545e5a6ce7e6df5e";
 
 /// How a host that has no `onetaskgraph` gets one.
 ///
@@ -167,11 +155,8 @@ impl Store {
             tool: DEFAULT_BINARY,
             message: format!(
                 "{} ({what}); onepipeline reads a plan out of a onetaskgraph project and \
-                 needs {DEFAULT_BINARY} {CHECKED_MINIMUM} or newer — {INSTALL}. The reserved \
-                 metadata this mapping reads landed at revision {FIRST_REVISION}, after \
-                 that product's 0.1.0 release, so an install older than that revision \
-                 reports a version this check accepts and then answers with tasks \
-                 carrying no metadata at all",
+                 needs {DEFAULT_BINARY} {CHECKED_MINIMUM} or newer, the first release \
+                 carrying the reserved metadata this mapping reads — {INSTALL}",
                 binary.display()
             ),
         };
@@ -1153,13 +1138,15 @@ mod tests {
     #[test]
     fn versions_order_by_each_number_in_turn_and_a_prerelease_below_its_release() {
         let read = |token: &str| Version::parse(token).expect("a version");
-        assert!(read("0.0.9") < CHECKED_MINIMUM);
-        assert!(read("0.1.0") >= CHECKED_MINIMUM);
+        // The released 0.1.0 predates the metadata map, and is below the floor.
+        assert!(read("0.1.0") < CHECKED_MINIMUM);
+        assert!(read("0.1.9") < CHECKED_MINIMUM);
+        assert!(read("0.2.0") >= CHECKED_MINIMUM);
         assert!(read("1.0.0") > CHECKED_MINIMUM);
-        assert!(read("0.1.0-rc.1") < CHECKED_MINIMUM);
-        assert!(read("0.1.1-rc.1") > CHECKED_MINIMUM);
+        assert!(read("0.2.0-rc.1") < CHECKED_MINIMUM);
+        assert!(read("0.2.1-rc.1") > CHECKED_MINIMUM);
         // A build suffix is not a pre-release: it names the same release.
-        assert_eq!(read("0.1.0+build.7"), CHECKED_MINIMUM);
+        assert_eq!(read("0.2.0+build.7"), CHECKED_MINIMUM);
     }
 
     #[test]
@@ -1220,25 +1207,59 @@ mod tests {
         assert_eq!(resolved_binary(), PathBuf::from(DEFAULT_BINARY));
     }
 
-    /// The revision the checks install is the one this file declares.
+    /// The release the checks install meets the floor this file declares, and the
+    /// recipe that installs it reads it from the one place it is named.
     ///
-    /// A version floor cannot separate the released 0.1.0 from the revision that
-    /// first carried the metadata surface — they report the same number — so the
-    /// revision is written down, once, and everything that needs it derives it
-    /// from here. A second copy in the justfile would be a pin that could go
-    /// stale against the floor beside it without anything saying so.
+    /// The justfile's `onetaskgraph-version` is that place. A release below the
+    /// floor would be checks exercising an install every launch refuses, and a
+    /// second copy of the number — or an install line that stopped reading the
+    /// variable — would be a pin that could move away from it without anything
+    /// saying so.
     #[test]
-    fn the_revision_the_checks_install_is_read_out_of_this_file() {
+    fn the_release_the_checks_install_meets_the_floor_and_is_named_once() {
         let justfile = include_str!("../justfile");
+        let declared = justfile
+            .lines()
+            .find_map(|line| line.strip_prefix("onetaskgraph-version := \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the justfile names the onetaskgraph release its checks install");
+        let installed = Version::parse(declared).expect("the named release is a version");
         assert!(
-            justfile.contains("FIRST_REVISION"),
-            "the justfile no longer derives the revision it installs from this file"
+            installed >= CHECKED_MINIMUM,
+            "the checks install onetaskgraph {declared}, below the {CHECKED_MINIMUM} \
+             every launch requires"
         );
+        assert_eq!(
+            justfile.matches(declared).count(),
+            1,
+            "the justfile names onetaskgraph {declared} more than once"
+        );
+
+        let recipe: Vec<&str> = justfile
+            .lines()
+            .skip_while(|line| !line.starts_with("_ensure-onetaskgraph:"))
+            .skip(1)
+            .take_while(|line| line.starts_with(' '))
+            .collect();
+        let installs: Vec<&&str> = recipe
+            .iter()
+            .filter(|line| line.contains("cargo install onetaskgraph"))
+            .collect();
         assert!(
-            !justfile.contains(FIRST_REVISION),
-            "the justfile carries its own copy of the revision, which can go stale \
-             against the floor declared beside it here"
+            !installs.is_empty(),
+            "`_ensure-onetaskgraph` no longer installs onetaskgraph"
         );
+        for install in installs {
+            assert!(
+                install.contains("--version {{onetaskgraph-version}}"),
+                "`_ensure-onetaskgraph` installs without reading `onetaskgraph-version`: \
+                 {install}"
+            );
+            assert!(
+                !install.contains("--git") && !install.contains("--rev"),
+                "`_ensure-onetaskgraph` installs an unreleased onetaskgraph: {install}"
+            );
+        }
     }
 
     #[test]

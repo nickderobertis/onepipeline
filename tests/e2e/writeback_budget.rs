@@ -417,8 +417,8 @@ fn a_hold_the_double_cannot_read_refuses_the_copy_by_the_scripts_name() {
     // What the real store answers for the authored board, read before the run
     // exists. Held to *that* rather than to a status word: the fixture writes no
     // status, and the category a store reads off a task without one is the store
-    // release's own — `backlog` at one release, `todo` at the revision the checks
-    // pin — while a copy that landed rewrites the whole item.
+    // release's own — `backlog` at one, `todo` at another — while a copy that
+    // landed rewrites the whole item.
     let authored = world.store_tasks(&project);
     world
         .run(&["start", project.as_str(), "--detach"])
