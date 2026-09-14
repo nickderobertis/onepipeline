@@ -3453,8 +3453,8 @@ fn serve(args: &RunArgs) -> Result<i32> {
             // carries none of the fields a ruling is read from. The question
             // stays queued and answerable, and a frame naming its correlation
             // waits for its answer again.
-            Awaited::Unanswered(word) => (
-                json!({"answer": word, "correlation": pending.correlation()}),
+            Awaited::Unanswered(why) => (
+                json!({"answer": why.word(), "correlation": pending.correlation()}),
                 false,
             ),
         };
@@ -3513,8 +3513,27 @@ fn serve(args: &RunArgs) -> Result<i32> {
 enum Awaited {
     /// A ruling this listener is owed.
     Reply(crate::channel::QueuedReply),
-    /// None: the bus's word for why — the wait elapsed, or nobody is listening.
-    Unanswered(&'static str),
+    /// None, and why.
+    Unanswered(Unanswered),
+}
+
+/// Why a listener's wait ended with no ruling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unanswered {
+    /// The reply window elapsed.
+    Timeout,
+    /// Nobody is listening for the question any more.
+    Abandoned,
+}
+
+impl Unanswered {
+    /// The bus's own word for it, which is what the member is told.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Timeout => Answer::<()>::Timeout.word(),
+            Self::Abandoned => Answer::<()>::Abandoned.word(),
+        }
+    }
 }
 
 /// Wait up to `window` for what this listener is owed.
@@ -3540,7 +3559,7 @@ fn await_answer(
                     .map_err(|e| Error::Invalid(format!("verdict: {e}")));
             }
             Answer::Refused(refusal) => return Err(Error::Refused(refusal.reason)),
-            unanswered @ Answer::Abandoned => return Ok(Awaited::Unanswered(unanswered.word())),
+            Answer::Abandoned => return Ok(Awaited::Unanswered(Unanswered::Abandoned)),
             Answer::Timeout => {}
         }
         if let Some(owed) = channel.owed(asker)? {
@@ -3551,7 +3570,7 @@ fn await_answer(
             deadline.saturating_duration_since(Instant::now())
         });
         if left.is_zero() {
-            return Ok(Awaited::Unanswered(Answer::<()>::Timeout.word()));
+            return Ok(Awaited::Unanswered(Unanswered::Timeout));
         }
         channel.wait_for_replies(&since, left)?;
     }

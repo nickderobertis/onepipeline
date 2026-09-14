@@ -206,6 +206,158 @@ fn a_bus_config_widening_the_monitors_grants_is_refused_before_a_run_exists() {
     );
 }
 
+/// Every other part of a run's channel this crate decides for itself is refused
+/// at the launch, naming the key and its value, before any run exists: a
+/// transport option the local transport does not take, queues of the
+/// configuration's own, a codec `channel serve` does not speak, and an
+/// `onejudge` codec pointed at another queue or at variables `channel serve`
+/// does not read its run or its node from.
+#[test]
+fn a_bus_config_moving_what_the_channel_decides_for_itself_is_refused_before_a_run_exists() {
+    let world = World::new("bus-config-corners");
+    for (body, named) in [
+        (
+            "version: 1\ntransport: {kind: local, poll: fast}\n",
+            ["transport.poll", "`fast`"],
+        ),
+        (
+            "version: 1\ntransport: {kind: local}\nqueues:\n  surfaces: {}\n",
+            ["queues.surfaces", "leave `queues` out"],
+        ),
+        (
+            "version: 1\ntransport: {kind: local}\ncodecs:\n  another: {}\n",
+            ["codecs.another", "`onejudge`"],
+        ),
+        (
+            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {queue: replies}\n",
+            ["codecs.onejudge.queue", "`replies`"],
+        ),
+        (
+            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {run_env: HOST_RUN}\n",
+            ["codecs.onejudge.run_env", "`HOST_RUN`"],
+        ),
+        (
+            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {about_env: HOST_ABOUT}\n",
+            ["codecs.onejudge.about_env", "`HOST_ABOUT`"],
+        ),
+    ] {
+        refused_before_a_run_exists(&world, body, &named);
+    }
+}
+
+/// A validator the configuration names on the surfaces queue judges each
+/// question `channel serve` raises: one it refuses is refused in its words and
+/// queues nothing, and one it passes reaches the planner.
+#[test]
+fn a_validator_on_the_surfaces_queue_judges_the_questions_channel_serve_raises() {
+    let world = World::new("bus-config-surfaces");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: surfaces, kind: command, command: [{validator:?}]}}\n"
+        ),
+    );
+    let path = plan(&world, "bussurfaces");
+    launched(&world, &path, "bussurfaces", &["--bus-config", &file]);
+    let served = || {
+        let mut serving = world.cmd(&["channel", "serve", "bussurfaces"]);
+        // Nobody answers a question that is raised, and the wait is not under test.
+        serving.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+        serving
+    };
+
+    let reason = "a question has to name the node it is about";
+    world.script("bus-validator.refuse", reason);
+    let refused = "refused before it is raised";
+    world
+        .run_with_stdin_on(
+            served(),
+            &format!(r#"{{"kind":"blocker","message":"{refused}"}}"#),
+        )
+        .exited(REFUSED)
+        .err_has(reason);
+    assert!(
+        !channel_file(&world, "bussurfaces", "surfaces.jsonl").contains(refused),
+        "a question the validator refused was queued"
+    );
+    let judged: Vec<Value> = std::fs::read_to_string(world.fakes.join("bus-validator.jsonl"))
+        .expect("the validator was run")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("the validator records JSON"))
+        .collect();
+    assert!(
+        judged
+            .iter()
+            .any(|record| record["queue"] == json!("surfaces")
+                && record["message"]["message"] == json!(refused)),
+        "the validator was not offered the question on the surfaces queue: {judged:?}"
+    );
+
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
+    let passed = "passed and raised";
+    world
+        .run_with_stdin_on(
+            served(),
+            &format!(r#"{{"kind":"blocker","message":"{passed}"}}"#),
+        )
+        .exited(0)
+        .out_has("\"answer\":\"timeout\"");
+    assert!(
+        channel_file(&world, "bussurfaces", "surfaces.jsonl").contains(passed),
+        "a question the validator passed never reached the planner"
+    );
+    world.release("slow.go");
+}
+
+/// `channel serve` reads its asker and its session bound from the variables the
+/// configuration's `codecs.onejudge` block names rather than its own: the
+/// question is raised under the asker the named variable holds, and a bound the
+/// named variable holds that cannot be read is refused naming that variable.
+#[test]
+fn channel_serve_reads_its_asker_and_bound_from_the_variables_the_codec_names() {
+    let world = World::new("bus-config-codec-env");
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\ncodecs:\n  \
+         onejudge: {asker_env: HOST_ASKER, session_env: HOST_SESSION}\n",
+    );
+    let path = plan(&world, "buscodecenv");
+    launched(&world, &path, "buscodecenv", &["--bus-config", &file]);
+
+    let question = "asked under the asker the codec names";
+    let mut serving = world.cmd(&["channel", "serve", "buscodecenv"]);
+    serving
+        .env("HOST_ASKER", "host-named-asker")
+        .env("ONEPIPELINE_CHANNEL_ASKER", "the-default-variables-asker")
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+    world
+        .run_with_stdin_on(
+            serving,
+            &format!(r#"{{"kind":"blocker","message":"{question}"}}"#),
+        )
+        .exited(0);
+    let queued = channel_file(&world, "buscodecenv", "surfaces.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("a surface record"))
+        .find(|record| record["event"] == json!("queued") && record["message"] == json!(question))
+        .expect("the question was queued");
+    assert_eq!(queued["asker"], json!("host-named-asker"), "{queued}");
+
+    let mut bounded = world.cmd(&["channel", "serve", "buscodecenv"]);
+    bounded
+        .env("HOST_SESSION", "0")
+        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "30");
+    world
+        .run_with_stdin_on(bounded, "")
+        .exited(REFUSED)
+        .err_has("HOST_SESSION");
+    world.release("slow.go");
+}
+
 /// An author the configuration narrowed is refused what it took away — naming
 /// the author, the op and the configuration's reason, with nothing appended to
 /// the channel — and keeps what it left, while the same plan launched without the
@@ -312,6 +464,21 @@ fn a_validator_a_bus_config_names_refuses_a_reply_in_its_own_words_and_queues_it
         serde_json::from_str::<Value>(verdict).expect("the verdict is JSON"),
         "the validator was handed another document than the reply"
     );
+
+    // A validator that gives no verdict at all refuses the reply as well, rather
+    // than letting it through judged by nothing.
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
+    world.script("bus-validator.unjudged", "");
+    world
+        .run_with_stdin(&["reply", "busvalidated"], verdict)
+        .exited(REFUSED);
+    assert_eq!(
+        channel_file(&world, "busvalidated", "replies.jsonl"),
+        "",
+        "a reply no validator gave a verdict on was queued"
+    );
+    std::fs::remove_file(world.fakes.join("bus-validator.unjudged"))
+        .expect("the missing verdict is lifted");
 
     launched(&world, &path, "busvalidated-2", &[]);
     world

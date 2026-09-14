@@ -497,6 +497,83 @@ fn the_flag_beats_the_environment_which_beats_the_config() {
     }
 }
 
+/// The bar is resolved as the reviewer is: with no flag naming it, from
+/// `ONEPIPELINE_ENVELOPE_REVIEWER_BAR`, and with neither, from a launch config's
+/// `envelope_reviewer_bar`. A pass is kept under whichever rung named it, the
+/// launch record carries the bar it resolved, and a launch naming no bar keeps
+/// no pass and offers every envelope.
+#[test]
+fn a_bar_named_by_the_environment_or_the_launch_config_keeps_passes_as_the_flag_does() {
+    const BAR_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER_BAR";
+    let world = World::new("reviewer-bar-rungs");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!("schema_version: 7\nenvelope_reviewer_bar: {bar:?}\n"),
+    )
+    .expect("the launch config is written");
+    let finding = envelope(json!([{"op": "finding", "message": "the fixture is slow"}]));
+
+    for (name, by_config, environment) in [
+        ("barbyenvironment", false, Some(bar.as_str())),
+        ("barbyconfig", true, None),
+        ("barbynone", false, None),
+    ] {
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+        world.script("slow.wait", "hold");
+        let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
+        let mut args = vec![
+            "start".to_string(),
+            path,
+            spelling("flag"),
+            reviewer.clone(),
+        ];
+        if by_config {
+            args.push("--launch-config".to_string());
+            args.push(config.to_string_lossy().into_owned());
+        }
+        args.push("--detach".to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = world.cmd(&borrowed);
+        match environment {
+            Some(value) => command.env(BAR_ENV, value),
+            None => command.env_remove(BAR_ENV),
+        };
+        world.run_on(command, "start").exited(0);
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", name])
+                .stdout
+                .contains("slow: running")
+        });
+
+        let before = offered(&world).len();
+        for _ in 0..2 {
+            world.run_with_stdin(&["reply", name], &finding).exited(0);
+        }
+        let passes = std::fs::read_dir(world.run_file(name, "validator-passes"))
+            .map_or(0, |passes| passes.count());
+        let (reviews, kept, recorded) = match name {
+            "barbynone" => (2, 0, Value::Null),
+            _ => (1, 1, json!(bar)),
+        };
+        assert_eq!(
+            (offered(&world).len() - before, passes),
+            (reviews, kept),
+            "{name}: the reviews run and the passes kept are not what its bar asks for"
+        );
+        assert_eq!(
+            world.run_json(name, "launch.json")["envelope_reviewer_bar"],
+            recorded,
+            "{name}: the launch record does not carry the bar the launch resolved"
+        );
+        world.release("slow.go");
+    }
+}
+
 /// Every op that introduces or changes a node is listed in the document, and no
 /// other op is — held against the list entry 45 states, in both directions.
 ///

@@ -1123,6 +1123,11 @@ pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config>
         )));
     }
     if let Some((key, value)) = config.transport.options.iter().next() {
+        // Named as the file spells it, as every other key here is: a string
+        // option bare, and anything else in its JSON form.
+        let value = value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned);
         return Err(named(format!(
             "transport.{key} is `{value}`, which the {} transport does not take",
             onemessagebus::LOCAL
@@ -2267,6 +2272,24 @@ mod tests {
             Some("ask-manager-token:first".to_owned())
         );
         assert_eq!(echoed_token("nothing to echo here"), None);
+    }
+
+    /// The prefix is the one the contract and the README tell a host its answer
+    /// echoes. The asking wrapper is another repository's, and those two
+    /// documents are what it is written against, so a prefix changed here and
+    /// not there fails here rather than silently ending binding by token.
+    #[test]
+    fn the_token_prefix_is_the_one_the_contract_and_the_readme_state() {
+        for document in ["docs/contract.md", "README.md"] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(document),
+            )
+            .expect("the document ships");
+            assert!(
+                text.contains(&format!("`{ECHOED_TOKEN_PREFIX}`")),
+                "{document} does not state the prefix `{ECHOED_TOKEN_PREFIX}` a verdict echoes"
+            );
+        }
     }
 
     /// A channel under a fresh run root, removed when the test ends.
