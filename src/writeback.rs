@@ -54,7 +54,7 @@
 //! Both are absent for a node with no change of its own, which is most of them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -293,7 +293,6 @@ impl Classified {
     }
 }
 
-/// One projection attempt that did not land.
 struct Failed {
     reason: String,
     classified: Option<Classified>,
@@ -577,6 +576,20 @@ fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
         .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
 }
 
+/// Where the worker's attempts stand, which decides what the next outcome prints.
+///
+/// One value, because these are mutually exclusive: a projection is landing, or it is part-way
+/// through a streak of failures the schedule retries, or the store refused its last attempt.
+/// A landing after either of the other two is a recovery, and a retried failure after a
+/// refusal starts a streak of its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Landing,
+    /// The consecutive failures of the retried streak in progress, the first being 1.
+    Failing(NonZeroU32),
+    Refused,
+}
+
 fn worker(
     binary: PathBuf,
     launch_dir: PathBuf,
@@ -584,11 +597,8 @@ fn worker(
     per_item: NonZeroU64,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    // The consecutive failures of the retried streak in progress, and the whole of what this
-    // worker remembers about one: zero is a projection that is landing, or one refused.
-    let mut failures: u32 = 0;
-    // Whether the last attempt was refused, which a projection that then lands recovers from.
-    let mut refused = false;
+    // The whole of what this worker remembers about the attempts before this one.
+    let mut standing = Standing::Landing;
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -614,14 +624,13 @@ fn worker(
         };
         match project(&binary, &launch_dir, &run_dir, per_item, &snapshot) {
             Ok(()) => {
-                if failures > 0 || refused {
+                if standing != Standing::Landing {
                     eprintln!(
                         "onetaskgraph write-back recovered for '{}'",
                         snapshot.project
                     );
                 }
-                failures = 0;
-                refused = false;
+                standing = Standing::Landing;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
@@ -642,8 +651,7 @@ fn worker(
                     snapshot.project,
                     failed.said()
                 );
-                failures = 0;
-                refused = true;
+                standing = Standing::Refused;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.unprojected.push(Unprojected {
@@ -663,9 +671,12 @@ fn worker(
                 }
             }
             Err(failed) => {
-                let first = failures == 0;
-                failures = failures.saturating_add(1);
-                refused = false;
+                let failures = match standing {
+                    Standing::Failing(failures) => failures.saturating_add(1),
+                    Standing::Landing | Standing::Refused => NonZeroU32::MIN,
+                };
+                let first = failures == NonZeroU32::MIN;
+                standing = Standing::Failing(failures);
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to
@@ -685,7 +696,7 @@ fn worker(
                 // resolve a root that is gone, and answers so in milliseconds — so
                 // [`COMMAND_FLOOR`] is no part of it: that is spent only by a command that has
                 // not exited, which is a store answering slowly.
-                if !should_retry_after(&pending, retry_after(failures)) {
+                if !should_retry_after(&pending, retry_after(failures.get())) {
                     return;
                 }
                 let (lock, ready) = &*pending;
@@ -800,6 +811,12 @@ fn project(
             exit(&output.status),
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        // llmlint: ignore[changed_behavior_has_e2e] the copy is classed by the same
+        // `Failed::answered` the project read is, and the worker's branch on the result does
+        // not know which command failed — so `store::a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_graph_changes`
+        // drives this decision end to end. A copy the real store refuses on its own needs its
+        // destination to change between the two reads before it, which is a race rather than a
+        // journey; the refused-and-unclassified copy is `a_project_copy_refusal_is_reported_retried_and_recovers`.
         Err(Failed::answered(&output, reason))
     }
 }
@@ -904,6 +921,11 @@ fn destination_origins(
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
+            // llmlint: ignore[changed_behavior_has_e2e] classed by the same `Failed::answered`
+            // the project read's refusal journey drives end to end, into a worker branch that
+            // does not know which command failed. The page is read straight after `project show`
+            // succeeded against the same source, so a store refusing it alone is a race between
+            // two reads rather than an input either CLI exposes.
             return Err(Failed::answered(&output, reason));
         }
         // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the
@@ -1048,6 +1070,13 @@ fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
                 kind: document.failure.kind,
             })
         }
+        // llmlint: ignore[changed_behavior_has_e2e] driven end to end already: a `local-md` root
+        // that has gone is answered by the real store as exit 4 with every entry `refused`, and
+        // `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`
+        // asserts the `class: refused, kind: config` only this arm produces, while the four
+        // store-outage journeys assert the timer stays off. The mixed case needs two sources, one
+        // unreachable and one refusing, which no offline store can be made to answer; the unit
+        // test holds it against entry 72's rule.
         WRITEBACK_PARTIAL_EXIT => {
             let answer: PartialAnswer = serde_json::from_slice(stdout).ok()?;
             if answer.errors.is_empty() {
@@ -1696,7 +1725,6 @@ mod tests {
         );
     }
 
-    /// The block of one entry of the divergence record, parsed.
     fn divergence_block(number: &str) -> Value {
         let record = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),

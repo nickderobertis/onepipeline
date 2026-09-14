@@ -1332,6 +1332,12 @@ fn noted(world: &World, run: &str, node: &str, text: &str) {
         .exited(0);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this waits on is an
+// absence across a window the old schedule retried in three times, which cannot be observed in
+// less than that window, and the edge it needs is the crate under test: it drives the compiled
+// `onepipeline` binary against its own write-back worker and the real store, exactly as the six
+// schedule journeys below do, so a project of its own would declare the same dependency and
+// skip nothing. The reason those six record for staying in this binary is this one's too.
 /// How long a refused projection is watched for another attempt. The schedule every failure
 /// used to get asks again a quarter of a second after it, then a second after that, then four,
 /// so across this window it would have asked three more times.
@@ -1500,6 +1506,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         "the refusal changed what executed"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What a hosted destination says when it is refusing for a rate limit, and what this
 /// suite's store double is made to say. The words are GitHub's own: that limiter is the
