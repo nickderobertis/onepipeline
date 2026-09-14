@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32 and 34** have since been **ruled on by the planner who owns
+Entries **1–9, 23–32, 34 and 73** have since been **ruled on by the planner who owns
 the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -941,14 +941,13 @@ answered with a window while `monitor` answered with the whole store would make
 the two verbs disagree about what "the event view" means.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
-*describes* the duplication rather than introducing it: `docs/contract.md` fixes the
-filter grammar — like the envelope beside it — as duplicated per repository by design,
-with the committed grammar text as the one source and each producer's own contract test as
-the drift gate. `tests/contract.rs` is this repository's, and it fails `just check` the
-moment `src/filter.rs` stops matching the document. Building a cross-repository generation
-step or drift gate instead is a change to three independently-released tools and to the
-approved contract, which is a proposal to the planner who owns it — which is what this
-entry is. -->
+*describes* a duplication rather than introducing one: it records how the filter grammar
+was held while each producer kept its own copy, and entry 73 records the ruling that ended
+that — the filter and the envelope are `onemessagebus-agent`'s, re-exported, with
+`onemessagebus`'s `docs/contract.md` the one source and `tests/contract.rs` driving this
+repository's marked copy through the re-exported types. What remains here is history, and
+rewriting it to read as though the copies never existed would lose why the corners below
+were settled the way they were. -->
 
 ## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — RESOLVED
 
@@ -961,9 +960,9 @@ that.** The source is the committed grammar text, which the approved contract
 fixes as authoritative for all three producers; the gate is `tests/contract.rs`,
 which drives that text's own example through `src/filter.rs`'s types and fails
 this repository's `just check` the moment its copy stops matching. `oneagentgraph`
-and `onevcs` each carry the same text and the same gate. There is deliberately no
-shared crate — the same decision the envelope beside it is under, and for the same
-reason: a shared crate would make three independently-released tools co-version.
+and `onevcs` each carry the same text and the same gate. That this grammar had no
+shared crate is superseded by entry 73: the filter and the envelope are now
+`onemessagebus-agent`'s, re-exported by all three producers.
 
 What this entry is about is narrower. Three corners of that text do not settle a question
 an implementation has to answer anyway, so each producer answers it — and two
@@ -5372,5 +5371,85 @@ document at all.
       "refused_when": "every"
     }
   }
+}
+```
+
+## 73. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
+
+**Ruling: the envelope and filter types are `onemessagebus-agent`'s, re-exported
+here at the paths this crate always published them at, with `onemessagebus`'s own
+`docs/contract.md` the one source of the text `docs/contract.md` keeps as a marked
+copy. Ruled by the planner's task that moved this crate's wire layer onto the bus
+(`onepipeline-adopt-bus-wire`), and on four questions that task's worker asked over
+the ask seam: keep `journal::merge_order` as the one merge, holding it equal to
+the bus's `Merge` wherever the two agree; decode journal lines through the bus
+`Reader` and classify what it refuses as before; keep `ArtifactId` as this crate's
+own; and take the bus's byte order and its refusal of an unknown top-level field
+as the wire's rule, proven over a committed journal written before the change.**
+
+What moved, and what it replaced. `event::{Envelope, Labels, Source, Phase,
+ArtifactRef}` are `onemessagebus_agent::event`'s, `event::EventKind` is
+`onemessagebus::Kind`, and `filter::{EventFilter, Matcher}` are the agent profile's
+filter and matcher. `ENVELOPE_VERSION` and `ENVELOPE_VERSIONS_READ` are the agent
+profile's write version for `pipeline` and its registry's read-set for
+`agent.event-envelope`, and the fold asks that registry's `read_at` whether a record
+is at a version this build reads — so a record at version 3 is reported exactly as
+it was. Every `PipelineKind` payload is a registered bus message,
+`agent.pipeline.<kind>@2`, in the registry this crate constructs when it starts. A
+relayed `onevcs` envelope is the bus value itself, so the arm-by-arm conversions of
+its phase, source and labels are gone. What stays this crate's: `PipelineKind`,
+`Filters`, `LaunchConfig`, `DEFAULT_PROFILE`, `MONITOR_PROFILE`, and the shipped
+profiles' contents.
+
+Where the result is not what this crate did before, each one named so nobody reads
+it as a regression:
+
+- **The merge is seq-first; the bus's is not.** `onemessagebus::Merge` stably sorts
+  every record by `(ts, stream, seq)`. `journal::merge_order` keeps each stream in
+  its own `seq` and interleaves streams by `ts`. The two agree on every store whose
+  producers stamp each stream's clock in `seq` order, and part where a stream's
+  clock steps back against its own `seq` — the one ordering promise an envelope
+  carries, and the one `src/checkpoint.rs`'s coverage marker and `src/summary.rs`'s
+  open instant are proved over. So the in-memory merge stays this crate's, and
+  `journal::tests` holds both halves: three interleaved streams merge as the bus
+  merges them, and a stream whose clock stepped back keeps its own order where the
+  bus's does not. The bus-side sort is recorded against `onemessagebus`.
+- **Journal lines are decoded by the bus `Reader`.** It reports an unterminated
+  final line as torn and refuses every other line that is not an envelope, blank
+  lines included; this crate then classes a refused line as blank (no loss), a
+  fragment with a whole record glued after it (the record is recovered), a record
+  that stops early, or a line this build cannot read. The integrity report places a
+  torn tail where the reader does.
+- **An unknown top-level key refuses the line.** The bus's envelope refuses a key it
+  does not declare, where this crate's derive ignored one; such a line is now a line
+  this build cannot read. No producer writes one: every v2 pipeline record on the
+  operator's host reads, and `tests/e2e/compatibility.rs` folds and renders a journal
+  written before the change to its committed rendering.
+- **A relayed envelope is written in its producer's byte order.** The bus's `Labels`
+  carries `member` in a slot of its own ahead of `persona`, as `oneagentgraph` and
+  `onevcs` write it; this crate's copy kept it among the extras, after `persona`.
+- **The matcher names `phase`.** It is the agent profile's one reserved top-level
+  dimension; a spec naming it was refused here before.
+- **A filter's refusal is the bus's sentence**, naming the list and the position as
+  `include[0]`, and `EventFilter::{parse, read, validate}` answer the bus's
+  `FilterError`; a `Filters` block still validates every filter it carries where it
+  is read.
+- **A torn session stream is read for its whole records.** `onevcs` 0.24.0 reads its
+  stream through the same reader, so an unterminated record is handed over once its
+  newline lands rather than refusing the batch, and a session whose last commit
+  record is half written answers the branch its whole records put it at.
+- **Three shapes of the public surface moved with the types.** An envelope carries
+  its phase as `dimensions.phase`; `ArtifactRef.id` is a `String`, while `ArtifactId`
+  stays this crate's own newtype, as it stays `onevcs`'s; and
+  `Envelope::written_at_a_known_version` is no longer a public method, because an
+  inherent method cannot be declared on another crate's type.
+
+```json
+{
+  "wire_types_from": "onemessagebus-agent",
+  "bus_release": "0.4.0",
+  "payload_schema": "agent.pipeline.<kind>@2",
+  "merge": "journal::merge_order",
+  "line_reader": "onemessagebus::Reader"
 }
 ```

@@ -421,8 +421,8 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
 /// The `filters:` block in the contract is a block this crate's own types read.
 ///
 /// Driven out of the document, like every other fixture here: the grammar is
-/// shared across the stack with no shared crate, so the committed text is the one
-/// source and a copy that stopped matching it fails this gate.
+/// `onemessagebus`'s, re-exported, and this document keeps a marked copy of it, so
+/// a bus release whose grammar stopped matching that text fails this gate.
 #[test]
 fn the_contracts_launch_config_example_parses_and_round_trips() {
     let yaml = fenced_block_naming("yaml", "schema_version: 2");
@@ -4173,6 +4173,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
     ("44.", "the minimum this build requires"),
+    ("73.", "`onemessagebus`'s own `docs/contract.md` is the one source of their shape"),
 ];
 
 #[test]

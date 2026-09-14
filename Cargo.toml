@@ -42,9 +42,10 @@ resolver = "2"
 # pin**, because a revision is content this host cannot reproduce from crates.io
 # and a crate that itself ships there cannot publish against one.
 #
-# The filter grammar this crate passes through to them — a *cross-repository*
-# contract with no shared crate — is carried by both pins: `oneagentgraph` merged
-# it at v0.2.13 and `onevcs` at v0.2.7, and each pin below is above its own.
+# The filter grammar this crate passes through to them is carried by both pins:
+# `oneagentgraph` merged it at v0.2.13 and `onevcs` at v0.2.7, and each pin below
+# is above its own. Since `oneagentgraph` 0.4.2 and `onevcs` 0.24.0 the grammar's
+# one implementation is `onemessagebus-agent`'s, which all three re-export.
 # `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
 # the real siblings, so a pin moved below one fails rather than reads differently.
 #
@@ -496,6 +497,12 @@ onemessagebus-agent = "0.4.0"
 # dispatched judge is told where work git cannot show it lives. `oneagentgraph`
 # 0.4.1 requires exactly this release, so the two move together, and it is a
 # requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
+#
+# 0.12.0 is the release that adopted the bus: its command-provider frames are the
+# agent profile's registered messages. `oneagentgraph` 0.4.2 requires exactly it,
+# and the three of them resolve the one `onemessagebus` and `onemessagebus-agent`
+# the pins above name, so the four move together or a relayed envelope is two
+# types. A requirement for the same reason again: `^0.11` admits no 0.12.x.
 onejudge = "0.12.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
