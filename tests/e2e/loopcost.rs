@@ -42,21 +42,34 @@ use serde_json::{json, Value};
 // run them, and a constant they share cannot be edged narrower than they are.
 const WINDOW: Duration = Duration::from_secs(60);
 
+/// How long the scale journey waits for its large run's held node to dispatch.
+///
+/// That node is queued behind the run's ninety-nine others at a concurrency of
+/// four, so the wait is those hundred dispatches rather than one step of the
+/// loop, and it is sized to them: three seconds each, where the slowest
+/// cross-platform leg has taken about one and a half — a debug build reading its
+/// journal through the bus reader, whose decode is recorded in
+/// `docs/contract-divergences.md` entry 75. It is the harness's backstop and not
+/// what the journey proves: every bound the journey asserts is a count of work,
+/// and none of them moved.
+const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);
+
 /// A world whose driver counts its own work, and whose held dispatches outlast
 /// the journey holding them.
 ///
 /// The harness's default hold patience is set above one `until` deadline, which
 /// is what every other journey holds a dispatch across. The journeys here hold
-/// one across several — three `until` deadlines and then the whole of
-/// [`WINDOW`], four hundred and twenty seconds — and a hold that expires inside
-/// the window is not reported as the expiry it is: the double exits, the engine
-/// dispatches the node again, and that re-dispatch's reads land in the minute
-/// that was supposed to record nothing. So the patience is that sum with room,
-/// and a hold nobody releases still fails first, as an `until` timeout.
+/// one across several — at the longest, two `until` deadlines, then
+/// [`QUEUED_DISPATCHES`], then the whole of [`WINDOW`], six hundred seconds —
+/// and a hold that expires inside the window is not reported as the expiry it
+/// is: the double exits, the engine dispatches the node again, and that
+/// re-dispatch's reads land in the minute that was supposed to record nothing.
+/// So the patience is that sum with room, and a hold nobody releases still fails
+/// first, as an `until` timeout.
 fn measured(name: &str) -> World {
     World::new(name)
         .with_env(LOOP_STATS_ENV, "1")
-        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env(RENDEZVOUS_SECONDS_ENV, "900")
 }
 
 /// The records a run wrote that change what the graph is: what "one per recorded
@@ -234,7 +247,7 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
     world.run(&["start", &small, "--detach"]).exited(0);
     world.run(&["start", &large, "--detach"]).exited(0);
     for run in ["small", "large"] {
-        world.until("both dispatches to start", |world| {
+        world.until_within(QUEUED_DISPATCHES, "both dispatches to start", |world| {
             recorded(world, run, "node-dispatched", "hold")
         });
         reporting(&world, run);
