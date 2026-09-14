@@ -1523,19 +1523,19 @@ pub(crate) struct EnvelopeLine {
 }
 
 impl EnvelopeLine {
-    /// The line's own bytes, decoded leniently and without a trailing `\r`.
+    /// The line's own bytes, decoded leniently and without a trailing `\r`, or
+    /// `None` where they could not be read again.
     ///
     /// Asked only of a line the reader did not read as an envelope — a torn tail
     /// or a refused line — which is rare, so it is read again from the file
-    /// rather than held for every line of every read.
-    pub(crate) fn text(&self, path: &Path) -> String {
-        read_range(path, self.offset, self.bytes)
-            .map(|bytes| {
-                String::from_utf8_lossy(&bytes)
-                    .trim_end_matches('\r')
-                    .to_string()
-            })
-            .unwrap_or_default()
+    /// rather than held for every line of every read. A reread that fails is not
+    /// an empty line: the reader refused bytes that were there.
+    pub(crate) fn text(&self, path: &Path) -> Option<String> {
+        read_range(path, self.offset, self.bytes).map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .trim_end_matches('\r')
+                .to_string()
+        })
     }
 }
 

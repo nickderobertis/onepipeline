@@ -362,7 +362,11 @@ fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
     if let Some(envelope) = line.envelope {
         return Reading::Whole(envelope);
     }
-    let text = line.text(path);
+    // A line the reader refused whose bytes cannot be read again is one this build
+    // cannot read, and is reported as that rather than skipped as blank.
+    let Some(text) = line.text(path) else {
+        return Reading::Unparseable;
+    };
     if text.trim().is_empty() {
         return Reading::Blank;
     }
@@ -1430,6 +1434,36 @@ mod tests {
         let (events, at) = finished_after(&path, 0);
         assert_eq!(events.len(), 2);
         assert_eq!(at, reported.at);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line the reader refused is read again to say what it is, and a reread
+    /// that fails — the file shrank or was replaced under the read — is a line
+    /// this build cannot read, never a blank line skipped as no loss.
+    #[test]
+    fn a_refused_line_that_cannot_be_read_again_is_unreadable_and_not_blank() {
+        let dir = std::env::temp_dir().join(format!("onepipeline-reread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("events.jsonl");
+        let whole = serde_json::to_string(&stamped("a", 1, "2026-09-01T00:00:01.000Z"))
+            .expect("serializes");
+        std::fs::write(&path, format!("{whole}\n{{\"hello\":1}}\n")).expect("a journal");
+
+        let refused = ledger::read_envelope_lines(&path, 0)
+            .pop()
+            .expect("the line after the record");
+        assert!(
+            refused.envelope.is_none(),
+            "the reader refuses the line that is not an envelope"
+        );
+        // The file loses the refused line between the read and the reread.
+        std::fs::write(&path, format!("{whole}\n")).expect("the journal shrinks");
+        assert!(
+            matches!(reading(refused, &path), Reading::Unparseable),
+            "a refused line whose bytes could not be read again was classed as something \
+             this build read"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

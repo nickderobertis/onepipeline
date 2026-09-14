@@ -119,6 +119,25 @@ impl From<crate::channel::Author> for AuthorWord {
     }
 }
 
+/// Which of the two release styles a target is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReleaseStyleWord {
+    /// `automated`.
+    Automated,
+    /// `human-step`.
+    HumanStep,
+}
+
+impl From<onevcs::releases::ReleaseStyle> for ReleaseStyleWord {
+    fn from(style: onevcs::releases::ReleaseStyle) -> Self {
+        match style {
+            onevcs::releases::ReleaseStyle::Automated => Self::Automated,
+            onevcs::releases::ReleaseStyle::HumanStep => Self::HumanStep,
+        }
+    }
+}
+
 /// Where a release note was delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -237,6 +256,15 @@ impl From<crate::note::Evidence> for EvidenceWord {
     }
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] these documents are
+// not a second copy maintained beside the emitters: `Journal::emit` checks every record
+// it appends against its kind's document in every debug build of the binary, which is
+// the build each end-to-end and note journey drives, and panics naming the kind and the
+// refusal, so an emit site that drifts fails the journeys that reach it. The
+// `every_kinds_recorded_envelope_validates_against_its_registered_document` test
+// below holds each kind's recorded envelope to its document, and each closed word is
+// built from its owning type through an exhaustive `From`. Moving every emit site onto
+// these types is a rewrite of the emitters across the engine, outside this wire adoption.
 /// `run-started`: the plan the run was launched with, and how it is driven.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RunStarted {
@@ -377,7 +405,13 @@ pub(crate) struct EditRejected {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceQueued {
     /// The surface's kind.
+    // llmlint: ignore-block[invalid_states_unrepresentable] a queued surface's kind is
+    // not `channel::SurfaceKind`'s closed set: the engine queues surfaces of its own —
+    // the recorded journal carries `quiet-worker` — and `SurfaceKind` is only the kinds
+    // an operator may raise from the command line. An enum here would refuse records
+    // this crate writes.
     pub(crate) kind: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// What it says.
     pub(crate) message: String,
     /// What raised it.
@@ -390,7 +424,13 @@ pub(crate) struct PlannerSurfaceQueued {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaced {
     /// The surface's kind.
+    // llmlint: ignore-block[invalid_states_unrepresentable] a queued surface's kind is
+    // not `channel::SurfaceKind`'s closed set: the engine queues surfaces of its own —
+    // the recorded journal carries `quiet-worker` — and `SurfaceKind` is only the kinds
+    // an operator may raise from the command line. An enum here would refuse records
+    // this crate writes.
     pub(crate) kind: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// What it says.
     pub(crate) message: String,
     /// What raised it.
@@ -563,7 +603,7 @@ pub(crate) struct ReleaseArrived {
     pub(crate) target: Option<String>,
     /// The release style, `null` for none.
     #[serde(default)]
-    pub(crate) style: Option<String>,
+    pub(crate) style: Option<ReleaseStyleWord>,
 }
 
 /// `release-adopted`: a fast-adoption node told its releases arrived.
@@ -650,6 +690,7 @@ pub(crate) struct NoteShown {
     /// What showed the presentation happening.
     pub(crate) evidence: EvidenceWord,
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
 /// from a kind to that id, and the registry every one of them is registered in.
@@ -890,6 +931,12 @@ mod tests {
         ] {
             assert_eq!(word(&AuthorWord::from(author)), author.as_str());
             assert_eq!(word(&AuthorWord::from(author)), word(&author));
+        }
+        for style in [
+            onevcs::releases::ReleaseStyle::Automated,
+            onevcs::releases::ReleaseStyle::HumanStep,
+        ] {
+            assert_eq!(word(&ReleaseStyleWord::from(style)), style.as_str());
         }
         for delivery in [
             crate::edits::Delivery::Live,
