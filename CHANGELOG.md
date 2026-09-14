@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0](https://github.com/nickderobertis/onepipeline/compare/v0.30.0...v0.31.0) - 2026-09-14
+
+### Changed
+
+- *(event)* take the envelope, filter, registry and merge from onemessagebus, and link the adopted siblings ([#288](https://github.com/nickderobertis/onepipeline/pull/288))
+
 ## [0.30.0](https://github.com/nickderobertis/onepipeline/compare/v0.29.4...v0.30.0) - 2026-09-14
 
 ### Added
