@@ -929,33 +929,39 @@ mod tests {
 
     /// One envelope of every kind this crate emits, recorded from real runs: the
     /// operator's host's journals for every kind a run there has written, and this
-    /// build's own end-to-end journeys for the three no host run has, with free
-    /// text and host paths stood in for.
+    /// build's own end-to-end journeys for the kinds no host run has, with free
+    /// text and host paths stood in for. A kind whose payload takes more than one
+    /// shape — `run-hook-fired`'s `null` reason for success and a reason listing
+    /// nodes for failure — is recorded once in each.
     const RECORDED: &str = include_str!("../tests/recorded/pipeline-kinds.jsonl");
 
-    /// Every kind's recorded envelope is admitted by its registered document, and a
-    /// payload violating that document — a key every writer of the kind writes,
-    /// taken away — is refused naming the document and the pointer.
+    /// Every recorded envelope is admitted by its kind's registered document, every
+    /// kind has one, and a payload violating that document — a key every writer of
+    /// the kind writes, taken away — is refused naming the document and the pointer.
     #[test]
     fn every_kinds_recorded_envelope_validates_against_its_registered_document() {
         let recorded: Vec<crate::event::Envelope> = RECORDED
             .lines()
             .map(|line| serde_json::from_str(line).expect("a recorded envelope reads"))
             .collect();
-        for kind in PIPELINE_KINDS {
-            let id = schema_of(*kind);
-            let envelope = recorded
-                .iter()
-                .find(|envelope| PipelineKind::from_wire(&envelope.kind) == Some(*kind))
-                .unwrap_or_else(|| panic!("no recorded envelope of {kind}"));
+        for envelope in &recorded {
+            let kind = PipelineKind::from_wire(&envelope.kind)
+                .unwrap_or_else(|| panic!("{} is not a kind this crate emits", envelope.kind));
             assert_eq!(
                 envelope.v, ENVELOPE_VERSION,
                 "{kind} was recorded at another version"
             );
             let payload = serde_json::Value::Object(envelope.payload.clone());
             registry()
-                .check(&id, &payload)
+                .check(&schema_of(kind), &payload)
                 .unwrap_or_else(|refusal| panic!("the recorded {kind} is refused: {refusal}"));
+        }
+        for kind in PIPELINE_KINDS {
+            let id = schema_of(*kind);
+            let envelope = recorded
+                .iter()
+                .find(|envelope| PipelineKind::from_wire(&envelope.kind) == Some(*kind))
+                .unwrap_or_else(|| panic!("no recorded envelope of {kind}"));
 
             let document = registry().schema(&id).expect("registered");
             let Some(required) = document["required"]
