@@ -358,8 +358,9 @@ A verdict answers one question. Each question `onepipeline channel serve` raises
 carries a correlation, and `reply --correlation C` binds a verdict to the question
 `C` names, refusing by name a correlation no pending question holds. A verdict
 naming none is bound to the question whose `ask-manager-token:` its `message`
-echoes, then to the question the pending slot holds, then to the oldest one still
-outstanding. A question nobody answers within the server's reply window is answered
+echoes, then to the question the pending slot holds, then to the oldest one a live
+listener waits on; with none of those it is queued unbound, for the next listener
+to read. A question nobody answers within the server's reply window is answered
 on its stdout with `{"answer": "timeout", "correlation": C}`, which carries no
 completion and appends no reply: the question stays queued, and a frame
 `{"correlation": C}` waits for its answer again. The window is

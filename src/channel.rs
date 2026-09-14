@@ -1587,11 +1587,14 @@ impl ChannelState {
     ///
     /// 1. the question whose [`echoed_token`] the verdict's `message` carries;
     /// 2. the question the pending slot holds;
-    /// 3. the oldest question still outstanding that a listener is waiting on,
-    ///    and failing that the oldest outstanding at all.
+    /// 3. the oldest question still outstanding that a live listener is waiting
+    ///    on.
     ///
-    /// With no question outstanding it is queued as 0.28.2 queued it, carrying
-    /// no correlation. Either way the pending slot is released, as a verdict has
+    /// With none of those it is queued as 0.28.2 queued it, carrying no
+    /// correlation, for the next listener to read: a question whose listener
+    /// has gone may already have been handed a verdict bound to nothing, and
+    /// binding a later one to it would keep that verdict from every listener
+    /// still reading. Either way the pending slot is released, as a verdict has
     /// always released it.
     pub fn answer(&self, reply: &Reply) -> crate::Result<u64> {
         self.answer_bound(reply, None)
@@ -1691,9 +1694,7 @@ impl ChannelState {
                 return Ok(Some(correlation.clone()));
             }
         }
-        Ok(outstanding
-            .first()
-            .and_then(|asked| asked.correlation.clone()))
+        Ok(None)
     }
 
     /// Every question still waiting for its answer, oldest first: each surface
@@ -2323,7 +2324,7 @@ mod tests {
     }
 
     /// A verdict echoing a question's token binds to that question, ahead of
-    /// the one the pending slot holds and ahead of the oldest outstanding.
+    /// the one the pending slot holds and ahead of any a live listener waits on.
     ///
     /// Two asks outstanding at once is the case the order exists for: a manager
     /// answering the second must not have the answer routed to the first by

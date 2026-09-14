@@ -4201,9 +4201,13 @@ correlation on `replies.jsonl`. `reply --correlation <c>` binds to the question
 `c` names, and refuses, naming it, a correlation no pending question holds. A
 verdict naming none is bound, in order, to the question whose
 `ask-manager-token:` its `message` echoes, to the question the pending slot holds,
-to the oldest outstanding question a listener is waiting on, and failing that to
-the oldest outstanding at all; with no question outstanding it is queued with no
-correlation, as it always was. A listener reads its own question's answer, a
+and to the oldest outstanding question a live listener is waiting on; with none of
+those it is queued with no correlation, as it always was, for the next listener to
+read. A later ruling on the same task dropped a fifth rung, the oldest outstanding
+question at all: a question whose listener had gone may already have been handed a
+verdict bound to nothing, and binding the next verdict to it kept that verdict from
+every listener still reading, which 0.28.2 never did
+(`journal::a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed`). A listener reads its own question's answer, a
 ruling on any other question its asker raised, and a ruling bound to no question —
 never a ruling on another asker's question.
 `channel::a_verdict_reaches_the_question_it_answers_rather_than_whichever_listener_polls`
