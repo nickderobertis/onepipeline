@@ -3150,6 +3150,100 @@ fn write_persona(world: &World, name: &str) {
     .expect("the persona is written");
 }
 
+/// The brief onejudge opens every supervisor prompt on, which is what tells a
+/// judge's prompt from the worker's among everything the harness was handed.
+const SUPERVISOR_OPENING: &str = "You are the simulated USER and completion supervisor";
+
+/// The heading onejudge renders a judge's named artifacts under.
+const ARTIFACTS_HEADING: &str = "ARTIFACTS TO READ DIRECTLY";
+
+/// Every supervisor prompt the harness double was really handed, in order.
+fn judge_prompts(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneharness-config")
+        .filter_map(|call| call["args"][0].as_str().map(str::to_string))
+        .filter(|prompt| prompt.contains(SUPERVISOR_OPENING))
+        .collect()
+}
+
+/// A dispatched `kind: onejudge` member whose persona delta names `user.artifacts`
+/// gives its judge a prompt naming them, and one naming none does not.
+///
+/// The third root cause of ai-orchestrator #1004: a judge of a design document
+/// looped on a git question, because the document was untracked and git was all
+/// the evidence it had been pointed at. onejudge 0.11.0 renders the paths a persona
+/// names into its judge-side prompts, and `oneagentgraph` 0.4.1 carries a persona's
+/// list there — neither reaches a dispatch unless this build links them. So this
+/// drives the whole path: the plan's persona, the sibling's merge, onejudge
+/// composing the prompt, and the harness double recording what it was handed.
+///
+/// Both spellings of a path are named: a relative one, resolved against the judge's
+/// evidence worktree, and an absolute one that exists. The run naming none goes
+/// first, so the section appearing afterwards is the persona's doing rather than
+/// something every judge prompt of this build carries.
+#[test]
+fn a_persona_naming_artifacts_gives_its_judge_a_prompt_naming_them() {
+    let world = World::new("real-judge-artifacts");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    write_persona(&world, "plain");
+    let design = world.graphs().join("design.md");
+    std::fs::write(&design, "# Design\n").expect("the design document is written");
+    std::fs::write(
+        world.graphs().join("reviewer.yaml"),
+        format!(
+            "name: reviewer\nsystem_prompt: Ship it.\nuser:\n  persona: Review it.\n  \
+             artifacts:\n    - docs/design-notes\n    - '{}'\n",
+            design.display()
+        ),
+    )
+    .expect("the persona naming artifacts is written");
+
+    let judged = |run: &str, persona: &str| -> Vec<String> {
+        let before = judge_prompts(&world).len();
+        let mut node = agent(run, &[]);
+        node["persona"] = Value::from(format!("./{persona}.yaml"));
+        let path = world.plan(run, &plan_of(run, vec![node]));
+        world
+            .run_on_agentgraph(&["start", &path, "--attach"])
+            .exited(0)
+            .settled();
+        let mut prompts = judge_prompts(&world);
+        let asked = prompts.split_off(before);
+        assert!(
+            !asked.is_empty(),
+            "the {run} member's judge was never asked, so nothing here is proven: {:?}",
+            world.invocations()
+        );
+        asked
+    };
+
+    for prompt in judged("unnamed", "plain") {
+        assert!(
+            !prompt.contains(ARTIFACTS_HEADING),
+            "a persona naming no artifacts gave its judge an artifacts section:\n{prompt}"
+        );
+    }
+
+    let design = design.display().to_string();
+    for prompt in judged("named", "reviewer") {
+        assert!(
+            prompt.contains(ARTIFACTS_HEADING),
+            "the persona's artifacts never reached its judge's prompt:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("design-notes"),
+            "the relative artifact is not named to the judge:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(&design) && !prompt.contains(&format!("{design} (does not exist)")),
+            "the absolute artifact is not named to the judge as the file it is:\n{prompt}"
+        );
+    }
+}
+
 /// A node's turn budget reaches the configuration its dispatch is handed, and
 /// beats the run-wide override an operator set.
 ///

@@ -3681,6 +3681,106 @@ fn a_red_required_check_on_a_replaced_head_cannot_end_the_publication() {
     );
 }
 
+/// A required check the host reports **cancelled**, which is what CI stopping a
+/// run before it answered looks like to a change request the host was asked to
+/// land.
+const CANCELLED: &str = "llmlint completed cancelled required";
+
+/// How many times this host was asked for a change request's check rollup.
+///
+/// Counted off the host double's own record rather than off the sibling's events,
+/// because what is proven is that the publication went back to the host: a read
+/// this double never answered is not one.
+fn check_rollup_reads(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "gh" && call["args"][0] == "pr" && call["args"][1] == "view")
+        .filter(|call| {
+            call["args"]
+                .as_array()
+                .is_some_and(|args| args.iter().any(|arg| arg == "headRefOid,statusCheckRollup"))
+        })
+        .count()
+}
+
+/// A required check the host reports cancelled is **no verdict**: the publication
+/// reads the change's checks again rather than refusing it, and with nothing later
+/// to read it settles `checks-unsettled` on its bound.
+///
+/// The first root cause of ai-orchestrator #1004, driven from this crate's own
+/// end. A cancelled check cost a publication attempt, because `onevcs` below
+/// 0.23.0 read every settled conclusion that is not green as red: the node settled
+/// `checks-failed` and was re-dispatched with a diagnosis about a tree nothing had
+/// judged. A cancellation says nothing about the tree.
+///
+/// The contrast with
+/// [`a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved`]
+/// is the assertion: the same required check, concluding `failure` there and
+/// `cancelled` here. Every read of this host answers `cancelled`, so a publication
+/// that stopped on the conclusion read the rollup once, and one reading past it
+/// reads it again on every poll until its bound. And the ending is held against
+/// each wrong reading of it: `checks-failed` is a verdict nobody gave, a landing is
+/// a merge nothing allowed, and a wait with no end is a run `settle` never returns
+/// from.
+#[test]
+fn a_required_check_the_host_cancelled_is_read_again_and_never_settles_checks_failed() {
+    let world = World::new("lifecycle-cancelled").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", CANCELLED);
+    // No `gh.merged`: nothing later arrives to answer for the cancelled run.
+    let run = settle(&world, "cancelled", vec![lifecycle("service", &[])]);
+
+    // The publication met the conclusion, rather than never getting as far as the
+    // checks …
+    assert!(
+        world
+            .events_of(&run, "change-check")
+            .iter()
+            .any(|event| event["payload"]["conclusion"] == "cancelled"),
+        "the host's cancelled check was never read, so nothing here is about it\n{}",
+        why(&world, &run)
+    );
+    // … and went back to the host for them after it.
+    let reads = check_rollup_reads(&world);
+    assert!(
+        reads >= 2,
+        "the publication read the checks {reads} time(s) and stopped on a cancelled one\n{}",
+        why(&world, &run)
+    );
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"],
+        "checks-unsettled",
+        "a cancelled check was read as a verdict\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("1 checks-unsettled"),
+        "the settlement does not name the bound it stopped on: {detail}"
+    );
+    assert!(
+        !detail.contains("checks-failed"),
+        "a cancelled check was reported as a check that failed: {detail}"
+    );
+
+    // Preserving, like every other bounded ending: the work is where a person
+    // picks it up.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the unsettled change is on was not handed back"
+    );
+}
+
 /// And the same ending is preserving, which is only visible where the budget
 /// leaves room for the attempt that proves it.
 ///

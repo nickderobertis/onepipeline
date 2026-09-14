@@ -1149,6 +1149,97 @@ fn an_answer_this_host_cannot_read_is_never_read_as_a_release_that_has_not_happe
     }
 }
 
+/// A published node held on a landing that has **no release baseline** stays held
+/// while the release it waits on is out, and is released by the acknowledgement a
+/// person records through `onevcs` — and by nothing before it.
+///
+/// The #855 incident, whose hold never cleared on a release already on PyPI. A
+/// baseline is what the dependency's publication captures as its change lands —
+/// the version the target had then — and it is the only thing a later version is
+/// compared against. Where the probe could not answer at the landing none is
+/// captured, and a version the probe answers afterwards may or may not carry the
+/// change, so `onevcs` answers *not answered* rather than guess — and a
+/// `published` hold, which nothing times out, waited on that for ever. `onevcs`
+/// 0.23.0 accepts an acknowledgement for an automated target's landing as it does
+/// for a human step's, so the release a person can see is one this run can hear.
+#[test]
+fn a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknowledgement() {
+    let world = watching("adoption-nobaseline");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // There and holding nothing, so the probe the engine's publication runs as its
+    // change lands fails rather than answering, and no baseline is captured for
+    // that landing. An answer that is merely not a version would not do: the probe
+    // answered, and what it answered is recorded as the baseline.
+    std::fs::write(&answer, "").expect("the probe is left with no answer to give");
+
+    let run = start(
+        &world,
+        "adoption-nobaseline",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the engine to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "engine")
+    });
+    let landed = branch_of(&world, &run, "engine");
+
+    // The release is out now, and the probe says so. With nothing captured at the
+    // landing to compare it against, the sibling will not say this version carries
+    // the change — which is the state this journey is about, so it is established
+    // from the sibling itself rather than assumed.
+    releases_at(&answer, "0.2.0");
+    match world.on_onevcs(|| onevcs::release_status(&landed, None)) {
+        Ok(onevcs::ReleaseStatus::NotAnswered { reason }) => assert!(
+            reason.contains("no baseline"),
+            "the landing is unanswerable for some reason other than a missing baseline: {reason}"
+        ),
+        other => panic!("a landing with no baseline was answered as something else: {other:?}"),
+    }
+
+    // And the run holds on it. Two more of its own probe runs with the version in
+    // place — the first could have started before the write — and the node is still
+    // not dispatched, its wait answered `not-answered` rather than released.
+    let asked = world.probe_runs(ENGINE);
+    world.until("the run to ask about the released version", |world| {
+        world.probe_runs(ENGINE) >= asked + 2
+    });
+    world.until("the wait to record the unanswerable landing", |world| {
+        answered(world, &run, "consumer") == Some("not-answered".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node started on a landing no answer could say was released"
+    );
+
+    // The person who can see the release records it, the way `onevcs release
+    // acknowledge` does — and that is what starts the node.
+    world.on_onevcs(|| {
+        onevcs::acknowledge_release(
+            &landed,
+            &"crate".parse().expect("a target name"),
+            "0.2.0",
+            false,
+        )
+        .expect("the release of a landing with no baseline is acknowledged")
+    });
+    world.until("the acknowledgement to start the held node", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    assert!(dispatched(&world, &run, "consumer"));
+    for event in world.events_of(&run, "node-settled") {
+        assert_eq!(
+            event["payload"]["status"],
+            json!("done"),
+            "a node held on a landing with no baseline did not finish: {event}"
+        );
+    }
+}
+
 /// An unusable poll or surface bound falls back to the shipped one rather than to
 /// zero or to no bound at all, and the run behaves.
 ///

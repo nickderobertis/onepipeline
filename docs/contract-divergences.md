@@ -1450,9 +1450,17 @@ never failing — and what differs is only where the readiness answer comes from
 and what is reported. An automated target's answer is its probe, which is a
 subprocess: it is asked off the reconcile loop's own thread and paced on its own
 interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 60 seconds by default — the
-minute this loop promises for every answer it owes on a clock. A
-human-step target's answer is the acknowledgement record, for which this crate
-runs no probe because there is none to run. `awaiting-human-step` is carried as
+minute this loop promises for every answer it owes on a clock. A probe's answer
+is compared against the baseline the landing captured, and a landing that
+captured none — its probe could not answer as the change landed — is *not
+answered* for as long as it has none, however many versions the probe reports
+since: `onevcs` will not say whether one carries the change. From `onevcs`
+0.23.0 such a landing is released by an acknowledgement record, exactly as a
+human step's is, and the same one call reads it on the probe's interval;
+`tests/e2e/adoption.rs`'s
+`a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknowledgement`
+holds the hold to it. A human-step target's answer is the acknowledgement record,
+for which this crate runs no probe because there is none to run. `awaiting-human-step` is carried as
 its own answer through the scheduler, the surface, and the payload and is never
 folded into either neighbour. This crate never performs a human release step,
 never prompts for one, and never acknowledges one on somebody's behalf.
