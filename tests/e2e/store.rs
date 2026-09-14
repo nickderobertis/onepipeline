@@ -1612,13 +1612,13 @@ fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
     }
 }
 
-/// A failure the store classes as one a wait can change keeps today's schedule exactly: a
-/// document classed `transient`, and a partial answer with any entry a wait could change even
-/// beside one that refused. So does a document carrying a class this build has never heard of,
-/// which it does not read as a refusal. The first retry stays prompt, the interval grows, and
-/// the one line and one surface say it is being retried.
+/// A failure the store does not refuse keeps today's schedule exactly: a document classed
+/// `transient`, a partial answer with any entry a wait could change even beside one that
+/// refused, and a document carrying a class this build has never heard of, which it does not
+/// read as a refusal. The first retry stays prompt, the interval grows, and the one line and
+/// one surface say it is being retried.
 #[test]
-fn a_failure_the_store_classes_transient_is_retried_on_the_schedule() {
+fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
     let unknown_class =
         RATE_LIMITED_DOCUMENT.replace(r#""class":"transient""#, r#""class":"deferred""#);
     assert_ne!(
@@ -1828,10 +1828,10 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
         "the line an operator reads says a refused projection is being retried: {said}"
     );
 
-    // With no double to record them, an attempt is read off the capture file it creates for
-    // the `project show` it opens with, so the refused attempt's capture is taken away first.
-    let capture = world.run_file(run, "writeback-project-show.stderr");
-    std::fs::remove_file(&capture).expect("the refused attempt left its capture");
+    // Read where an operator reads it: the driver reports every refused attempt with a line of
+    // its own and every projection that lands as a recovery, so a store asked again inside the
+    // window — on a timer, or because it was put right halfway through — is a second failure
+    // line, or a recovery before the graph has changed.
     let watched = Instant::now();
     let mut put_back = false;
     while watched.elapsed() < REFUSAL_WINDOW {
@@ -1841,12 +1841,15 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
             renamed(&aside, &board, "the destination project is put back");
             put_back = true;
         }
+        let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .expect("the driver log is readable");
         assert!(
-            !capture.exists(),
-            "the store was asked again {:?} after it refused the projection",
+            log.matches("onetaskgraph write-back failed").count() == 1
+                && !log.contains("onetaskgraph write-back recovered"),
+            "the store was asked again {:?} after it refused the projection:\n{log}",
             watched.elapsed()
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert!(put_back, "the destination project was never put back");
 
