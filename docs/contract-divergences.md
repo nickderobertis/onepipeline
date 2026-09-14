@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–73 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73 and 75 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
@@ -21,8 +21,8 @@ general integration hooks only and nothing in them may know about this one; the
 rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
-`onevcs`'s. An open entry is recorded here and never resolved from this
-repository.
+`onevcs`'s. Entry 75 is for `onemessagebus` and for a node of this crate's own. An
+open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -5613,3 +5613,63 @@ it as a regression:
   "line_reader": "onemessagebus::Reader"
 }
 ```
+
+## 75. The bus reader decodes a line twice, and a summary rebuild pays that for the whole store several times a dispatch — OPEN
+
+**Proposal (for `onemessagebus`): decode an envelope line in one typed pass.
+Proposal (for this crate): stop the summary maintainer reading the whole store
+again for a relayed record stamped behind the newest instant. Recorded on the
+manager's ruling over the ask seam during `onepipeline-adopt-bus-wire`. That ruling
+kept the wire adoption as it is and sized one journey's backstop wait rather than
+change either algorithm in that task.**
+
+What happens today. `onemessagebus` 0.4.0 reads an envelope in two passes. It first
+parses the line into a `serde_json::Map`. It then runs `serde_json::from_value`
+again for each key it takes, and once more for the dimensions left over (`impl
+Deserialize for Envelope<V>` in its `envelope.rs`). It reads that way so it can
+refuse an unknown top-level key by name.
+
+Measured in a debug build over one 1,900-record journal:
+
+- one `Reader` read takes 70 ms;
+- the decoder this crate had before the adoption took 28.6 ms over the same records;
+- parsing each line into a bare `Value` alone takes 38 ms.
+
+`journal::read` adds nothing measurable around the reader. `Reader` and `Envelope`
+are type aliases over the bus's generics, so the decode is compiled into this crate
+at its own optimisation level, and a profile override on the bus crates does not
+reach it.
+
+`summary::Maintainer` multiplies that cost. It rebuilds from a whole read of the
+store when a record lands stamped behind the newest instant any stream has reached,
+or behind a `seq` its own stream has already settled. Its documentation calls both
+rare. Relaying `oneagentgraph` makes them routine. In
+`loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on`, five records of
+every dispatch arrive behind: `turn-activity`, `turn-message`, `oneharness-session`,
+`turn-completed` and `member-settled`. So the 100-node run rebuilds 503 times. The
+tree before the adoption rebuilt exactly 503 times too; what grew is the read each
+rebuild makes.
+
+What it cost. Timings for that journey:
+
+| tree | macOS | Windows | this host |
+| --- | --- | --- | --- |
+| before the adoption | 99–110 s | 146–160 s | 104 s |
+| the adoption | 125–139 s | timed out at 120 s, 77 of 99 queued dispatches done | 136 s |
+
+A second cause was this crate's own and is fixed. The fold asked `Registry::read_at`
+of every record, and that call rebuilds and sorts the read set each time. The read
+set is now taken once per process, which brings this host to 116 s. What is left is
+the decode above. The journey's wait for its queued node is now sized to the hundred
+dispatches it waits for (`QUEUED_DISPATCHES` in `tests/e2e/loopcost.rs`), and every
+bound the journey asserts is unchanged.
+
+What would close it:
+
+- **For `onemessagebus`:** an `Envelope` decode that reads its declared keys straight
+  from the line, and passes only the keys it does not declare on to the dimensions
+  and to the unknown-key refusal. The refusal stays; the second pass goes.
+- **For this crate:** a `summary::Maintainer` that places a record stamped behind the
+  newest instant without reading the store again, so a relayed burst costs its own
+  records rather than the whole run. That is ordering-sensitive work over the merge
+  `journal::merge_order` states, and it is for a node of its own.
