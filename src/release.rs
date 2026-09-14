@@ -1914,6 +1914,19 @@ mod tests {
                     target: "crate".parse().expect("a target name"),
                     style: ReleaseStyle::Automated,
                     version: "0.2.0".to_owned(),
+                    source: onevcs::ReleaseSource::Probed,
+                }),
+                "released",
+            ),
+            // An automated target whose landing has no baseline, released by the
+            // acknowledgement a person recorded: the same answer, whatever
+            // produced it.
+            (
+                Ok(ReleaseStatus::Released {
+                    target: "crate".parse().expect("a target name"),
+                    style: ReleaseStyle::Automated,
+                    version: "0.2.0".to_owned(),
+                    source: onevcs::ReleaseSource::Acknowledged,
                 }),
                 "released",
             ),
