@@ -775,6 +775,10 @@ enum Conclusion {
     Failure,
     Cancelled,
     TimedOut,
+    /// A check the host set aside as out of date, which says nothing about the
+    /// tree — the conclusion `onevcs` 0.23.0 reads as no verdict beside
+    /// `cancelled`.
+    Stale,
 }
 
 /// Whether branch protection lists the check, so that a merge waits on it.
@@ -796,6 +800,7 @@ impl Conclusion {
         Self::Failure,
         Self::Cancelled,
         Self::TimedOut,
+        Self::Stale,
     ];
 
     fn wire(self) -> &'static str {
@@ -806,6 +811,7 @@ impl Conclusion {
             Self::Failure => "failure",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::Stale => "stale",
         }
     }
 

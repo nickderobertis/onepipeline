@@ -879,9 +879,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79ec9df3f0032aad2392882ada2ca7611dab2b22c80f836bee3d7f6f90591c8d"
+checksum = "17ac6aa42325355228b588229aa4a9ba5e152e4d474773d0e16e2ad0c3457c37"
 dependencies = [
  "clap",
  "libc",
@@ -920,9 +920,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c74c7a003b14fa399afac0bd4a93d1cec90120688843bc3c372be3ebc0cea937"
+checksum = "ea984645bcde45b913237eda80642c3cb9e9705840baa4787b606d073dd07004"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -973,9 +973,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.21.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88d1835126bdc0358c3fa5517775d786e1a091fe9e41b042f033237766f6bbec"
+checksum = "1b76cf335a75f97834b257f60d7b23d6a38c6d7debc440ce576e1d974684a574"
 dependencies = [
  "clap",
  "dunce",
@@ -999,9 +999,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.6.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b2523caa38f9f4744e3713865cae525128a28aabd3f574890a51dfab8ce074c"
+checksum = "eaf64e1d360bed0905eb1fa5bb3d6e2e219a6a91aba90253b68970d7473bb8eb"
 dependencies = [
  "onevcs",
  "serde",

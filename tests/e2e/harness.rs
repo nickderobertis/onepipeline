@@ -714,6 +714,14 @@ impl World {
             // own; what a genuine dispatch carries is composed per dispatch by
             // `executor` and is untouched by this.
             .env_remove(onepipeline::channel::ASKER_ENV)
+            // And the session that dispatch works in, for the same reason: the
+            // engine hands `ONEVCS_SESSION` to a lifecycle node's dispatch alone,
+            // so a direct node's dispatch that inherited the outer one read as
+            // working in a session no run of this world opened.
+            // `a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run`
+            // holds it. Spelled out because the engine's own name for it is not
+            // public.
+            .env_remove("ONEVCS_SESSION")
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
