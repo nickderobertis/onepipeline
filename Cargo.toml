@@ -449,6 +449,11 @@ resolver = "2"
 # admits no version of — is neither: the check names it and the pin holding it,
 # prints no update (the one that takes it resolves `onevcs` twice), and passes.
 # Only moving the pin lifts it, and that is a host-wide move another plan owns.
+# One MSRV floor for both members, so the test-support crate cannot declare a
+# different one. `just msrv`, CI's `msrv` job, and `clippy.toml` read this line.
+[workspace.package]
+rust-version = "1.89"
+
 [workspace.dependencies]
 oneagentgraph = "0.4.2"
 onevcs = "0.24.0"
@@ -535,7 +540,7 @@ onevcs-testing = "0.6.2"
 name = "onepipeline"
 version = "0.29.4"
 edition = "2021"
-rust-version = "1.89"
+rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
 license = "MIT"
 repository = "https://github.com/nickderobertis/onepipeline"
