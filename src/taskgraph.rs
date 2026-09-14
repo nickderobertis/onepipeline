@@ -136,12 +136,26 @@ const DEPS_ARE_EDGES: &str =
 #[derive(Debug, Clone)]
 pub struct Store {
     binary: PathBuf,
+    /// The version token that check read, as the binary printed it.
+    // llmlint: ignore[invalid_states_unrepresentable] kept as the token the binary printed
+    // because it is written verbatim into the write-back's store record for a reader; the
+    // check above has already parsed it as a `Version`, and `at_least` re-parses it for the
+    // one comparison anything makes of it.
+    version: String,
 }
 
 impl Store {
     /// The checked executable, for the best-effort write-back worker.
     pub(crate) fn binary(&self) -> PathBuf {
         self.binary.clone()
+    }
+
+    /// The version the check read, for the write-back worker to decide what the store offers.
+    ///
+    /// Read off the `--version` the launch check already asked, so deciding it spends no
+    /// store command of its own.
+    pub(crate) fn reported_version(&self) -> &str {
+        &self.version
     }
     /// Resolve the binary and check what it reports before anything is
     /// dispatched.
@@ -185,7 +199,10 @@ impl Store {
         if version < CHECKED_MINIMUM {
             return Err(named(format!("is version {token}, below the minimum")));
         }
-        Ok(Self { binary })
+        Ok(Self {
+            binary,
+            version: token.to_owned(),
+        })
     }
 
     /// Read one qualified project id as the plan it holds.
@@ -953,6 +970,17 @@ fn version_token(printed: &str) -> Option<&str> {
     let first = tokens.next()?;
     let token = tokens.next().unwrap_or(first);
     tokens.next().is_none().then_some(token)
+}
+
+/// Whether a version token `--version` printed names `release` or a later one.
+///
+/// Either side failing to read as a version is *not* at least, so a store whose version
+/// cannot be read is taken to offer only what every release does.
+pub(crate) fn at_least(reported: &str, release: &str) -> bool {
+    match (Version::parse(reported), Version::parse(release)) {
+        (Some(reported), Some(release)) => reported >= release,
+        _ => false,
+    }
 }
 
 /// What every `--json` query answers with, in the shape the store writes it.

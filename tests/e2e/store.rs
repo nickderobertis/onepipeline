@@ -1549,16 +1549,18 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     );
 }
 
-/// An attempt is refused whichever of its three commands the store refuses: a page of the
-/// project's tasks, the copy, or the project read answered as a partial response every entry of
+/// An attempt is refused whichever of its commands the store refuses: the read of a member the
+/// copy names, the copy, or the project read answered as a partial response every entry of
 /// which is refused. Each is reported once under the store's own kind, and none is asked again
-/// on a timer.
+/// on a timer. The graph change each scenario makes is a member projection, which reads a named
+/// member rather than a page of the project's tasks; a whole projection's page of tasks refused
+/// is `writeback_projections::a_projection_after_a_failed_attempt_is_whole`'s.
 #[test]
 fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
     for (scenario, script, said, document, exit, kind) in [
         (
-            "task-list",
-            "onetaskgraph.task-list.refuse",
+            "task-show",
+            "onetaskgraph.task-show.refuse",
             SOURCE_REFUSED_SAID,
             SOURCE_REFUSED,
             1,
@@ -2502,7 +2504,9 @@ fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
         })
     });
 
-    let capture = world.run_file("writeback-capture-retry", "writeback-task-list.stdout");
+    // The read every attempt opens with, whole or members: a member projection runs no page of
+    // tasks at all, so that read's capture would never be asked for again.
+    let capture = world.run_file("writeback-capture-retry", "writeback-project-show.stdout");
     std::fs::remove_file(&capture).expect("the completed capture is removed");
     std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
     world

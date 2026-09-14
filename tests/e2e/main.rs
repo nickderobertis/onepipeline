@@ -95,3 +95,4 @@ mod watch;
 // journeys in `mod store` above do.
 mod writeback_budget;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod writeback_projections;

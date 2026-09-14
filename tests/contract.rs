@@ -23,8 +23,9 @@ use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_CLASS_MEMBER, WRITEBACK_FAILURE_EXIT,
-    WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_PARTIAL_CLASS_MEMBER, WRITEBACK_PARTIAL_EXIT,
-    WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ,
+    WRITEBACK_PARTIAL_CLASS_MEMBER, WRITEBACK_PARTIAL_EXIT, WRITEBACK_PROJECTIONS_FILE,
+    WRITEBACK_REFUSED_CLASS, WRITEBACK_STORE_FILE,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -54,7 +55,11 @@ use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
 };
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
-use onepipeline::views::{NodeLanding, RunPaths, RunSummary, RunTelemetry, SUMMARY_SCHEMA_VERSION};
+use onepipeline::views::{
+    FailureClass, NodeLanding, ProjectionActions, ProjectionEnded, ProjectionFailure,
+    ProjectionRecord, ProjectionScope, RunPaths, RunSummary, RunTelemetry, WholeBecause,
+    SUMMARY_SCHEMA_VERSION,
+};
 use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
 
@@ -2636,6 +2641,246 @@ fn the_writeback_refusal_rule_is_what_the_divergence_record_names() {
         contract.contains("Write-back is best effort and retried off the reconcile loop"),
         "the sentence entry 72 proposes to narrow is no longer the contract's"
     );
+}
+
+/// The JSON type one written value is, in the words entry 73's `fields` use.
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_u64() || number.is_i64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// The write-back's projection record and member copy this build carries **beyond** the
+/// contract.
+///
+/// The contract says every accepted edit updates the project's tasks and names no record of
+/// it, so entry 73 is the only place either is written down — and a divergence nothing gates
+/// quietly stops being true. The entry's own block is the source: the two paths and the release
+/// are the constants the worker writes and compares by, the member projection's reads are the
+/// commands it runs, and every field, type and admitted value of the record is held against the
+/// record type on each shape of line it writes, with the entry's example read and written back
+/// unchanged.
+#[test]
+fn the_writeback_projection_record_is_what_the_divergence_record_names() {
+    let block = divergence_block("73.");
+    let projection = &block["projection"];
+    let detection = &block["detection"];
+    let member = &block["member_projection"];
+
+    assert_eq!(
+        projection["record"].as_str(),
+        Some(format!("<run dir>/{WRITEBACK_PROJECTIONS_FILE}").as_str()),
+        "entry 73 names a different record than the worker appends to"
+    );
+    assert_eq!(
+        detection["record"].as_str(),
+        Some(format!("<run dir>/{WRITEBACK_STORE_FILE}").as_str()),
+        "entry 73 keeps the store's answer somewhere other than the worker does"
+    );
+    assert_eq!(
+        detection["members_from"].as_str(),
+        Some(WRITEBACK_MEMBERS_FROM),
+        "entry 73 names a different first release offering a member copy"
+    );
+    assert_eq!(
+        detection["command"].as_str(),
+        Some("onetaskgraph --version")
+    );
+    assert_eq!(
+        member["reads"],
+        json!([WRITEBACK_CLASSIFIED_COMMANDS[0], WRITEBACK_MEMBER_READ]),
+        "entry 73 names other reads for a member projection than the worker runs"
+    );
+    assert_eq!(
+        member["never_reads"],
+        json!([WRITEBACK_CLASSIFIED_COMMANDS[1]]),
+        "entry 73 no longer says a member projection runs no page of tasks"
+    );
+
+    // The example is one line of the record, and written back it is the same line.
+    let example = &projection["example"];
+    let record: ProjectionRecord = serde_json::from_value(example.clone())
+        .unwrap_or_else(|error| panic!("entry 73's example is not a record: {error}"));
+    assert_eq!(
+        serde_json::to_value(&record).expect("a record serializes"),
+        *example,
+        "entry 73's example does not write back as itself"
+    );
+
+    // Every shape of line the worker writes: a member copy that landed, a whole one that failed
+    // with the store's class, and one that landed with no report read.
+    let lines = [
+        record.clone(),
+        ProjectionRecord {
+            scope: ProjectionScope::Whole(WholeBecause::AfterFailure),
+            ended: ProjectionEnded::Failed {
+                classified: Some(ProjectionFailure {
+                    class: FailureClass::Refused,
+                    kind: "stale-origin".to_owned(),
+                }),
+                reason: "copy exited 1: the store's own words".to_owned(),
+            },
+            ..record.clone()
+        },
+        ProjectionRecord {
+            scope: ProjectionScope::Whole(WholeBecause::First),
+            ended: ProjectionEnded::Projected {
+                actions: None,
+                spent: None,
+            },
+            ..record.clone()
+        },
+        ProjectionRecord {
+            scope: ProjectionScope::Whole(WholeBecause::StoreLacksMembers),
+            ended: ProjectionEnded::Failed {
+                classified: None,
+                reason: "project-copy exceeded 60 seconds".to_owned(),
+            },
+            ..record.clone()
+        },
+    ];
+    let fields = projection["fields"]
+        .as_object()
+        .expect("entry 73 names the record's fields");
+    let mut written_words: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for line in &lines {
+        let written = serde_json::to_value(line).expect("a record serializes");
+        let written = written.as_object().expect("a record is one object");
+        assert_eq!(
+            written.keys().collect::<BTreeSet<_>>(),
+            fields.keys().collect::<BTreeSet<_>>(),
+            "the record writes other keys than entry 73 names"
+        );
+        for (name, field) in fields {
+            let value = &written[name];
+            let types: Vec<&str> = match &field["type"] {
+                Value::String(one) => vec![one.as_str()],
+                Value::Array(several) => several.iter().filter_map(Value::as_str).collect(),
+                other => panic!("entry 73 types `{name}` as {other}"),
+            };
+            assert!(
+                types.contains(&json_type(value)),
+                "`{name}` is written as {} where entry 73 types it {types:?}: {value}",
+                json_type(value)
+            );
+            if let (Some(admitted), Some(word)) = (field["values"].as_array(), value.as_str()) {
+                assert!(
+                    admitted.contains(&json!(word)),
+                    "`{name}` is written as `{word}`, which entry 73 does not admit"
+                );
+                written_words
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(word.to_owned());
+            }
+            if let (Some(members), Some(object)) = (field["members"].as_array(), value.as_object())
+            {
+                assert_eq!(
+                    object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+                    members
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    "`{name}` is written with other members than entry 73 names"
+                );
+            }
+        }
+    }
+    // And every word entry 73 admits for the scope, the outcome and the reasons is one the
+    // record writes — asked of the serializer rather than restated.
+    for name in ["scope", "outcome"] {
+        let admitted: BTreeSet<String> = serde_json::from_value(fields[name]["values"].clone())
+            .expect("entry 73 lists the words");
+        assert_eq!(
+            written_words.get(name),
+            Some(&admitted),
+            "entry 73 admits other `{name}` words than the record writes"
+        );
+    }
+    let because: BTreeSet<String> = [
+        WholeBecause::First,
+        WholeBecause::AfterFailure,
+        WholeBecause::StoreLacksMembers,
+    ]
+    .into_iter()
+    .map(|reason| {
+        serde_json::to_value(reason)
+            .ok()
+            .and_then(|word| word.as_str().map(str::to_owned))
+            .expect("a reason is a word")
+    })
+    .collect();
+    assert_eq!(
+        serde_json::from_value::<BTreeSet<String>>(fields["whole_because"]["values"].clone())
+            .expect("entry 73 lists the reasons"),
+        because
+    );
+    let classes: BTreeSet<String> = [FailureClass::Refused, FailureClass::Transient]
+        .into_iter()
+        .map(|class| {
+            serde_json::to_value(class)
+                .ok()
+                .and_then(|word| word.as_str().map(str::to_owned))
+                .expect("a class is a word")
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_value::<BTreeSet<String>>(fields["class"]["values"].clone())
+            .expect("entry 73 lists the classes"),
+        classes
+    );
+    assert_eq!(
+        fields["actions"]["members"],
+        json!(serde_json::to_value(ProjectionActions::default())
+            .expect("counts serialize")
+            .as_object()
+            .expect("an object")
+            .keys()
+            .collect::<Vec<_>>())
+    );
+
+    // A line saying a contradiction, or naming a key the entry does not, is refused.
+    for (contradiction, patch) in [
+        (
+            "a member copy with a reason to be whole",
+            json!({"whole_because": "first"}),
+        ),
+        ("a whole copy with no reason", json!({"scope": "whole"})),
+        (
+            "a landed attempt with a failure's reason",
+            json!({"reason": "it failed"}),
+        ),
+        (
+            "a failed attempt with a copy report",
+            json!({"outcome": "failed", "reason": "it failed"}),
+        ),
+        (
+            "a failed attempt with no reason",
+            json!({"outcome": "failed", "actions": null, "spent": null}),
+        ),
+        (
+            "a class without its kind",
+            json!({"outcome": "failed", "reason": "it failed", "actions": null, "spent": null,
+                   "class": "refused"}),
+        ),
+        ("a key the entry does not name", json!({"cost": 94})),
+    ] {
+        let mut line = example.clone();
+        for (key, value) in patch.as_object().expect("a patch") {
+            line[key] = value.clone();
+        }
+        assert!(
+            serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
+            "{contradiction} was read as a record: {line}"
+        );
+    }
 }
 
 /// The criterion check this build carries **beyond** the contract is exactly what

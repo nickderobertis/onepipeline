@@ -19,9 +19,11 @@
 //!
 //! Scripted from the directory every double reads its scenario out of:
 //!
-//! * `onetaskgraph.version` — what `--version` prints, verbatim. Absent, it
-//!   prints nothing at all, which is an install this build cannot read a version
-//!   off.
+//! * `onetaskgraph.version` — what `--version` prints, verbatim, and it wins over
+//!   `onetaskgraph.delegate`: an install that says it is an older release while every
+//!   other answer is the real store's. Absent, `--version` is the delegate's where one
+//!   is scripted and prints nothing at all otherwise, which is an install this build
+//!   cannot read a version off.
 //! * `onetaskgraph.refuse` — makes **every** invocation exit 1, saying the file's
 //!   contents on stderr. An install that is broken is not broken per verb.
 //! * `onetaskgraph.refuse-reads` — the same, for every invocation **except**
@@ -74,6 +76,12 @@
 //!   at **another JSON type** — `{"labels": "planning, q3"}` for a list answered as
 //!   a string. Only a field the item already holds is moved, because a retype is
 //!   not an addition; `.grow` is where an addition goes.
+//! * `onetaskgraph.<verb>.rewrite` — a JSON object whose members replace, or join, the
+//!   top-level members of the **next** delegated answer of that verb, and nothing after
+//!   it: the file is taken away as it is read. The store still does the work — a copy
+//!   still writes what it writes — and only what it reports is rewritten, which is how a
+//!   journey hands the build a report carrying figures an offline store never reports,
+//!   `spent` among them, and asserts they reach the run exactly.
 //!
 //! `.shrink` and `.retype` name fields of an answer that exists, so a name nothing
 //! in the answer carries is **refused** rather than applied to nothing: a fixture
@@ -87,16 +95,17 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-/// The three halves of `.grow`, `.shrink` and `.retype`, as scripted for one verb.
+/// `.grow`, `.shrink`, `.retype` and `.rewrite`, as scripted for one verb.
 #[derive(Default)]
 struct Release {
     grown: Map<String, Value>,
     shrunk: Vec<String>,
     retyped: Map<String, Value>,
+    rewritten: Map<String, Value>,
 }
 
 impl Release {
-    /// What a journey scripted, `None` where it scripted none of the three, and a refusal
+    /// What a journey scripted, `None` where it scripted none of the four, and a refusal
     /// where it scripted one this program cannot read.
     ///
     /// A scenario file is external input, and a refusal here reaches the journey as this
@@ -113,13 +122,38 @@ impl Release {
         )?;
         let shrunk = Self::scenario(dir, name, "shrink")?
             .map(|scripted| scripted.split_whitespace().map(ToOwned::to_owned).collect());
+        let rewritten = Self::taken(dir, name)?;
         Ok(
-            (grown.is_some() || shrunk.is_some() || retyped.is_some()).then(|| Self {
-                grown: grown.unwrap_or_default(),
-                shrunk: shrunk.unwrap_or_default(),
-                retyped: retyped.unwrap_or_default(),
-            }),
+            (grown.is_some() || shrunk.is_some() || retyped.is_some() || rewritten.is_some()).then(
+                || Self {
+                    grown: grown.unwrap_or_default(),
+                    shrunk: shrunk.unwrap_or_default(),
+                    retyped: retyped.unwrap_or_default(),
+                    rewritten: rewritten.unwrap_or_default(),
+                },
+            ),
         )
+    }
+
+    /// `<verb>.rewrite`, taken away as it is read so that it rewrites exactly one answer.
+    ///
+    /// Taken away before it is applied rather than after, so a second call arriving while the
+    /// first is still with the real store answers unrewritten. A file that cannot be taken
+    /// away is refused: left in place, it would rewrite every answer after this one while the
+    /// journey asserted about one.
+    fn taken(dir: &Path, name: &str) -> Result<Option<Map<String, Value>>, String> {
+        let Some(scripted) = Self::scenario(dir, name, "rewrite")? else {
+            return Ok(None);
+        };
+        std::fs::remove_file(dir.join(format!("{name}.rewrite")))
+            .map_err(|error| format!("`{name}.rewrite` could not be taken away: {error}"))?;
+        match serde_json::from_str(&scripted) {
+            Ok(Value::Object(members)) => Ok(Some(members)),
+            _ => Err(format!(
+                "`{name}.rewrite` states the members that replace the answer's own, as a JSON \
+                 object"
+            )),
+        }
     }
 
     /// One scenario file, or `None` where the journey wrote none.
@@ -221,6 +255,11 @@ impl Release {
         // response rather than of an item — `plan`, `next` — is scriptable too.
         self.apply(&mut response, &mut moved);
         moved.against(self)?;
+        if let Value::Object(page) = &mut response {
+            for (key, value) in &self.rewritten {
+                page.insert(key.clone(), value.clone());
+            }
+        }
         serde_json::to_vec(&response)
             .map(|mut written| {
                 written.push(b'\n');
@@ -363,11 +402,23 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::from(1),
             };
         }
+        // A scripted version is what this install says it is even in front of a delegate:
+        // an install at an older release whose every answer is still the real store's own.
+        match std::fs::read_to_string(dir.join("onetaskgraph.version")) {
+            Ok(printed) => {
+                print!("{printed}");
+                return ExitCode::SUCCESS;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return fake::refuse(&format!(
+                    "`onetaskgraph.version` could not be read: {error}"
+                ))
+            }
+        }
         if let Some(status) = delegate(&dir, &args, None) {
             return status;
         }
-        let printed = std::fs::read_to_string(dir.join("onetaskgraph.version")).unwrap_or_default();
-        print!("{printed}");
         return ExitCode::SUCCESS;
     }
     if let Ok(reason) = std::fs::read_to_string(dir.join("onetaskgraph.refuse-reads")) {

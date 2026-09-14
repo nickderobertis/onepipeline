@@ -73,6 +73,25 @@ pub const WRITEBACK_FAILURE_EXIT: i32 = 1;
 /// entry of its `errors` carries [`WRITEBACK_REFUSED_CLASS`].
 pub const WRITEBACK_PARTIAL_EXIT: i32 = 4;
 
+/// The file, in a run's directory, each write-back projection attempt is appended to as one
+/// JSON object per line and never rewritten. Its shape is
+/// [`ProjectionRecord`](crate::views::ProjectionRecord).
+pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
+
+/// The file, in a run's directory, holding whether the store offers a member copy — decided
+/// once per run, before its first projection, and read by every later driver of the run.
+pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
+
+/// The first `onetaskgraph` release whose `project copy` takes `--member` and whose copy
+/// report carries `spent`. A store reporting an older version is projected whole.
+pub const WRITEBACK_MEMBERS_FROM: &str = "0.2.30";
+
+/// The store command a member projection reads one named member's destination item with,
+/// by the name its capture files and refusals carry. It stands in for
+/// [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of tasks, which a member projection never reads,
+/// and its failures are classified by the same rule.
+pub const WRITEBACK_MEMBER_READ: &str = "task-show";
+
 /// The environment variable naming the write-back's per-item budget, in seconds.
 ///
 /// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`
