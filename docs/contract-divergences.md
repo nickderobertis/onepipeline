@@ -5823,3 +5823,5 @@ Where that is not what 0.28.2 did:
   document and on what the bar prints when the pass is looked for. A refusal and a
   review that gives no verdict keep nothing, and a bar that prints nothing keeps
   nothing and says so on stderr.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
