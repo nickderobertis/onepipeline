@@ -4821,6 +4821,7 @@ const RULINGS: &[(&str, &str)] = &[
         "75.",
         "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
     ),
+    ("77.", "The planner channel is `onemessagebus`'s"),
 ];
 
 #[test]
