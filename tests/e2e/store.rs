@@ -1413,14 +1413,14 @@ fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl F
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these three wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these four wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
-// the old schedule retried in, and a transient one being asked at intervals that grow — which
-// cannot be observed in less time than the schedule takes. The edge they need is the crate
-// under test: they drive the compiled `onepipeline` binary against its own write-back worker
-// through the store double, exactly as the six schedule journeys below do, so a project of
-// their own would declare the same dependency and skip nothing. The reason those six record
-// for staying in this binary is these three's too.
+// the old schedule retried in, a transient one being asked at intervals that grow, and a run
+// settling over refusals — which cannot be observed in less time than the schedule takes. The
+// edge they need is the crate under test: they drive the compiled `onepipeline` binary against
+// its own write-back worker through the store double, exactly as the six schedule journeys
+// below do, so a project of their own would declare the same dependency and skip nothing. The
+// reason those six record for staying in this binary is these four's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
