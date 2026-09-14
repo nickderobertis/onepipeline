@@ -526,3 +526,55 @@ fn a_refused_envelope_leaves_the_same_nothing_for_either_reader() {
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A settled run the release this host ran before the bus wrote, as that release
+/// left it: every record of this crate's own at envelope version 2, and relayed
+/// `oneagentgraph` and `onevcs` envelopes stamped with both `member` and
+/// `persona`. `tests/replay.rs` describes how it was taken and what was stood in for.
+const BEFORE_BUS: &str = include_str!("../golden/journal-before-bus-adoption.jsonl");
+
+/// What that release's `results` rendered the journal as.
+const BEFORE_BUS_RENDERED: &str = include_str!("../golden/journal-before-bus-adoption.rendered");
+
+/// **The bus adoption.** The compiled binary reads a journal the release before
+/// the wire moved onto the bus wrote, every line of it, and its `results` says
+/// exactly what that release said about the run.
+#[test]
+fn this_build_reads_a_journal_the_release_before_the_bus_wrote_as_it_did() {
+    let world = World::new("compat-before-bus");
+    let root = world.fakes.join("before-bus-root");
+    let dir = root.join("before-bus");
+    std::fs::create_dir_all(&dir).expect("a run directory");
+    std::fs::write(
+        dir.join("launch.json"),
+        json!({
+            "run_id": "before-bus",
+            "plan": "plan.json",
+            "launcher": "claude-code",
+            "session": "session-replay",
+            "pid": 2_147_483_000u32,
+            "host": "replay",
+            "started_at": "2026-09-11T12:45:40.333Z",
+            "heartbeat_interval": 1_800,
+        })
+        .to_string(),
+    )
+    .expect("a launch record");
+    std::fs::write(dir.join("events.jsonl"), BEFORE_BUS).expect("a journal");
+
+    let rendered = world
+        .cmd(&["results", "before-bus"])
+        .env("ONEPIPELINE_RUNS_DIR", &root)
+        .output()
+        .expect("the view runs");
+    assert!(
+        rendered.status.success(),
+        "`onepipeline results` refused the run: {}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&rendered.stdout),
+        BEFORE_BUS_RENDERED,
+        "this build renders a journal the release before the bus wrote differently from that release"
+    );
+}

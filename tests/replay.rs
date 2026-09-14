@@ -359,7 +359,9 @@ fn rendered_through_the_views(name: &str, journal: &str) -> String {
 /// replaces — every record of this crate's own at envelope version 2, and the
 /// relayed `oneagentgraph` and `onevcs` envelopes stamped with both `member` and
 /// `persona`, which is where the bus's `Labels` and this crate's old copy
-/// disagreed about byte order. Free text and host paths are stood in for.
+/// disagreed about byte order. Free text and host paths are stood in for, and the
+/// node names no repository or checkout of that host, so nothing it renders is a
+/// read taken now against a repository only that host has.
 const BEFORE_BUS: &str = include_str!("golden/journal-before-bus-adoption.jsonl");
 
 /// What that release rendered the journal as, through the same call below, run
