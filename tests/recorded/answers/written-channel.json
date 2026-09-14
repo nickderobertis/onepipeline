@@ -1,0 +1,79 @@
+{
+  "steps": [
+    {
+      "args": [
+        "surface",
+        "onemessagebus-repair-2",
+        "--kind",
+        "check-in",
+        "--message",
+        "the first check-in"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "surface",
+        "onemessagebus-repair-2",
+        "--kind",
+        "check-in",
+        "--message",
+        "the check-in that replaces it"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "surface",
+        "onemessagebus-repair-2",
+        "--kind",
+        "finding",
+        "--message",
+        "a finding nobody read yet"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "next",
+        "onemessagebus-repair-2"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "next",
+        "onemessagebus-repair-2"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "next",
+        "onemessagebus-repair-2"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "reply",
+        "onemessagebus-repair-2"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "reply",
+        "onemessagebus-repair-2"
+      ],
+      "exit": 2
+    }
+  ],
+  "verdict_reached_the_server": true,
+  "channel": {
+    "queue.json": "{\n  \"waiting\": [],\n  \"pending\": null,\n  \"next_id\": 4,\n  \"accounted\": \"<unshared>\",\n  \"seal\": \"<unshared>\"\n}",
+    "replies-cursor.json": "1",
+    "replies.jsonl": "{\"id\":0,\"reply\":{\"completion\":false,\"message\":\"keep going\"},\"at\":\"<unshared>\"}\n",
+    "surfaces.jsonl": "{\"event\":\"queued\",\"id\":0,\"kind\":\"check-in\",\"message\":\"the first check-in\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"claimed\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"answered\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n"
+  }
+}

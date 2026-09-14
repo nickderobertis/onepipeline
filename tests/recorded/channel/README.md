@@ -81,6 +81,21 @@ The four files are the copy after those two commands, unedited. `surfaces.jsonl`
 is the recorded log with surface `3`'s `queued` and `claimed` records appended,
 and `queue.json` holds surface `3` pending, not abandoned, with `next_id` 4.
 
+## `../answers/written-channel.json` (written by the 0.28.2 binary)
+
+Not a recorded directory but a channel **written from empty**, so that what this
+build writes is held to what 0.28.2 writes rather than only what it reads.
+`recorded_channel::a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes`
+runs the same steps over a scratch copy of the recorded run root with an empty
+`channel/`: two check-ins, the second replacing the first; a finding; a blocking
+question `channel serve` raises under `ONEPIPELINE_CHANNEL_ASKER=written-listener`;
+three `next`s; a verdict that answers the question; and a monitor's commands-only
+reply. The answer file holds each step's exit and every channel file afterwards,
+captured by `scripts/record-channel-answers.sh` with the 0.28.2 binary. The
+instants (`queued_at`, `at`), what the projection derives from the log's bytes
+(`accounted`, `seal`) and every `correlation` are normalized in place, as the
+manager ruled for this comparison, and nothing else is.
+
 # Recorded run root
 
 ## `../run-root/onemessagebus-repair-2/`
