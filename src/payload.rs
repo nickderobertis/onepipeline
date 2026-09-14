@@ -585,4 +585,58 @@ mod tests {
         );
         refused(serde_json::json!({"outcome": "task-completed"}), "");
     }
+
+    /// One envelope of every kind this crate emits, recorded from real runs: the
+    /// operator's host's journals for every kind a run there has written, and this
+    /// build's own end-to-end journeys for the three no host run has, with free
+    /// text and host paths stood in for.
+    const RECORDED: &str = include_str!("../tests/recorded/pipeline-kinds.jsonl");
+
+    /// Every kind's recorded envelope is admitted by its registered document, and a
+    /// payload violating that document — a key every writer of the kind writes,
+    /// taken away — is refused naming the document and the pointer.
+    #[test]
+    fn every_kinds_recorded_envelope_validates_against_its_registered_document() {
+        let recorded: Vec<crate::event::Envelope> = RECORDED
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a recorded envelope reads"))
+            .collect();
+        for kind in PIPELINE_KINDS {
+            let id = schema_of(*kind);
+            let envelope = recorded
+                .iter()
+                .find(|envelope| PipelineKind::from_wire(&envelope.kind) == Some(*kind))
+                .unwrap_or_else(|| panic!("no recorded envelope of {kind}"));
+            assert_eq!(
+                envelope.v, ENVELOPE_VERSION,
+                "{kind} was recorded at another version"
+            );
+            let payload = serde_json::Value::Object(envelope.payload.clone());
+            registry()
+                .check(&id, &payload)
+                .unwrap_or_else(|refusal| panic!("the recorded {kind} is refused: {refusal}"));
+
+            let document = registry().schema(&id).expect("registered");
+            let Some(required) = document["required"]
+                .as_array()
+                .and_then(|keys| keys.first())
+            else {
+                continue;
+            };
+            let key = required.as_str().expect("a required key is a name");
+            let mut violating = envelope.payload.clone();
+            violating.remove(key);
+            match registry().check(&id, &serde_json::Value::Object(violating)) {
+                Err(CheckError::Violation(violation)) => {
+                    assert_eq!(violation.id, id);
+                    assert_eq!(violation.pointer, "", "{violation}");
+                    assert!(
+                        violation.to_string().contains(&id.to_string()),
+                        "{violation}"
+                    );
+                }
+                other => panic!("{kind} without `{key}` was not refused: {other:?}"),
+            }
+        }
+    }
 }

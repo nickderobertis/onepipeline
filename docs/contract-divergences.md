@@ -5420,11 +5420,17 @@ it as a regression:
   fragment with a whole record glued after it (the record is recovered), a record
   that stops early, or a line this build cannot read. The integrity report places a
   torn tail where the reader does.
-- **An unknown top-level key refuses the line.** The bus's envelope refuses a key it
-  does not declare, where this crate's derive ignored one; such a line is now a line
-  this build cannot read. No producer writes one: every v2 pipeline record on the
-  operator's host reads, and `tests/e2e/compatibility.rs` folds and renders a journal
-  written before the change to its committed rendering.
+- **An unknown top-level key, or a `member` label that is not text, refuses the
+  line.** The bus's envelope refuses a key it does not declare and its `Labels` reads
+  `member` into a text slot, where this crate's derive ignored the one and carried the
+  other among the extras; such a line is now a line this build cannot read, and the
+  views' "a side this build cannot read" attribution has no input left to name. No
+  producer writes either: every v2 pipeline record on the operator's host validates
+  against its registered payload document; `tests/replay.rs` reads a journal the
+  release before this one wrote on that host — relayed envelopes stamped with both
+  `member` and `persona` included — and renders it exactly as that release did,
+  against a rendering taken from the tree before the change; and
+  `tests/e2e/compatibility.rs` does the same for its committed version-1 journal.
 - **A relayed envelope is written in its producer's byte order.** The bus's `Labels`
   carries `member` in a slot of its own ahead of `persona`, as `oneagentgraph` and
   `onevcs` write it; this crate's copy kept it among the extras, after `persona`.
