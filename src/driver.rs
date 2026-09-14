@@ -457,6 +457,35 @@ fn start(args: &StartArgs) -> Result<i32> {
         .filter(|command| !command.is_empty());
     // llmlint: ignore-end[invalid_states_unrepresentable]
 
+    // The bar the reviewer judges against, by the reviewer's own three rungs and
+    // for its reasons.
+    // llmlint: ignore-block[invalid_states_unrepresentable] the resolved command stays the `String` `LaunchRecord`'s schema declares, exactly as the reviewer's own does above.
+    let barred = match args.envelope_reviewer_bar.clone() {
+        flag @ Some(_) => flag,
+        None => match engine::configured_envelope_reviewer_bar()? {
+            variable @ Some(_) => variable,
+            None => declared.envelope_reviewer_bar.clone(),
+        },
+    };
+    let envelope_reviewer_bar: Option<String> = barred
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty());
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+
+    // The bus configuration, by two rungs, read and checked here — before the
+    // run directory exists, so a configuration this run could not be kept under
+    // mints nothing. Resolved against the launch directory, as a graph is.
+    let bus_config = match args.bus_config.clone().or_else(|| {
+        declared
+            .bus_config
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+    }) {
+        Some(path) => Some(crate::channel::launch_bus_config(&launch_dir.join(path))?),
+        None => None,
+    };
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -573,6 +602,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
         node_validator: node_validator.unwrap_or_default(),
         envelope_reviewer: envelope_reviewer.unwrap_or_default(),
+        envelope_reviewer_bar: envelope_reviewer_bar.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Claimed by this process immediately below, through the one writer of
@@ -602,6 +632,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         node_sets: args.node_sets.clone(),
         adoptions: 0,
         filters,
+        bus_config,
     };
     record.driven_by_this_process();
 
@@ -2648,7 +2679,7 @@ fn submit_envelope(
     envelope: &Reply,
 ) -> Result<Submitted> {
     let view = RunView::open(paths)?;
-    let channel = ChannelState::new(paths);
+    let channel = ChannelState::of_run(paths, &view.launch);
 
     // A correlation names the question a verdict answers, so an envelope with no
     // verdict half has nothing to bind to it — and silently dropping the flag
@@ -2692,6 +2723,10 @@ fn submit_envelope(
                 paths.run
             )));
         }
+        // Judged before anything is queued: a verdict is offered to the reply
+        // queue as an edit envelope is, so a validator the run's configuration
+        // names refuses it whole.
+        channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
         let id = match correlation {
             None => channel.answer(envelope)?,
             named => channel.answer_bound(envelope, named)?,
@@ -2744,14 +2779,19 @@ fn submit_envelope(
     // than half of it. The graph it is handed is the one the envelope leaves
     // behind, which is what a review of the *edit* rather than of one node is
     // about, and the plan it came from is where the run's goal is stated.
-    if let Some(review) = edits::EnvelopeReview::of(
+    let review = edits::EnvelopeReview::of(
         view.launch.envelope_reviewer(),
         &envelope.commands,
         &projected,
         view.state.plan.as_ref(),
-    )? {
-        channel.judge_reply(envelope, review)?;
-    }
+    )?;
+    let review = match (review, view.launch.envelope_reviewer_bar()) {
+        (Some(review), Some(bar)) => {
+            Some(review.recording_passes(bar, &paths.dir.join(edits::VALIDATOR_PASSES))?)
+        }
+        (review, _) => review,
+    };
+    channel.judge_reply(envelope, review)?;
 
     // Whether a reconciler is running is asked by *taking the run's lock*, which
     // is the same question and the only answer that cannot be raced: with a
@@ -3160,8 +3200,7 @@ fn reply_timeout_seconds() -> u64 {
 /// was trying to change, and a zero one would end it before it carried anything.
 /// The refusal is made before the first frame is read, so a session that cannot
 /// honour its bound never raises a surface it will not stay for.
-fn serve_session_deadline() -> Result<Option<Instant>> {
-    let key = crate::channel::SERVE_SESSION_ENV;
+fn serve_session_deadline(key: &str) -> Result<Option<Instant>> {
     let Some(value) = std::env::var_os(key) else {
         return Ok(None);
     };
@@ -3202,10 +3241,27 @@ fn serve_session_deadline() -> Result<Option<Instant>> {
 /// would take over questions belonging to askers it has never heard of. The
 /// refusal is made before the first frame is read, so a session that cannot say
 /// who it listens for never raises a question under the wrong name.
-fn serve_asker() -> Result<Option<crate::channel::Asker>> {
-    std::env::var_os(crate::channel::ASKER_ENV)
-        .map(|value| crate::channel::asker_named(&value))
+fn serve_asker(key: &str) -> Result<Option<crate::channel::Asker>> {
+    std::env::var_os(key)
+        .map(|value| crate::channel::asker_named(&value, key))
         .transpose()
+}
+
+/// How long a serving session waits for each question's answer.
+///
+/// [`REPLY_TIMEOUT_ENV`](crate::channel::REPLY_TIMEOUT_ENV) where it says, which
+/// is what the host's scripts set; otherwise the reply window the run's bus
+/// configuration sets for the `onejudge` codec; otherwise the shipped default.
+fn serve_reply_window(codec: &onemessagebus::CodecConfig) -> Duration {
+    let variable = std::env::var(crate::channel::REPLY_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Duration::from_secs(match (variable, codec.reply_window_seconds) {
+        (Some(seconds), _) => seconds,
+        (None, Some(configured)) => configured.get(),
+        (None, None) => crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS,
+    })
 }
 
 /// Why a serving session stopped, which is the whole of what decides whether
@@ -3239,12 +3295,25 @@ enum Served {
 /// own author, where the allowlist applies.
 fn serve(args: &RunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
-    let channel = ChannelState::new(&paths);
+    let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    let channel = ChannelState::of_run(&paths, &launch);
+    // What the run's configuration sets for the codec this session speaks: the
+    // variables its bound and its asker are read from, and how long it waits.
+    let codec = channel.codec();
     // Every surface this session raised, so that what it leaves behind can be
     // said out loud rather than left standing as a question with no asker.
     let mut raised: Vec<u64> = Vec::new();
-    let asker = serve_asker()?;
-    let session_deadline = serve_session_deadline()?;
+    let asker = serve_asker(
+        codec
+            .asker_env
+            .as_ref()
+            .map_or(crate::channel::ASKER_ENV, onemessagebus::EnvName::as_str),
+    )?;
+    let session_deadline = serve_session_deadline(codec.session_env.as_ref().map_or(
+        crate::channel::SERVE_SESSION_ENV,
+        onemessagebus::EnvName::as_str,
+    ))?;
+    let window = serve_reply_window(&codec);
     // Before a frame is read, and before anything this session raises: an asker
     // that re-armed is waiting on a question an earlier listener of its own gave
     // up, and the manager it is waiting on may look at the queue at any moment.
@@ -3370,7 +3439,6 @@ fn serve(args: &RunArgs) -> Result<i32> {
         // arriving while this waits is not an answer at all: it carries no
         // ruling, so it goes to the command path and leaves this wait standing
         // rather than ending the member with an envelope it cannot read.
-        let window = Duration::from_secs(reply_timeout_seconds());
         let (written, completed) = match await_answer(&channel, &pending, asker.as_ref(), window)? {
             Awaited::Reply(queued) => {
                 channel.delivered(&queued)?;
@@ -3871,6 +3939,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: crate::filter::Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         }
     }
 

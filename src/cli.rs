@@ -122,6 +122,12 @@ pub struct Cli {
 }
 
 /// The top-level commands.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process, so the size of `start`'s arguments costs nothing a \
+              box would save; boxing that variant would change the shape of a public enum a \
+              consumer matches on"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
@@ -276,6 +282,30 @@ pub struct StartArgs {
     /// below.
     #[arg(long, value_name = "COMMAND")]
     pub envelope_reviewer: Option<String>,
+    /// The command whose output fingerprints the bar the envelope reviewer
+    /// judges against.
+    ///
+    /// Named, each pass the reviewer gives is recorded under the run's own
+    /// `validator-passes/`, keyed on the document it judged and on what this
+    /// command prints when the pass is looked for: an identical envelope under an
+    /// unchanged bar is passed without running the reviewer again, and a bar that
+    /// moved runs it again. A command that fails or prints nothing keys nothing,
+    /// and the envelope is reviewed uncached. Given here it beats
+    /// `ONEPIPELINE_ENVELOPE_REVIEWER_BAR` and the launch config's own field.
+    #[arg(long, value_name = "COMMAND")]
+    pub envelope_reviewer_bar: Option<String>,
+    /// The `onemessagebus` configuration this run's channel is kept under.
+    ///
+    /// Read at the launch and retained in the launch record: its `authors` block
+    /// may narrow what an author may issue and never widen it, its `validators`
+    /// judge what is offered to the channel's queues, and its `codecs.onejudge`
+    /// block sets what `channel serve` waits and reads. Its transport is the run
+    /// root's own, so a `transport` other than `local`, a `transport.dir`, a
+    /// `profile` other than `planner-channel`, and a `queues` block are refused,
+    /// naming the key and the value read, before any run exists. Given here it
+    /// beats the launch config's own field.
+    #[arg(long, value_name = "PATH")]
+    pub bus_config: Option<PathBuf>,
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

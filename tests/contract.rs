@@ -2366,7 +2366,7 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
     // The refusal it promises for a rejected edit, and the default it promises
     // for a launch that names none.
     assert!(
-        prose.contains("a non-zero exit refuses it with the command's own stderr as the reason")
+        prose.contains("exit `1` refuses it with the command's own stderr as the reason")
             && prose.contains("naming none is the default and runs no validator at all"),
         "the README no longer states what a validator's answers mean"
     );

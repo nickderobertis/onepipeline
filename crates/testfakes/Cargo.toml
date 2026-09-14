@@ -120,6 +120,21 @@ path = "src/bin/node-validator.rs"
 name = "envelope-reviewer"
 path = "src/bin/envelope-reviewer.rs"
 
+# A third real program at a hook seam: a command validator, as a bus
+# configuration's `validators` block names one. It judges whatever the bus offers
+# a queue, so a journey about a host's validator drives a real command rather than
+# a stub of the bus's own.
+[[bin]]
+name = "bus-validator"
+path = "src/bin/bus-validator.rs"
+
+# And the command a reviewer's bar is fingerprinted with: a real program that
+# prints what a journey scripts, so a moved bar is a file changing on disk rather
+# than anything the crate under test is told.
+[[bin]]
+name = "reviewer-bar"
+path = "src/bin/reviewer-bar.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"

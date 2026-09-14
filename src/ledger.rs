@@ -657,6 +657,17 @@ pub struct LaunchRecord {
     /// after it shipped, so a build that predates it still reads what it wrote.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub envelope_reviewer: String,
+    /// The command whose output fingerprints the bar this run's envelope
+    /// reviewer judges against, when the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, and
+    /// the launch config in that order. What it prints is read each time a pass
+    /// is looked for rather than here, so a bar that moves between two envelopes
+    /// of one run runs the reviewer again. Read it through
+    /// [`envelope_reviewer_bar`](Self::envelope_reviewer_bar). Omitted when empty,
+    /// like every other field added to this record after it shipped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub envelope_reviewer_bar: String,
     /// The launcher, as the environment reported it.
     ///
     /// Defaulted to [`sys::UNKNOWN_LAUNCHER`] on a record that carries no such
@@ -805,6 +816,18 @@ pub struct LaunchRecord {
     /// after it shipped, so a build that predates it still reads what it wrote.
     #[serde(default, skip_serializing_if = "Filters::is_empty")]
     pub filters: Filters,
+    /// The `onemessagebus` configuration this run's channel is kept under, when
+    /// the launch named one.
+    ///
+    /// The document as the launch read and checked it — its transport the local
+    /// one with no directory of its own, its profile `planner-channel` — retained
+    /// whole rather than as the path it was read from, so a `reply` typed in
+    /// another shell, a later `channel serve`, and every driver that adopts the
+    /// run enforce the configuration the run was launched under rather than
+    /// whatever that file says now. Omitted when absent, so a record written
+    /// before this field existed reads as a run under the profile as declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_config: Option<onemessagebus::Config>,
 }
 
 impl LaunchRecord {
@@ -887,6 +910,12 @@ impl LaunchRecord {
     /// and this is the one place that absence becomes "there is none" again.
     pub fn envelope_reviewer(&self) -> Option<&str> {
         (!self.envelope_reviewer.is_empty()).then_some(self.envelope_reviewer.as_str())
+    }
+
+    /// The bar this run's envelope reviewer judges against, when the launch
+    /// named one — read as [`envelope_reviewer`](Self::envelope_reviewer) is.
+    pub fn envelope_reviewer_bar(&self) -> Option<&str> {
+        (!self.envelope_reviewer_bar.is_empty()).then_some(self.envelope_reviewer_bar.as_str())
     }
 
     /// Whether `session` is the session that launched this run.
@@ -2827,6 +2856,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         }
     }
 
@@ -3557,6 +3588,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -3591,6 +3624,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

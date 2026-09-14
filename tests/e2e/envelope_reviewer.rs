@@ -869,3 +869,117 @@ fn the_resolved_reviewer_is_in_the_launch_record_and_survives_an_adoption() {
         .err_has(&format!("by-flag: {RULES}"))
         .err_lacks("somewhere-else");
 }
+
+/// A pass the reviewer gives is kept under the run's own root, keyed on the
+/// document it judged and on what the bar prints: an identical envelope under an
+/// unchanged bar is passed without the reviewer being spawned, a bar that moved
+/// spawns it again, and a bar that prints nothing keys nothing — said on stderr,
+/// with the envelope reviewed uncached.
+#[test]
+fn a_pass_is_kept_under_the_bar_and_a_moved_bar_runs_the_reviewer_again() {
+    let world = World::new("reviewer-passes");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let run = live_run(
+        &world,
+        "reviewerpasses",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--envelope-reviewer-bar",
+            &bar,
+        ],
+    );
+    let finding = envelope(json!([{"op": "finding", "message": "the fixture is slow"}]));
+    let passes = || {
+        std::fs::read_dir(world.run_file(&run, "validator-passes"))
+            .map_or(0, |passes| passes.count())
+    };
+
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (1, 1),
+        "the first review was not run and recorded"
+    );
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (1, 1),
+        "an identical envelope under an unchanged bar spawned the reviewer again"
+    );
+
+    world.script("reviewer-bar.fingerprint", "criteria revision 2");
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (2, 2),
+        "a moved bar was passed from the record kept under the old one"
+    );
+
+    std::fs::remove_file(world.fakes.join("reviewer-bar.fingerprint")).expect("the bar is lifted");
+    world
+        .run_with_stdin(&["reply", &run], &finding)
+        .exited(0)
+        .err_has("printed no fingerprint");
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (3, 2),
+        "a bar that printed nothing keyed a pass"
+    );
+    world.release("slow.go");
+}
+
+/// A review that refuses, and one that gives no verdict at all, each refuse the
+/// reply with nothing queued and record no pass — the refusal in the reviewer's
+/// own words, and the missing verdict naming how the reviewer ended.
+#[test]
+fn a_review_that_refuses_or_gives_no_verdict_queues_nothing_and_records_no_pass() {
+    let world = World::new("reviewer-no-pass");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let run = live_run(
+        &world,
+        "reviewernopass",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--envelope-reviewer-bar",
+            &bar,
+        ],
+    );
+    let passes = || {
+        std::fs::read_dir(world.run_file(&run, "validator-passes"))
+            .map_or(0, |passes| passes.count())
+    };
+    let queued = || {
+        std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl")).unwrap_or_default()
+    };
+
+    world.script("reviewer.refuse", RULES);
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has(RULES);
+    assert_eq!(
+        (passes(), queued()),
+        (0, String::new()),
+        "a refusal queued or recorded"
+    );
+    std::fs::remove_file(world.fakes.join("reviewer.refuse")).expect("the scenario is lifted");
+
+    world.script("reviewer.silent", "");
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has("gave no verdict")
+        .err_has("exited 5");
+    assert_eq!(
+        (passes(), queued()),
+        (0, String::new()),
+        "no verdict queued or recorded"
+    );
+    world.release("slow.go");
+}

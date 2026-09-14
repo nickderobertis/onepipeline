@@ -3487,6 +3487,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         }
     }
 

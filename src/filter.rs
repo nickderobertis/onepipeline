@@ -40,10 +40,12 @@ pub const MONITOR_PROFILE: &str = "monitor";
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **6** since a launch declares the commands its run fires when it ends:
-/// `success_hook`, `failure_hook` and `hook_timeout` are keys versions 1 to 5
-/// never had, so a document carrying one is a different document and says so.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 6;
+/// **7** since a launch names the `onemessagebus` configuration its channel is
+/// kept under and the bar its envelope reviewer judges against: `bus_config` and
+/// `envelope_reviewer_bar` are keys versions 1 to 6 never had, so a document
+/// carrying one is a different document and says so. **6** declared the commands
+/// a run fires when it ends — `success_hook`, `failure_hook` and `hook_timeout`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 7;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -53,11 +55,12 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 6;
 /// document — a version-1 one says nothing about drafting, a version-2 one says
 /// nothing about validating a node, a version-3 one says nothing about
 /// reviewing an envelope, a version-4 one says nothing about the write-back's
-/// budget, and a version-5 one says nothing about a run-end hook, which is what
-/// a launch naming none of them means — and naming a later key there is refused
-/// **by that field's name**, exactly as a key no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 6] =
-    [LAUNCH_CONFIG_SCHEMA_VERSION, 5, 4, 3, 2, 1];
+/// budget, a version-5 one says nothing about a run-end hook, and a version-6 one
+/// says nothing about the bus or a reviewer's bar, which is what a launch naming
+/// none of them means — and naming a later key there is refused **by that field's
+/// name**, exactly as a key no version ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 7] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 6, 5, 4, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -91,6 +94,8 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("success_hook", 6, BlankValue::Kept),
     ("failure_hook", 6, BlankValue::Kept),
     (HOOK_TIMEOUT_KEY, 6, BlankValue::Refused),
+    ("envelope_reviewer_bar", 7, BlankValue::Refused),
+    ("bus_config", 7, BlankValue::Refused),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
@@ -324,6 +329,21 @@ pub struct LaunchConfig {
     /// launch that named none is a document an earlier reader still accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_reviewer: Option<String>,
+    /// The command whose output fingerprints the bar this launch's envelope
+    /// reviewer judges against, if any.
+    ///
+    /// Named, a pass the reviewer gives is recorded under the run's own
+    /// `validator-passes/`, keyed on the document it judged and on what this
+    /// command prints when the pass is looked for — so an identical envelope
+    /// under an unchanged bar is passed without running the reviewer again, and
+    /// a bar that moved runs it again. `--envelope-reviewer-bar` spells the same
+    /// thing inline and overrides this, as does `ONEPIPELINE_ENVELOPE_REVIEWER_BAR`
+    /// between them.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one, refused blank by its own name, and omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_reviewer_bar: Option<String>,
     /// How long this launch's settlement write-back allows its store's
     /// `project copy` per item it writes, in seconds, if the launch says.
     ///
@@ -374,6 +394,19 @@ pub struct LaunchConfig {
         deserialize_with = "hook_timeout"
     )]
     pub hook_timeout: Option<NonZeroU64>,
+    /// The `onemessagebus` configuration file this launch keeps its run's
+    /// channel under, if any.
+    ///
+    /// Read once, at the launch, and retained in the launch record as the
+    /// document it read: its `authors` block narrows what each author may issue,
+    /// its `validators` judge what is offered to the channel's queues, and its
+    /// `codecs.onejudge` block sets what `channel serve` waits and reads. A
+    /// `--bus-config` given inline overrides this.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one, refused blank by its own name, and omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_config: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -384,10 +417,12 @@ impl Default for LaunchConfig {
             pr_author_graph: None,
             node_validator: None,
             envelope_reviewer: None,
+            envelope_reviewer_bar: None,
             writeback_item_budget: None,
             success_hook: None,
             failure_hook: None,
             hook_timeout: None,
+            bus_config: None,
         }
     }
 }
@@ -431,7 +466,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 7] = [
+        let carried: [(&str, Carried); 9] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -468,6 +503,11 @@ impl LaunchConfig {
                     .hook_timeout
                     .map_or(Carried::Absent, |_| Carried::Named),
             ),
+            (
+                "envelope_reviewer_bar",
+                Carried::text(config.envelope_reviewer_bar.as_deref()),
+            ),
+            ("bus_config", Carried::text(config.bus_config.as_deref())),
         ];
         for (key, value) in carried {
             let Some((arrived, blank)) = KEYS_BY_VERSION
@@ -649,11 +689,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v6.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v7.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 5] = [
+    const GOLDEN_EARLIER: [(u32, &str); 6] = [
+        (6, include_str!("../tests/golden/launch-config-v6.json")),
         (5, include_str!("../tests/golden/launch-config-v5.json")),
         (4, include_str!("../tests/golden/launch-config-v4.json")),
         (3, include_str!("../tests/golden/launch-config-v3.json")),
@@ -706,10 +747,12 @@ mod tests {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
+            envelope_reviewer_bar: Some("./scripts/reviewer-bar.sh".to_string()),
             writeback_item_budget: NonZeroU64::new(10),
             success_hook: Some("./scripts/follow-up.sh".to_string()),
             failure_hook: Some("./scripts/report-failure.sh".to_string()),
             hook_timeout: NonZeroU64::new(600),
+            bus_config: Some("./onemessagebus.yaml".to_string()),
         }
     }
 
@@ -757,12 +800,14 @@ mod tests {
                     node_validator: (version >= 3).then(|| "./scripts/check-node.sh".to_string()),
                     envelope_reviewer: (version >= 4)
                         .then(|| "./scripts/review-envelope.sh".to_string()),
-                    // Version 5 declared the write-back's budget, and none of
-                    // them a run-end hook.
+                    // Version 5 declared the write-back's budget, version 6 the
+                    // run-end hooks, and none of them the bus or a reviewer's bar.
                     writeback_item_budget: NonZeroU64::new(10).filter(|_| version >= 5),
-                    success_hook: None,
-                    failure_hook: None,
-                    hook_timeout: None,
+                    success_hook: (version >= 6).then(|| "./scripts/follow-up.sh".to_string()),
+                    failure_hook: (version >= 6).then(|| "./scripts/report-failure.sh".to_string()),
+                    hook_timeout: NonZeroU64::new(600).filter(|_| version >= 6),
+                    envelope_reviewer_bar: None,
+                    bus_config: None,
                 }
             );
             assert!(
@@ -995,10 +1040,10 @@ mod tests {
         };
 
         // A number this build has never written, told the versions it reads.
-        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 7\n"))
+        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 8\n"))
             .expect_err("a version this build does not read is refused");
         let said = later.to_string();
-        assert!(said.contains("schema_version 7"), "{said}");
+        assert!(said.contains("schema_version 8"), "{said}");
         for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
             assert!(
                 said.contains(&version.to_string()),

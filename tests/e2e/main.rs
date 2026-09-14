@@ -24,6 +24,7 @@ mod harness;
 mod adoption;
 mod amend;
 mod boundary;
+mod bus_config;
 mod cancellation;
 mod channel;
 mod compatibility;

@@ -13,7 +13,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use onemessagebus::{CommandValidator, QueueName, ValidationContext, Validator, Verdict};
+use onemessagebus::{
+    CommandValidator, PassCache, QueueName, ValidationContext, Validator, Verdict,
+};
 use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -764,6 +766,10 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
     }
 }
 
+/// The directory under a run's own root an envelope reviewer's passes are
+/// recorded in.
+pub(crate) const VALIDATOR_PASSES: &str = "validator-passes";
+
 /// One node an envelope introduces or changes, as the reviewer is handed it.
 ///
 /// The op is carried beside the node because the same node reads differently
@@ -951,6 +957,28 @@ impl EnvelopeReview {
                 .filter_map(crate::channel::target_of)
                 .collect(),
         }))
+    }
+
+    /// The same review, recording each pass it gives under `dir`, keyed on the
+    /// document it judged and on what `bar` prints when the pass is looked for.
+    ///
+    /// A bar that prints no fingerprint — the command fails, or prints nothing —
+    /// keys nothing: this envelope is reviewed uncached, nothing is recorded, and
+    /// that is said on stderr rather than a pass being kept under an empty key.
+    pub(crate) fn recording_passes(self, bar: &str, dir: &std::path::Path) -> Result<Self> {
+        let cache = PassCache::new(dir, [bar])
+            .map_err(|e| refuse(format!("the envelope reviewer's bar names no command: {e}")))?;
+        if cache.fingerprint().is_none() {
+            eprintln!(
+                "onepipeline: the envelope reviewer's bar '{bar}' printed no fingerprint, so this \
+                 envelope is reviewed uncached and no pass of it is recorded"
+            );
+            return Ok(self);
+        }
+        Ok(Self {
+            hook: self.hook.with_cache(cache),
+            ..self
+        })
     }
 
     /// The reviewer's verdict on this envelope, in the words a refusal of it

@@ -68,6 +68,13 @@ pub const NODE_VALIDATOR_ENV: &str = "ONEPIPELINE_NODE_VALIDATOR";
 /// reviewer at all. Read once, at the launch, and retained in the launch record.
 pub const ENVELOPE_REVIEWER_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER";
 
+/// The environment variable naming the command whose output fingerprints the
+/// bar an envelope reviewer judges against.
+///
+/// The middle rung of three, as [`ENVELOPE_REVIEWER_ENV`] is for the reviewer it
+/// keys. Read once, at the launch, and retained in the launch record.
+pub const ENVELOPE_REVIEWER_BAR_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER_BAR";
+
 /// The environment variable naming the directory a direct agent node runs in.
 pub const PROJECT_DIR_ENV: &str = "ONEPIPELINE_PROJECT_DIR";
 
@@ -704,7 +711,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     // written again whenever a claim moved the graph — this is the run's last
     // word on what became of it. It cannot spin, because the queue's cursor only
     // advances, and the release itself is [`let_go_of`]'s.
-    let channel = ChannelState::new(paths);
+    let channel = ChannelState::of_run(paths, &launch);
     let mut lock = lock;
     let mut departure = Departure::LeftClaimed;
     loop {
@@ -913,7 +920,7 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
         paths,
         &mut journal,
         &mut state,
-        &ChannelState::new(paths),
+        &ChannelState::of_run(paths, &launch),
         &launch,
         &mut BTreeMap::new(),
     )?;
@@ -939,7 +946,7 @@ fn converge(
         crate::writeback::Writeback::start(store.binary(), store.reported_version(), paths, launch)
     });
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    let channel = ChannelState::new(paths);
+    let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
@@ -1507,7 +1514,7 @@ fn close_out_and_drain(
         paths,
         journal,
         state,
-        &ChannelState::new(paths),
+        &ChannelState::of_run(paths, launch),
         launch,
         in_flight,
     )? {
@@ -2424,12 +2431,12 @@ fn validate_envelope(
 ) -> Vec<std::result::Result<Staged, Error>> {
     let mut staged_state: RunState = (**state).clone();
     let mut evaluated = Vec::with_capacity(commands.len());
+    // The run's own grants, as its launch narrowed them.
+    let channel = ChannelState::of_run(paths, launch);
     for command in commands {
-        let ruling = ChannelState::new(paths)
-            .allows(author, command)
-            .and_then(|()| {
-                validate_command(paths, &staged_state, author, command, launch, in_flight)
-            });
+        let ruling = channel.allows(author, command).and_then(|()| {
+            validate_command(paths, &staged_state, author, command, launch, in_flight)
+        });
         if let Ok(step) = &ruling {
             crate::projection::fold_operations(
                 &mut staged_state,
@@ -4922,6 +4929,27 @@ pub(crate) fn configured_node_validator() -> Result<Option<String>> {
             "{NODE_VALIDATOR_ENV} holds something this build cannot read as text, so the \
              command it names cannot be resolved — set it to the command, or unset it to \
              declare that this launch has none"
+        ))),
+    }
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What [`ENVELOPE_REVIEWER_BAR_ENV`] says, when it says anything at all.
+///
+/// Read exactly as [`configured_envelope_reviewer`] reads its own rung.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a value this build cannot read as text.
+// llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` for the reason `configured_envelope_reviewer` gives, and the one invariant a newtype could carry is applied by the caller for all three rungs at once.
+pub(crate) fn configured_envelope_reviewer_bar() -> Result<Option<String>> {
+    match std::env::var(ENVELOPE_REVIEWER_BAR_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{ENVELOPE_REVIEWER_BAR_ENV} holds something this build cannot read as text, so the \
+             command it names cannot be resolved — set it to the command, or unset it to \
+             declare that this launch names no bar"
         ))),
     }
 }

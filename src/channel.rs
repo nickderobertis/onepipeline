@@ -41,9 +41,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use onemessagebus::{
-    Allowlist, AskOptions, Bus, BusError, Config, ConsumerName, Correlation, Fingerprint, Layouts,
-    Lifetime, LocalTransport, Message, OpWord, Pending, QueueError, QueueName, QueueSpec, RawQueue,
-    Read, Registry, SchemaId, Transport, TransportKinds,
+    Allowlist, AskOptions, Bus, BusError, CodecConfig, CodecName, Config, ConsumerName,
+    Correlation, Fingerprint, Layouts, Lifetime, LocalTransport, Message, OpWord, Pending,
+    QueueError, QueueName, QueueSpec, RawQueue, Read, Registry, SchemaId, Transport,
+    TransportConfig, TransportKinds,
 };
 use onemessagebus_agent::channel::{
     ChannelAuthor, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
@@ -805,9 +806,10 @@ pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 /// crate refused them with, named by where the value came from.
 pub(crate) use onemessagebus::Asker;
 
-/// The asker one environment value names, or a refusal saying why it names none.
-pub(crate) fn asker_named(value: &std::ffi::OsStr) -> crate::Result<Asker> {
-    Asker::named(value, ASKER_ENV).map_err(|refused| crate::Error::Refused(refused.to_string()))
+/// The asker one environment value names, or a refusal saying why it names none —
+/// naming `from`, the variable it was read from.
+pub(crate) fn asker_named(value: &std::ffi::OsStr, from: &str) -> crate::Result<Asker> {
+    Asker::named(value, from).map_err(|refused| crate::Error::Refused(refused.to_string()))
 }
 
 /// Read the asker a queue recorded, reading a name that names nobody as none.
@@ -922,9 +924,17 @@ impl Message for Surface {
 #[derive(Clone)]
 pub(crate) struct ChannelState {
     paths: crate::ledger::RunPaths,
+    /// The configuration the run's launch named, checked at the launch.
+    config: Option<Arc<Config>>,
     transport: Arc<OnceLock<std::result::Result<Arc<dyn Transport>, String>>>,
     surfaces: Arc<OnceLock<std::result::Result<onemessagebus::Queue<Surface>, String>>>,
+    /// The bus the channel's records are appended through: the run's
+    /// configuration with its validators left out, because what is appended has
+    /// already been judged.
     bus: Arc<OnceLock<std::result::Result<Bus, String>>>,
+    /// The bus an offer is judged by: the run's configuration, validators and
+    /// all. Resolved only for a run whose configuration declares validators.
+    judging: Arc<OnceLock<std::result::Result<Bus, String>>>,
     /// What the last read of the surfaces found, keyed on the transport's change
     /// token for that queue: a reader asking again of a channel nothing has
     /// written since is answered without folding its log a second time.
@@ -1069,6 +1079,118 @@ pub(crate) enum CommandVerdict {
     Refused,
 }
 
+/// The one layout a run's channel is kept under.
+fn planner_channel() -> Layouts {
+    Layouts::new().with(Arc::new(PlannerChannel))
+}
+
+/// Read the `onemessagebus` configuration a launch names, and refuse — naming
+/// the key and the value read — what a run's channel cannot be kept under.
+///
+/// Everything is decided before the run exists. What the file alone decides is
+/// `Config::load`'s. What only this crate decides is checked here: the transport
+/// is the run root's local one, so another kind, a directory or a key of its own
+/// is refused; the layout is `planner-channel`, whose queues are the files a
+/// release that predates the bus reads, so another profile or a `queues` block
+/// is refused; and `channel serve` speaks `onejudge` on `surfaces`, taking its
+/// run from its argument and a question's node from its frame, so the codec keys
+/// it would not read are refused rather than ignored. What only the layout
+/// decides — an author it does not declare, a grant it does not give, a
+/// validator on a queue it does not have — is decided by resolving the
+/// configuration against it over a transport that keeps nothing, so a refused
+/// launch writes nothing anywhere.
+///
+/// # Errors
+///
+/// [`crate::Error::Invalid`], naming the file, the key and the value read.
+pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config> {
+    let named =
+        |why: String| crate::Error::Invalid(format!("--bus-config {}: {why}", path.display()));
+    let mut config = Config::load(path).map_err(|failure| named(failure.to_string()))?;
+    if config.transport.kind.as_str() != onemessagebus::LOCAL {
+        return Err(named(format!(
+            "transport.kind is `{}`, and a run's channel is kept on the `{local}` transport over \
+             the run's own channel directory — name `kind: {local}`",
+            config.transport.kind,
+            local = onemessagebus::LOCAL,
+        )));
+    }
+    if let Some(dir) = &config.transport.dir {
+        return Err(named(format!(
+            "transport.dir is `{}`, and where a run's channel is kept is its run root's to \
+             decide rather than the configuration's — leave `transport.dir` out",
+            dir.display()
+        )));
+    }
+    if let Some((key, value)) = config.transport.options.iter().next() {
+        return Err(named(format!(
+            "transport.{key} is `{value}`, which the {} transport does not take",
+            onemessagebus::LOCAL
+        )));
+    }
+    if let Some(profile) = config
+        .profile
+        .as_deref()
+        .filter(|profile| *profile != PLANNER_CHANNEL)
+    {
+        return Err(named(format!(
+            "profile is `{profile}`, and a run's channel is the `{PLANNER_CHANNEL}` layout — name \
+             it, or leave `profile` out"
+        )));
+    }
+    if let Some(queue) = config.queues.keys().next() {
+        return Err(named(format!(
+            "queues.{queue} is declared, and a run's queues are the `{PLANNER_CHANNEL}` layout's \
+             — leave `queues` out"
+        )));
+    }
+    let onejudge = onemessagebus_agent::codec::onejudge::CODEC;
+    for (codec, block) in &config.codecs {
+        let refused = if codec.as_str() != onejudge {
+            Some(format!(
+                "codecs.{codec} is configured, and the one codec `channel serve` speaks is \
+                 `{onejudge}`"
+            ))
+        } else if let Some(queue) = block
+            .queue
+            .as_ref()
+            .filter(|queue| queue.as_str() != SURFACES)
+        {
+            Some(format!(
+                "codecs.{onejudge}.queue is `{queue}`, and `channel serve` asks on `{SURFACES}`"
+            ))
+        } else if let Some(run_env) = &block.run_env {
+            Some(format!(
+                "codecs.{onejudge}.run_env is `{run_env}`, and `channel serve` takes its run from \
+                 its own argument"
+            ))
+        } else {
+            block.about_env.as_ref().map(|about_env| {
+                format!(
+                    "codecs.{onejudge}.about_env is `{about_env}`, and `channel serve` takes what \
+                     a question is about from its frame's `node`"
+                )
+            })
+        };
+        if let Some(why) = refused {
+            return Err(named(why));
+        }
+    }
+    config.profile = Some(PLANNER_CHANNEL.to_owned());
+    let mut probe = config.clone();
+    probe.transport = TransportConfig {
+        kind: onemessagebus::MEMORY
+            .parse()
+            .map_err(|failure| named(format!("{failure}")))?,
+        dir: None,
+        options: Map::new(),
+    };
+    probe
+        .resolve(&planner_channel(), &TransportKinds::builtin())
+        .map_err(|failure| named(failure.to_string()))?;
+    Ok(config)
+}
+
 /// A queue the `planner-channel` layout declares, by the name it declares it
 /// under.
 fn queue_name(text: &str) -> QueueName {
@@ -1147,10 +1269,27 @@ impl ChannelState {
     pub fn new(paths: &crate::ledger::RunPaths) -> Self {
         Self {
             paths: paths.clone(),
+            config: None,
             transport: Arc::default(),
             surfaces: Arc::default(),
             bus: Arc::default(),
+            judging: Arc::default(),
             seen: Arc::default(),
+        }
+    }
+
+    /// The channel of one run, under the bus configuration its launch named.
+    ///
+    /// Every writer that authors, judges or waits on the channel opens it this
+    /// way, so the grants, validators and reply window a run enforces are the
+    /// ones it was launched under wherever it is written from.
+    pub(crate) fn of_run(
+        paths: &crate::ledger::RunPaths,
+        launch: &crate::ledger::LaunchRecord,
+    ) -> Self {
+        Self {
+            config: launch.bus_config.clone().map(Arc::new),
+            ..Self::new(paths)
         }
     }
 
@@ -1198,30 +1337,87 @@ impl ChannelState {
     /// validators.
     fn bus(&self) -> crate::Result<Bus> {
         self.bus
-            .get_or_init(|| {
-                Config::local(self.paths.channel_dir(), Some(PLANNER_CHANNEL))
-                    .resolve(
-                        &Layouts::new().with(Arc::new(PlannerChannel)),
-                        &TransportKinds::builtin(),
-                    )
-                    .map_err(|failure| failure.to_string())
-            })
+            .get_or_init(|| self.resolved(false))
             .clone()
             .map_err(crate::Error::Refused)
     }
 
-    /// Whether `author` may issue `command` on this run.
-    pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
-        allowed_by(profile_allowlist(), author, command)
+    /// The bus an offer to this channel is judged by.
+    fn judging_bus(&self) -> crate::Result<Bus> {
+        if self
+            .config
+            .as_ref()
+            .is_none_or(|config| config.validators.is_empty())
+        {
+            return self.bus();
+        }
+        self.judging
+            .get_or_init(|| self.resolved(true))
+            .clone()
+            .map_err(crate::Error::Refused)
     }
 
-    /// Whether `author` may declare this run finished through a verdict.
+    /// The run's configuration — or the profile as declared, for a run whose
+    /// launch named none — resolved over this run's channel directory, with its
+    /// validators or without them.
+    fn resolved(&self, judging: bool) -> std::result::Result<Bus, String> {
+        let mut config = match &self.config {
+            Some(config) => (**config).clone(),
+            None => Config::local(self.paths.channel_dir(), Some(PLANNER_CHANNEL)),
+        }
+        .with_transport_dir(self.paths.channel_dir());
+        config.profile = Some(PLANNER_CHANNEL.to_owned());
+        if !judging {
+            config.validators.clear();
+        }
+        config
+            .resolve(&planner_channel(), &TransportKinds::builtin())
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// Whether the run's configuration declares a validator on `queue`.
+    fn validates(&self, queue: &str) -> bool {
+        self.config.as_ref().is_some_and(|config| {
+            config
+                .validators
+                .iter()
+                .any(|validator| validator.on.as_str() == queue)
+        })
+    }
+
+    /// What the run's configuration sets for the `onejudge` codec `channel serve`
+    /// speaks, or nothing for a run whose launch named no configuration.
+    pub(crate) fn codec(&self) -> CodecConfig {
+        let Some(config) = &self.config else {
+            return CodecConfig::default();
+        };
+        onemessagebus_agent::codec::onejudge::CODEC
+            .parse::<CodecName>()
+            .ok()
+            .and_then(|name| config.codecs.get(&name).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Whether `author` may issue `command` on this run, under the grants its
+    /// configuration narrowed.
+    pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
+        match &self.config {
+            None => allowed_by(profile_allowlist(), author, command),
+            Some(_) => allowed_by(self.bus()?.allowlist(), author, command),
+        }
+    }
+
+    /// Whether `author` may declare this run finished through a verdict, under
+    /// the grants its configuration narrowed.
     pub(crate) fn allows_completion(
         &self,
         author: Author,
         completion: Option<bool>,
     ) -> crate::Result<()> {
-        completion_allowed_by(profile_allowlist(), author, completion)
+        match &self.config {
+            None => completion_allowed_by(profile_allowlist(), author, completion),
+            Some(_) => completion_allowed_by(self.bus()?.allowlist(), author, completion),
+        }
     }
 
     /// The transport's change tokens for the two queues the reconcile loop reads
@@ -1293,6 +1489,18 @@ impl ChannelState {
     /// check-in is ever waiting: the layout supersedes a waiting check-in with
     /// the next, so being ignored makes the harness louder rather than quieter.
     pub fn push(&self, surface: Surface) -> crate::Result<Surface> {
+        if self.validates(SURFACES) {
+            let surfaces = queue_name(SURFACES);
+            let offered = serde_json::to_value(&surface)
+                .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
+            QueueError::of_verdict(
+                &surfaces,
+                self.judging_bus()?
+                    .validate(&surfaces, offered)
+                    .map_err(bus_failure)?,
+            )
+            .map_err(queue_failure)?;
+        }
         Ok(self
             .surfaces()?
             .push(&surface)
@@ -1606,7 +1814,7 @@ impl ChannelState {
             asker: question.asker.clone(),
             about: None,
         };
-        self.bus()?
+        self.judging_bus()?
             .ask::<Surface, Value>(&queue_name(SURFACES), question, options)
             .map_err(bus_failure)
     }
@@ -1689,18 +1897,23 @@ impl ChannelState {
     /// appending nothing: the layout's routing and the author's grants, `review`
     /// registered on the reply queue as a validator of it, and each queue the
     /// envelope would be routed to by that queue's own validators.
-    pub(crate) fn judge_reply(
+    pub(crate) fn judge_reply<V: onemessagebus::Validator<Value> + 'static>(
         &self,
         reply: &Reply,
-        review: impl onemessagebus::Validator<Value> + 'static,
+        review: Option<V>,
     ) -> crate::Result<()> {
+        if review.is_none() && !self.validates(REPLIES) && !self.validates(COMMANDS) {
+            return Ok(());
+        }
         let replies = queue_name(REPLIES);
         let offered = serde_json::to_value(reply)
             .map_err(|failure| crate::Error::Invalid(format!("reply: {failure}")))?;
-        let bus = self
-            .bus()?
-            .with_validator::<Value>(&replies, review)
-            .map_err(bus_failure)?;
+        let mut bus = self.judging_bus()?;
+        if let Some(review) = review {
+            bus = bus
+                .with_validator::<Value>(&replies, review)
+                .map_err(bus_failure)?;
+        }
         QueueError::of_verdict(
             &replies,
             bus.validate(&replies, offered).map_err(bus_failure)?,
