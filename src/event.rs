@@ -51,17 +51,32 @@ pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
 /// sibling's version is that library's own vocabulary, and judging it by this
 /// crate's table would refuse a producer for moving at its own pace.
 ///
-/// Answered by the registry's [`Registry::read_at`] for `agent.event-envelope`. A
+/// Answered by the registry's [`Registry::read_at`] for `agent.event-envelope`:
+/// a version it reads at is one in the read set the registry declares, and that
+/// set is taken from the registry once per process rather than rebuilt for every
+/// record folded — the registry derives it by walking every document it holds,
+/// and a fold asks this of each record of a run. A
 /// reader that meets `false` has met a record a *newer* build wrote, whose kinds
 /// or payload may mean something this build would read wrongly. What the fold
 /// does with that is report rather than guess — it marks the run as one it could
 /// not read whole, and a driver says so before it converges.
 #[must_use]
 pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
-    matches!(
-        registry().read_at(EVENT_ENVELOPE_FAMILY, envelope.v),
-        Read::At(_)
-    )
+    static READ_AT: OnceLock<Vec<u32>> = OnceLock::new();
+    READ_AT
+        .get_or_init(|| {
+            registry()
+                .read_set(EVENT_ENVELOPE_FAMILY)
+                .into_iter()
+                .filter(|version| {
+                    matches!(
+                        registry().read_at(EVENT_ENVELOPE_FAMILY, *version),
+                        Read::At(_)
+                    )
+                })
+                .collect()
+        })
+        .contains(&envelope.v)
 }
 
 /// The registry this crate constructs: the agent profile's, with every payload
