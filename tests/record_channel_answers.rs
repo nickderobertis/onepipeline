@@ -19,7 +19,6 @@ mod unix {
         "/scripts/record-channel-answers.sh"
     );
 
-    /// The exit the script refuses with.
     const REFUSED: i32 = 2;
 
     /// A directory of its own, holding the three programs and what each was asked.
@@ -62,7 +61,8 @@ mod unix {
             let path = format!(
                 "{}:{}",
                 self.0.join("bin").display(),
-                std::env::var("PATH").unwrap_or_default()
+                std::env::var("PATH")
+                    .expect("the script's own tools — bash, sh, printf — are found on PATH")
             );
             Command::new("bash")
                 .arg(SCRIPT)
@@ -93,8 +93,6 @@ mod unix {
         )
     }
 
-    /// A release that is not a version is refused naming it, before anything is
-    /// fetched or captured.
     #[test]
     fn a_release_that_is_not_a_version_is_refused_before_anything_is_fetched() {
         let scratch = Scratch::new("not-a-version", "onepipeline 0.28.2");
@@ -117,7 +115,6 @@ mod unix {
         );
     }
 
-    /// A release `uv` cannot install is refused naming it, and nothing is captured.
     #[test]
     fn a_release_uv_cannot_install_is_refused_and_nothing_is_captured() {
         let scratch = Scratch::new("uv-fails", "onepipeline 0.28.2");
@@ -143,8 +140,6 @@ mod unix {
         );
     }
 
-    /// An executable reporting another release than the one asked for is refused
-    /// naming both, and nothing is captured.
     #[test]
     fn an_executable_reporting_another_release_is_refused_and_nothing_is_captured() {
         let scratch = Scratch::new("mismatch", "onepipeline 0.27.0");
@@ -162,8 +157,6 @@ mod unix {
         );
     }
 
-    /// The release named is fetched, and its executable captures through the
-    /// recorded-channel journeys and no others.
     #[test]
     fn the_named_release_captures_through_the_recorded_channel_journeys_alone() {
         let scratch = Scratch::new("captures", "onepipeline 0.29.0");
