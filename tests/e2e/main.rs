@@ -65,6 +65,7 @@ mod node_validator;
 mod plan;
 mod plan_check;
 mod real_vcs;
+mod recorded_channel;
 mod run_end_hooks;
 mod scratch;
 mod session;

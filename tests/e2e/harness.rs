@@ -617,7 +617,18 @@ impl World {
 
     /// The `onepipeline` binary, wired to this world.
     pub fn cmd(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(binary());
+        self.cmd_on(&binary(), args)
+    }
+
+    /// Another `onepipeline` executable, wired to this world exactly as the build
+    /// under test is.
+    ///
+    /// For the one journey whose claim is about a release rather than this build:
+    /// `recorded_channel` captures what a published binary answers over the same
+    /// world this build is then held to, so the two answers differ in the binary
+    /// and nothing else.
+    pub fn cmd_on(&self, program: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
         let path = path_leading_with(&[onevcs_binary()
             .parent()
             .expect("onevcs has a directory")
