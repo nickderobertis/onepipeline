@@ -1937,7 +1937,27 @@ say in the contract that it is not passed through, or move it to a name outside
 that product's namespace — `ONEPIPELINE_ONETASKGRAPH_BIN` is what this crate
 already calls the equivalent for `oneagentgraph`.**
 
-## 44. The minimum `onetaskgraph` this build needs is not a released version — OPEN
+## 44. The minimum `onetaskgraph` this build needs is not a released version — RESOLVED
+
+**Ruling: accept the proposal. onetaskgraph released the surface, so the floor is
+a release and the checks install one.** The revision the checks pinned is four
+commits before onetaskgraph `v0.2.0`, so every release from 0.2.0 carries the
+reserved metadata map and `>= 0.2.0` separates an install carrying it from one that
+does not, exactly. The contract states the floor only as the minimum this build
+requires and names no version, so nothing in `docs/contract.md` changed.
+
+**What this crate does today.** `src/taskgraph.rs` declares `CHECKED_MINIMUM`
+0.2.0, and a launch through the released 0.1.0 is refused by version, naming the
+minimum, rather than reading every task as one with no `onepipeline.id`;
+`FIRST_REVISION` is gone. `justfile`'s `_ensure-onetaskgraph` installs the published
+release named once, in `onetaskgraph-version`.
+`taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
+fails if that release falls below the floor or the recipe stops reading it,
+`provisioning::unix::provisioning_replaces_a_wrong_version_on_path_with_the_pinned_release`
+drives the recipe and requires the release it names, and
+`store::an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions`
+drives the refusal of 0.1.0 against the real binary. The entry as it was opened
+follows, for the record.
 
 `src/taskgraph.rs` declares `CHECKED_MINIMUM = "0.1.0"`, which is the version the
 binary carrying the surface this mapping reads **reports**, and the launch refuses
@@ -2485,16 +2505,26 @@ is a *name* and a normalised *category*, a `project copy` carries both, and a
 destination refuses a pair it would read differently — so a name outside that
 seven-word vocabulary can only be written where the destination normalises it the
 same way this shadow does. Four of the eight words this projection writes *are* a
-category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected. The
-other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
-vocabulary has none of: a store that does not know one reads it as the `unknown`
-category and keeps the name, which is what
-the shadow source's own default mapping produces, so the copy is accepted and the
-word arrives. The alternative — writing `failed` under the `done` category —
-requires the operator's own store to declare that mapping first, and until it did,
-**every projection after any node failed would be refused outright**. A board that
-stopped updating is strictly worse than one carrying a status category a filter
-cannot place beside a name that says exactly what happened.
+category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected.
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This open
+divergence is the repository's required record of the dependency behavior that makes
+its projection incomplete. The implementation source is cited at each GitHub Projects
+claim; onetaskgraph's disabled-status tests and `onetaskgraph-unknown-status` e2e journey
+are the reconciliation named by the owning plan, and adding that sibling work or a
+cross-repository gate is outside this entry's documentation-only correction. -->
+The other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
+vocabulary has none of. The `local-md` source reads each as the `unknown` category
+and keeps its name, so its default mapping accepts the copy and the word arrives.
+The `github-projects` source instead ships `unknown` disabled in
+`crates/onetaskgraph-github-projects/src/lib.rs`. That source writes the target board
+Status option rather than the incoming word, as
+`crates/onetaskgraph-github-projects/src/lib.rs` describes, and refuses the copy until
+`status_mapping.unknown` names a board Status option, as enforced in
+`crates/onetaskgraph-github-projects/src/lib.rs`. A board projection therefore needs
+that mapping configured. A closed state is not a remedy for `unknown`: it reads back
+as `done` or `cancelled`, so a copy under one of the four settlement words would never
+settle.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 **Beside the word, what closed the node.** The contract says only that "the
 settlement detail goes to reserved metadata", and it did: the whole settlement
@@ -3564,8 +3594,29 @@ settling, so `--until node=<ID>` naming it does wake a caller on the ready actio
 but only one that knew which node to name, which a supervisor asking "is anything
 waiting for a person?" does not.
 
-`monitor` and `status` are untouched: no flag, no output, and no exit code of
-either changed, so an existing caller of them is unaffected.
+**`monitor` carries the same cursor, so an observer keeps no file of its own.**
+The surface is `onepipeline monitor <RUN> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`.
+`monitor` has no cursor otherwise, so the host's observer persona kept one in two
+files in its working directory, and that directory was a publication checkout: in
+the run that closed `ai-orchestrator` #855 the observer's `monitor.cursor` and
+`monitor.batch` were left in a `local-direct` checkout, the publication was
+refused, and it was repaired by hand (`ai-orchestrator` #1004, root cause 4). So
+every `monitor` pass — with or without `--cursor`, and including one that renders
+no event — now ends its stdout with exactly one resume line after the trailer,
+`-- cursor 1:<run>:<byte>`. The byte is the end of the last finished record in
+the journal at the moment of the read, past records the profile hid, as a watch
+advances its own. `--cursor` renders, in the existing line format, profile and
+header, only the events from records that finish after that byte — what `watch
+--cursor` would emit before its meaningful-kind selection. The token, its parser and the tail read behind it are the ones
+`watch` uses rather than a copy, so a cursor either verb prints is one the other
+resumes from, and a cursor `watch` refuses — malformed, another run's, past the
+journal's end, or inside a record — `monitor` refuses the same way: exit `2`, the
+reason on stderr, nothing on stdout. The events rendered and the byte printed
+come out of one read of the journal rather than the view's own earlier read, so a
+record appended between the two cannot be stepped past unrendered. A `monitor`
+with no cursor renders what it rendered before; the resume line is the one thing
+it adds. `status` is untouched.
+
 `tests/e2e/watch.rs` drives the verb through the compiled binary — a line for a
 graph edit the monitor issued, for a node settling and for a surface being raised;
 a heartbeat carrying an unread count and its kinds; each of the five returns with
@@ -3602,8 +3653,9 @@ merely updated; and because the value differs, an item nothing else about the
 projection would change is written anyway. Measured in all three forms — a source
 item declaring the destination's own origin, one declaring none, and `--match-by
 onepipeline.id` — against `onetaskgraph` 0.2.18 and against revision
-`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which is the revision
-`taskgraph::FIRST_REVISION` pins and the one every check here installs.
+`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which was the revision
+`taskgraph::FIRST_REVISION` pinned and every check here installed when this was
+measured; entry 44 records its retirement for a release.
 
 So a destination item this crate projects onto is left carrying
 `onetaskgraph.origin: onepipeline-writeback:<hex>` — a source that exists only as

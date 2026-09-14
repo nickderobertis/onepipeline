@@ -91,10 +91,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Status(args) => status(&args),
         Verb::Host => report(&OptionalRunArgs { run: None }, views::host),
         Verb::Monitor(args) => {
-            let view = RunView::open(&resolve(&args.run)?)?;
-            let filter = read_filter(&view, &args)?;
-            print!("{}", views::monitor(&view, &filter));
-            Ok(EXIT_SUCCESS)
+            let paths = resolve(&args.read.run)?;
+            let view = RunView::open(&paths)?;
+            let filter = read_filter(&view, &args.read)?;
+            crate::watch::monitor(&args, &paths, &view, &filter)
         }
         Verb::Watch(args) => {
             // Both refusals are made before anything blocks: a run that is not

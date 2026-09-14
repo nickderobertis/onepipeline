@@ -451,6 +451,19 @@ renders a dispatched turn's tools and its words; `telemetry` reports what each
 party spent and where the wall clock went, in eight buckets that sum exactly.
 Anything nothing in the stack measures is reported absent, never as a zero.
 
+`onepipeline monitor RUN [--filter NAME|SPEC | --all] [--cursor CURSOR]` makes one
+pass over the merged stream and returns. Every pass — including one that renders
+no event — ends its stdout with exactly one resume line after the trailer,
+`-- cursor 1:<run>:<byte>`, whose byte is the end of the last finished record in
+the journal at the moment of the read: past records the profile hid, and short of
+a record whose writer has not finished it. `--cursor` renders only the events
+recorded after that place, so a caller that keeps the last line and hands it back
+reads nothing twice and keeps no file of its own. The cursor is the one `watch`
+prints and reads — either verb resumes from the other's — and a cursor `watch`
+would refuse (malformed, another run's, past the journal's end, or inside a
+record) is refused the same way, exiting `2` with the reason on stderr and nothing
+on stdout.
+
 `onepipeline watch RUN` is the bounded wait a supervisor puts in a wake loop, and
 it takes the same `--filter NAME|SPEC` / `--all` profile selection `monitor` does.
 It blocks, writing one line per event a supervisor acts on — a graph edit whichever

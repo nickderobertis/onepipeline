@@ -2675,7 +2675,7 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
             STORE_BINARY_ENV,
             &double("fake-onetaskgraph").to_string_lossy(),
         );
-        world.script("onetaskgraph.version", "onetaskgraph 0.1.0\n");
+        world.script("onetaskgraph.version", "onetaskgraph 0.2.0\n");
         for (file, body) in *scripted {
             world.script(file, body);
         }
@@ -2833,7 +2833,7 @@ fn an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing() {
         .run(&["start", &project, "--detach"])
         .exited(REFUSED)
         .err_has("no-such-onetaskgraph")
-        .err_has("0.1.0 or newer")
+        .err_has("0.2.0 or newer")
         .err_has("cargo install onetaskgraph");
     assert!(
         !world.runs.join("absent").exists(),
@@ -2860,13 +2860,13 @@ fn an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions() {
         "stale",
         &plan_of("stale", vec![crate::harness::agent("build", &[])]),
     );
-    world.script("onetaskgraph.version", "onetaskgraph 0.0.9\n");
+    world.script("onetaskgraph.version", "onetaskgraph 0.1.0\n");
 
     world
         .run(&["start", &project, "--detach"])
         .exited(REFUSED)
-        .err_has("is version 0.0.9")
-        .err_has("0.1.0 or newer")
+        .err_has("is version 0.1.0")
+        .err_has("0.2.0 or newer")
         .err_has("cargo install onetaskgraph");
     assert!(
         !world.runs.join("stale").exists(),
@@ -2897,7 +2897,7 @@ fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
         .exited(REFUSED)
         .err_has("refused `--version`")
         .err_has("this install is broken")
-        .err_has("0.1.0 or newer");
+        .err_has("0.2.0 or newer");
 
     std::fs::remove_file(world.fakes.join("onetaskgraph.refuse")).expect("the refusal is cleared");
     world.script("onetaskgraph.version", "something that is not a version\n");
@@ -2905,7 +2905,7 @@ fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
         .run(&["start", &project, "--detach"])
         .exited(REFUSED)
         .err_has("reported no version this build can read")
-        .err_has("0.1.0 or newer");
+        .err_has("0.2.0 or newer");
 
     world.script("onetaskgraph.version", "onetaskgraph 0.1.1-01\n");
     world
