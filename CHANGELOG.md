@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.4](https://github.com/nickderobertis/onepipeline/compare/v0.29.3...v0.29.4) - 2026-09-14
+
+### Added
+
+- *(writeback)* project only changed nodes, and record each projection ([#287](https://github.com/nickderobertis/onepipeline/pull/287))
+
+### Fixed
+
+- *(writeback)* stop retrying on a timer a projection the store refused ([#285](https://github.com/nickderobertis/onepipeline/pull/285))
+
 ## [0.29.3](https://github.com/nickderobertis/onepipeline/compare/v0.29.2...v0.29.3) - 2026-09-14
 
 ### Added
