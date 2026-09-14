@@ -25,7 +25,9 @@
 //! subprocess and is therefore paced on its own interval and asked off the
 //! reconcile loop's thread, and a human-step target's answer is the
 //! acknowledgement record `onevcs release acknowledge` writes, for which this
-//! crate runs no probe because there is none to run. Nothing here performs a
+//! crate runs no probe because there is none to run. An automated landing that
+//! captured no baseline is the one place the two meet: no probe answer can
+//! release it, and the acknowledgement record does. Nothing here performs a
 //! human release step, prompts for one, or acknowledges one on somebody's behalf.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] a node id, a dependency
@@ -1914,6 +1916,19 @@ mod tests {
                     target: "crate".parse().expect("a target name"),
                     style: ReleaseStyle::Automated,
                     version: "0.2.0".to_owned(),
+                    source: onevcs::ReleaseSource::Probed,
+                }),
+                "released",
+            ),
+            // An automated target whose landing has no baseline, released by the
+            // acknowledgement a person recorded: the same answer, whatever
+            // produced it.
+            (
+                Ok(ReleaseStatus::Released {
+                    target: "crate".parse().expect("a target name"),
+                    style: ReleaseStyle::Automated,
+                    version: "0.2.0".to_owned(),
+                    source: onevcs::ReleaseSource::Acknowledged,
                 }),
                 "released",
             ),
