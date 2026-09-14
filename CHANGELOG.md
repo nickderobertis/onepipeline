@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.2](https://github.com/nickderobertis/onepipeline/compare/v0.29.1...v0.29.2) - 2026-09-14
+
+### Added
+
+- *(monitor)* resume from a cursor and print one to resume from ([#274](https://github.com/nickderobertis/onepipeline/pull/274))
+
+### Fixed
+
+- *(taskgraph)* retire the revision pin for a released onetaskgraph floor ([#276](https://github.com/nickderobertis/onepipeline/pull/276))
+
 ## [0.29.1](https://github.com/nickderobertis/onepipeline/compare/v0.29.0...v0.29.1) - 2026-09-13
 
 ### Fixed
