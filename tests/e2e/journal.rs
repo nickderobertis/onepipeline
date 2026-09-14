@@ -365,6 +365,79 @@ fn settled_run(name: &'static str) -> (World, String) {
     (world, name.to_string())
 }
 
+/// A line the bus's envelope refuses is a line this build cannot read: the
+/// journal read skips it, the integrity report places it, and the records around
+/// it still read.
+///
+/// Two refusals that are the bus's wire rule rather than this crate's earlier
+/// reading, both recorded in entry 74 of `docs/contract-divergences.md`: a
+/// reserved label whose value is not text, and a top-level key the envelope does
+/// not declare. Each is a relayed record this run really holds with that one thing
+/// changed, and the same record with neither change is appended after them, so
+/// what the report names is the refusal and nothing else about the line.
+#[test]
+fn a_line_the_bus_envelope_refuses_is_placed_in_the_integrity_report() {
+    let (world, run) = settled_run("journal-refused");
+    let journal = world.run_file(&run, "events.jsonl");
+    let text = std::fs::read_to_string(&journal).expect("the journal reads");
+    let relayed: Value = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("the run wrote whole records"))
+        .find(|record| record["source"] == "agentgraph")
+        .expect("the run relayed the sibling's records");
+    let record = |stream: &str| {
+        let mut record = relayed.clone();
+        record["stream"] = json!(stream);
+        record["seq"] = json!(1);
+        record
+    };
+    let mut member_not_text = record("refused-member");
+    member_not_text["labels"]["member"] = json!(7);
+    let mut undeclared_key = record("refused-key");
+    undeclared_key["priority"] = json!("high");
+    let lines = [
+        member_not_text.to_string(),
+        undeclared_key.to_string(),
+        record("read-after-refused").to_string(),
+    ];
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a store
+    // holding lines no producer in this stack writes — both siblings serialise the
+    // bus's own envelope, which cannot carry either shape — so a line like this
+    // reaches a journal only from another writer: an older or foreign build, or a
+    // hand edit. Appending the bytes is the only way to put the reader in front of
+    // one, and the reader is driven as the compiled binary it is.
+    let mut grown = text.clone();
+    for line in &lines {
+        grown.push_str(line);
+        grown.push('\n');
+    }
+    std::fs::write(&journal, &grown).expect("the journal is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let first_line = text.lines().count() + 1;
+    let first_byte = text.len();
+    let second_byte = first_byte + lines[0].len() + 1;
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "journal: 2 lines this build cannot read: line {first_line} at byte {first_byte} \
+         ({} bytes), line {} at byte {second_byte} ({} bytes) — this run's record of itself \
+         is incomplete",
+        lines[0].len(),
+        first_line + 1,
+        lines[1].len(),
+    ));
+
+    // Skipped rather than ending the read: the whole record after both is read,
+    // and neither refused one is.
+    let shown = world.run(&["monitor", &run, "--all"]);
+    shown.exited(0).out_has("agent:read-after-refused");
+    assert!(
+        !shown.stdout.contains("agent:refused-"),
+        "a line the bus refuses was read as a record:\n{}",
+        shown.stdout
+    );
+}
+
 /// What a record a dying writer had got as far as looks like.
 const FRAGMENT: &str =
     "{\"v\":1,\"ts\":\"2026-08-16T00:00:00.000Z\",\"stream\":\"dead-writer\",\"seq\":";

@@ -195,6 +195,99 @@ fn a_filter_flag_takes_an_inline_spec_as_well_as_a_profile_name() {
     );
 }
 
+/// A filter may name `phase`, and it admits and excludes envelopes by the phase
+/// they carry.
+///
+/// `phase` is the agent profile's one reserved dimension, and a matcher naming it
+/// was refused here before the grammar became the bus's — entry 74 of
+/// `docs/contract-divergences.md` records the move. Read through `--filter`'s
+/// inline spec, which is parsed by the same grammar a source's `--event-filter`
+/// is: an `include` admits only records in that phase, an `exclude` keeps every
+/// record that is not, and a record carrying no phase at all is in none.
+#[test]
+fn a_filter_naming_a_phase_admits_and_excludes_envelopes_by_it() {
+    let world = World::new("filter-phase");
+    let run = settled(&world, "phased", &[]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a relayed record stamped with a
+    // phase reaches a store only from the real `onevcs` publishing and landing a
+    // change — `tests/e2e/lifecycle.rs` drives that and holds the phase it arrives
+    // with — and this world's doubled siblings stamp none. What this journey is about
+    // is the reader's filter over records that carry one, so the two records a
+    // session would have relayed are appended as the bytes it writes.
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .expect("the journal opens");
+    for (stream, kind, phase) in [
+        ("s-phase-review", "change-opened", "review"),
+        ("s-phase-release", "release-observed", "release"),
+    ] {
+        let record = serde_json::json!({
+            "v": 1,
+            "ts": "2026-09-14T00:00:00.000Z",
+            "stream": stream,
+            "seq": 1,
+            "source": "vcs",
+            "kind": kind,
+            "phase": phase,
+            "labels": {},
+            "payload": {},
+            "artifacts": []
+        });
+        writeln!(file, "{record}").expect("the record is appended");
+    }
+    drop(file);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let included = world.run(&[
+        "monitor",
+        &run,
+        "--filter",
+        r#"{"include": [{"phase": "release"}]}"#,
+    ]);
+    included.exited(0).out_has("vcs:s-phase-release");
+    for absent in ["vcs:s-phase-review", "node-dispatched"] {
+        assert!(
+            !included.stdout.contains(absent),
+            "an include naming the release phase admitted `{absent}`:\n{}",
+            included.stdout
+        );
+    }
+
+    let excluded = world.run(&[
+        "monitor",
+        &run,
+        "--filter",
+        r#"{"exclude": [{"phase": "release"}]}"#,
+    ]);
+    excluded
+        .exited(0)
+        .out_has("vcs:s-phase-review")
+        .out_has("node-dispatched");
+    assert!(
+        !excluded.stdout.contains("vcs:s-phase-release"),
+        "an exclude naming the release phase kept a record in it:\n{}",
+        excluded.stdout
+    );
+
+    // A word that is not a phase is refused naming it, as the grammar refuses a
+    // field that is not one.
+    let refused = world.run(&[
+        "monitor",
+        &run,
+        "--filter",
+        r#"{"include": [{"phase": "shipping"}]}"#,
+    ]);
+    refused.exited(REFUSED);
+    assert!(
+        refused.stderr.contains("shipping"),
+        "the refusal does not name the phase that is not one:\n{}",
+        refused.stderr
+    );
+}
+
 /// A launch overrides either shipped profile by declaring one of that name.
 #[test]
 fn a_launch_overrides_the_shipped_profiles_by_name() {
