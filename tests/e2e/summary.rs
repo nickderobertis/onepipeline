@@ -561,6 +561,181 @@ fn leave_a_fragment(paths: &RunPaths) -> String {
     fragment
 }
 
+/// A record appended after a half-written line is **finished**, rather than
+/// healed, leaves the summary current.
+///
+/// The race is an ordinary one on a live run. One appender holds the store,
+/// part-way through a record, when another process opens its journal writer. That
+/// writer reads the store as it stands — ending on a torn line — and then waits its
+/// turn. The first appender finishes the line and lets go, and the second appends
+/// its own record behind it. Nothing is healed, because by then nothing is torn.
+///
+/// A writer that had counted the half-written bytes would resume its next tail read
+/// from inside the record they belong to. The bus reader refuses that position as
+/// not a record boundary, so neither the finished record nor the writer's own would
+/// ever be folded. The document would be stamped short of the store, and every
+/// reader after would have to fold the store again for a row the writer should
+/// have kept.
+///
+/// Unix only, because the holder is `flock(2)`, for the reason
+/// `journal::an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it`
+/// gives.
+#[cfg(unix)]
+#[test]
+fn a_record_appended_after_a_half_written_line_is_finished_leaves_the_summary_current() {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+
+    let world = World::new("summary-finished");
+    let run = settled(&world, "finished", vec![agent("build", &[])]);
+    let paths = paths_of(&world, &run);
+    let before = RunSummary::of(&paths).expect("the run reads");
+    assert!(!before.stop_recorded);
+
+    // The record the other appender is part-way through: one of this run's own
+    // relayed records, on a stream of its own, stamped at the newest instant the
+    // store already carries, so it belongs at the end of the merge.
+    let store = std::fs::read_to_string(paths.journal()).expect("the store reads");
+    let records: Vec<serde_json::Value> = store
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("the run wrote whole records"))
+        .collect();
+    let newest = records
+        .iter()
+        .filter_map(|record| record["ts"].as_str())
+        .max()
+        .expect("a stamped record")
+        .to_string();
+    let mut finishing = records
+        .iter()
+        .find(|record| record["source"] == "agentgraph")
+        .expect("a relayed record")
+        .clone();
+    finishing["stream"] = serde_json::json!("a-second-appender");
+    finishing["seq"] = serde_json::json!(0);
+    finishing["ts"] = serde_json::json!(newest);
+    let line = format!("{}\n", serde_json::to_string(&finishing).expect("a record"));
+    let middle = (line.len() / 2..)
+        .find(|at| line.is_char_boundary(*at))
+        .expect("a place to stop writing");
+    let (written, rest) = line.split_at(middle);
+    let starts_at = store.len() as u64;
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the first appender is a real one,
+    // taking the store's own lock the way every appender does and writing a real record
+    // in two halves; no verb holds a run's journal part-way through a record, and one
+    // added to test with would be a surface nobody asked for. The second appender, whose
+    // accounting is under test, is the compiled binary.
+    let mut holder = std::fs::OpenOptions::new()
+        .append(true)
+        .open(paths.journal())
+        .expect("the store opens");
+    // SAFETY: the descriptor is one this test owns until it is dropped below, and
+    // `flock` borrows no memory.
+    assert_eq!(
+        unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) },
+        0,
+        "the store could not be held: {}",
+        std::io::Error::last_os_error()
+    );
+    holder
+        .write_all(written.as_bytes())
+        .expect("half of the record");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // The next record, appended through the run's own journal writer by the binary.
+    // It opens that writer over the store as it stands, torn line and all, and then
+    // waits for the lock the first appender holds.
+    let mut stopping = world
+        .cmd(&["stop", &run, "--force"])
+        .spawn()
+        .expect("the binary starts");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        stopping.try_wait().expect("the stop is waitable").is_none(),
+        "the stop appended to a store another writer was holding"
+    );
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the first appender finishing its
+    // record and letting go, as above.
+    holder
+        .write_all(rest.as_bytes())
+        .expect("the rest of the record");
+    drop(holder);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(
+        stopping.wait().expect("the stop ran").success(),
+        "the stop refused"
+    );
+
+    let grown = std::fs::read_to_string(paths.journal()).expect("the store reads");
+    assert!(
+        grown.contains(&line),
+        "the finished record is not whole in the store: {grown}"
+    );
+    assert!(
+        !world.run_file(&run, "events.jsonl.torn").exists(),
+        "the store was healed, so the line under test was never finished"
+    );
+
+    // The document the writer left, read as the file it is: a reader that folded
+    // would answer correctly whatever the writer counted, and what is under test is
+    // the writer's count.
+    let document: RunSummary = serde_json::from_str(
+        &std::fs::read_to_string(paths.summary()).expect("the document reads"),
+    )
+    .expect("the document the writer maintained");
+    let length = std::fs::metadata(paths.journal()).expect("a store").len();
+    assert_eq!(
+        document.journal_len,
+        length,
+        "the writer stamped its document at byte {}, where the store is {length} bytes and \
+         the record finished under it spans {starts_at}..{}: a count inside that record is \
+         a position no tail read can resume from",
+        document.journal_len,
+        starts_at + line.len() as u64
+    );
+    assert_eq!(document.journal_mtime_ms, journal_mtime_ms(&paths));
+    assert!(
+        document.stop_recorded,
+        "the record appended behind the finished line is not in the row the writer \
+         maintained: {document:?}"
+    );
+    assert_eq!(
+        document.event_count,
+        before.event_count + 2,
+        "the row the writer maintained does not carry both the finished record and its own"
+    );
+
+    // And a reader serves it without opening the store: nothing about the row
+    // waits on a fold.
+    {
+        let instrument = Unopenable::over(&paths);
+        let opened = std::fs::File::open(paths.journal());
+        assert!(
+            matches!(&opened, Err(refusal) if refusal.kind() == std::io::ErrorKind::PermissionDenied),
+            "this process opened a store carrying no read permission, so nothing below is \
+             measured: {opened:?}"
+        );
+        assert_eq!(
+            RunSummary::of(&paths).expect(
+                "the run reads: serving the row opened a store no byte of which can be read"
+            ),
+            document,
+            "the row served after the line was finished is not the row the writer maintained"
+        );
+        drop(instrument);
+    }
+
+    // And what the writer counted is what the store says.
+    recorded_before_the_document(&paths);
+    assert_eq!(
+        RunSummary::of(&paths).expect("the run folds"),
+        document,
+        "the row the writer maintained is not the row the store folds to"
+    );
+}
+
 /// A listing answers **most recently written first**, and says where a run that
 /// has written nothing goes.
 ///

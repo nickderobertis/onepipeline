@@ -129,16 +129,17 @@ impl Journal {
         // trusting a length another appender may have moved. See
         // `summary::Stamp`.
         let bytes = line.len() as u64 + 1;
-        // And what the same call cut off in front of it, which the summary's own
-        // count is a byte offset past: `ledger::append_line_healed`.
-        let healed = ledger::append_line_healed(&self.paths.journal(), &line)?;
+        // A fragment the same call cut off in front of it is the ledger's to report,
+        // and the summary needs nothing from it: its count is a record boundary, and a
+        // heal cuts only what follows the last one. See `summary::Maintainer::appended`.
+        ledger::append_line_healed(&self.paths.journal(), &line)?;
         // After the record has reached the file, so the summary never describes a
         // store that does not hold what it describes — and so a read of the
         // store, which is the answer to a record this state cannot place, reads
         // a store that already holds it. An append that failed took its own
         // bytes back off the file and returned above, with no summary written
         // for them.
-        self.summary.appended(envelope, healed, bytes);
+        self.summary.appended(envelope, bytes);
         Ok(())
     }
 }
@@ -232,38 +233,18 @@ pub fn read(path: &Path) -> Vec<Envelope> {
         .collect()
 }
 
-/// Every record a run's journal has grown by since its first `from` bytes, each
-/// with how many bytes of the file it occupies.
-///
-/// A record this build cannot read comes back as `None` **with its size**, and
-/// that is the point of the pairing: the caller is counting the store's bytes,
-/// and a line it could not parse is still a line the file holds. Dropping it
-/// would leave the count short for ever and every later read of that run would
-/// re-read the whole store.
-pub(crate) fn read_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
-    ledger::read_envelope_lines(path, from)
-        .into_iter()
-        .map(|line| {
-            let occupies = line.bytes + u64::from(line.terminated);
-            let whole = match reading(line, path) {
-                Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
-                Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
-            };
-            (whole, occupies)
-        })
-        .collect()
-}
-
 /// Every **finished** record a run's journal has grown by since its first
 /// `from` bytes, each with how many bytes of the file it occupies.
 ///
-/// [`read_after`] and [`finished_after`] at once, because a checkpoint needs
-/// exactly one half of each. Like the tailer, it **stops** at a record whose
-/// writer has not finished it: the byte it hands back becomes the byte a later
-/// read resumes at, and a boundary inside a half-written line loses the record
-/// it lands in once that writer finishes. Like [`read_after`], it hands back a
-/// record this build cannot read **with its size**, because that line is one the
-/// file holds and a boundary that skipped it would be short for ever.
+/// What the checkpoint and the summary maintainer both count the store by. Like
+/// the tailer, it **stops** at a record whose writer has not finished it: the bytes
+/// it hands back add up to the byte a later read resumes at, and a count inside a
+/// half-written line is a position the bus reader refuses to resume from once that
+/// writer finishes, so the record it lands in would never be read. A record this
+/// build cannot read comes back as `None` **with its size**, and that is the point
+/// of the pairing: a line it could not parse is still a line the file holds, and a
+/// count that skipped it would be short for ever, so every later read of that run
+/// would read the whole store again.
 pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let mut grown = Vec::new();
     for line in ledger::read_envelope_lines(path, from) {
@@ -283,13 +264,12 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
 /// Every **finished** record a run's journal has grown by since its first `from`
 /// bytes, and the byte a later read resumes at.
 ///
-/// The tailer's counterpart of [`read_after`], and the difference is the last
-/// line. That one accounts for every line the file holds, because a byte count
-/// that skipped one would be short for ever; this one **stops** at a record
-/// whose writer has not finished it and reports the byte that record begins at,
-/// because a tailer that advanced past a half-written line would never come back
-/// for the rest of it — and the record it lost is the one the driver was in the
-/// middle of appending, which on a live run is the newest thing there is to say.
+/// The tailer's counterpart of [`finished_records_after`]: it **stops** at a
+/// record whose writer has not finished it and reports the byte that record
+/// begins at, because a tailer that advanced past a half-written line would never
+/// come back for the rest of it — and the record it lost is the one the driver was
+/// in the middle of appending, which on a live run is the newest thing there is to
+/// say.
 ///
 /// A line this build cannot parse is skipped and still accounted for, exactly as
 /// [`read`] skips it: a record from a schema this build does not know is not a

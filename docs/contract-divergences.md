@@ -3585,8 +3585,8 @@ nothing. A length check cannot see it, because a byte from a longer journal is a
 plausible byte of a shorter one. The run is what makes it refusable by name. The
 tail
 read behind it (`journal::finished_after`) stops at a record whose writer has not
-finished it rather than accounting for it, which is the one place it differs from
-the summary maintainer's `read_after` beside it: a tailer that advanced past a
+finished it rather than accounting for it, as the summary maintainer's tail read
+beside it (`journal::finished_records_after`) does too: a tailer that advanced past a
 half-written line would never come back for the rest of it, and on a live run
 that line is the newest thing there is to say.
 

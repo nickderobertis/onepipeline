@@ -149,7 +149,7 @@ pub(crate) struct Coverage {
     ///
     /// What "folded only the records the checkpoint does not account for" is
     /// counted against, and it counts lines rather than foldable ones for the
-    /// reason [`journal::read_after`] pairs a record it could not read with its
+    /// reason [`journal::finished_records_after`] pairs a record it could not read with its
     /// size: a line this build cannot read is still a line the file holds.
     pub(crate) records: u64,
     /// The greatest [`Placed`] among the records folded, or absent where none
