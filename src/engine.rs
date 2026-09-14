@@ -675,7 +675,7 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 /// graph is terminal or when nothing can move without something arriving over
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
-pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState> {
+pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
     // contents are oneagentgraph's validation boundary. Here the ledger boundary
@@ -706,6 +706,7 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     // advances, and the release itself is [`let_go_of`]'s.
     let channel = ChannelState::new(paths);
     let mut lock = lock;
+    let mut departure = Departure::LeftClaimed;
     loop {
         // Everything the queue is holding, applied and then recorded — the run's
         // last word has to carry an edit applied after it was written.
@@ -728,7 +729,10 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
         // and the release are one section, so an edit accepted after this driver
         // stopped claiming is an edit accepted from a run that is free.
         match let_go_of(paths, lock) {
-            LettingGo::Released => break,
+            LettingGo::Released => {
+                departure = Departure::Released;
+                break;
+            }
             LettingGo::QueueMoved(back) => lock = back,
             // Nothing was looked at and nothing released, so this driver does not
             // release the run either: it leaves the claim standing over a process
@@ -754,7 +758,33 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState
     // which fails without the seal; no offline closeout leaves a document for this call
     // to repair — `src/driver.rs` says why beside its own call.
     crate::summary::seal(paths);
-    Ok(outcome)
+    Ok(Driven {
+        state: outcome,
+        departure,
+    })
+}
+
+/// How a driver's loop ended: the state the graph settled in, and how the driver
+/// left the run.
+pub struct Driven {
+    /// The state the graph settled in, whose exit code the binary carries.
+    pub state: GraphState,
+    /// Whether the driver let go of the run on its way out.
+    pub departure: Departure,
+}
+
+/// How a driver left the run it drove.
+///
+/// A run-end hook is judged only at a let-go, so the two are kept apart by type
+/// rather than by a flag a caller could read the wrong way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure {
+    /// The ownership lock was released: the run is free, and this driver is the
+    /// one that judges how it ended.
+    Released,
+    /// The handover could not be taken, so the lock was left claimed over a
+    /// process that is ending. The next writer reclaims the run, and judges it.
+    LeftClaimed,
 }
 
 /// What a writer that tried to let go of a run found on its way out.

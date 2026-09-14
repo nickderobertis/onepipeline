@@ -1324,15 +1324,16 @@ mod tests {
     }
 
     /// The draft settlement vocabulary this build carries is exactly what the
-    /// divergence record proposes, and `docs/contract.md` names none of it.
+    /// divergence record proposes, and `docs/contract.md` names all of it.
     ///
     /// A node status and a publication outcome, and both are private vocabulary —
     /// `graph` and `vcs` are engine modules, so `tests/contract.rs`, which drives
-    /// the published surface, cannot reach either and entry 51 is the only place
-    /// they are written down. Held both directions, and against the contract as
-    /// well: a word this build grows without a line in that entry fails here, one
-    /// the entry names that this build no longer spells fails here, and one the
-    /// approved contract has since taken up is no divergence and fails here too.
+    /// the published surface, cannot reach either. The approved run-end hooks
+    /// addition took both words up as contract vocabulary, and entry 51 records
+    /// that ruling while the draft-publication semantics it proposes stay open.
+    /// Held against both documents: a status this build grows that the contract
+    /// has never heard of fails here, a word the entry names that this build no
+    /// longer spells fails here, and one the contract stops naming fails here too.
     #[test]
     fn the_draft_settlement_vocabulary_is_what_the_divergence_record_names() {
         let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
@@ -1366,9 +1367,13 @@ mod tests {
             .filter(|word| !contract.contains(word.as_str()))
             .collect();
         assert_eq!(
-            undocumented, statuses,
-            "the statuses this build carries that docs/contract.md does not name are not entry \
-             51's"
+            undocumented,
+            Vec::<String>::new(),
+            "docs/contract.md does not name every status this build carries"
+        );
+        assert!(
+            !statuses.is_empty(),
+            "entry 51 names no node status to hold"
         );
         for word in &statuses {
             assert_eq!(
@@ -1387,8 +1392,8 @@ mod tests {
         );
         for word in &outcomes {
             assert!(
-                !contract.contains(word.as_str()),
-                "the contract names `{word}`, so it is no divergence"
+                contract.contains(word.as_str()),
+                "the contract does not name `{word}`, which the run-end hooks took up"
             );
         }
     }

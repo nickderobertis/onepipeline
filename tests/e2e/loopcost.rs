@@ -49,7 +49,7 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// loop, and it is sized to them: three seconds each, where the slowest
 /// cross-platform leg has taken about one and a half — a debug build reading its
 /// journal through the bus reader, whose decode is recorded in
-/// `docs/contract-divergences.md` entry 75. It is the harness's backstop and not
+/// `docs/contract-divergences.md` entry 76. It is the harness's backstop and not
 /// what the journey proves: every bound the journey asserts is a count of work,
 /// and none of them moved.
 const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);

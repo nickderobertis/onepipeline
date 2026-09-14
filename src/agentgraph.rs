@@ -3449,7 +3449,7 @@ mod tests {
     /// The bus's `Labels` holds `member` in a slot of its own ahead of `persona`
     /// and every key nobody reserves, which is where `oneagentgraph` writes it;
     /// this crate's copy before the bus kept `member` among the extras, after
-    /// `persona`. Entry 74 of `docs/contract-divergences.md` records the move as
+    /// `persona`. Entry 75 of `docs/contract-divergences.md` records the move as
     /// the bus's wire rule, and this holds it at the one place a relayed record
     /// reaches the store: the line the journal appends is compared with the
     /// producer's line byte for byte, not decoded and compared as a value.

@@ -760,6 +760,31 @@ pub struct LaunchRecord {
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
     #[serde(default)]
     pub writeback_item_budget: u64,
+    /// The command this run fires once when it ends with every node `done`, when
+    /// the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag and the launch config in
+    /// that order, and replayed by every driver that adopts the run — `adopt`
+    /// takes none of its own. Read it through
+    /// [`success_hook`](Self::success_hook). Omitted when empty, like every other
+    /// field added to this record after it shipped, so a record written by a
+    /// build that predates it reads as naming no hook, and fires none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub success_hook: String,
+    /// The command this run fires once when it ends any other way, when the
+    /// launch named one. Resolved, replayed and omitted exactly as
+    /// [`success_hook`](Self::success_hook) is.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure_hook: String,
+    /// How long a run-end hook is awaited, in seconds, or `0` on a record that
+    /// names no hook.
+    ///
+    /// Retained only beside a hook, because it bounds nothing else: a launch
+    /// naming no hook writes the record it always wrote. Read through
+    /// [`hook_timeout`](Self::hook_timeout), which is where `0` becomes the
+    /// shipped default and never a timeout that ends a hook before it begins.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hook_timeout: u64,
     /// Opaque overrides replayed on the dag-scope graph launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dag_sets: Vec<String>,
@@ -956,6 +981,40 @@ impl LaunchRecord {
     pub fn item_budget(&self) -> Option<NonZeroU64> {
         NonZeroU64::new(self.writeback_item_budget)
     }
+
+    /// The success hook this run was launched with, when it was launched with
+    /// one.
+    ///
+    /// The same reading [`observer_graph`](Self::observer_graph) has, and for
+    /// the same reason: an absent string field is written as no field at all,
+    /// and this is the one place that absence becomes "there is none" again.
+    pub fn success_hook(&self) -> Option<&str> {
+        (!self.success_hook.is_empty()).then_some(self.success_hook.as_str())
+    }
+
+    /// The failure hook this run was launched with, when it was launched with
+    /// one. Read as [`success_hook`](Self::success_hook) is.
+    pub fn failure_hook(&self) -> Option<&str> {
+        (!self.failure_hook.is_empty()).then_some(self.failure_hook.as_str())
+    }
+
+    /// How long this run's hooks are awaited.
+    ///
+    /// The shipped default,
+    /// [`cli::DEFAULT_HOOK_TIMEOUT_SECONDS`], for the `0` a record naming no
+    /// timeout defaults to — and a [`NonZeroU64`], so no later reader can put a
+    /// timeout of zero back.
+    ///
+    /// [`cli::DEFAULT_HOOK_TIMEOUT_SECONDS`]: crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS
+    pub fn hook_timeout(&self) -> NonZeroU64 {
+        NonZeroU64::new(self.hook_timeout).unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS)
+    }
+}
+
+/// Whether a count this record carries is the `0` that stands for "the record
+/// does not say", so the field is omitted rather than written.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Whether a recorded session attributes a launch to anybody at all.
@@ -2866,6 +2925,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             writeback_item_budget: 10,
+            success_hook: "./scripts/follow-up.sh".into(),
+            failure_hook: "./scripts/report-failure.sh".into(),
+            hook_timeout: 45,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -2951,19 +3013,23 @@ mod tests {
     /// default stands for *the record does not say*, and every reading of it says
     /// so. Each assertion here fails if the value were invented — a session that
     /// named somebody, a pid a reader would probe, a host a reader would claim,
-    /// an instant nobody measured, a pacemaker that fires every zero seconds, or
-    /// a write-back budget of zero seconds per item.
+    /// an instant nobody measured, a pacemaker that fires every zero seconds, a
+    /// write-back budget of zero seconds per item, a run-end hook nobody named,
+    /// or a hook timeout of zero.
     #[test]
-    fn a_launch_record_written_before_any_of_these_six_keys_still_reads() {
+    fn a_launch_record_written_before_any_of_these_nine_keys_still_reads() {
         /// Every key added to this record after it shipped whose absence this
         /// reader has to answer for.
-        const HISTORICAL: [&str; 6] = [
+        const HISTORICAL: [&str; 9] = [
             "session",
             "pid",
             "host",
             "started_at",
             "heartbeat_interval",
             "writeback_item_budget",
+            "success_hook",
+            "failure_hook",
+            "hook_timeout",
         ];
         let root = scratch("historical-launch");
         let whole = serde_json::to_value(a_record()).expect("a record this build writes");
@@ -3051,12 +3117,34 @@ mod tests {
                         "a zero-second budget was served as one"
                     );
                 }
-                other => unreachable!("{other} is not one of the six"),
+                "success_hook" => {
+                    assert_eq!(read.success_hook(), None, "a success hook was invented");
+                    assert_eq!(read.failure_hook(), Some("./scripts/report-failure.sh"));
+                }
+                "failure_hook" => {
+                    assert_eq!(read.failure_hook(), None, "a failure hook was invented");
+                    assert_eq!(read.success_hook(), Some("./scripts/follow-up.sh"));
+                }
+                "hook_timeout" => {
+                    assert_eq!(read.hook_timeout, 0);
+                    assert_eq!(
+                        read.hook_timeout(),
+                        crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS,
+                        "a record naming no timeout was not given the shipped one"
+                    );
+                }
+                other => unreachable!("{other} is not one of the nine"),
             }
         }
 
-        // And the record 141 roots on that host actually hold: none of the six.
-        let oldest = read_one("all-six", &HISTORICAL);
+        // And the record 141 roots on that host actually hold: none of the nine.
+        let oldest = read_one("all-nine", &HISTORICAL);
+        assert_eq!(oldest.success_hook(), None);
+        assert_eq!(oldest.failure_hook(), None);
+        assert_eq!(
+            oldest.hook_timeout(),
+            crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS
+        );
         assert!(oldest.session.is_empty());
         assert_eq!(oldest.owner_label("a-session"), "[unknown]");
         assert!(!oldest.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -3071,9 +3159,12 @@ mod tests {
         assert_eq!(oldest.launcher, "claude-code");
         assert_eq!(oldest.node_graph, "graphs/node-scope.yaml");
 
-        // A record that carries the six reads them, so none of the defaults
+        // A record that carries the nine reads them, so none of the defaults
         // above is standing in front of a value somebody wrote.
         let whole = read_one("whole", &[]);
+        assert_eq!(whole.success_hook(), Some("./scripts/follow-up.sh"));
+        assert_eq!(whole.failure_hook(), Some("./scripts/report-failure.sh"));
+        assert_eq!(whole.hook_timeout(), NonZeroU64::new(45).expect("nonzero"));
         assert_eq!(whole.session, "a-session");
         assert_eq!(whole.driver_pid(), NonZeroU32::new(1));
         assert_eq!(whole.recorded_host(), Some("h"));
@@ -3564,6 +3655,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
@@ -3595,6 +3689,9 @@ mod tests {
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             writeback_item_budget: 0,
+            success_hook: String::new(),
+            failure_hook: String::new(),
+            hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

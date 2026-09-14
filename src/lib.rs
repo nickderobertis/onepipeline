@@ -72,6 +72,7 @@ mod driver;
 mod edits;
 mod engine;
 mod graph;
+mod hooks;
 mod journal;
 mod ledger;
 mod lifecycle;

@@ -1298,7 +1298,7 @@ mod tests {
     /// Where a stream's clock steps back against its own `seq`, the two merges
     /// part, and this one keeps the producer's order.
     ///
-    /// The difference `docs/contract-divergences.md` entry 74 records: `seq` is
+    /// The difference `docs/contract-divergences.md` entry 75 records: `seq` is
     /// the only ordering promise an envelope carries, and the checkpoint's
     /// coverage marker and the summary's open instant are both proved over a
     /// merge that honours it, while the bus sorts every record by its stamp.

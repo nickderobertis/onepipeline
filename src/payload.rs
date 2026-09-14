@@ -690,6 +690,93 @@ pub(crate) struct NoteShown {
     /// What showed the presentation happening.
     pub(crate) evidence: EvidenceWord,
 }
+/// The word a run-end hook record names its hook by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HookWord {
+    /// Every node settled `done`.
+    Success,
+    /// The run ended any other way.
+    Failure,
+}
+
+/// Why the failure hook fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HookReasonWord {
+    /// The graph holds a `failed` or `skipped` node.
+    Nodes,
+    /// The graph holds a node that is not `done`, none failed or skipped, and no
+    /// decision is outstanding.
+    Unfinished,
+    /// `stop` established a clean teardown.
+    Stopped,
+}
+
+/// One node that was not `done` when a hook was judged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct UnsettledNode {
+    /// The node.
+    pub(crate) id: String,
+    /// Its status word.
+    pub(crate) status: String,
+    /// Its outcome, written as `null` rather than omitted where it has none.
+    pub(crate) outcome: Option<String>,
+}
+
+/// Why the failure hook fired, and every node not `done` when it was judged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct HookReason {
+    /// Why.
+    pub(crate) kind: HookReasonWord,
+    /// Every node not `done`.
+    pub(crate) nodes: Vec<UnsettledNode>,
+}
+
+/// `run-hook-fired`: a run-end hook marked as fired, once per run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct RunHookFired {
+    /// Which hook.
+    pub(crate) hook: HookWord,
+    /// The command the launch record names for it.
+    pub(crate) command: String,
+    /// Why the failure hook fired; `null` for the success hook.
+    pub(crate) reason: Option<HookReason>,
+}
+
+/// How a run-end hook ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HookEndingWord {
+    /// Exit status zero.
+    Succeeded,
+    /// Any other exit status.
+    Failed,
+    /// The command could not be started.
+    CouldNotStart,
+    /// The bound on its running elapsed.
+    TimedOut,
+}
+
+/// `run-hook-finished`: how the fired hook ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct RunHookFinished {
+    /// Which hook.
+    pub(crate) hook: HookWord,
+    /// Its exit status; `null` where it never started or was ended.
+    pub(crate) exit: Option<i32>,
+    /// How it ended.
+    pub(crate) ending: HookEndingWord,
+    /// Where its output was captured.
+    pub(crate) log: String,
+}
+
+/// `run-hook-withheld`: a driver let go of a paused run without firing a hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct RunHookWithheld {
+    /// The settlement word the run was left under.
+    pub(crate) settlement: String,
+}
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
@@ -767,6 +854,9 @@ payload_messages! {
     CriterionChecked => "criterion-checked";
     BodyNotDrafted => "body-not-drafted";
     NoteShown => "note-shown";
+    RunHookFired => "run-hook-fired";
+    RunHookFinished => "run-hook-finished";
+    RunHookWithheld => "run-hook-withheld";
 }
 
 #[cfg(test)]

@@ -199,7 +199,7 @@ fn a_filter_flag_takes_an_inline_spec_as_well_as_a_profile_name() {
 /// they carry.
 ///
 /// `phase` is the agent profile's one reserved dimension, and a matcher naming it
-/// was refused here before the grammar became the bus's — entry 74 of
+/// was refused here before the grammar became the bus's — entry 75 of
 /// `docs/contract-divergences.md` records the move. Read through `--filter`'s
 /// inline spec, which is parsed by the same grammar a source's `--event-filter`
 /// is: an `include` admits only records in that phase, an `exclude` keeps every

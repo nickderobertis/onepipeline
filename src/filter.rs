@@ -40,10 +40,10 @@ pub const MONITOR_PROFILE: &str = "monitor";
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **5** since a launch declares how long the settlement write-back allows its
-/// store per item it projects: `writeback_item_budget` is a key versions 1 to 4
-/// never had, so a document carrying it is a different document and says so.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 5;
+/// **6** since a launch declares the commands its run fires when it ends:
+/// `success_hook`, `failure_hook` and `hook_timeout` are keys versions 1 to 5
+/// never had, so a document carrying one is a different document and says so.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 6;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -52,11 +52,12 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 5;
 /// keyed to the version the document declares. An earlier config is a complete
 /// document — a version-1 one says nothing about drafting, a version-2 one says
 /// nothing about validating a node, a version-3 one says nothing about
-/// reviewing an envelope, and a version-4 one says nothing about the write-back's
-/// budget, which is what a launch naming none of them means — and naming a later
-/// key there is refused **by that field's name**, exactly as a key no version
-/// ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 5] = [LAUNCH_CONFIG_SCHEMA_VERSION, 4, 3, 2, 1];
+/// reviewing an envelope, a version-4 one says nothing about the write-back's
+/// budget, and a version-5 one says nothing about a run-end hook, which is what
+/// a launch naming none of them means — and naming a later key there is refused
+/// **by that field's name**, exactly as a key no version ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 6] =
+    [LAUNCH_CONFIG_SCHEMA_VERSION, 5, 4, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -76,16 +77,29 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 5] = [LAUNCH_CONFIG_SCHEMA_V
 /// a key the operator did not change. What it means is settled where the value
 /// is *read* rather than here: `driver::start` reads a blank drafting graph as
 /// naming none, which is what the document omitting the key says.
+///
+/// The two run-end hook commands are kept blank from the version they arrived
+/// at, deliberately unlike the validator and the reviewer: the contract states a
+/// blank hook as this launch saying it has none, so `driver::start` reads it the
+/// way it reads a blank drafting graph. Their timeout is a number, and a blank
+/// number is the half-written decision the budget's is.
 const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
     ("envelope_reviewer", 4, BlankValue::Refused),
     (WRITEBACK_ITEM_BUDGET_KEY, 5, BlankValue::Refused),
+    ("success_hook", 6, BlankValue::Kept),
+    ("failure_hook", 6, BlankValue::Kept),
+    (HOOK_TIMEOUT_KEY, 6, BlankValue::Refused),
 ];
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
 /// for the two readers that refuse by it.
 const WRITEBACK_ITEM_BUDGET_KEY: &str = "writeback_item_budget";
+
+/// The launch-config key naming how long a run-end hook is awaited, spelled
+/// once for the two readers that refuse by it.
+const HOOK_TIMEOUT_KEY: &str = "hook_timeout";
 
 /// How a document carries one of the keys [`KEYS_BY_VERSION`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,78 +142,102 @@ fn refused_blank(key: &str) -> String {
 fn item_budget<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<NonZeroU64>, D::Error> {
-    struct Budget;
+    deserializer.deserialize_any(PositiveSeconds {
+        key: WRITEBACK_ITEM_BUDGET_KEY,
+        unit: "seconds per item",
+        default: crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+        zero: crate::writeback::refused_zero_budget,
+    })
+}
 
-    impl Budget {
-        fn refused<E: serde::de::Error>(held: &dyn std::fmt::Display) -> E {
-            E::custom(format!(
-                "`{WRITEBACK_ITEM_BUDGET_KEY}` holds {held}, which is not a positive whole \
-                 number of seconds per item — give it one, or leave the key out to take \
-                 {} seconds per item",
-                crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
-            ))
+/// Read `hook_timeout` as the positive whole number of seconds it is.
+///
+/// On [`item_budget`]'s terms and for its reasons: serde's own reading would
+/// take the key present and blank as omitted, and would accept zero — a timeout
+/// that ends every hook before it has begun. Both are refused by the key's name.
+fn hook_timeout<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<NonZeroU64>, D::Error> {
+    deserializer.deserialize_any(PositiveSeconds {
+        key: HOOK_TIMEOUT_KEY,
+        unit: "seconds",
+        default: crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS,
+        zero: crate::hooks::refused_zero_timeout,
+    })
+}
+
+/// A launch-config key read as a positive whole number of seconds, refused by
+/// its own name wherever it is anything else.
+///
+/// One reading for every such key, so a budget and a timeout cannot come to
+/// refuse the same mistake in two different sentences.
+struct PositiveSeconds {
+    /// The key, as the refusal names it.
+    key: &'static str,
+    /// What one of the seconds is counted per, in the refusal's words.
+    unit: &'static str,
+    /// What a document leaving the key out takes.
+    default: NonZeroU64,
+    /// The sentence a zero is refused with, given the key's spelling — the one
+    /// the flag refuses a zero with too.
+    zero: fn(&str) -> String,
+}
+
+impl PositiveSeconds {
+    fn refused<E: serde::de::Error>(&self, held: &dyn std::fmt::Display) -> E {
+        E::custom(format!(
+            "`{}` holds {held}, which is not a positive whole number of {} — give it one, or \
+             leave the key out to take {} {}",
+            self.key, self.unit, self.default, self.unit
+        ))
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for PositiveSeconds {
+    type Value = Option<NonZeroU64>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "a positive whole number of {}", self.unit)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, seconds: u64) -> std::result::Result<Self::Value, E> {
+        NonZeroU64::new(seconds)
+            .map(Some)
+            .ok_or_else(|| E::custom((self.zero)(&format!("`{}`", self.key))))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, seconds: i64) -> std::result::Result<Self::Value, E> {
+        match u64::try_from(seconds) {
+            Ok(seconds) => self.visit_u64(seconds),
+            Err(_) => Err(self.refused(&seconds)),
         }
     }
 
-    impl<'de> serde::de::Visitor<'de> for Budget {
-        type Value = Option<NonZeroU64>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a positive whole number of seconds per item")
-        }
-
-        fn visit_u64<E: serde::de::Error>(
-            self,
-            seconds: u64,
-        ) -> std::result::Result<Self::Value, E> {
-            NonZeroU64::new(seconds).map(Some).ok_or_else(|| {
-                E::custom(crate::writeback::refused_zero_budget(&format!(
-                    "`{WRITEBACK_ITEM_BUDGET_KEY}`"
-                )))
-            })
-        }
-
-        fn visit_i64<E: serde::de::Error>(
-            self,
-            seconds: i64,
-        ) -> std::result::Result<Self::Value, E> {
-            match u64::try_from(seconds) {
-                Ok(seconds) => self.visit_u64(seconds),
-                Err(_) => Err(Self::refused(&seconds)),
-            }
-        }
-
-        fn visit_f64<E: serde::de::Error>(
-            self,
-            seconds: f64,
-        ) -> std::result::Result<Self::Value, E> {
-            Err(Self::refused(&seconds))
-        }
-
-        fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<Self::Value, E> {
-            if text.trim().is_empty() {
-                return Err(E::custom(refused_blank(WRITEBACK_ITEM_BUDGET_KEY)));
-            }
-            Err(Self::refused(&format!("{text:?}")))
-        }
-
-        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
-            Err(E::custom(refused_blank(WRITEBACK_ITEM_BUDGET_KEY)))
-        }
-
-        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
-            self.visit_unit()
-        }
-
-        fn visit_some<D2: Deserializer<'de>>(
-            self,
-            deserializer: D2,
-        ) -> std::result::Result<Self::Value, D2::Error> {
-            deserializer.deserialize_any(self)
-        }
+    fn visit_f64<E: serde::de::Error>(self, seconds: f64) -> std::result::Result<Self::Value, E> {
+        Err(self.refused(&seconds))
     }
 
-    deserializer.deserialize_any(Budget)
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<Self::Value, E> {
+        if text.trim().is_empty() {
+            return Err(E::custom(refused_blank(self.key)));
+        }
+        Err(self.refused(&format!("{text:?}")))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+        Err(E::custom(refused_blank(self.key)))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+        self.visit_unit()
+    }
+
+    fn visit_some<D2: Deserializer<'de>>(
+        self,
+        deserializer: D2,
+    ) -> std::result::Result<Self::Value, D2::Error> {
+        deserializer.deserialize_any(self)
+    }
 }
 
 /// What a key present and holding nothing means.
@@ -303,6 +341,39 @@ pub struct LaunchConfig {
         deserialize_with = "item_budget"
     )]
     pub writeback_item_budget: Option<NonZeroU64>,
+    /// The command this launch's run fires once when it ends with every node
+    /// `done`, if any.
+    ///
+    /// The sixth launch-level decision, written down beside a plan for the
+    /// reason the first five are: what happens after a graph completes — a
+    /// follow-up run launched, a board told — is a property of how a team works
+    /// rather than of one launch. `--success-hook` spells the same thing inline
+    /// and overrides this.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Blank is kept as written and read at the launch as naming
+    /// none, which is what the contract says a blank hook is. Omitted when
+    /// absent, so a config that names no hook round-trips as the file wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_hook: Option<String>,
+    /// The command this launch's run fires once when it ends any other way, if
+    /// any.
+    ///
+    /// Declared, overridden and omitted exactly as
+    /// [`success_hook`](Self::success_hook) is; `--failure-hook` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_hook: Option<String>,
+    /// How long a run-end hook is awaited, in seconds, if the launch says.
+    ///
+    /// The lower of the two rungs `--hook-timeout` heads. A key
+    /// [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, refused blank and refused zero by
+    /// its own name, and omitted when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "hook_timeout"
+    )]
+    pub hook_timeout: Option<NonZeroU64>,
 }
 
 impl Default for LaunchConfig {
@@ -314,6 +385,9 @@ impl Default for LaunchConfig {
             node_validator: None,
             envelope_reviewer: None,
             writeback_item_budget: None,
+            success_hook: None,
+            failure_hook: None,
+            hook_timeout: None,
         }
     }
 }
@@ -357,7 +431,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 4] = [
+        let carried: [(&str, Carried); 7] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -376,6 +450,22 @@ impl LaunchConfig {
                 WRITEBACK_ITEM_BUDGET_KEY,
                 config
                     .writeback_item_budget
+                    .map_or(Carried::Absent, |_| Carried::Named),
+            ),
+            (
+                "success_hook",
+                Carried::text(config.success_hook.as_deref()),
+            ),
+            (
+                "failure_hook",
+                Carried::text(config.failure_hook.as_deref()),
+            ),
+            // Never `Blank`, for the budget's reason: `hook_timeout` refused a
+            // blank one by name before this document existed.
+            (
+                HOOK_TIMEOUT_KEY,
+                config
+                    .hook_timeout
                     .map_or(Carried::Absent, |_| Carried::Named),
             ),
         ];
@@ -559,11 +649,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v5.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v6.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 4] = [
+    const GOLDEN_EARLIER: [(u32, &str); 5] = [
+        (5, include_str!("../tests/golden/launch-config-v5.json")),
         (4, include_str!("../tests/golden/launch-config-v4.json")),
         (3, include_str!("../tests/golden/launch-config-v3.json")),
         (2, include_str!("../tests/golden/launch-config-v2.json")),
@@ -616,6 +707,9 @@ mod tests {
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
             writeback_item_budget: NonZeroU64::new(10),
+            success_hook: Some("./scripts/follow-up.sh".to_string()),
+            failure_hook: Some("./scripts/report-failure.sh".to_string()),
+            hook_timeout: NonZeroU64::new(600),
         }
     }
 
@@ -663,7 +757,12 @@ mod tests {
                     node_validator: (version >= 3).then(|| "./scripts/check-node.sh".to_string()),
                     envelope_reviewer: (version >= 4)
                         .then(|| "./scripts/review-envelope.sh".to_string()),
-                    writeback_item_budget: None,
+                    // Version 5 declared the write-back's budget, and none of
+                    // them a run-end hook.
+                    writeback_item_budget: NonZeroU64::new(10).filter(|_| version >= 5),
+                    success_hook: None,
+                    failure_hook: None,
+                    hook_timeout: None,
                 }
             );
             assert!(
@@ -690,13 +789,16 @@ mod tests {
             node_validator: Some("./scripts/check-node.sh".to_string()),
             envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
             writeback_item_budget: NonZeroU64::new(15),
+            success_hook: Some("./scripts/follow-up.sh".to_string()),
+            failure_hook: Some("./scripts/report-failure.sh".to_string()),
+            hook_timeout: NonZeroU64::new(30),
             ..LaunchConfig::default()
         };
         let rendered = serde_json::to_string(&named).expect("it serialises");
         assert_eq!(
             rendered,
             format!(
-                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh","writeback_item_budget":15}}"#
+                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh","writeback_item_budget":15,"success_hook":"./scripts/follow-up.sh","failure_hook":"./scripts/report-failure.sh","hook_timeout":30}}"#
             )
         );
         assert_eq!(
@@ -711,6 +813,9 @@ mod tests {
             "node_validator",
             "envelope_reviewer",
             WRITEBACK_ITEM_BUDGET_KEY,
+            "success_hook",
+            "failure_hook",
+            HOOK_TIMEOUT_KEY,
         ] {
             assert!(
                 !rendered.contains(key),
@@ -757,6 +862,9 @@ mod tests {
             assert_eq!(minimal.node_validator, None);
             assert_eq!(minimal.envelope_reviewer, None);
             assert_eq!(minimal.writeback_item_budget, None);
+            assert_eq!(minimal.success_hook, None);
+            assert_eq!(minimal.failure_hook, None);
+            assert_eq!(minimal.hook_timeout, None);
         }
     }
 
@@ -846,6 +954,34 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A run-end hook present and blank loads, as a launch saying it has none.
+    ///
+    /// Deliberately not the validator's and the reviewer's refusal: the contract
+    /// states a blank hook as naming none, so the document reads as written and
+    /// the launch decides what it means.
+    #[test]
+    fn a_blank_run_end_hook_is_kept_as_written_rather_than_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-config-blank-hook-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let path = root.join("blank.yaml");
+        std::fs::write(
+            &path,
+            format!(
+                "schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\nsuccess_hook: \"\"\n\
+                 failure_hook: \"   \"\n"
+            ),
+        )
+        .expect("the config is written");
+        let read = LaunchConfig::load(&path).expect("a blank hook loads");
+        assert_eq!(read.success_hook.as_deref(), Some(""));
+        assert_eq!(read.failure_hook.as_deref(), Some("   "));
+        assert_eq!(read.hook_timeout, None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The version is refused by its number, an unknown key by its name, and a
     /// key an earlier version never had by *that* key's name.
     #[test]
@@ -885,6 +1021,9 @@ mod tests {
             ("node_validator", 3, "./scripts/check-node.sh"),
             ("envelope_reviewer", 4, "./scripts/review-envelope.sh"),
             (WRITEBACK_ITEM_BUDGET_KEY, 5, "12"),
+            ("success_hook", 6, "./scripts/follow-up.sh"),
+            ("failure_hook", 6, "./scripts/report-failure.sh"),
+            (HOOK_TIMEOUT_KEY, 6, "45"),
         ] {
             let early = LaunchConfig::load(&written(
                 &format!("early-{key}.yaml"),
@@ -904,10 +1043,14 @@ mod tests {
             let budget = read
                 .writeback_item_budget
                 .map(|seconds| seconds.to_string());
+            let timeout = read.hook_timeout.map(|seconds| seconds.to_string());
             let named = match key {
                 "pr_author_graph" => read.pr_author_graph.as_deref(),
                 "node_validator" => read.node_validator.as_deref(),
                 "envelope_reviewer" => read.envelope_reviewer.as_deref(),
+                "success_hook" => read.success_hook.as_deref(),
+                "failure_hook" => read.failure_hook.as_deref(),
+                HOOK_TIMEOUT_KEY => timeout.as_deref(),
                 _ => budget.as_deref(),
             };
             assert_eq!(named, Some(value));
@@ -981,6 +1124,30 @@ mod tests {
                 said.contains(WRITEBACK_ITEM_BUDGET_KEY),
                 "a {spelled} budget was not refused by the key's name: {said}"
             );
+        }
+
+        // A hook timeout is refused on the budget's terms, by its own name: blank
+        // in each spelling, zero, and anything that is not a whole number.
+        for (spelled, written_as) in [
+            ("bare", format!("{HOOK_TIMEOUT_KEY}:")),
+            ("empty", format!("{HOOK_TIMEOUT_KEY}: \"\"")),
+            ("zero", format!("{HOOK_TIMEOUT_KEY}: 0")),
+            ("negative", format!("{HOOK_TIMEOUT_KEY}: -5")),
+            ("fractional", format!("{HOOK_TIMEOUT_KEY}: 2.5")),
+        ] {
+            let refused = LaunchConfig::load(&written(
+                &format!("timeout-{spelled}.yaml"),
+                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{written_as}\n"),
+            ))
+            .expect_err("a timeout that is not a positive whole number is refused");
+            let said = refused.to_string();
+            assert!(
+                said.contains(&format!("`{HOOK_TIMEOUT_KEY}`")),
+                "a {spelled} timeout was not refused by the key's name: {said}"
+            );
+            if spelled == "zero" {
+                assert!(said.contains("zero"), "{said}");
+            }
         }
 
         let stray = LaunchConfig::load(&written(

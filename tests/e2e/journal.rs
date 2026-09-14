@@ -370,7 +370,7 @@ fn settled_run(name: &'static str) -> (World, String) {
 /// it still read.
 ///
 /// Two refusals that are the bus's wire rule rather than this crate's earlier
-/// reading, both recorded in entry 74 of `docs/contract-divergences.md`: a
+/// reading, both recorded in entry 75 of `docs/contract-divergences.md`: a
 /// reserved label whose value is not text, and a top-level key the envelope does
 /// not declare. Each is a relayed record this run really holds with that one thing
 /// changed, and the same record with neither change is appended after them, so

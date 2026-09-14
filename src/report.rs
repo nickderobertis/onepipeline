@@ -259,7 +259,7 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
 /// The guarantee is the open's, not a check's: a path tested and then opened is
 /// two different files on a bad day, and the whole point of refusing a symlink
 /// is that the name and the file disagree.
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

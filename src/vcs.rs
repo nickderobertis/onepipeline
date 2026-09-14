@@ -2840,7 +2840,7 @@ mod tests {
         // ended and holds that line back without saying so — so the branch stands
         // where the whole records put it, and the commit is read the moment its
         // line is. What is lost is telling a torn record from no record at all:
-        // entry 74 of `docs/contract-divergences.md` proposes `onevcs` expose the
+        // entry 75 of `docs/contract-divergences.md` proposes `onevcs` expose the
         // reader's torn report so this can answer `Unknown` again.
         let torn = "s-tip-torn";
         let whole = committed(torn, "decaf");
@@ -2978,7 +2978,7 @@ mod tests {
         // of `docs/contract-divergences.md`). That release reads through the bus
         // reader, so the whole records before it are handed back and the torn one
         // alone is not — held back as the line its writer has not finished, and
-        // reported nowhere this crate can read, which entry 74 proposes it expose.
+        // reported nowhere this crate can read, which entry 75 proposes it expose.
         let cut = "s-cutmidline";
         let whole = record(cut, 1, "session-opened");
         let partial = record(cut, 2, "push");

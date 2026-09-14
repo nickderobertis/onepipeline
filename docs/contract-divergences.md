@@ -6,12 +6,12 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34 and 74** have since been **ruled on by the planner who owns
-the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
+Entries **1–9, 23–32, 34, 74 and 75** have since been **ruled on by the planner who
+owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73 and 75 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73 and 76 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
@@ -21,7 +21,7 @@ general integration hooks only and nothing in them may know about this one; the
 rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
-`onevcs`'s. Entry 75 is for `onemessagebus` and for a node of this crate's own. An
+`onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
 open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
@@ -478,7 +478,7 @@ into an empty stream.
 
 Half of it is answered by `onevcs` 0.24.0, which reads its stream through the bus
 reader and hands back the whole records before a torn line. The other half — the
-line is not reported — is what entry 74 proposes it expose.
+line is not reported — is what entry 75 proposes it expose.
 
 ## 18. No lifecycle journey runs on Windows — OPEN
 
@@ -946,7 +946,7 @@ the two verbs disagree about what "the event view" means.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
 *describes* a duplication rather than introducing one: it records how the filter grammar
-was held while each producer kept its own copy, and entry 74 records the ruling that ended
+was held while each producer kept its own copy, and entry 75 records the ruling that ended
 that — the filter and the envelope are `onemessagebus-agent`'s, re-exported, with
 `onemessagebus`'s `docs/contract.md` the one source and `tests/contract.rs` driving this
 repository's marked copy through the re-exported types. What remains here is history, and
@@ -965,7 +965,7 @@ fixes as authoritative for all three producers; the gate is `tests/contract.rs`,
 which drives that text's own example through `src/filter.rs`'s types and fails
 this repository's `just check` the moment its copy stops matching. `oneagentgraph`
 and `onevcs` each carry the same text and the same gate. That this grammar had no
-shared crate is superseded by entry 74: the filter and the envelope are now
+shared crate is superseded by entry 75: the filter and the envelope are now
 `onemessagebus-agent`'s, re-exported by all three producers.
 
 What this entry is about is narrower. Three corners of that text do not settle a question
@@ -2697,6 +2697,18 @@ and `patch_pin::the_audit_permits_exactly_the_revisions_the_manifest_patches` is
 what holds them equal — including at zero, so the audit's exemption is deleted in
 the same change the patch is.
 
+**Ruled in part: the vocabulary is now the contract's, and the semantics stay
+open.** The approved run-end hooks addition to `docs/contract.md` says that success
+covers every outcome that settles done, `no-changes` and `change-draft` among them,
+and that a run holding a `complete-but-draft` node has not ended. The manager
+ruled that this approval takes both words up as contract vocabulary. The contract
+now uses them as the settlement words the engine writes. What stays open is the
+rest of this proposal: publishing a draft change request, the node holding the run,
+and the release arriving to start a new worker on the node's existing branch.
+`graph::tests::the_draft_settlement_vocabulary_is_what_the_divergence_record_names`
+holds both halves. The contract names both words, and both still round-trip
+through the status and the outcome this build writes.
+
 ## 52. A correction reaches one party of a node's dispatch, and never both — SUPERSEDED BY 60
 
 **Superseded by entry 60, which is where the shape now lives.** This entry is the
@@ -3121,7 +3133,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "fields": [
     "schema_version",
     "run_id",
@@ -3142,6 +3154,7 @@ cannot go on describing a document the build stopped writing:
     "pid",
     "host",
     "started",
+    "let_go_by",
     "timing",
     "parked",
     "judge_rejected",
@@ -5500,7 +5513,37 @@ rewritten to carry known `spent` and action counts, recorded exactly.
 }
 ```
 
-## 74. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
+## 74. The failure hook's `unfinished` rule named only a parked or cancelled node, so a run could end firing neither hook — RESOLVED
+
+**Ruling: widen `unfinished` to any node that is not `done`. The failure hook
+fires with reason kind `unfinished` at a driver's let-go whenever the graph holds
+a node that is not `done` — parked, cancelled, blocked or still pending — holds
+no failed or skipped node, and has no decision outstanding. `awaiting-planner`
+still withholds, a `complete-but-draft` node still means the run has not ended,
+and the payload, the kinds and the views are unchanged.**
+
+The run-end hooks arrived as an approved addition to the driver contract, and as
+approved they stated the `unfinished` reason as a graph that "holds no failed or
+skipped node, holds a `parked` or `cancelled` node, and no decision is
+outstanding". The same addition promises that the two hooks together cover every
+way a run ends. Built as written, those two sentences disagree over a graph the
+engine really lets go of: a node whose upstream never settles `done` without
+anything in the graph being failed, skipped, parked or cancelled. A consumer of a
+cross-DAG `run:<id>#<node>` reference whose upstream run failed, or does not
+exist yet, is the ordinary case — that edge leaves its consumer blocked, never
+failed, by the contract's own cross-DAG rule, so nothing is movable, no decision
+is outstanding, the driver lets go, and the run reads `unattended`. Neither hook's
+condition held, so a run that had plainly ended fired nothing, and a consumer
+wiring its failure hook to surface such a run would never hear of it.
+
+The manager ruled for the wider reading, and `docs/contract.md` states it in those
+terms in its run-end hooks paragraph. Nothing else about the addition moved:
+success still needs every node `done`, a paused run still fires nothing and
+journals `run-hook-withheld`, and `nodes` still lists every node not `done` in
+plan order — which for this reason is the blocked consumer. The journey
+`run_end_hooks::a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfinished`
+drives exactly that let-go against the real binary.
+## 75. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the
 dated record of a ruling, decided against `onemessagebus` 0.4.0, and not a live contract:
@@ -5614,7 +5657,7 @@ it as a regression:
 }
 ```
 
-## 75. The bus reader decodes a line twice, and a summary rebuild pays that for the whole store several times a dispatch — OPEN
+## 76. The bus reader decodes a line twice, and a summary rebuild pays that for the whole store several times a dispatch — OPEN
 
 **Proposal (for `onemessagebus`): decode an envelope line in one typed pass.
 Proposal (for this crate): stop the summary maintainer reading the whole store
