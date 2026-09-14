@@ -31,6 +31,11 @@ allow = [
     # approved, and strictly more permissive than the MIT this crate itself
     # ships under, so it imposes no condition the allow list already accepts.
     "MIT-0",
+    # `foldhash`, the default hasher of the `hashbrown` release `indexmap` resolves
+    # to since the bus adoption. Zlib is OSI approved and permissive: its only
+    # conditions are not misrepresenting authorship and keeping the notice in
+    # source redistributions, none beyond what MIT already asks.
+    "Zlib",
 ]
 confidence-threshold = 0.9
 exceptions = []
