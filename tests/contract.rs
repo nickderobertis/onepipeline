@@ -2871,6 +2871,16 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
                    "class": "refused"}),
         ),
         ("a key the entry does not name", json!({"cost": 94})),
+        ("a start that is not a time", json!({"at": "yesterday"})),
+        (
+            "a start that is not UTC",
+            json!({"at": "2026-09-13T12:00:00+02:00"}),
+        ),
+        (
+            "a project that is not a qualified id",
+            json!({"project": "writeback-quota-plan"}),
+        ),
+        ("an item with no node id", json!({"items": [""]})),
     ] {
         let mut line = example.clone();
         for (key, value) in patch.as_object().expect("a patch") {

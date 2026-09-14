@@ -557,6 +557,41 @@ fn a_projection_after_a_failed_attempt_is_whole() {
     assert_eq!(again["scope"], "members", "{again}");
     assert_eq!(again["items"], json!(["later"]), "{again}");
     assert_eq!(again["outcome"], "projected", "{again}");
+
+    // A failure the store writes no class for is retried on the schedule, and the retry is
+    // whole: the read of the named member failing is recorded failed and unclassified, and the
+    // attempt the schedule makes next reads the page of tasks rather than that member, and lands.
+    world.script(
+        "onetaskgraph.task-show.refuse",
+        "onetaskgraph: the connection was reset",
+    );
+    noted(&world, run, "later", "retried whole");
+    let retried = recorded(6);
+    let unread = &retried[mark + 4];
+    assert_eq!(unread["scope"], "members", "{unread}");
+    assert_eq!(unread["items"], json!(["later"]), "{unread}");
+    assert_eq!(unread["outcome"], "failed", "{unread}");
+    assert_eq!(unread["class"], Value::Null, "{unread}");
+    assert_eq!(unread["kind"], Value::Null, "{unread}");
+    assert!(
+        unread["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("task show exited")
+                && reason.contains("connection was reset")),
+        "{unread}"
+    );
+    let recovered = &retried[mark + 5];
+    assert_eq!(recovered["scope"], "whole", "{recovered}");
+    assert_eq!(recovered["whole_because"], "after-failure", "{recovered}");
+    assert_eq!(recovered["outcome"], "projected", "{recovered}");
+    world.until_store("the retried projection to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "retried whole"
+        })
+    });
+    std::fs::remove_file(world.fakes.join("onetaskgraph.task-show.refuse"))
+        .expect("the member read stops failing");
 }
 
 /// Against a store that reports a version older than the first offering a member copy, every

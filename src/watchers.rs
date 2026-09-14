@@ -150,7 +150,7 @@ fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::
 ///
 /// Kept here rather than reached for from a dependency because it is the only place
 /// this crate parses an instant at all: every other timestamp it holds it *writes*.
-fn is_rfc3339(text: &str) -> bool {
+pub(crate) fn is_rfc3339(text: &str) -> bool {
     let Some((date, rest)) = text.split_once(['T', 't']) else {
         return false;
     };

@@ -639,7 +639,7 @@ fn worker(
 ) {
     // Decided here, on the worker's own thread and before the first snapshot is taken, so
     // the reconcile loop neither waits on it nor reads it.
-    let members = offers_members(&run_dir, version);
+    let members = decide_member_copy_once(&run_dir, version);
     let mut standing = Standing::Landing;
     let mut carried = Carried::default();
     loop {
@@ -888,9 +888,16 @@ fn project(
     // A member copy names exactly the nodes that changed. Naming none is not a copy of
     // everything: the project item alone carries what changed at the project's level.
     if let Carry::Members(named) = carry {
+        // llmlint: ignore-block[changed_behavior_has_e2e] a member projection naming no node is
+        // reached only by a snapshot that moves no node's shadow task — a status moving inside
+        // one board word, pending to ready — because no edit a CLI accepts changes only the
+        // project's metadata, and the run passes through such a move inside a pass no input
+        // holds open. `writeback::tests` holds the decision that names none; `--no-tasks` is the
+        // store's own documented flag for copying the project item alone.
         if named.is_empty() {
             args.push("--no-tasks".to_owned());
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         for node in named {
             args.extend(["--member".to_owned(), member_id(snapshot, node)]);
         }
@@ -1658,7 +1665,11 @@ impl Carry {
     /// has landed in this worker yet, in that order of precedence. A node changed when its
     /// shadow task, rendered from the snapshot alone, differs from the one the last success
     /// rendered, or when that success did not hold it. Project-level metadata is not a node:
-    /// the project item every copy includes carries it.
+    /// the project item every copy includes carries it. A node never leaves a snapshot — every
+    /// node the plan or an edit ever held is in one — so there is no node to carry away: a
+    /// dropped node changes by its word turning `cancelled`, and is carried like any other
+    /// change, which `live_edit::retry_cancel_requeue_and_drop_are_projected_after_their_rulings`
+    /// drives to the board.
     fn decide(
         members: bool,
         after_failure: bool,
@@ -1865,19 +1876,18 @@ impl CopyReport {
 /// without `--member` that is a failed attempt, and the attempt after a failure is whole — the
 /// cost a member copy exists to remove. A record that does not read is decided again and
 /// replaced.
-fn offers_members(run_dir: &Path, reported: &str) -> bool {
+fn decide_member_copy_once(run_dir: &Path, reported: &str) -> bool {
     let path = run_dir.join(WRITEBACK_STORE_FILE);
     if let Some(recorded) = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StoreRecord>(&bytes).ok())
     {
-        return recorded.members;
+        return recorded.members();
     }
-    let members = crate::taskgraph::at_least(reported, WRITEBACK_MEMBERS_FROM);
     let recorded = StoreRecord {
         version: reported.to_owned(),
-        members,
     };
+    let members = recorded.members();
     // llmlint: ignore-block[changed_behavior_has_e2e] writing a small file into the run's own
     // directory fails only on a host whose run directory has been made unwritable, which no
     // CLI journey arranges; the answer is still used for this driver, and a later driver that
@@ -1896,14 +1906,63 @@ fn offers_members(run_dir: &Path, reported: &str) -> bool {
     members
 }
 
-/// What [`WRITEBACK_STORE_FILE`] holds: the version it was decided from, and the decision.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// What [`WRITEBACK_STORE_FILE`] holds: the version the run's answer was decided from.
+///
+/// Written with the decision beside it, for a reader, and read back only where the two agree.
+/// The decision is derived from the version rather than kept beside it, so a record whose
+/// `members` says something its `version` does not is no record of this run's answer, and the
+/// answer is decided again.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(try_from = "StoreWire", into = "StoreWire")]
 struct StoreRecord {
     // llmlint: ignore[invalid_states_unrepresentable] the token the store printed, recorded
-    // verbatim for a reader; `members` is what anything decides by.
+    // verbatim for a reader and read by `taskgraph::at_least` for the one decision made of it;
+    // a token that does not read as a version is a store offering no member copy, which is an
+    // answer rather than an invalid record.
+    version: String,
+}
+
+impl StoreRecord {
+    /// Whether the store this was decided from offers a member copy.
+    fn members(&self) -> bool {
+        crate::taskgraph::at_least(&self.version, WRITEBACK_MEMBERS_FROM)
+    }
+}
+
+/// The two keys [`StoreRecord`] is written as.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreWire {
     version: String,
     members: bool,
+}
+
+impl TryFrom<StoreWire> for StoreRecord {
+    type Error = String;
+
+    fn try_from(wire: StoreWire) -> Result<Self, String> {
+        let record = Self {
+            version: wire.version,
+        };
+        if record.members() == wire.members {
+            Ok(record)
+        } else {
+            Err(format!(
+                "the store record says `members: {}` of version {:?}, which says otherwise",
+                wire.members, record.version
+            ))
+        }
+    }
+}
+
+impl From<StoreRecord> for StoreWire {
+    fn from(record: StoreRecord) -> Self {
+        let members = record.members();
+        Self {
+            version: record.version,
+            members,
+        }
+    }
 }
 
 /// Append one attempt to the run's [`WRITEBACK_PROJECTIONS_FILE`].
@@ -2112,6 +2171,13 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
     type Error = String;
 
     fn try_from(wire: ProjectionWire) -> Result<Self, String> {
+        if !(crate::watchers::is_rfc3339(&wire.at) && wire.at.ends_with(['Z', 'z'])) {
+            return Err(format!("`at` is not an RFC 3339 UTC time: {:?}", wire.at));
+        }
+        QualifiedId::try_from(wire.project.clone()).map_err(|why| format!("`project`: {why}"))?;
+        if wire.items.iter().any(String::is_empty) {
+            return Err("`items` names an empty node id".to_owned());
+        }
         let scope = match (wire.scope, wire.whole_because) {
             (ScopeWord::Whole, Some(because)) => ProjectionScope::Whole(because),
             (ScopeWord::Members, None) => ProjectionScope::Members,
@@ -3484,7 +3550,9 @@ mod tests {
         assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
     }
 
-    use super::{member_id, offers_members, Carry, CopyReport, ProjectionActions, WholeBecause};
+    use super::{
+        decide_member_copy_once, member_id, Carry, CopyReport, ProjectionActions, WholeBecause,
+    };
     use crate::cli::{WRITEBACK_MEMBERS_FROM, WRITEBACK_STORE_FILE};
 
     /// The node ids a decision carries as members, refusing a whole one.
@@ -3717,7 +3785,7 @@ mod tests {
         assert!(!crate::taskgraph::at_least("", WRITEBACK_MEMBERS_FROM));
 
         let dir = scratch("members-record");
-        assert!(!offers_members(&dir, "0.2.29"));
+        assert!(!decide_member_copy_once(&dir, "0.2.29"));
         let path = dir.join(WRITEBACK_STORE_FILE);
         let recorded: Value =
             serde_json::from_slice(&std::fs::read(&path).expect("the answer is recorded"))
@@ -3733,19 +3801,32 @@ mod tests {
             "the record is not the shape entry 73 states"
         );
         assert!(
-            !offers_members(&dir, "0.2.30"),
+            !decide_member_copy_once(&dir, "0.2.30"),
             "a later decision asked the version again rather than reading the run's answer"
         );
 
         std::fs::write(&path, "not a record").expect("the record is spoiled");
         assert!(
-            offers_members(&dir, "0.2.30"),
+            decide_member_copy_once(&dir, "0.2.30"),
             "a record that does not read was kept"
         );
         assert_eq!(
             serde_json::from_slice::<Value>(&std::fs::read(&path).expect("a record"))
                 .expect("JSON"),
             detection["record_example"],
+        );
+
+        // A record whose decision disagrees with its version is no record of the answer.
+        std::fs::write(&path, r#"{"version": "0.2.29", "members": true}"#)
+            .expect("a contradictory record is written");
+        assert!(
+            decide_member_copy_once(&dir, "0.2.30"),
+            "a record whose `members` its version contradicts was trusted"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).expect("a record"))
+                .expect("JSON"),
+            json!({"version": "0.2.30", "members": true}),
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
