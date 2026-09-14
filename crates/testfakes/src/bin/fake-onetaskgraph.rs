@@ -19,9 +19,11 @@
 //!
 //! Scripted from the directory every double reads its scenario out of:
 //!
-//! * `onetaskgraph.version` — what `--version` prints, verbatim. Absent, it
-//!   prints nothing at all, which is an install this build cannot read a version
-//!   off.
+//! * `onetaskgraph.version` — what `--version` prints, verbatim, and it wins over
+//!   `onetaskgraph.delegate`: an install that says it is an older release while every
+//!   other answer is the real store's. Absent, `--version` is the delegate's where one
+//!   is scripted and prints nothing at all otherwise, which is an install this build
+//!   cannot read a version off.
 //! * `onetaskgraph.refuse` — makes **every** invocation exit 1, saying the file's
 //!   contents on stderr. An install that is broken is not broken per verb.
 //! * `onetaskgraph.refuse-reads` — the same, for every invocation **except**
@@ -36,7 +38,16 @@
 //! * `onetaskgraph.delegate` — an executable to proxy unscripted calls to. A
 //!   matching `onetaskgraph.<verb>.refuse.<n>` injects one refused call before
 //!   later calls reach that real executable, for retry journeys at this sibling
-//!   subprocess boundary.
+//!   subprocess boundary, and `onetaskgraph.<verb>.refuse` refuses every call of that
+//!   verb for as long as it is there.
+//! * `<refusal>.stdout` and `<refusal>.exit`, beside any of the refusals above but
+//!   `onetaskgraph.refuse` — what that refusal writes on stdout and the status it exits
+//!   under, `1` where none is scripted. The real store answers a failed verb with a
+//!   failure document naming its class, but an offline store cannot be made to fail most
+//!   of the ways a hosted one does — a rate limit, a source that refused a write, one
+//!   refusing command of three — so a journey about what this build does with one of those
+//!   states the document the store writes for it, and every call it does not refuse is
+//!   still the delegated real store's.
 //! * `onetaskgraph.<verb>.rendezvous` — the address this double meets the test at
 //!   before it answers that verb, and holds until the test lets go — written by
 //!   `World::rendezvous("onetaskgraph.<verb>")`, read by `fake::meet`. The one way
@@ -65,6 +76,12 @@
 //!   at **another JSON type** — `{"labels": "planning, q3"}` for a list answered as
 //!   a string. Only a field the item already holds is moved, because a retype is
 //!   not an addition; `.grow` is where an addition goes.
+//! * `onetaskgraph.<verb>.rewrite` — a JSON object whose members replace, or join, the
+//!   top-level members of the **next** delegated answer of that verb, and nothing after
+//!   it: the file is taken away as it is read. The store still does the work — a copy
+//!   still writes what it writes — and only what it reports is rewritten, which is how a
+//!   journey hands the build a report carrying figures an offline store never reports,
+//!   `spent` among them, and asserts they reach the run exactly.
 //!
 //! `.shrink` and `.retype` name fields of an answer that exists, so a name nothing
 //! in the answer carries is **refused** rather than applied to nothing: a fixture
@@ -78,16 +95,17 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-/// The three halves of `.grow`, `.shrink` and `.retype`, as scripted for one verb.
+/// `.grow`, `.shrink`, `.retype` and `.rewrite`, as scripted for one verb.
 #[derive(Default)]
 struct Release {
     grown: Map<String, Value>,
     shrunk: Vec<String>,
     retyped: Map<String, Value>,
+    rewritten: Map<String, Value>,
 }
 
 impl Release {
-    /// What a journey scripted, `None` where it scripted none of the three, and a refusal
+    /// What a journey scripted, `None` where it scripted none of the four, and a refusal
     /// where it scripted one this program cannot read.
     ///
     /// A scenario file is external input, and a refusal here reaches the journey as this
@@ -104,13 +122,38 @@ impl Release {
         )?;
         let shrunk = Self::scenario(dir, name, "shrink")?
             .map(|scripted| scripted.split_whitespace().map(ToOwned::to_owned).collect());
+        let rewritten = Self::taken(dir, name)?;
         Ok(
-            (grown.is_some() || shrunk.is_some() || retyped.is_some()).then(|| Self {
-                grown: grown.unwrap_or_default(),
-                shrunk: shrunk.unwrap_or_default(),
-                retyped: retyped.unwrap_or_default(),
-            }),
+            (grown.is_some() || shrunk.is_some() || retyped.is_some() || rewritten.is_some()).then(
+                || Self {
+                    grown: grown.unwrap_or_default(),
+                    shrunk: shrunk.unwrap_or_default(),
+                    retyped: retyped.unwrap_or_default(),
+                    rewritten: rewritten.unwrap_or_default(),
+                },
+            ),
         )
+    }
+
+    /// `<verb>.rewrite`, taken away as it is read so that it rewrites exactly one answer.
+    ///
+    /// Taken away before it is applied rather than after, so a second call arriving while the
+    /// first is still with the real store answers unrewritten. A file that cannot be taken
+    /// away is refused: left in place, it would rewrite every answer after this one while the
+    /// journey asserted about one.
+    fn taken(dir: &Path, name: &str) -> Result<Option<Map<String, Value>>, String> {
+        let Some(scripted) = Self::scenario(dir, name, "rewrite")? else {
+            return Ok(None);
+        };
+        std::fs::remove_file(dir.join(format!("{name}.rewrite")))
+            .map_err(|error| format!("`{name}.rewrite` could not be taken away: {error}"))?;
+        match serde_json::from_str(&scripted) {
+            Ok(Value::Object(members)) => Ok(Some(members)),
+            _ => Err(format!(
+                "`{name}.rewrite` states the members that replace the answer's own, as a JSON \
+                 object"
+            )),
+        }
     }
 
     /// One scenario file, or `None` where the journey wrote none.
@@ -212,6 +255,11 @@ impl Release {
         // response rather than of an item — `plan`, `next` — is scriptable too.
         self.apply(&mut response, &mut moved);
         moved.against(self)?;
+        if let Value::Object(page) = &mut response {
+            for (key, value) in &self.rewritten {
+                page.insert(key.clone(), value.clone());
+            }
+        }
         serde_json::to_vec(&response)
             .map(|mut written| {
                 written.push(b'\n');
@@ -304,6 +352,40 @@ fn code(code: Option<i32>) -> ExitCode {
     ExitCode::from(code.and_then(|code| u8::try_from(code).ok()).unwrap_or(1))
 }
 
+/// Act out one scripted refusal: its reason on stderr, `<script>.stdout` on stdout where a
+/// journey wrote one, and `<script>.exit` as the status, `1` where it wrote none.
+///
+/// Only "there is no such file" is absence, for the reason `Release::scenario` gives: a
+/// document a journey wrote and this program cannot read, or a status that is not one, is a
+/// fixture nobody applied, and acting out a plain refusal in its place would hand the journey
+/// the unclassified failure while it asserted against a classified one.
+fn refused(dir: &Path, script: &str, reason: &str) -> ExitCode {
+    let status = match std::fs::read_to_string(dir.join(format!("{script}.exit"))) {
+        // Zero is refused with the rest: a refusal acted out under success would hand the
+        // caller a failure's words and document beside a status saying nothing failed.
+        Ok(scripted) => match scripted.trim().parse::<u8>() {
+            Ok(status) if status != 0 => status,
+            _ => {
+                return fake::refuse(&format!(
+                    "`{script}.exit` states `{}`, which is not a failing exit status (1 to 255)",
+                    scripted.trim()
+                ))
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+        Err(error) => return fake::refuse(&format!("`{script}.exit` could not be read: {error}")),
+    };
+    match std::fs::read_to_string(dir.join(format!("{script}.stdout"))) {
+        Ok(document) => print!("{document}"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return fake::refuse(&format!("`{script}.stdout` could not be read: {error}"))
+        }
+    }
+    eprintln!("{}", reason.trim());
+    ExitCode::from(status)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -320,16 +402,27 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::from(1),
             };
         }
+        // A scripted version is what this install says it is even in front of a delegate:
+        // an install at an older release whose every answer is still the real store's own.
+        match std::fs::read_to_string(dir.join("onetaskgraph.version")) {
+            Ok(printed) => {
+                print!("{printed}");
+                return ExitCode::SUCCESS;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return fake::refuse(&format!(
+                    "`onetaskgraph.version` could not be read: {error}"
+                ))
+            }
+        }
         if let Some(status) = delegate(&dir, &args, None) {
             return status;
         }
-        let printed = std::fs::read_to_string(dir.join("onetaskgraph.version")).unwrap_or_default();
-        print!("{printed}");
         return ExitCode::SUCCESS;
     }
     if let Ok(reason) = std::fs::read_to_string(dir.join("onetaskgraph.refuse-reads")) {
-        eprintln!("{}", reason.trim());
-        return ExitCode::from(1);
+        return refused(&dir, "onetaskgraph.refuse-reads", &reason);
     }
 
     // The verb is the leading words that are not flags or their values, which is
@@ -346,9 +439,10 @@ fn main() -> ExitCode {
     let name = format!("onetaskgraph.{}", verb.join("-"));
 
     let nth = fake::count(&dir, &name);
-    if let Ok(reason) = std::fs::read_to_string(dir.join(format!("{name}.refuse.{nth}"))) {
-        eprintln!("{}", reason.trim());
-        return ExitCode::from(1);
+    for script in [format!("{name}.refuse.{nth}"), format!("{name}.refuse")] {
+        if let Ok(reason) = std::fs::read_to_string(dir.join(&script)) {
+            return refused(&dir, &script, &reason);
+        }
     }
     // Held here, before any answer, so what the test times is the whole of what the
     // caller waited for: a store that has not answered yet. Only "there is no such

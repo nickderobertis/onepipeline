@@ -434,6 +434,13 @@ resolver = "2"
 # the real sibling. `onevcs-testing` 0.6.0 requires exactly this `onevcs`, so the
 # two floors move together.
 #
+# `onevcs` 0.23.0 is what a dispatch publishes and holds through, and a dispatch
+# meets only the library linked here: a `cancelled` or `stale` required check is
+# no verdict rather than `checks-failed`, and an automated landing with no
+# baseline is released by its acknowledgement instead of holding a `published`
+# node for ever. A **requirement**, because `^0.21` admits no 0.23.x; and
+# `onevcs-testing` 0.6.2 requires exactly this `onevcs`, so the two move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -442,8 +449,8 @@ resolver = "2"
 # prints no update (the one that takes it resolves `onevcs` twice), and passes.
 # Only moving the pin lifts it, and that is a host-wide move another plan owns.
 [workspace.dependencies]
-oneagentgraph = "0.4.0"
-onevcs = "0.21.0"
+oneagentgraph = "0.4.1"
+onevcs = "0.23.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -475,15 +482,20 @@ onevcs = "0.21.0"
 # document through `JudgedTurn` and `SCHEMA_VERSION` rather than by hand.
 # `oneagentgraph` 0.4.0 requires exactly this release; it is a **requirement**
 # here rather than a lock floor because `^0.8.1` admits no 0.10.x pre-1.0.
-onejudge = "0.10.0"
+#
+# 0.11.0 renders a persona's `user.artifacts` into its judge's prompts, so a
+# dispatched judge is told where work git cannot show it lives. `oneagentgraph`
+# 0.4.1 requires exactly this release, so the two move together, and it is a
+# requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
+onejudge = "0.11.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.10.0
-# it requires `oneharness-core 0.13`, as `oneagentgraph` 0.4.0 does, so the shared
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.11.0
+# it requires `oneharness-core 0.13`, as `oneagentgraph` 0.4.1 does, so the shared
 # requirement resolves one compatible copy and the double writes the one its
 # consumer parses — at 0.13 a `RunResult` with `observed_model` on it, which is
 # the field the double reports a misrouted candidate's served model in. If
@@ -501,11 +513,11 @@ oneharness-core = "0.13.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.0"
+onevcs-testing = "0.6.2"
 
 [package]
 name = "onepipeline"
-version = "0.29.1"
+version = "0.29.4"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

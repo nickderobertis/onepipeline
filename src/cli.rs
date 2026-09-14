@@ -46,6 +46,52 @@ pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10
 /// the projection stays off the reconcile loop while the child runs.
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
+/// The store commands one write-back attempt runs, and whose failures it reads the store's
+/// own class off: the project, each page of its tasks, and the copy.
+///
+/// Any one of them answering [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused,
+/// because a projection needs all three.
+pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-list", "project-copy"];
+
+/// The member of a store's failure document the write-back branches on, as a path.
+pub const WRITEBACK_FAILURE_CLASS_MEMBER: &str = "failure.class";
+
+/// The member of each entry of a store's partial answer the write-back reads, as a path.
+pub const WRITEBACK_PARTIAL_CLASS_MEMBER: &str = "errors[].class";
+
+/// The class that stops the write-back's retry timer: a failure asking again cannot change.
+///
+/// A projection refused under it is reported once and attempted again only when a snapshot
+/// different from the refused one is published. Every other failure — another class, or no
+/// class at all — keeps the growing retry schedule.
+pub const WRITEBACK_REFUSED_CLASS: &str = "refused";
+
+/// The exit status a store command writes its failure document under.
+pub const WRITEBACK_FAILURE_EXIT: i32 = 1;
+
+/// The exit status a store command writes a partial answer under. Refused only where every
+/// entry of its `errors` carries [`WRITEBACK_REFUSED_CLASS`].
+pub const WRITEBACK_PARTIAL_EXIT: i32 = 4;
+
+/// The file, in a run's directory, each write-back projection attempt is appended to as one
+/// JSON object per line and never rewritten. Its shape is
+/// [`ProjectionRecord`](crate::views::ProjectionRecord).
+pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
+
+/// The file, in a run's directory, holding whether the store offers a member copy — decided
+/// once per run, before its first projection, and read by every later driver of the run.
+pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
+
+/// The first `onetaskgraph` release whose `project copy` takes `--member` and whose copy
+/// report carries `spent`. A store reporting an older version is projected whole.
+pub const WRITEBACK_MEMBERS_FROM: &str = "0.2.30";
+
+/// The store command a member projection reads one named member's destination item with,
+/// by the name its capture files and refusals carry. It stands in for
+/// [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of tasks, which a member projection never reads,
+/// and its failures are classified by the same rule.
+pub const WRITEBACK_MEMBER_READ: &str = "task-show";
+
 /// The environment variable naming the write-back's per-item budget, in seconds.
 ///
 /// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`
@@ -106,7 +152,7 @@ pub enum Command {
     /// Every live dispatch on this host, with its owner and load contribution.
     Host,
     /// Stream a run's merged events.
-    Monitor(ReadArgs),
+    Monitor(MonitorArgs),
     /// Block until a run needs a supervisor, saying so as it waits.
     Watch(WatchArgs),
     /// Which of a session's runs has nothing watching it.
@@ -359,6 +405,22 @@ pub struct ReadArgs {
     /// Read every event in the store, through no profile at all.
     #[arg(long)]
     pub all: bool,
+}
+
+/// `onepipeline monitor`: the run and profile selection every read verb takes,
+/// and the cursor `watch` prints and reads back.
+///
+/// A struct of its own rather than a flag on [`ReadArgs`], because `next` takes
+/// those too and a cursor is not something `next` can resume from.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct MonitorArgs {
+    /// The run, and the profile its event view is shaped through.
+    #[command(flatten)]
+    pub read: ReadArgs,
+    /// Render only what was recorded after this cursor — one an earlier
+    /// `monitor` or `watch` printed.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 
 /// How long a `watch` waits before giving up, when it is given none.

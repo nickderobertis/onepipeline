@@ -463,7 +463,7 @@ fn a_parked_frontier_with_no_decision_outstanding_fires_failure_as_unfinished() 
 }
 
 /// A node its upstream never released is neither failed nor parked, and a run
-/// that ends over it has ended unfinished — divergence entry 72's ruling.
+/// that ends over it has ended unfinished — divergence entry 74's ruling.
 #[test]
 fn a_run_that_ends_over_a_node_its_upstream_never_released_fires_failure_as_unfinished() {
     let world = hooked_world("hooks-unreleased");

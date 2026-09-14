@@ -935,9 +935,9 @@ fn converge(
     // after `start` already resolved the same executable requires replacing or deleting the
     // real sibling between two adjacent calls; that is a host sabotage fixture, not a user
     // journey, and the compatibility behavior here is intentionally the absence of a writer.
-    let writeback = crate::taskgraph::Store::resolve()
-        .ok()
-        .and_then(|store| crate::writeback::Writeback::start(store.binary(), paths, launch));
+    let writeback = crate::taskgraph::Store::resolve().ok().and_then(|store| {
+        crate::writeback::Writeback::start(store.binary(), store.reported_version(), paths, launch)
+    });
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let channel = ChannelState::new(paths);
     let rules = executor_rules()?;
@@ -5263,6 +5263,22 @@ fn one_line(said: &str) -> String {
 /// The finding one failed projection raises.
 fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
     let items = failure.items.join(", ");
+    // The store's own class and kind, on a line of their own, wherever it gave them.
+    let classified = failure
+        .classified
+        .as_ref()
+        .map(|classified| format!("{}\n", bounded(&classified.said())))
+        .unwrap_or_default();
+    let refused = if failure
+        .classified
+        .as_ref()
+        .is_some_and(|classified| classified.class == crate::writeback::FailureClass::Refused)
+    {
+        " The store refused it, so it is not attempted again on a timer: the projection \
+         will be attempted again when the run's graph next changes."
+    } else {
+        ""
+    };
     Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::Finding.as_str().into(),
@@ -5270,8 +5286,10 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
             "the onetaskgraph project '{project}' did not take this run's projection.\n\
              items: {items}\n\
              reason: {reason}\n\
+             {classified}\
              The run itself is unaffected — nothing was settled, scheduled or failed on \
-             this — but the project is behind what the run recorded until it is fixed.",
+             this — but the project is behind what the run recorded until it is fixed.\
+             {refused}",
             project = bounded(failure.project.as_str()),
             items = bounded(&items),
             // On one line, because the line above it is what a reader scans: a

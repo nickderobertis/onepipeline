@@ -118,6 +118,18 @@ pub use crate::watchers::{Watch, WatchStanding, WatcherRecord, Watchers, WATCHER
 /// this.
 pub use crate::telemetry::{Bucket, BucketName, Party, RunTelemetry, Usage};
 
+/// One settlement write-back projection attempt, as a run records it.
+///
+/// Re-exported where the views are, because it is read the way a view is: what a run's
+/// projections carried, how each ended and what it spent, off the run's own directory rather
+/// than off a store. The six types beside it are what one line is made of — a field a
+/// consumer cannot name is a field it cannot read — and entry 73 of
+/// `docs/contract-divergences.md` is the one statement of the line's shape.
+pub use crate::writeback::{
+    FailureClass, ProjectionActions, ProjectionEnded, ProjectionFailure, ProjectionRecord,
+    ProjectionScope, WholeBecause,
+};
+
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).
 ///
@@ -2721,10 +2733,21 @@ pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> 
 /// typed id a detail lookup resolves, and the monitor never tries to *be* the
 /// detail.
 pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
+    monitor_of(view, &view.events, filter)
+}
+
+/// The same pass over a slice of the store the caller read itself.
+///
+/// What the `monitor` verb renders through, because the resume line it ends on
+/// is a byte of the journal and the events above that line have to come out of
+/// the one read that byte was taken from — [`RunView::open`]'s own read is a
+/// different moment, and a record appended between the two would be one the
+/// cursor stepped past without it ever being rendered.
+pub(crate) fn monitor_of(view: &RunView, events: &[Envelope], filter: &EventFilter) -> String {
     let mut out = String::from(
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
-    for event in shaped(view, filter) {
+    for event in events.iter().filter(|event| filter.matches(event)) {
         out.push_str(&event_line(view, event));
         out.push('\n');
     }
@@ -3509,6 +3532,68 @@ mod tests {
                 .map(|token| token.recorded().to_string())
                 .unwrap_or_default(),
         }
+    }
+
+    /// A `monitor` renders from the same read of the journal its cursor is taken
+    /// from, not from the view's own earlier one.
+    ///
+    /// A record is put between the two reads here, which no invocation of the
+    /// binary can be made to do on demand: had the events come from the view, the
+    /// cursor would step past that record and no later pass would render it.
+    #[test]
+    fn a_monitor_renders_a_record_appended_after_its_view_was_read_before_its_cursor_passes_it() {
+        let root = scratch("monitor-one-read");
+        let paths = write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        let view = RunView::open(&paths).expect("the run reads");
+        let late = event(
+            crate::journal::PipelineKind::NodeReady,
+            Some("late-arrival"),
+            &[],
+        );
+        ledger::append_line(
+            &paths.journal(),
+            &serde_json::to_string(&late).expect("an event"),
+        )
+        .expect("appended");
+        assert!(
+            view.events
+                .iter()
+                .all(|seen| seen.labels.node.as_deref() != Some("late-arrival")),
+            "the view was read after the append, so this proves nothing"
+        );
+
+        let args = crate::cli::MonitorArgs {
+            read: crate::cli::ReadArgs {
+                run: "demo".to_string(),
+                filter: None,
+                all: true,
+            },
+            cursor: None,
+        };
+        let document =
+            crate::watch::monitor_document(&args, &paths, &view, &EventFilter::default())
+                .expect("the pass renders");
+        let held = std::fs::metadata(paths.journal())
+            .expect("the journal is there")
+            .len();
+        assert!(
+            document.ends_with(&format!("-- cursor 1:demo:{held}")),
+            "{document}"
+        );
+        assert!(
+            document.contains("graph:late-arrival"),
+            "the cursor passed a record this pass never rendered:\n{document}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn event(

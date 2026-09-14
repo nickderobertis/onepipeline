@@ -3681,6 +3681,120 @@ fn a_red_required_check_on_a_replaced_head_cannot_end_the_publication() {
     );
 }
 
+/// How many times this host was asked for a change request's check rollup.
+///
+/// Counted off the host double's own record rather than off the sibling's events,
+/// because what is proven is that the publication went back to the host: a read
+/// this double never answered is not one.
+fn check_rollup_reads(world: &World) -> usize {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "gh" && call["args"][0] == "pr" && call["args"][1] == "view")
+        .filter(|call| {
+            call["args"]
+                .as_array()
+                .is_some_and(|args| args.iter().any(|arg| arg == "headRefOid,statusCheckRollup"))
+        })
+        .count()
+}
+
+/// A required check the host reports **cancelled** is no verdict: the publication
+/// reads the change's checks again rather than refusing it, and with nothing later
+/// to read it settles `checks-unsettled` on its bound.
+///
+/// The first root cause of ai-orchestrator #1004, driven from this crate's own
+/// end. A cancelled check cost a publication attempt, because `onevcs` below
+/// 0.23.0 read every settled conclusion that is not green as red: the node settled
+/// `checks-failed` and was re-dispatched with a diagnosis about a tree nothing had
+/// judged. A cancellation says nothing about the tree.
+///
+/// The contrast with
+/// [`a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved`]
+/// is the assertion: the same required check, concluding `failure` there and
+/// `cancelled` here.
+#[test]
+fn a_required_check_the_host_cancelled_is_read_again_and_never_settles_checks_failed() {
+    a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled("cancelled");
+}
+
+/// A required check the host marked **stale** is no verdict either, for the same
+/// reason and to the same ending: the host set the run aside rather than judging
+/// the tree, and `onevcs` 0.23.0 reads the two conclusions alike.
+#[test]
+fn a_required_check_the_host_marked_stale_is_read_again_and_never_settles_checks_failed() {
+    a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled("stale");
+}
+
+/// The journey both conclusions that are no verdict take.
+///
+/// Every read of this host answers `conclusion`, so a publication that stopped on
+/// it read the rollup once, and one reading past it reads it again on every poll
+/// until its bound. And the ending is held against each wrong reading of it:
+/// `checks-failed` is a verdict nobody gave, a landing is a merge nothing allowed,
+/// and a wait with no end is a run `settle` never returns from.
+fn a_required_check_with_no_verdict_is_read_again_and_settles_checks_unsettled(conclusion: &str) {
+    let name = format!("noverdict{conclusion}");
+    let world =
+        World::new(&format!("lifecycle-{name}")).with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "gh.checks",
+        &format!("llmlint completed {conclusion} required"),
+    );
+    // No `gh.merged`: nothing later arrives to answer for the check.
+    let run = settle(&world, &name, vec![lifecycle("service", &[])]);
+
+    // The publication met the conclusion, rather than never getting as far as the
+    // checks …
+    assert!(
+        world
+            .events_of(&run, "change-check")
+            .iter()
+            .any(|event| event["payload"]["conclusion"] == conclusion),
+        "the host's {conclusion} check was never read, so nothing here is about it\n{}",
+        why(&world, &run)
+    );
+    // … and went back to the host for them after it.
+    let reads = check_rollup_reads(&world);
+    assert!(
+        reads >= 2,
+        "the publication read the checks {reads} time(s) and stopped on a {conclusion} one\n{}",
+        why(&world, &run)
+    );
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"],
+        "checks-unsettled",
+        "a {conclusion} check was read as a verdict\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("1 checks-unsettled"),
+        "the settlement does not name the bound it stopped on: {detail}"
+    );
+    assert!(
+        !detail.contains("checks-failed"),
+        "a {conclusion} check was reported as a check that failed: {detail}"
+    );
+
+    // Preserving, like every other bounded ending: the work is where a person
+    // picks it up.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the unsettled change is on was not handed back"
+    );
+}
+
 /// And the same ending is preserving, which is only visible where the budget
 /// leaves room for the attempt that proves it.
 ///
@@ -5959,6 +6073,73 @@ fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change()
     assert!(gh_pr_calls(&world, "ready").is_empty() && gh_pr_calls(&world, "edit").is_empty());
     assert!(world.events_of(&run, "published").is_empty());
     world.run(&["results", &run]).exited(0).out_has(url);
+}
+
+/// A journey this suite runs from **inside a lifecycle dispatch** hands none of
+/// that outer dispatch's `ONEVCS_SESSION` to the run it drives.
+///
+/// Which is where the suite runs whenever this repository is worked on by the
+/// system it is a library for: the outer dispatch exports its own session, and
+/// every command the world spawned inherited it. A direct node's dispatch then
+/// read it as a session it works in, so
+/// [`every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_runs_root`]
+/// failed on every host running the suite that way and passed everywhere else.
+///
+/// The variable is set in this test's own process, exactly as a dispatch hands it
+/// to the suite, rather than on the command a journey builds — that would be a
+/// journey choosing the value, not inheriting it. Nextest runs each test in a
+/// process of its own, so it reaches no other journey.
+#[test]
+fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
+    const OUTER: &str = "s-the-dispatch-running-this-suite";
+    std::env::set_var("ONEVCS_SESSION", OUTER);
+    let world = World::new("lifecycle-outer-session");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    let plan = plan_of(
+        "outersession",
+        vec![lifecycle("service", &[]), agent("direct", &[])],
+    );
+    let path = world.plan("outersession", &plan);
+    world.run(&["start", &path, "--attach"]).settled();
+    let run = "outersession";
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "{}",
+        why(&world, run)
+    );
+
+    let token = world
+        .journal(run)
+        .iter()
+        .find(|event| event["kind"] == "session-opened" && event["labels"]["node"] == "service")
+        .and_then(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("the lifecycle node opened no session\n{}", why(&world, run)));
+    let turn_of = |node: &str| -> serde_json::Value {
+        world
+            .journal(run)
+            .into_iter()
+            .find(|event| event["kind"] == "turn-activity" && event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("{node} ran no turn\n{}", why(&world, run)))
+    };
+
+    let direct = turn_of("direct");
+    assert!(
+        direct["payload"]["session"].is_null(),
+        "a direct node's dispatch was handed the session of the dispatch running this suite: \
+         {direct}"
+    );
+    let service = turn_of("service");
+    assert_eq!(
+        service["payload"]["session"],
+        json!(token),
+        "a lifecycle node's dispatch was not told the session it opened: {service}"
+    );
+    assert_ne!(
+        token, OUTER,
+        "the run opened the outer dispatch's session as its own"
+    );
 }
 
 /// Every dispatch of a lifecycle node's agent steps, first and later, and its

@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34 and 72** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34 and 74** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–71 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–73 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 71 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -1450,9 +1450,17 @@ never failing — and what differs is only where the readiness answer comes from
 and what is reported. An automated target's answer is its probe, which is a
 subprocess: it is asked off the reconcile loop's own thread and paced on its own
 interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 60 seconds by default — the
-minute this loop promises for every answer it owes on a clock. A
-human-step target's answer is the acknowledgement record, for which this crate
-runs no probe because there is none to run. `awaiting-human-step` is carried as
+minute this loop promises for every answer it owes on a clock. A probe's answer
+is compared against the baseline the landing captured, and a landing that
+captured none — its probe could not answer as the change landed — is *not
+answered* for as long as it has none, however many versions the probe reports
+since: `onevcs` will not say whether one carries the change. From `onevcs`
+0.23.0 such a landing is released by an acknowledgement record, exactly as a
+human step's is, and the same one call reads it on the probe's interval;
+`tests/e2e/adoption.rs`'s
+`a_published_node_held_on_a_landing_with_no_baseline_is_released_by_its_acknowledgement`
+holds the hold to it. A human-step target's answer is the acknowledgement record,
+for which this crate runs no probe because there is none to run. `awaiting-human-step` is carried as
 its own answer through the scheduler, the surface, and the payload and is never
 folded into either neighbour. This crate never performs a human release step,
 never prompts for one, and never acknowledges one on somebody's behalf.
@@ -1937,7 +1945,27 @@ say in the contract that it is not passed through, or move it to a name outside
 that product's namespace — `ONEPIPELINE_ONETASKGRAPH_BIN` is what this crate
 already calls the equivalent for `oneagentgraph`.**
 
-## 44. The minimum `onetaskgraph` this build needs is not a released version — OPEN
+## 44. The minimum `onetaskgraph` this build needs is not a released version — RESOLVED
+
+**Ruling: accept the proposal. onetaskgraph released the surface, so the floor is
+a release and the checks install one.** The revision the checks pinned is four
+commits before onetaskgraph `v0.2.0`, so every release from 0.2.0 carries the
+reserved metadata map and `>= 0.2.0` separates an install carrying it from one that
+does not, exactly. The contract states the floor only as the minimum this build
+requires and names no version, so nothing in `docs/contract.md` changed.
+
+**What this crate does today.** `src/taskgraph.rs` declares `CHECKED_MINIMUM`
+0.2.0, and a launch through the released 0.1.0 is refused by version, naming the
+minimum, rather than reading every task as one with no `onepipeline.id`;
+`FIRST_REVISION` is gone. `justfile`'s `_ensure-onetaskgraph` installs the published
+release named once, in `onetaskgraph-version`.
+`taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
+fails if that release falls below the floor or the recipe stops reading it,
+`provisioning::unix::provisioning_replaces_a_wrong_version_on_path_with_the_pinned_release`
+drives the recipe and requires the release it names, and
+`store::an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions`
+drives the refusal of 0.1.0 against the real binary. The entry as it was opened
+follows, for the record.
 
 `src/taskgraph.rs` declares `CHECKED_MINIMUM = "0.1.0"`, which is the version the
 binary carrying the surface this mapping reads **reports**, and the launch refuses
@@ -2485,16 +2513,26 @@ is a *name* and a normalised *category*, a `project copy` carries both, and a
 destination refuses a pair it would read differently — so a name outside that
 seven-word vocabulary can only be written where the destination normalises it the
 same way this shadow does. Four of the eight words this projection writes *are* a
-category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected. The
-other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
-vocabulary has none of: a store that does not know one reads it as the `unknown`
-category and keeps the name, which is what
-the shadow source's own default mapping produces, so the copy is accepted and the
-word arrives. The alternative — writing `failed` under the `done` category —
-requires the operator's own store to declare that mapping first, and until it did,
-**every projection after any node failed would be refused outright**. A board that
-stopped updating is strictly worse than one carrying a status category a filter
-cannot place beside a name that says exactly what happened.
+category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected.
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This open
+divergence is the repository's required record of the dependency behavior that makes
+its projection incomplete. The implementation source is cited at each GitHub Projects
+claim; onetaskgraph's disabled-status tests and `onetaskgraph-unknown-status` e2e journey
+are the reconciliation named by the owning plan, and adding that sibling work or a
+cross-repository gate is outside this entry's documentation-only correction. -->
+The other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
+vocabulary has none of. The `local-md` source reads each as the `unknown` category
+and keeps its name, so its default mapping accepts the copy and the word arrives.
+The `github-projects` source instead ships `unknown` disabled in
+`crates/onetaskgraph-github-projects/src/lib.rs`. That source writes the target board
+Status option rather than the incoming word, as
+`crates/onetaskgraph-github-projects/src/lib.rs` describes, and refuses the copy until
+`status_mapping.unknown` names a board Status option, as enforced in
+`crates/onetaskgraph-github-projects/src/lib.rs`. A board projection therefore needs
+that mapping configured. A closed state is not a remedy for `unknown`: it reads back
+as `done` or `cancelled`, so a copy under one of the four settlement words would never
+settle.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 **Beside the word, what closed the node.** The contract says only that "the
 settlement detail goes to reserved metadata", and it did: the whole settlement
@@ -3577,8 +3615,29 @@ settling, so `--until node=<ID>` naming it does wake a caller on the ready actio
 but only one that knew which node to name, which a supervisor asking "is anything
 waiting for a person?" does not.
 
-`monitor` and `status` are untouched: no flag, no output, and no exit code of
-either changed, so an existing caller of them is unaffected.
+**`monitor` carries the same cursor, so an observer keeps no file of its own.**
+The surface is `onepipeline monitor <RUN> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`.
+`monitor` has no cursor otherwise, so the host's observer persona kept one in two
+files in its working directory, and that directory was a publication checkout: in
+the run that closed `ai-orchestrator` #855 the observer's `monitor.cursor` and
+`monitor.batch` were left in a `local-direct` checkout, the publication was
+refused, and it was repaired by hand (`ai-orchestrator` #1004, root cause 4). So
+every `monitor` pass — with or without `--cursor`, and including one that renders
+no event — now ends its stdout with exactly one resume line after the trailer,
+`-- cursor 1:<run>:<byte>`. The byte is the end of the last finished record in
+the journal at the moment of the read, past records the profile hid, as a watch
+advances its own. `--cursor` renders, in the existing line format, profile and
+header, only the events from records that finish after that byte — what `watch
+--cursor` would emit before its meaningful-kind selection. The token, its parser and the tail read behind it are the ones
+`watch` uses rather than a copy, so a cursor either verb prints is one the other
+resumes from, and a cursor `watch` refuses — malformed, another run's, past the
+journal's end, or inside a record — `monitor` refuses the same way: exit `2`, the
+reason on stderr, nothing on stdout. The events rendered and the byte printed
+come out of one read of the journal rather than the view's own earlier read, so a
+record appended between the two cannot be stepped past unrendered. A `monitor`
+with no cursor renders what it rendered before; the resume line is the one thing
+it adds. `status` is untouched.
+
 `tests/e2e/watch.rs` drives the verb through the compiled binary — a line for a
 graph edit the monitor issued, for a node settling and for a surface being raised;
 a heartbeat carrying an unread count and its kinds; each of the five returns with
@@ -3615,8 +3674,9 @@ merely updated; and because the value differs, an item nothing else about the
 projection would change is written anyway. Measured in all three forms — a source
 item declaring the destination's own origin, one declaring none, and `--match-by
 onepipeline.id` — against `onetaskgraph` 0.2.18 and against revision
-`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which is the revision
-`taskgraph::FIRST_REVISION` pins and the one every check here installs.
+`d8051ac20140e45b0b9f1747545e5a6ce7e6df5e`, which was the revision
+`taskgraph::FIRST_REVISION` pinned and every check here installed when this was
+measured; entry 44 records its retirement for a release.
 
 So a destination item this crate projects onto is left carrying
 `onetaskgraph.origin: onepipeline-writeback:<hex>` — a source that exists only as
@@ -5231,7 +5291,226 @@ on the launch record an `adopt` replays.
 }
 ```
 
-## 72. The failure hook's `unfinished` rule named only a parked or cancelled node, so a run could end firing neither hook — RESOLVED
+## 72. A write-back the store refused is retried on a timer no retry can answer — OPEN
+
+**Proposal (for the planner who owns the contract): narrow *retried* in "Write-back
+is best effort and retried off the reconcile loop" to the failures a retry can
+change. A projection attempt the store **refuses** — by its own failure document's
+`class` — is reported once, is not retried on a timer, and is attempted again only
+when the run publishes a snapshot different from the one refused. Every other
+failure keeps the retry schedule it has today.**
+
+The contract's sentence, under *Live edits write through*, is "Write-back is best
+effort and retried off the reconcile loop: a slow or unavailable store is reported
+and never changes an edit ruling, a node settlement, or a scheduling decision." The
+worker read *retried* as every failure alike: it re-queued the snapshot and waited
+out an interval growing from a quarter of a second to a one-minute ceiling, for as
+long as the run lasted, whatever the store had said.
+
+Measured on this host on 2026-09-13: the refusal it kept meeting was the store's
+`status unknown is disabled for source plans`. A settlement projects `failed`,
+`provider-failed`, `parked` and `skipped` (entry 50), whose category is `unknown`,
+and the `github-projects` source disables `unknown` by default. That refusal arrives
+after every read the attempt made and after the store's undo journal has restored
+anything it wrote, so it changes nothing on the board and costs the whole attempt:
+about 94 GraphQL points — `project show` 3, `task list` 5, `project copy` 86. One run
+holding one failed node spent about 5,600 points an hour on it. The runs'
+`writeback-project-copy.stderr` show `root-causes-855-fixes-2` doing that for about
+11 hours, `agents-md-durable-and-terse-v2` for about 6, and
+`adopt-216-fix-releases` for about 3, starving every other reader of the same
+token's hourly allowance.
+
+What this crate does now is the block below, and the block is the source. The
+distinction comes from the store and from nothing else: `onetaskgraph` writes one
+failure document on stdout when a verb exits `1` under `--json`, and gives each
+entry of an exit-`4` partial answer's `errors` the same `class`. That member is the
+store's own mapping and is never restated here, and the `message` beside it is
+never read to decide. An attempt is **refused** when any of its three commands —
+the project read, a page of its tasks, or the copy — fails with a failure document
+whose `failure.class` is `refused`, or answers a partial response every one of whose
+`errors` carries `refused`. On that attempt the worker raises the `Unprojected`
+surface and prints its one stderr line, each carrying the store's `class` and `kind`
+beside the reason and saying the projection will be attempted again when the run's
+graph next changes; it schedules nothing; and it remembers the refused snapshot, so
+that publishing the same one again attempts nothing.
+
+Everything else is retried exactly as before: a failure document classed
+`transient`, a partial answer with any entry that is not `refused`, and every failure
+that carries no class at all — a store release that predates the document, a command
+killed at its deadline, a spawn failure, or stdout that does not parse, a class this
+build has never heard of included. Closeout attempts a terminal snapshot published
+after a refusal, because it is a different snapshot, and does not re-attempt the
+refused one; stopping stays prompt; no store read feeds back into scheduling, and no
+store command delays closeout, a settlement, or an edit ruling.
+
+One consequence is the store's call rather than this crate's, and is named so nobody
+mistakes it for a regression: `onetaskgraph` classes a `local-md` source whose root
+has gone as a `config` failure, which is `refused`. The release this repository's
+checks pin, 0.2.29, is the first to write the failure document, so a store taken away
+mid-run is reported once and attempted again on the next change to the graph rather
+than asked every minute until it returns, and a terminal projection refused while it
+is gone is not re-attempted inside closeout. A host still running 0.2.28 or earlier
+writes no document, so every failure there is unclassified and keeps today's schedule.
+
+The six constants the worker branches on — `WRITEBACK_CLASSIFIED_COMMANDS`,
+`WRITEBACK_FAILURE_CLASS_MEMBER`, `WRITEBACK_PARTIAL_CLASS_MEMBER`,
+`WRITEBACK_REFUSED_CLASS`, `WRITEBACK_FAILURE_EXIT` and `WRITEBACK_PARTIAL_EXIT` — are
+published from `cli` beside entry 71's, and are part of this proposal for the same
+reason: a gate outside the crate has to be able to reach what it holds.
+`tests/contract.rs` holds the block against them; `writeback::tests` holds it against
+the type and the classifier the worker actually reads through; and
+`tests/e2e/store.rs` drives the compiled binary against the real `onetaskgraph` at
+the pinned release. There the store itself refuses — a destination project it no
+longer holds, and a source whose root has gone — and a refused projection is not
+attempted again across a window the old schedule would have retried in, and is
+attempted again when the graph next changes. For what an offline store cannot be
+made to answer, the store double stands in front of that same real binary and
+writes the failure document the store writes for the one command it is scripted to
+refuse: a refusal from a page of tasks, from the copy, and from an all-refused partial
+answer; a document classed `transient`, a partial answer with an entry a wait could
+change, and a class this build does not know, each retried on today's schedule; and
+closeout over a refusal. The retry journeys keep that schedule for a failure with no
+document at all.
+
+```json
+{
+  "failure": {
+    "member": "failure.class",
+    "stops_the_timer": "refused",
+    "failure_document_exit": 1,
+    "commands": ["project-show", "task-list", "project-copy"],
+    "partial_answer": {
+      "exit": 4,
+      "member": "errors[].class",
+      "refused_when": "every"
+    }
+  }
+}
+```
+
+## 73. A write-back copies every node of the plan to change one — OPEN
+
+**Proposal (for the planner who owns the contract): make the settlement write-back
+**incremental**. An attempt carries only the nodes whose projection changed since the last
+attempt that landed, named to the store's `project copy --member`, and carries the whole
+project only where it has to — the first projection of a driver, the attempt after one that
+failed, and a store that offers no member copy. Every attempt is appended to one record in
+the run's directory, so what a projection carried, how it ended and what it spent is read
+off the run.** It changes no sentence of the contract's *Live edits write through*: "Every
+accepted graph edit updates the onetaskgraph project's tasks" stays true of every task the
+edit changed, and the proposal is that a task the edit did not change is not one it writes.
+
+What the worker did: every change the reconcile loop folds hands it a new snapshot, so a node
+going ready, running and done fires three projections. Each ran `project show`, walked the
+project's `task list`, rebuilt the whole shadow project and ran `project copy` over **every**
+node. Measured on 2026-09-13 against the live `plans` board, one attempt for a ten-item
+project cost about 94 GraphQL points — `project show` 3, `task list` 5, `project copy` 86 —
+about nine per item whatever changed. A run's board cost grew as roughly 3 × N × 9N points,
+so a twenty-node plan spent about 10,000 against an hourly allowance of 5,000, and a person's
+`just plans`, `just check-plan` and `just copy-plan`, and a second run on the same token, were
+left nothing. Nothing in the run said so: the only account of the spend was an agent's guess.
+
+What this crate does now is the block below, and the block is the source.
+
+**Which nodes are carried.** A node changed when its shadow task, as the worker renders it from
+the snapshot alone, differs from the one the last successful projection rendered, or when that
+success did not hold the node. Project-level metadata is carried by the project item, which
+every copy includes, so a projection whose only change is project-level names no task and
+copies with `--no-tasks`. An attempt is whole, as before, for one of the three reasons the block
+names, taken in its precedence order.
+
+**What a member projection reads.** The project item, and each named member the run holds a
+destination item for, one `task show` apiece — its labels are the destination's own, and a
+person may have changed them. It never runs `task list`, and it never reads an unnamed member.
+What a member copy needs of an unnamed member — the destination item its edges resolve to — is
+carried on the run from the last whole projection's page of tasks, updated by what each copy
+since reported creating. A `task show` failure is classified by entry 72's rule, like the three
+commands that entry names. Whatever a member copy does not name, it neither reads at the
+destination nor rewrites, so the module's ownership rule is unchanged and a person's edit on an
+unnamed item stands until that node next changes. Entry 71's deadline and the `Unprojected`
+surface's `items` both count the nodes the copy carries — every node, for a whole copy.
+
+**Whether the store offers a member copy** is decided once per run, before its first projection,
+and never by attempting a copy: against a store without `--member` that is a failed attempt,
+and the attempt after a failure is whole, which is the cost this removes. It is decided off the
+`--version` the launch check every driver already asks — so deciding spends no store command —
+against the first release offering it, and written to the run's directory. A later projection,
+and every driver an `adopt` starts, reads that record rather than deciding again.
+
+**The record** is one JSON object per attempt, landed or failed, appended to
+`<run dir>/writeback-projections.jsonl` and never rewritten; `example` is one line of it. Its
+type is `views::ProjectionRecord`, re-exported beside the other stored shapes a reader names, and
+its flat line admits no contradiction: a member copy names no `whole_because`, a failed attempt
+carries no `actions` or `spent`, and `class` and `kind` come together. `spent` is the copy
+report's own object, verbatim, and is `null` wherever the report carried none — which is every
+copy into a destination that meters nothing, a local Markdown one included.
+
+`tests/contract.rs` holds this block against the published constants and the record type: the
+two paths, the release, the member reads, every field and its admitted values, and the example
+line read and written back byte-equal. `writeback::tests` holds the precedence and the rule for
+a changed node against the worker's own decision. `tests/e2e/writeback_projections.rs` drives the
+compiled binary against the real `onetaskgraph` at 0.2.30, through the store double recording
+every command it is handed and delegating it to that store: a run's first projection whole and
+`first`; a later transition of one node carried alone, its destination item projected, an unnamed
+node's item left byte for byte as a person edited it, and no `task list` and no read of the
+unnamed member in the double's log; a projection after a failed attempt whole and
+`after-failure`; a store reporting an older version projected whole and `store-lacks-members`
+with no `--member` copy attempted, decided once and kept by an adopted driver; and a copy report
+rewritten to carry known `spent` and action counts, recorded exactly.
+
+```json
+{
+  "projection": {
+    "record": "<run dir>/writeback-projections.jsonl",
+    "one_line_per": "attempt",
+    "rewritten": false,
+    "fields": {
+      "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
+      "project": {"type": "string", "is": "the qualified project id"},
+      "scope": {"type": "string", "values": ["whole", "members"]},
+      "whole_because": {"type": ["string", "null"], "values": ["first", "after-failure", "store-lacks-members"], "null_when": "scope is members"},
+      "items": {"type": "array", "of": "string", "is": "the plan node ids the copy carried"},
+      "outcome": {"type": "string", "values": ["projected", "failed"]},
+      "class": {"type": ["string", "null"], "values": ["refused", "transient"], "null_when": "the attempt did not fail with the store's failure document"},
+      "kind": {"type": ["string", "null"], "null_when": "class is null"},
+      "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
+      "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
+      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned"], "null_when": "no copy report was read"},
+      "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"}
+    },
+    "whole_because": {
+      "store-lacks-members": "the store reported a version older than detection.members_from",
+      "after-failure": "the attempt before this one failed",
+      "first": "nothing has landed in this driver yet, including a driver an adopt started"
+    },
+    "whole_because_precedence": ["store-lacks-members", "after-failure", "first"],
+    "example": {"at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+                "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
+                "outcome": "projected", "class": null, "kind": null, "reason": null,
+                "duration_ms": 1830,
+                "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}}
+  },
+  "detection": {
+    "command": "onetaskgraph --version",
+    "asked_by": "the launch check every driver already runs",
+    "members_from": "0.2.30",
+    "decided": "once per run, before its first projection",
+    "never_by": "attempting a copy",
+    "record": "<run dir>/writeback-store.json",
+    "record_example": {"version": "0.2.30", "members": true}
+  },
+  "member_projection": {
+    "reads": ["project-show", "task-show"],
+    "task_show_per": "named member the run holds a destination item for",
+    "never_reads": ["task-list"],
+    "copy_flag": "--member",
+    "naming_none": "--no-tasks"
+  }
+}
+```
+
+## 74. The failure hook's `unfinished` rule named only a parked or cancelled node, so a run could end firing neither hook — RESOLVED
 
 **Ruling: widen `unfinished` to any node that is not `done`. The failure hook
 fires with reason kind `unfinished` at a driver's let-go whenever the graph holds
