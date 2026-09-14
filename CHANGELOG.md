@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/nickderobertis/onepipeline/compare/v0.29.4...v0.30.0) - 2026-09-14
+
+### Added
+
+- *(driver)* run a success hook or a failure hook once when a run ends ([#290](https://github.com/nickderobertis/onepipeline/pull/290))
+
 ## [0.29.4](https://github.com/nickderobertis/onepipeline/compare/v0.29.3...v0.29.4) - 2026-09-14
 
 ### Added
