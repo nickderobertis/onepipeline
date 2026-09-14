@@ -81,20 +81,51 @@ The four files are the copy after those two commands, unedited. `surfaces.jsonl`
 is the recorded log with surface `3`'s `queued` and `claimed` records appended,
 and `queue.json` holds surface `3` pending, not abandoned, with `next_id` 4.
 
+## `waiting-updates/` (produced by the 0.28.2 binary)
+
+**Updates nobody has read**, which no finished run on this host holds either: a
+finished run's check-ins were read. Produced on 2026-09-14 by the 0.28.2 release's
+`onepipeline` binary, run from uv's cached copy of the `onepipeline-cli` 0.28.2
+wheel, over a scratch copy of the recorded `onemessagebus-repair-2` run root with
+an empty `channel/`, with `ONEPIPELINE_RUNS_DIR` naming that scratch runs root:
+
+1. `surface onemessagebus-repair-2 --kind check-in --message first`
+2. `surface onemessagebus-repair-2 --kind check-in --message second`, which
+   replaced the first while it was still waiting
+3. `surface onemessagebus-repair-2 --kind finding --message "a finding"`
+
+The two files are the copy after those three commands, unedited: `surfaces.jsonl`
+holds the three `queued` records, and `queue.json` holds check-in `1` and finding
+`2` waiting, nothing pending, `next_id` 3. Every view counts the two as unread;
+how long they have been unread is the clock's, so the answers blank that age.
+
 ## `../answers/written-channel.json` (written by the 0.28.2 binary)
 
 Not a recorded directory but a channel **written from empty**, so that what this
 build writes is held to what 0.28.2 writes rather than only what it reads.
 `recorded_channel::a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes`
-runs the same steps over a scratch copy of the recorded run root with an empty
-`channel/`: two check-ins, the second replacing the first; a finding; a blocking
-question `channel serve` raises under `ONEPIPELINE_CHANNEL_ASKER=written-listener`;
-three `next`s; a verdict that answers the question; and a monitor's commands-only
-reply. The answer file holds each step's exit and every channel file afterwards,
-captured by `scripts/record-channel-answers.sh` with the 0.28.2 binary. The
-instants (`queued_at`, `at`), what the projection derives from the log's bytes
-(`accounted`, `seal`) and every `correlation` are normalized in place, as the
-manager ruled for this comparison, and nothing else is.
+has each binary launch its own run, `written`, whose one node the `oneagentgraph`
+double holds open, so that binary's driver is live and reconciles the command
+queue for the whole journey. Over it the journey takes, in order: two check-ins,
+the second replacing the first, and a finding; `runs`, for the unread count; a
+blocking question `channel serve` raises under
+`ONEPIPELINE_CHANNEL_ASKER=written-listener`; three `next`s; a reply carrying a
+verdict and a `finding` command, whose verdict reaches that server and whose
+command the driver applies; a commands-only reply the driver applies; a second
+session of the same asker that waits out a one-second window and ends, abandoning
+its question; a third that attends it and ends on its session bound; a verdict no
+listener reads, leaving the reply cursor short of the log; `runs` again; and
+`stop`.
+
+The answer file holds each step's exit, both unread lines, and every channel file
+0.28.2 wrote across those steps — `surfaces.jsonl`, `queue.json`,
+`replies.jsonl`, `replies-cursor.json`, `commands.jsonl`,
+`commands-cursor.json` and `command-outcomes.jsonl` — captured by
+`scripts/record-channel-answers.sh` with the 0.28.2 binary. The instants
+(`queued_at`, `at`), what the projection derives from the log's bytes
+(`accounted`, `seal`), every `correlation` and how long an update has been
+unread are normalized in place, as the manager ruled for this comparison, and
+nothing else is.
 
 # Recorded run root
 

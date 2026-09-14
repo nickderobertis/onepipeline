@@ -2,8 +2,16 @@
   "steps": [
     {
       "args": [
+        "start",
+        "plans:written-board",
+        "--detach"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
         "surface",
-        "onemessagebus-repair-2",
+        "written",
         "--kind",
         "check-in",
         "--message",
@@ -14,7 +22,7 @@
     {
       "args": [
         "surface",
-        "onemessagebus-repair-2",
+        "written",
         "--kind",
         "check-in",
         "--message",
@@ -25,7 +33,7 @@
     {
       "args": [
         "surface",
-        "onemessagebus-repair-2",
+        "written",
         "--kind",
         "finding",
         "--message",
@@ -35,45 +43,79 @@
     },
     {
       "args": [
-        "next",
-        "onemessagebus-repair-2"
+        "runs"
       ],
       "exit": 0
     },
     {
       "args": [
         "next",
-        "onemessagebus-repair-2"
+        "written"
       ],
       "exit": 0
     },
     {
       "args": [
         "next",
-        "onemessagebus-repair-2"
+        "written"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "next",
+        "written"
       ],
       "exit": 0
     },
     {
       "args": [
         "reply",
-        "onemessagebus-repair-2"
+        "written"
       ],
       "exit": 0
     },
     {
       "args": [
         "reply",
-        "onemessagebus-repair-2"
+        "written"
       ],
-      "exit": 2
+      "exit": 0
+    },
+    {
+      "args": [
+        "reply",
+        "written"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "runs"
+      ],
+      "exit": 0
+    },
+    {
+      "args": [
+        "stop",
+        "written"
+      ],
+      "exit": 0
     }
   ],
+  "unread": [
+    "2 planner update(s) waiting (1 check-in, 1 finding), unread for <age>; read them with: onepipeline next written",
+    "3 planner update(s) waiting (1 planner-question, 2 finding), unread for <age>; read them with: onepipeline next written"
+  ],
   "verdict_reached_the_server": true,
+  "abandoned_session_was_told": true,
   "channel": {
-    "queue.json": "{\n  \"waiting\": [],\n  \"pending\": null,\n  \"next_id\": 4,\n  \"accounted\": \"<unshared>\",\n  \"seal\": \"<unshared>\"\n}",
+    "command-outcomes.jsonl": "{\"id\":0,\"applied\":true,\"results\":[{\"index\":0,\"op\":\"finding\",\"outcome\":\"applied\"}]}\n{\"id\":1,\"applied\":true,\"results\":[{\"index\":0,\"op\":\"finding\",\"outcome\":\"applied\"}]}\n",
+    "commands-cursor.json": "2",
+    "commands.jsonl": "{\"id\":0,\"author\":\"planner\",\"commands\":[{\"op\":\"finding\",\"message\":\"a finding beside the verdict\"}]}\n{\"id\":1,\"author\":\"planner\",\"commands\":[{\"op\":\"finding\",\"message\":\"a finding on its own\"}]}\n",
+    "queue.json": "{\n  \"waiting\": [\n    {\n      \"id\": 4,\n      \"kind\": \"finding\",\n      \"message\": \"a finding beside the verdict\",\n      \"source\": \"proposal\",\n      \"blocking\": false,\n      \"queued_at\": \"<unshared>\"\n    },\n    {\n      \"id\": 5,\n      \"kind\": \"finding\",\n      \"message\": \"a finding on its own\",\n      \"source\": \"proposal\",\n      \"blocking\": false,\n      \"queued_at\": \"<unshared>\"\n    },\n    {\n      \"id\": 6,\n      \"kind\": \"planner-question\",\n      \"message\": \"a question its session leaves behind\",\n      \"source\": \"proposal\",\n      \"blocking\": true,\n      \"queued_at\": \"<unshared>\",\n      \"asker\": \"written-listener\"\n    }\n  ],\n  \"pending\": null,\n  \"next_id\": 7,\n  \"accounted\": \"<unshared>\",\n  \"seal\": \"<unshared>\"\n}",
     "replies-cursor.json": "1",
-    "replies.jsonl": "{\"id\":0,\"reply\":{\"completion\":false,\"message\":\"keep going\"},\"at\":\"<unshared>\"}\n",
-    "surfaces.jsonl": "{\"event\":\"queued\",\"id\":0,\"kind\":\"check-in\",\"message\":\"the first check-in\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"claimed\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"answered\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n"
+    "replies.jsonl": "{\"id\":0,\"reply\":{\"version\":3,\"completion\":false,\"message\":\"keep going\",\"commands\":[{\"op\":\"finding\",\"message\":\"a finding beside the verdict\"}]},\"at\":\"<unshared>\"}\n{\"id\":1,\"reply\":{\"completion\":false,\"message\":\"a ruling no listener reads\"},\"at\":\"<unshared>\"}\n",
+    "surfaces.jsonl": "{\"event\":\"queued\",\"id\":0,\"kind\":\"check-in\",\"message\":\"the first check-in\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"claimed\",\"id\":1,\"kind\":\"check-in\",\"message\":\"the check-in that replaces it\",\"source\":\"check-in\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"claimed\",\"id\":2,\"kind\":\"finding\",\"message\":\"a finding nobody read yet\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":4,\"kind\":\"finding\",\"message\":\"a finding beside the verdict\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"answered\",\"id\":3,\"kind\":\"planner-question\",\"message\":\"a blocking question the planner answers\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"queued\",\"id\":5,\"kind\":\"finding\",\"message\":\"a finding on its own\",\"source\":\"proposal\",\"blocking\":false,\"queued_at\":\"<unshared>\"}\n{\"event\":\"queued\",\"id\":6,\"kind\":\"planner-question\",\"message\":\"a question its session leaves behind\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n{\"event\":\"abandoned\",\"id\":6,\"kind\":\"planner-question\",\"message\":\"a question its session leaves behind\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"abandoned\":true,\"asker\":\"written-listener\"}\n{\"event\":\"attended\",\"id\":6,\"kind\":\"planner-question\",\"message\":\"a question its session leaves behind\",\"source\":\"proposal\",\"blocking\":true,\"queued_at\":\"<unshared>\",\"asker\":\"written-listener\"}\n"
   }
 }
