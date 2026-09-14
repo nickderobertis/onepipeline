@@ -11,14 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–71 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–72 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 71 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 72 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -5274,6 +5274,103 @@ on the launch record an `adopt` replays.
         "refusal": "project-copy exceeded 60 seconds (the 60 second floor; 2 items × 10 seconds per item is less)"
       }
     ]
+  }
+}
+```
+
+## 72. A write-back the store refused is retried on a timer no retry can answer — OPEN
+
+**Proposal (for the planner who owns the contract): narrow *retried* in "Write-back
+is best effort and retried off the reconcile loop" to the failures a retry can
+change. A projection attempt the store **refuses** — by its own failure document's
+`class` — is reported once, is not retried on a timer, and is attempted again only
+when the run publishes a snapshot different from the one refused. Every other
+failure keeps the retry schedule it has today.**
+
+The contract's sentence, under *Live edits write through*, is "Write-back is best
+effort and retried off the reconcile loop: a slow or unavailable store is reported
+and never changes an edit ruling, a node settlement, or a scheduling decision." The
+worker read *retried* as every failure alike: it re-queued the snapshot and waited
+out an interval growing from a quarter of a second to a one-minute ceiling, for as
+long as the run lasted, whatever the store had said.
+
+Measured on this host on 2026-09-13: the refusal it kept meeting was the store's
+`status unknown is disabled for source plans`. A settlement projects `failed`,
+`provider-failed`, `parked` and `skipped` (entry 50), whose category is `unknown`,
+and the `github-projects` source disables `unknown` by default. That refusal arrives
+after every read the attempt made and after the store's undo journal has restored
+anything it wrote, so it changes nothing on the board and costs the whole attempt:
+about 94 GraphQL points — `project show` 3, `task list` 5, `project copy` 86. One run
+holding one failed node spent about 5,600 points an hour on it. The runs'
+`writeback-project-copy.stderr` show `root-causes-855-fixes-2` doing that for about
+11 hours, `agents-md-durable-and-terse-v2` for about 6, and
+`adopt-216-fix-releases` for about 3, starving every other reader of the same
+token's hourly allowance.
+
+What this crate does now is the block below, and the block is the source. The
+distinction comes from the store and from nothing else: `onetaskgraph` writes one
+failure document on stdout when a verb exits `1` under `--json`, and gives each
+entry of an exit-`4` partial answer's `errors` the same `class`. That member is the
+store's own mapping and is never restated here, and the `message` beside it is
+never read to decide. An attempt is **refused** when any of its three commands —
+the project read, a page of its tasks, or the copy — fails with a failure document
+whose `failure.class` is `refused`, or answers a partial response every one of whose
+`errors` carries `refused`. On that attempt the worker raises the `Unprojected`
+surface and prints its one stderr line, each carrying the store's `class` and `kind`
+beside the reason and saying the projection will be attempted again when the run's
+graph next changes; it schedules nothing; and it remembers the refused snapshot, so
+that publishing the same one again attempts nothing.
+
+Everything else is retried exactly as before: a failure document classed
+`transient`, a partial answer with any entry that is not `refused`, and every failure
+that carries no class at all — a store release that predates the document, a command
+killed at its deadline, a spawn failure, or stdout that does not parse, a class this
+build has never heard of included. Closeout attempts a terminal snapshot published
+after a refusal, because it is a different snapshot, and does not re-attempt the
+refused one; stopping stays prompt; no store read feeds back into scheduling, and no
+store command delays closeout, a settlement, or an edit ruling.
+
+One consequence is the store's call rather than this crate's, and is named so nobody
+mistakes it for a regression: `onetaskgraph` classes a `local-md` source whose root
+has gone as a `config` failure, which is `refused`. The release this repository's
+checks pin, 0.2.29, is the first to write the failure document, so a store taken away
+mid-run is reported once and attempted again on the next change to the graph rather
+than asked every minute until it returns, and a terminal projection refused while it
+is gone is not re-attempted inside closeout. A host still running 0.2.28 or earlier
+writes no document, so every failure there is unclassified and keeps today's schedule.
+
+The six constants the worker branches on — `WRITEBACK_CLASSIFIED_COMMANDS`,
+`WRITEBACK_FAILURE_CLASS_MEMBER`, `WRITEBACK_PARTIAL_CLASS_MEMBER`,
+`WRITEBACK_REFUSED_CLASS`, `WRITEBACK_FAILURE_EXIT` and `WRITEBACK_PARTIAL_EXIT` — are
+published from `cli` beside entry 71's, and are part of this proposal for the same
+reason: a gate outside the crate has to be able to reach what it holds.
+`tests/contract.rs` holds the block against them; `writeback::tests` holds it against
+the type and the classifier the worker actually reads through; and
+`tests/e2e/store.rs` drives the compiled binary against the real `onetaskgraph` at
+the pinned release. There the store itself refuses — a destination project it no
+longer holds, and a source whose root has gone — and a refused projection is not
+attempted again across a window the old schedule would have retried in, and is
+attempted again when the graph next changes. For what an offline store cannot be
+made to answer, the store double stands in front of that same real binary and
+writes the failure document the store writes for the one command it is scripted to
+refuse: a refusal from a page of tasks, from the copy, and from an all-refused partial
+answer; a document classed `transient`, a partial answer with an entry a wait could
+change, and a class this build does not know, each retried on today's schedule; and
+closeout over a refusal. The retry journeys keep that schedule for a failure with no
+document at all.
+
+```json
+{
+  "failure": {
+    "member": "failure.class",
+    "stops_the_timer": "refused",
+    "failure_document_exit": 1,
+    "commands": ["project-show", "task-list", "project-copy"],
+    "partial_answer": {
+      "exit": 4,
+      "member": "errors[].class",
+      "refused_when": "every"
+    }
   }
 }
 ```

@@ -36,7 +36,16 @@
 //! * `onetaskgraph.delegate` — an executable to proxy unscripted calls to. A
 //!   matching `onetaskgraph.<verb>.refuse.<n>` injects one refused call before
 //!   later calls reach that real executable, for retry journeys at this sibling
-//!   subprocess boundary.
+//!   subprocess boundary, and `onetaskgraph.<verb>.refuse` refuses every call of that
+//!   verb for as long as it is there.
+//! * `<refusal>.stdout` and `<refusal>.exit`, beside any of the refusals above but
+//!   `onetaskgraph.refuse` — what that refusal writes on stdout and the status it exits
+//!   under, `1` where none is scripted. The real store answers a failed verb with a
+//!   failure document naming its class, but an offline store cannot be made to fail most
+//!   of the ways a hosted one does — a rate limit, a source that refused a write, one
+//!   refusing command of three — so a journey about what this build does with one of those
+//!   states the document the store writes for it, and every call it does not refuse is
+//!   still the delegated real store's.
 //! * `onetaskgraph.<verb>.rendezvous` — the address this double meets the test at
 //!   before it answers that verb, and holds until the test lets go — written by
 //!   `World::rendezvous("onetaskgraph.<verb>")`, read by `fake::meet`. The one way
@@ -304,6 +313,40 @@ fn code(code: Option<i32>) -> ExitCode {
     ExitCode::from(code.and_then(|code| u8::try_from(code).ok()).unwrap_or(1))
 }
 
+/// Act out one scripted refusal: its reason on stderr, `<script>.stdout` on stdout where a
+/// journey wrote one, and `<script>.exit` as the status, `1` where it wrote none.
+///
+/// Only "there is no such file" is absence, for the reason `Release::scenario` gives: a
+/// document a journey wrote and this program cannot read, or a status that is not one, is a
+/// fixture nobody applied, and acting out a plain refusal in its place would hand the journey
+/// the unclassified failure while it asserted against a classified one.
+fn refused(dir: &Path, script: &str, reason: &str) -> ExitCode {
+    let status = match std::fs::read_to_string(dir.join(format!("{script}.exit"))) {
+        // Zero is refused with the rest: a refusal acted out under success would hand the
+        // caller a failure's words and document beside a status saying nothing failed.
+        Ok(scripted) => match scripted.trim().parse::<u8>() {
+            Ok(status) if status != 0 => status,
+            _ => {
+                return fake::refuse(&format!(
+                    "`{script}.exit` states `{}`, which is not a failing exit status (1 to 255)",
+                    scripted.trim()
+                ))
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+        Err(error) => return fake::refuse(&format!("`{script}.exit` could not be read: {error}")),
+    };
+    match std::fs::read_to_string(dir.join(format!("{script}.stdout"))) {
+        Ok(document) => print!("{document}"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return fake::refuse(&format!("`{script}.stdout` could not be read: {error}"))
+        }
+    }
+    eprintln!("{}", reason.trim());
+    ExitCode::from(status)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -328,8 +371,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if let Ok(reason) = std::fs::read_to_string(dir.join("onetaskgraph.refuse-reads")) {
-        eprintln!("{}", reason.trim());
-        return ExitCode::from(1);
+        return refused(&dir, "onetaskgraph.refuse-reads", &reason);
     }
 
     // The verb is the leading words that are not flags or their values, which is
@@ -346,9 +388,10 @@ fn main() -> ExitCode {
     let name = format!("onetaskgraph.{}", verb.join("-"));
 
     let nth = fake::count(&dir, &name);
-    if let Ok(reason) = std::fs::read_to_string(dir.join(format!("{name}.refuse.{nth}"))) {
-        eprintln!("{}", reason.trim());
-        return ExitCode::from(1);
+    for script in [format!("{name}.refuse.{nth}"), format!("{name}.refuse")] {
+        if let Ok(reason) = std::fs::read_to_string(dir.join(&script)) {
+            return refused(&dir, &script, &reason);
+        }
     }
     // Held here, before any answer, so what the test times is the whole of what the
     // caller waited for: a store that has not answered yet. Only "there is no such

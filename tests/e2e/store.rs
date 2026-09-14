@@ -19,7 +19,7 @@
 // suppression and the full rationale.
 
 use crate::harness::{
-    agent, double, lifecycle, onetaskgraph_binary, plan_of, renamed, World, REFUSED,
+    agent, double, lifecycle, onetaskgraph_binary, plan_of, project_id, renamed, World, REFUSED,
     RENDEZVOUS_SECONDS_ENV, STORE_BINARY_ENV,
 };
 use serde_json::{json, Value};
@@ -1087,9 +1087,16 @@ fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, 
 }
 
 /// Losing the store is a projection failure, never an execution failure. The worker reports
-/// it, keeps retrying off the reconcile loop, and catches the board up when it returns.
+/// it off the reconcile loop, and catches the board up on the next change to the graph once
+/// the store is back.
+///
+/// What it does *not* do is ask again on a timer, and that is the store's call rather than
+/// this crate's: `onetaskgraph` classes a `local-md` source whose root has gone as a `config`
+/// failure, which is `refused`. So the store's return alone attempts nothing, and a terminal
+/// projection it refused is not attempted again inside closeout.
 #[test]
-fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffected() {
+fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while_the_run_completes_unaffected(
+) {
     let world = World::new("store-writeback-retry");
     world.script("work.wait", "hold");
     let project = world.plan(
@@ -1127,20 +1134,27 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
             .to_string(),
         )
         .exited(0);
-    world.until("write-back failure to be reported", |world| {
+    world.until("write-back refusal to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log")).is_ok_and(|log| {
-            log.contains("onetaskgraph write-back failed") && log.contains("retrying")
+            log.contains("onetaskgraph write-back failed") && log.contains("the store refused it")
         })
     });
     renamed(&unavailable, &world.store(), "the store returns");
+    noted(
+        &world,
+        "writeback-retry",
+        "later",
+        "project this now the store is back",
+    );
     world.until("write-back recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
     });
-    world.until("the retried edit to reach the store", |world| {
+    world.until("the next edit to reach the store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "retry this projection"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "project this now the store is back"
         })
     });
 
@@ -1180,30 +1194,35 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
         "the outage kept the dependent node from dispatching"
     );
 
-    // Bring the store back inside the worker's bounded closeout window. It must
-    // retry the failed terminal publication and project both settlements
-    // without revisiting execution.
+    // The terminal projection was refused, so closeout has nothing to wait on and nothing
+    // attempts it again: the run settles while the store is still gone, and a settled run's
+    // graph does not change again, so the board stays behind what the run recorded.
+    world.until("the run to write its result", |world| {
+        world.run_file("writeback-retry", "result.json").is_file()
+    });
+    assert!(
+        !world.store().exists(),
+        "the run only settled after the store became reachable"
+    );
     renamed(
         &unavailable,
         &world.store(),
         "the store returns after settlement",
     );
-    world.until("terminal write-back recovery to be reported", |world| {
-        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
-            .is_ok_and(|log| log.matches("onetaskgraph write-back recovered").count() >= 2)
-    });
-    world.until_store(
-        "the recovered terminal settlement to reach the store",
-        |world| {
-            world.store_tasks(&project).iter().all(|task| {
-                task["item"]["status"]["category"] == "done"
-                    && task["item"]["metadata"]["onepipeline.settlement"].is_object()
-            })
-        },
+    let log = std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+        .expect("the driver log is readable");
+    assert_eq!(
+        log.matches("onetaskgraph write-back recovered").count(),
+        1,
+        "a refused terminal projection was attempted again at closeout:\n{log}"
     );
-    world.until("the recovered run to write its result", |world| {
-        world.run_file("writeback-retry", "result.json").is_file()
-    });
+    assert!(
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["status"]["category"] != "done"),
+        "the refused terminal settlement reached the store"
+    );
     let result = world.run_json("writeback-retry", "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert!(
@@ -1296,6 +1315,588 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
             .is_file()
     });
 }
+
+// The failure documents the store writes on a failed verb, in the shape `onetaskgraph` writes
+// them from 0.2.29 — `failure.class`, `kind`, `source`, `message` and `retry_after_seconds`,
+// every member always present — and the partial answers its exit-4 verbs write, each `errors`
+// entry carrying its `class`. The pinned release writes them for the failures an offline store
+// can be made to have, and the journey against it reads the real one; these stand in for the
+// failures it cannot be made to have, for the one command a journey scripts the double to
+// refuse, and every other call is the real store's own.
+
+/// What `project show` writes for a project the store does not hold.
+const NO_SUCH_ITEM: &str = r#"{"failure":{"class":"refused","kind":"no-such-item","source":null,"message":"no project with that id\nnext: check the id, or list what is there — `onetaskgraph project list` reports every project the configured sources hold.","retry_after_seconds":null}}"#;
+const NO_SUCH_ITEM_SAID: &str = "onetaskgraph: no project with that id\nnext: check the id, or list \
+     what is there — `onetaskgraph project list` reports every project the configured sources hold.";
+
+/// What a verb writes when its source declined the request.
+const SOURCE_REFUSED: &str = r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans could not do it: the source refused the request: status unknown is disabled for source plans\nnext: fix what the source named above, then copy again.","retry_after_seconds":null}}"#;
+const SOURCE_REFUSED_SAID: &str = "onetaskgraph: source plans could not do it: the source refused \
+     the request: status unknown is disabled for source plans";
+
+/// What `project copy` writes when an item's recorded origin names nothing the destination
+/// still holds.
+const STALE_ORIGIN: &str = r#"{"failure":{"class":"refused","kind":"stale-origin","source":null,"message":"onepipeline-writeback:board/work was copied from plans:board/000-work, which that destination no longer holds\nnext: re-run with --recreate to create a new item there instead, or restore plans:board/000-work.","retry_after_seconds":null}}"#;
+const STALE_ORIGIN_SAID: &str = "onetaskgraph: onepipeline-writeback:board/work was copied from \
+     plans:board/000-work, which that destination no longer holds";
+
+/// What a verb writes when its source rate-limited the request.
+const RATE_LIMITED_DOCUMENT: &str = r#"{"failure":{"class":"transient","kind":"rate-limited","source":"plans","message":"source plans could not do it: the source rate-limited the request: You have exceeded a secondary rate limit","retry_after_seconds":60}}"#;
+
+/// A partial answer whose one failed source refused, which is what a `local-md` source whose
+/// root has gone answers with.
+const PARTIAL_REFUSED: &str = r#"{"items":[],"next":null,"plan":{"per_source":[]},"errors":[{"source":"plans","error":{"kind":"config","message":"source plans: cannot canonicalize root plan-store: No such file or directory (os error 2)"},"class":"refused"}]}"#;
+const PARTIAL_REFUSED_SAID: &str =
+    "onetaskgraph: source plans could not answer: configuration for \
+     this source is invalid: source plans: cannot canonicalize root plan-store";
+
+/// The same, beside a second source that could not be reached, which a wait could change.
+const PARTIAL_MIXED: &str = r#"{"items":[],"next":null,"plan":{"per_source":[]},"errors":[{"source":"plans","error":{"kind":"config","message":"source plans: cannot canonicalize root plan-store: No such file or directory (os error 2)"},"class":"refused"},{"source":"board","error":{"kind":"unavailable","message":"connection reset"},"class":"transient"}]}"#;
+
+/// Script the store double to refuse through `script` the way a release that writes a failure
+/// document does: its words on stderr, `document` on stdout, under `exit`. The document and
+/// the status are written first, so the refusal is never acted out without them.
+fn refusing(world: &World, script: &str, said: &str, document: &str, exit: u8) {
+    world.script(&format!("{script}.stdout"), document);
+    world.script(&format!("{script}.exit"), &exit.to_string());
+    world.script(script, said);
+}
+
+/// Give a run something new to project: a note for one node, which changes the graph the
+/// write-back worker is handed.
+fn noted(world: &World, run: &str, node: &str, text: &str) {
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "note", "id": node, "addressee": "worker",
+                              "text": text, "deliver": "next"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+}
+
+/// The one line the driver printed about a failing projection, which has to be the only one.
+fn the_line_reported(world: &World, run: &str) -> String {
+    let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
+        .expect("the driver log is readable");
+    let said: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("onetaskgraph write-back failed"))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "one failing projection was reported {} times:\n{log}",
+        said.len()
+    );
+    said[0].to_owned()
+}
+
+/// The surfaces that told the planner a projection failed, by their text.
+fn surfaces_raised(world: &World, run: &str) -> Vec<String> {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter_map(|event| event["payload"]["message"].as_str().map(str::to_owned))
+        .filter(|said| said.contains("did not take this run's projection"))
+        .collect()
+}
+
+/// How long a refused projection is watched for another attempt. The schedule every failure
+/// used to get asks again a quarter of a second after it, then a second after that, then four,
+/// so across this window it would have asked three more times.
+const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
+
+/// Nothing asks the store again for `run` across `window`, read off the `project show` every
+/// attempt opens with. `midway` runs halfway through, for a journey that puts the store right
+/// while it watches.
+fn asked_nothing_more(world: &World, run: &str, window: Duration, midway: impl FnOnce()) {
+    let asked = projections_asked_for(world);
+    let watched = Instant::now();
+    let mut midway = Some(midway);
+    while watched.elapsed() < window {
+        if watched.elapsed() >= window / 2 {
+            if let Some(midway) = midway.take() {
+                midway();
+            }
+        }
+        assert_eq!(
+            projections_asked_for(world),
+            asked,
+            "the store was asked again {:?} after it refused {run}'s projection",
+            watched.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these five wait on
+// is the schedule and its absence — a refused projection not being asked again across a window
+// the old schedule retried in, a transient one being asked at intervals that grow, and a run
+// settling over refusals — which cannot be observed in less time than the schedule takes. The
+// edge they need is the crate under test: they drive the compiled `onepipeline` binary against
+// its own write-back worker and the real store, four of them through the store double, exactly
+// as the six schedule journeys below do, so a project of their own would declare the same
+// dependency and skip nothing. The reason those six record for staying in this binary is these
+// five's too.
+/// A projection the store **refuses** is reported once and is not asked again on a timer: the
+/// store would refuse the same projection the same way, and against a hosted destination every
+/// attempt spends its allowance for nothing. It is attempted again when the run's graph next
+/// changes, and lands then once what the store refused has been put right — and not when the
+/// store is put right alone, which nothing here polls.
+#[test]
+fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_graph_changes() {
+    let run = "writeback-refused";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-refused", run);
+
+    refusing(
+        &world,
+        "onetaskgraph.refuse-reads",
+        NO_SUCH_ITEM_SAID,
+        NO_SUCH_ITEM,
+        1,
+    );
+    noted(
+        &world,
+        run,
+        "later",
+        "project this onto a board that is not there",
+    );
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let said = the_line_reported(&world, run);
+    for expected in [
+        project.as_str(),
+        "no project with that id",
+        "class: refused, kind: no-such-item",
+        "attempted again when the run's graph next changes",
+    ] {
+        assert!(
+            said.contains(expected),
+            "the line an operator reads does not say `{expected}`: {said}"
+        );
+    }
+    assert!(
+        !said.contains("retrying"),
+        "the line an operator reads says a refused projection is being retried: {said}"
+    );
+
+    asked_nothing_more(&world, run, REFUSAL_WINDOW, || stops_refusing(&world));
+
+    let raised = surfaces_raised(&world, run);
+    assert_eq!(
+        raised.len(),
+        1,
+        "the planner heard {} times about one refusal: {raised:?}",
+        raised.len()
+    );
+    assert!(
+        raised[0]
+            .lines()
+            .any(|line| line == "class: refused, kind: no-such-item"),
+        "the surface does not carry the store's class and kind: {}",
+        raised[0]
+    );
+    assert!(
+        raised[0].contains("attempted again when the run's graph next changes")
+            && !raised[0].contains("retrying"),
+        "the surface does not say when the projection is attempted again: {}",
+        raised[0]
+    );
+
+    noted(
+        &world,
+        run,
+        "later",
+        "project this onto the board that came back",
+    );
+    world.until("the projection to land once the graph changed", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the changed graph to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "project this onto the board that came back"
+        })
+    });
+    assert_eq!(
+        streaks_reported(&world, run),
+        1,
+        "the attempt that landed was reported as a failure"
+    );
+
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the refusal changed how the run settled"
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the refusal changed what executed"
+    );
+}
+
+/// An attempt is refused whichever of its three commands the store refuses: a page of the
+/// project's tasks, the copy, or the project read answered as a partial response every entry of
+/// which is refused. Each is reported once under the store's own kind, and none is asked again
+/// on a timer.
+#[test]
+fn a_refusal_from_any_command_of_an_attempt_stops_the_retry_timer() {
+    for (scenario, script, said, document, exit, kind) in [
+        (
+            "task-list",
+            "onetaskgraph.task-list.refuse",
+            SOURCE_REFUSED_SAID,
+            SOURCE_REFUSED,
+            1,
+            "class: refused, kind: refused",
+        ),
+        (
+            "project-copy",
+            "onetaskgraph.project-copy.refuse",
+            STALE_ORIGIN_SAID,
+            STALE_ORIGIN,
+            1,
+            "class: refused, kind: stale-origin",
+        ),
+        (
+            "partial",
+            "onetaskgraph.refuse-reads",
+            PARTIAL_REFUSED_SAID,
+            PARTIAL_REFUSED,
+            4,
+            "class: refused, kind: config",
+        ),
+    ] {
+        let run = format!("writeback-refused-{scenario}");
+        let (world, _project) = a_run_whose_destination_can_start_refusing(
+            &format!("store-writeback-refused-{scenario}"),
+            &run,
+        );
+        refusing(&world, script, said, document, exit);
+        noted(&world, &run, "later", &format!("refuse this at {scenario}"));
+        world.until(&format!("the {scenario} refusal to be reported"), |world| {
+            streaks_reported(world, &run) >= 1
+        });
+
+        let line = the_line_reported(&world, &run);
+        assert!(
+            line.contains(kind) && line.contains("the store refused it"),
+            "{scenario}: the line does not report the store's refusal as `{kind}`: {line}"
+        );
+        // The old schedule asked again a quarter of a second in, and a second after that.
+        asked_nothing_more(&world, &run, REFUSAL_WINDOW / 2, || {});
+        assert_eq!(
+            surfaces_raised(&world, &run).len(),
+            1,
+            "{scenario}: the planner was not told exactly once"
+        );
+        assert_eq!(
+            dispatched(&world, &run),
+            ["work"],
+            "{scenario}: the refusal changed what executed"
+        );
+    }
+}
+
+/// A failure the store does not refuse keeps today's schedule exactly: a document classed
+/// `transient`, a partial answer with any entry a wait could change even beside one that
+/// refused, and a document carrying a class this build has never heard of, which it does not
+/// read as a refusal. The first retry stays prompt, the interval grows, and the one line and
+/// one surface say it is being retried.
+#[test]
+fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
+    let unknown_class =
+        RATE_LIMITED_DOCUMENT.replace(r#""class":"transient""#, r#""class":"deferred""#);
+    assert_ne!(
+        unknown_class, RATE_LIMITED_DOCUMENT,
+        "the unknown-class document names the class it was built from"
+    );
+    for (scenario, document, exit, kind) in [
+        (
+            "transient",
+            RATE_LIMITED_DOCUMENT,
+            1,
+            Some("class: transient, kind: rate-limited"),
+        ),
+        (
+            "mixed-partial",
+            PARTIAL_MIXED,
+            4,
+            Some("class: transient, kind: config, unavailable"),
+        ),
+        ("unknown-class", unknown_class.as_str(), 1, None),
+    ] {
+        let run = format!("writeback-{scenario}");
+        let (world, _project) = a_run_whose_destination_can_start_refusing(
+            &format!("store-writeback-{scenario}"),
+            &run,
+        );
+        world.script("onetaskgraph.refuse-reads.stdout", document);
+        world.script("onetaskgraph.refuse-reads.exit", &exit.to_string());
+
+        let outage = starts_refusing(&world, &run, &format!("retry this {scenario}"));
+        let waited = retry_intervals(&world, &run, &outage, 3, Duration::from_secs(60));
+        outage.replied();
+
+        assert!(
+            waited[0] < Duration::from_secs(1),
+            "{scenario}: the first retry came {:?} after the failure",
+            waited[0]
+        );
+        for pair in waited.windows(2) {
+            assert!(
+                pair[1] >= pair[0] * 2,
+                "{scenario}: the schedule did not grow: {waited:?}"
+            );
+        }
+        let line = the_line_reported(&world, &run);
+        assert!(
+            line.contains("retrying") && line.contains(RATE_LIMITED),
+            "{scenario}: the line does not report a retried failure: {line}"
+        );
+        match kind {
+            Some(kind) => assert!(
+                line.contains(kind),
+                "{scenario}: the line does not carry the store's `{kind}`: {line}"
+            ),
+            None => assert!(
+                !line.contains("class:"),
+                "{scenario}: a class this build does not know was reported as one: {line}"
+            ),
+        }
+        assert_eq!(
+            surfaces_raised(&world, &run).len(),
+            1,
+            "{scenario}: one streak raised other than one surface"
+        );
+    }
+}
+
+/// Closeout attempts a terminal snapshot published after a refusal, because it is a different
+/// snapshot, and never asks the store about a refused one again; and a run whose projections
+/// the store keeps refusing settles without its closeout waiting on any of them.
+#[test]
+fn closeout_attempts_what_changed_after_a_refusal_and_never_a_refused_snapshot_again() {
+    let run = "writeback-refused-then-put-right";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-refused-then-put-right", run);
+    refusing(
+        &world,
+        "onetaskgraph.refuse-reads",
+        NO_SUCH_ITEM_SAID,
+        NO_SUCH_ITEM,
+        1,
+    );
+    noted(&world, run, "later", "refused before the run ends");
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    stops_refusing(&world);
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    world.until_store("the terminal settlement to reach the board", |world| {
+        world.store_tasks(&project).iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the run did not settle complete"
+    );
+
+    let run = "writeback-refused-to-the-end";
+    let (world, _project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-refused-to-the-end", run);
+    let asked_before = projections_asked_for(&world);
+    refusing(
+        &world,
+        "onetaskgraph.refuse-reads",
+        NO_SUCH_ITEM_SAID,
+        NO_SUCH_ITEM,
+        1,
+    );
+    noted(&world, run, "later", "refused until the run ends");
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let released = Instant::now();
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert!(
+        released.elapsed() < Duration::from_secs(15),
+        "a run whose projections were refused took {:?} to settle",
+        released.elapsed()
+    );
+    let result = world.run_json(run, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert_eq!(
+        dispatched(&world, run),
+        ["work", "later"],
+        "the refusals changed what executed"
+    );
+    // Every attempt since the store began refusing was a snapshot of its own, reported once:
+    // one asked again — on a timer, or inside closeout, where the old schedule asked as fast as
+    // the store refused — is an attempt with no line of its own.
+    let attempts = projections_asked_for(&world) - asked_before;
+    let reported = streaks_reported(&world, run);
+    assert!(
+        attempts <= reported,
+        "the store was asked {attempts} times for {reported} refused snapshots, so a refused \
+         one was asked about again"
+    );
+}
+
+/// The same refusal, answered by the real store with no double in front of it: the project the
+/// run projects onto is taken out of the store, so the `project show` every attempt opens with
+/// is answered with the store's own failure document, classed `refused` under `no-such-item`.
+#[test]
+fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_changes() {
+    let run = "writeback-refused-real";
+    let world = World::new("store-writeback-refused-real");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running state to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` source *is* its folder of
+    // Markdown — the file is the interface an operator authors and removes a project through,
+    // and `onetaskgraph` has no verb that deletes or creates one (`project` offers list, show,
+    // deps and copy). This suite authors every project the same way (`World::plan` writes the
+    // file) and takes stores away the same way; the refusal that results is the real binary's.
+    let board = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", project_id(run)));
+    let aside = world.root.join("refused-board.md");
+    renamed(
+        &board,
+        &aside,
+        "the destination project is taken out of the store",
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    noted(
+        &world,
+        run,
+        "later",
+        "project this onto a board that is not there",
+    );
+    world.until("the refusal to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let said = the_line_reported(&world, run);
+    for expected in [
+        project.as_str(),
+        "class: refused, kind: no-such-item",
+        "attempted again when the run's graph next changes",
+    ] {
+        assert!(
+            said.contains(expected),
+            "the line an operator reads does not say `{expected}`: {said}"
+        );
+    }
+    assert!(
+        !said.contains("retrying"),
+        "the line an operator reads says a refused projection is being retried: {said}"
+    );
+
+    // Read where an operator reads it: the driver reports every refused attempt with a line of
+    // its own and every projection that lands as a recovery, so a store asked again inside the
+    // window — on a timer, or because it was put right halfway through — is a second failure
+    // line, or a recovery before the graph has changed.
+    let watched = Instant::now();
+    let mut put_back = false;
+    while watched.elapsed() < REFUSAL_WINDOW {
+        if !put_back && watched.elapsed() >= REFUSAL_WINDOW / 2 {
+            // llmlint: ignore[tests_mirror_real_usage] putting the project back is the same
+            // authoring of a `local-md` source's Markdown the block above records the reason for.
+            renamed(&aside, &board, "the destination project is put back");
+            put_back = true;
+        }
+        let log = std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .expect("the driver log is readable");
+        assert!(
+            log.matches("onetaskgraph write-back failed").count() == 1
+                && !log.contains("onetaskgraph write-back recovered"),
+            "the store was asked again {:?} after it refused the projection:\n{log}",
+            watched.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(put_back, "the destination project was never put back");
+
+    let raised = surfaces_raised(&world, run);
+    assert_eq!(
+        raised.len(),
+        1,
+        "the planner heard {} times about one refusal: {raised:?}",
+        raised.len()
+    );
+    assert!(
+        raised[0]
+            .lines()
+            .any(|line| line == "class: refused, kind: no-such-item"),
+        "the surface does not carry the store's class and kind: {}",
+        raised[0]
+    );
+
+    noted(
+        &world,
+        run,
+        "later",
+        "project this onto the board that came back",
+    );
+    world.until("the projection to land once the graph changed", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the changed graph to reach the board", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "project this onto the board that came back"
+        })
+    });
+
+    world.release("work.go");
+    world.until("the run to write its result", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the refusal changed how the run settled"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// What a hosted destination says when it is refusing for a rate limit, and what this
 /// suite's store double is made to say. The words are GitHub's own: that limiter is the
@@ -1963,10 +2564,15 @@ fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
     );
 }
 
-/// Returning to the last successful graph is still a new projection when a different
-/// snapshot superseded it while the store was unavailable.
+/// A snapshot the store refused while it was unavailable never reaches the board once it
+/// returns, when the graph has since gone back to what the board already holds.
+///
+/// The store classes a source whose root has gone as `refused`, so the two-edge snapshot is
+/// not queued to be asked about again, and the revert publishes the graph last projected,
+/// which leaves nothing to attempt. The next change to the graph — `spare` settling — is what
+/// projects the graph as it then stands.
 #[test]
-fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
+fn a_reverted_edit_supersedes_the_refused_projection_before_store_recovery() {
     let world = World::new("store-writeback-reverted-edit");
     world.script("work.wait", "hold");
     world.script("spare.wait", "hold");
@@ -2015,9 +2621,13 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
             .out_has("\"applied\"");
     };
     reparent(&["work", "spare"]);
-    world.until("the changed projection to fail", |world| {
-        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
-            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
+    world.until("the changed projection to be refused", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log")).is_ok_and(
+            |log| {
+                log.contains("onetaskgraph write-back failed")
+                    && log.contains("the store refused it")
+            },
+        )
     });
     reparent(&["work"]);
     world.until("both edits to be committed before recovery", |world| {
@@ -2028,6 +2638,7 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
     });
 
     renamed(&unavailable, &world.store(), "the store recovers");
+    world.release("spare.go");
     world.until("write-back to report recovery", |world| {
         std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
@@ -2062,7 +2673,6 @@ fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
     });
 
     world.release("work.go");
-    world.release("spare.go");
     world.until("the unchanged run to settle", |world| {
         world
             .run_file("writeback-reverted-edit", "result.json")
@@ -2128,8 +2738,8 @@ fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
     let log = std::fs::read_to_string(world.run_file("writeback-closeout-expiry", "driver.log"))
         .expect("the driver log is readable");
     assert!(
-        log.contains("onetaskgraph write-back failed") && log.contains("retrying"),
-        "the run settled without reporting the store outage: {log}"
+        log.contains("onetaskgraph write-back failed") && log.contains("the store refused it"),
+        "the run settled without reporting the store's refusal: {log}"
     );
 }
 
@@ -3247,19 +3857,32 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
     }
     // The reason, on **one** line. What the sibling refused with is several lines of its
     // own and the last of them is the `next:` it ends with, which read as this surface's
-    // own advice — so the whole message is four lines, one of which is the reason.
+    // own advice — so the whole message is five lines: one is the reason, and the next is
+    // the class and kind the store gave it. A source whose root has gone is the store's
+    // `config` failure, which it classes `refused`.
     let reason = message
         .lines()
         .find_map(|line| line.strip_prefix("reason: "))
         .unwrap_or_else(|| panic!("the surface names no reason: {message}"));
     assert_eq!(
         message.lines().count(),
-        4,
+        5,
         "a multi-line refusal was carried onto the surface as it was spelled: {message}"
     );
     assert!(
         reason.contains("next:"),
         "the surface dropped what the store said rather than carrying it on one line: {reason}"
+    );
+    assert!(
+        message
+            .lines()
+            .any(|line| line == "class: refused, kind: config"),
+        "the surface does not carry the store's class and kind: {message}"
+    );
+    assert!(
+        message.contains("attempted again when the run's graph next changes")
+            && !message.contains("retrying"),
+        "the surface does not say a refused projection waits for the graph to change: {message}"
     );
 
     // And it is on the queue the planner actually reads, not only in the journal.
