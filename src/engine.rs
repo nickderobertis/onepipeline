@@ -5117,15 +5117,7 @@ pub(crate) fn record_operation_facts(
                 criterion,
                 reached: crate::note::Reached::Carried,
                 ..
-            } => {
-                let note =
-                    crate::note::of(*addressee, text, criterion.as_ref()).map_err(|why| {
-                        Error::Invalid(format!(
-                            "note: node '{node}': the note to carry could not be built: {why}"
-                        ))
-                    })?;
-                crate::note::carry(paths, node, note)?;
-            }
+            } => crate::note::carry(paths, node, *addressee, text, criterion.as_ref())?,
             _ => {}
         }
     }

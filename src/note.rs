@@ -660,14 +660,26 @@ pub(crate) fn carry_store(paths: &RunPaths, node: &str) -> PathBuf {
 /// # Errors
 ///
 /// [`Error::Ledger`] when the store's directory cannot be made, and
-/// [`Error::Invalid`] naming the store when the bus cannot carry into it.
-pub(crate) fn carry(paths: &RunPaths, node: &str, note: Note) -> Result<()> {
+/// [`Error::Invalid`] naming the store when the note cannot be built or the bus
+/// cannot carry it there.
+pub(crate) fn carry(
+    paths: &RunPaths,
+    node: &str,
+    addressee: Addressee,
+    text: &NoteText,
+    criterion: Option<&Criterion>,
+) -> Result<()> {
     let store = carry_store(paths, node);
     let dir = paths.dir.join(CARRY_DIR);
     std::fs::create_dir_all(&dir).map_err(|source| Error::Ledger { path: dir, source })?;
-    onemessagebus::Carry::sender::<Note, Accepted>(&store)
-        .send(note)
-        .map(drop)
+    of(addressee, text, criterion)
+        .map_err(|why| why.to_string())
+        .and_then(|note| {
+            onemessagebus::Carry::sender::<Note, Accepted>(&store)
+                .send(note)
+                .map(drop)
+                .map_err(|why| why.to_string())
+        })
         .map_err(|why| {
             Error::Invalid(format!(
                 "the note for node '{node}' could not be carried to its next dispatch in {}: {why}",
@@ -1097,9 +1109,17 @@ mod tests {
             onemessagebus::Carry::read(&carry_store(&paths, node)).map(|entries| entries.len())
         };
 
-        carry(&paths, "later", Note::to(Addressee::Worker, "first")).expect("carried");
-        carry(&paths, "later", Note::to(Addressee::Worker, "second")).expect("carried");
-        carry(&paths, "a/../b", Note::to(Addressee::Worker, "elsewhere")).expect("carried");
+        let text = |said: &str| -> NoteText { said.parse().expect("a readable note") };
+        carry(&paths, "later", Addressee::Worker, &text("first"), None).expect("carried");
+        carry(&paths, "later", Addressee::Worker, &text("second"), None).expect("carried");
+        carry(
+            &paths,
+            "a/../b",
+            Addressee::Worker,
+            &text("elsewhere"),
+            None,
+        )
+        .expect("carried");
         assert_eq!(stored("later").expect("a store"), 2);
         assert_eq!(
             carry_store(&paths, "a/../b")
@@ -1144,6 +1164,29 @@ mod tests {
         assert!(
             refused.to_string().contains("node 'later'")
                 && refused.to_string().contains("later.carried.jsonl"),
+            "{refused}"
+        );
+
+        // A store the bus cannot carry into is refused naming the node and the
+        // store, and nothing is carried.
+        std::fs::create_dir_all(carry_store(&paths, "blocked"))
+            .expect("a directory where the store would go");
+        let refused = carry(&paths, "blocked", Addressee::Worker, &text("held"), None)
+            .expect_err("a store that is a directory is refused");
+        assert!(
+            refused.to_string().contains("node 'blocked'")
+                && refused.to_string().contains("blocked.carried.jsonl"),
+            "{refused}"
+        );
+
+        // And a run whose notes directory cannot be made is refused naming it.
+        let filed = RunPaths::under(&root, "filed");
+        filed.create().expect("the run directory");
+        std::fs::write(filed.dir.join(CARRY_DIR), "not a directory").expect("written");
+        let refused = carry(&filed, "later", Addressee::Worker, &text("held"), None)
+            .expect_err("a notes directory that cannot be made is refused");
+        assert!(
+            matches!(&refused, Error::Ledger { path, .. } if path == &filed.dir.join(CARRY_DIR)),
             "{refused}"
         );
         let _ = std::fs::remove_dir_all(&root);

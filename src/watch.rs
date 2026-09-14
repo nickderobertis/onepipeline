@@ -1225,6 +1225,21 @@ mod tests {
         assert!(changes.document(&queue, &document).is_err());
         assert!(changes.replace_document(&queue, &document, b"{}").is_err());
         assert!(changes.exclusive(&queue, &mut |_| Ok(())).is_err());
+        let at = onemessagebus::MemoryTransport::new()
+            .append(&queue, b"{}")
+            .expect("a position");
+        assert!(changes.commit(&queue, &consumer, &at).is_err());
+        // A wait over a queue the run does not answer for is refused before it
+        // blocks, in the watch's own words.
+        let refused = Follow::from_now(&changes, other)
+            .err()
+            .expect("a queue the run does not answer for is refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("could not tell whether the run changed"),
+            "{refused}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

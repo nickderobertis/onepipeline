@@ -899,6 +899,21 @@ fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
             "the refusal does not name the variable: {}",
             refused.stderr
         );
+
+        // The bar's variable is read the same way, and refused the same way.
+        const BAR_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER_BAR";
+        let mut command = world.cmd(&["start", &path, "--detach"]);
+        command
+            .env_remove(spelling("environment"))
+            .env(BAR_ENV, std::ffi::OsStr::from_bytes(&[0x2e, 0xff, 0x2e]));
+        world
+            .run_on(command, "start")
+            .exited(REFUSED)
+            .err_has(BAR_ENV);
+        assert!(
+            !world.runs.join(name).exists(),
+            "a launch refused for an unreadable variable minted a run"
+        );
     }
 }
 
