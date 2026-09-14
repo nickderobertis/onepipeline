@@ -262,9 +262,16 @@ impl From<crate::note::Evidence> for EvidenceWord {
 // the build each end-to-end and note journey drives, and panics naming the kind and the
 // refusal, so an emit site that drifts fails the journeys that reach it. The
 // `every_kinds_recorded_envelope_validates_against_its_registered_document` test
-// below holds each kind's recorded envelope to its document, and each closed word is
-// built from its owning type through an exhaustive `From`. Moving every emit site onto
-// these types is a rewrite of the emitters across the engine, outside this wire adoption.
+// below holds every recorded envelope to its kind's document. The words declared above
+// this block are built from their owning types through an exhaustive `From`, and
+// `every_payload_word_is_its_owners_own_spelling` holds each spelling to the owner's.
+// The run-hook words declared inside it are not: their owners in `src/hooks.rs` are
+// private to that module. `WithheldSettlementWord` is held by that same spelling test
+// to `hooks::PAUSED`, the constant its emitter writes. `HookWord`, `HookReasonWord` and
+// `HookEndingWord` have neither a `From` nor a spelling test: they are held by that
+// document check and by `tests/e2e/run_end_hooks.rs`, whose journeys drive the debug
+// binary through every word of the three. Moving every emit site onto these types is a
+// rewrite of the emitters across the engine, outside this wire adoption.
 /// `run-started`: the plan the run was launched with, and how it is driven.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RunStarted {
