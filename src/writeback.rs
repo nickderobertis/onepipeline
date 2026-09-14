@@ -597,7 +597,6 @@ fn worker(
     per_item: NonZeroU64,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    // The whole of what this worker remembers about the attempts before this one.
     let mut standing = Standing::Landing;
     loop {
         let snapshot = {
@@ -1063,6 +1062,12 @@ fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> 
 /// rather than stopping it.
 fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
     match code? {
+        // llmlint: ignore[changed_behavior_has_e2e] the refused half of this arm is driven end to
+        // end against the real store. A document classed `transient` is `rate-limited` or
+        // `unavailable`, which only a hosted source answers and no offline store can be made to;
+        // and what it leads to is the retry schedule an unclassified failure already takes,
+        // which the schedule journeys in `tests/e2e/store.rs` drive. The unit test holds the
+        // class it reads against entry 72.
         WRITEBACK_FAILURE_EXIT => {
             let document: FailureDocument = serde_json::from_slice(stdout).ok()?;
             Some(Classified {

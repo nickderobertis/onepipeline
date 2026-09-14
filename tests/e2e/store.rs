@@ -1369,6 +1369,11 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         })
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` source *is* its folder of
+    // Markdown — the file is the interface an operator authors and removes a project through,
+    // and `onetaskgraph` has no verb that deletes or creates one (`project` offers list, show,
+    // deps and copy). This suite authors every project the same way (`World::plan` writes the
+    // file) and takes stores away the same way; the refusal that results is the real binary's.
     let board = world
         .store()
         .join("projects")
@@ -1379,6 +1384,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
         &aside,
         "the destination project is taken out of the store",
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     noted(
         &world,
         run,
@@ -1429,6 +1435,8 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     let mut put_back = false;
     while watched.elapsed() < REFUSAL_WINDOW {
         if !put_back && watched.elapsed() >= REFUSAL_WINDOW / 2 {
+            // llmlint: ignore[tests_mirror_real_usage] putting the project back is the same
+            // authoring of a `local-md` source's Markdown the block above records the reason for.
             renamed(&aside, &board, "the destination project is put back");
             put_back = true;
         }
