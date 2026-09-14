@@ -20,7 +20,7 @@ if ! program=$(uv tool run --from "onepipeline-cli==$release" sh -c 'command -v 
 fi
 reported=$("$program" --version)
 if [ "$reported" != "onepipeline $release" ]; then
-    echo "record-channel-answers: $program reports '$reported', not onepipeline $release; nothing was captured" >&2
+    echo "record-channel-answers: $program reports '$reported', not onepipeline $release; nothing was captured. Clear uv's cached copy with 'uv cache clean onepipeline-cli' and run this again, or pass the release that executable is as RELEASE" >&2
     exit 2
 fi
 
