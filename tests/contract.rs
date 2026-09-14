@@ -4428,7 +4428,8 @@ const RULINGS: &[(&str, &str)] = &[
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
     ("44.", "the minimum this build requires"),
-    ("74.",
+    (
+        "74.",
         "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
     ),
 ];

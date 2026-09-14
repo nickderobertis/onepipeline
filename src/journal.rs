@@ -69,6 +69,18 @@ impl Journal {
         labels: Labels,
         payload: Map<String, Value>,
     ) -> Result<()> {
+        // Every record an emitter writes is held to its registered document in a
+        // debug build of the binary — the build every end-to-end and note journey
+        // drives — so an emit site that drifts from its document in `payload` fails
+        // those journeys instead of reaching a reader. A unit test builds a partial
+        // payload on purpose, and a release build pays nothing.
+        #[cfg(all(debug_assertions, not(test)))]
+        if let Err(refusal) = crate::event::registry().check(
+            &crate::payload::schema_of(kind),
+            &Value::Object(payload.clone()),
+        ) {
+            panic!("an emitter wrote a {kind} record its own document refuses: {refusal}");
+        }
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),

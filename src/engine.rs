@@ -2455,6 +2455,18 @@ fn deliver_envelope(staged: Vec<Staged>) -> Vec<std::result::Result<Delivery, Er
     delivered
 }
 
+/// The word a `release-adopted` record names a release note's delivery with.
+///
+/// Spelled once, for the emitter and for the payload document that admits it:
+/// a note delivered into the running turn is `live`, and one deferred to the
+/// node's next dispatch is `next`.
+pub(crate) fn adoption_delivery(delivery: edits::Delivery) -> &'static str {
+    match delivery {
+        edits::Delivery::Live => "live",
+        edits::Delivery::Deferred => "next",
+    }
+}
+
 /// What the delivery phase did with one validated command.
 ///
 /// Two variants rather than an operation list, because the answer a refused
@@ -3149,13 +3161,7 @@ fn adopt_releases(
             journal::labels(&paths.run, Some(&node)),
             journal::payload(&[
                 ("node", json!(node)),
-                (
-                    "delivery",
-                    json!(match delivery {
-                        edits::Delivery::Live => "live",
-                        edits::Delivery::Deferred => "next",
-                    }),
-                ),
+                ("delivery", json!(adoption_delivery(delivery))),
                 (
                     "versions",
                     json!(released

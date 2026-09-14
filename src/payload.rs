@@ -18,7 +18,7 @@
 //! one, and a record a later build wrote is the ordinary contents of a runs root.
 
 use onemessagebus::{Message, Registry, SchemaId};
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -26,6 +26,160 @@ use crate::event::PipelineKind;
 
 /// A JSON object whose members this crate reads through a type of its own.
 type Object = Map<String, Value>;
+
+/// A string document admitting exactly `words`.
+fn one_of(words: impl IntoIterator<Item = String>) -> Schema {
+    let words: Vec<String> = words.into_iter().collect();
+    schemars::json_schema!({"type": "string", "enum": words})
+}
+
+/// A value's wire word, through the owning type's own serializer — under `tag`
+/// for an internally tagged enum, and as the value itself otherwise.
+fn spelled<T: Serialize>(value: &T, tag: Option<&str>) -> String {
+    let wire = serde_json::to_value(value).expect("a vocabulary value serializes");
+    let word = match tag {
+        Some(tag) => wire.get(tag).cloned(),
+        None => Some(wire),
+    };
+    word.and_then(|word| word.as_str().map(str::to_owned))
+        .expect("a vocabulary value serializes to a word")
+}
+
+// Each closed vocabulary below is read off the type that owns it. The match beside
+// each list names every variant, so a variant its owner adds fails to compile here,
+// beside the list it has to join — and the words are that type's own spelling, so
+// a word it renames is renamed here too.
+
+/// `NodeStatus`'s words.
+fn statuses(_: &mut SchemaGenerator) -> Schema {
+    use crate::graph::NodeStatus as S;
+    let listed = |status: S| match status {
+        S::Pending
+        | S::Ready
+        | S::Running
+        | S::Waiting
+        | S::Blocked
+        | S::Parked
+        | S::Cancelled
+        | S::Done
+        | S::CompleteDraft
+        | S::Failed
+        | S::Skipped => status.as_str().to_owned(),
+    };
+    one_of(
+        [
+            S::Pending,
+            S::Ready,
+            S::Running,
+            S::Waiting,
+            S::Blocked,
+            S::Parked,
+            S::Cancelled,
+            S::Done,
+            S::CompleteDraft,
+            S::Failed,
+            S::Skipped,
+        ]
+        .map(listed),
+    )
+}
+
+/// `Landing`'s words.
+fn landings(_: &mut SchemaGenerator) -> Schema {
+    use crate::graph::Landing as L;
+    let listed = |landing: L| match landing {
+        L::Landed | L::Unlanded => landing.as_str().to_owned(),
+    };
+    one_of([L::Landed, L::Unlanded].map(listed))
+}
+
+/// A reply's `Author`'s words.
+fn authors(_: &mut SchemaGenerator) -> Schema {
+    use crate::channel::Author as A;
+    let listed = |author: A| match author {
+        A::Planner | A::Monitor => author.as_str().to_owned(),
+    };
+    one_of([A::Planner, A::Monitor].map(listed))
+}
+
+/// The words a release note's delivery is recorded under.
+fn deliveries(_: &mut SchemaGenerator) -> Schema {
+    use crate::edits::Delivery as D;
+    let listed = |delivery: D| match delivery {
+        D::Live | D::Deferred => crate::engine::adoption_delivery(delivery).to_owned(),
+    };
+    one_of([D::Live, D::Deferred].map(listed))
+}
+
+/// A checked criterion's `Answer` words.
+fn answers(_: &mut SchemaGenerator) -> Schema {
+    use crate::criteria::Answer as A;
+    let listed = |answer: A| match answer {
+        A::Match | A::Mismatch { .. } | A::Unread { .. } => answer.as_str().to_owned(),
+    };
+    one_of(
+        [
+            A::Match,
+            A::Mismatch {
+                holds: String::new(),
+            },
+            A::Unread {
+                reason: String::new(),
+            },
+        ]
+        .map(listed),
+    )
+}
+
+/// An undrafted body's endings.
+fn endings(_: &mut SchemaGenerator) -> Schema {
+    use crate::lifecycle::Undrafted as U;
+    let listed = |undrafted: U| match undrafted {
+        U::Dispatch(_) | U::SchemaRefused | U::Bodyless => undrafted.ending().to_owned(),
+    };
+    one_of([U::Dispatch(String::new()), U::SchemaRefused, U::Bodyless].map(listed))
+}
+
+/// Where a note `Reached`, as the tag its record carries.
+fn reaches(_: &mut SchemaGenerator) -> Schema {
+    use crate::note::Reached as R;
+    let listed = |reached: R| match reached {
+        R::Queued | R::Worker | R::Supervisor | R::JudgedWith { .. } | R::Carried => {
+            spelled(&reached, Some("reached"))
+        }
+    };
+    one_of(
+        [
+            R::Queued,
+            R::Worker,
+            R::Supervisor,
+            R::JudgedWith {
+                completion_reason: String::new(),
+            },
+            R::Carried,
+        ]
+        .map(listed),
+    )
+}
+
+/// What a `note-shown` was decided from.
+fn evidences(_: &mut SchemaGenerator) -> Schema {
+    use crate::note::Evidence as E;
+    let listed = |evidence: E| match evidence {
+        E::DeliveredOrigin | E::OpeningTask | E::InstructionText | E::AnsweringTurn => {
+            spelled(&evidence, None)
+        }
+    };
+    one_of(
+        [
+            E::DeliveredOrigin,
+            E::OpeningTask,
+            E::InstructionText,
+            E::AnsweringTurn,
+        ]
+        .map(listed),
+    )
+}
 
 /// `run-started`: the plan the run was launched with, and how it is driven.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -99,6 +253,7 @@ pub(crate) struct NodeDispatched {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct NodeSettled {
     /// The terminal status.
+    #[schemars(schema_with = "statuses")]
     pub(crate) status: String,
     /// The word its settlement was reached under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +275,7 @@ pub(crate) struct NodeSettled {
     pub(crate) head: Option<String>,
     /// Whether the change reached its base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "landings")]
     pub(crate) landing: Option<String>,
     /// The steps the branch carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +353,7 @@ pub(crate) struct PlannerSurfaced {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerReplied {
     /// Who replied.
+    #[schemars(schema_with = "authors")]
     pub(crate) author: String,
     /// Whether it declared completion, `null` for no word.
     #[serde(default)]
@@ -362,6 +519,7 @@ pub(crate) struct ReleaseAdopted {
     /// The node.
     pub(crate) node: String,
     /// Whether the note reached a running turn or its next dispatch.
+    #[schemars(schema_with = "deliveries")]
     pub(crate) delivery: String,
     /// The releases it was told of.
     pub(crate) versions: Vec<AdoptedVersion>,
@@ -400,6 +558,7 @@ pub(crate) struct CriterionChecked {
     /// The literal it expects.
     pub(crate) expected: String,
     /// `match`, `mismatch`, or `unread`.
+    #[schemars(schema_with = "answers")]
     pub(crate) answer: String,
     /// What the file holds instead, on a mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -413,6 +572,7 @@ pub(crate) struct CriterionChecked {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BodyNotDrafted {
     /// Which of the three endings.
+    #[schemars(schema_with = "endings")]
     pub(crate) ending: String,
     /// The detail the settlement carries too.
     pub(crate) detail: String,
@@ -422,10 +582,11 @@ pub(crate) struct BodyNotDrafted {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct NoteShown {
     /// Who the note was addressed to.
-    pub(crate) addressee: String,
+    pub(crate) addressee: crate::note::Addressee,
     /// The note.
     pub(crate) text: String,
     /// Where it reached.
+    #[schemars(schema_with = "reaches")]
     pub(crate) reached: String,
     /// The criterion it carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,10 +595,11 @@ pub(crate) struct NoteShown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_reason: Option<String>,
     /// The party shown it.
-    pub(crate) party: String,
+    pub(crate) party: crate::note::Party,
     /// The turn the presentation opened.
     pub(crate) turn: u64,
     /// What showed the presentation happening.
+    #[schemars(schema_with = "evidences")]
     pub(crate) evidence: String,
 }
 
