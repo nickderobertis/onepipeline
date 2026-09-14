@@ -1054,6 +1054,53 @@ fn a_hook_that_swaps_its_log_for_a_link_shows_no_reader_the_file_it_names() {
     );
 }
 
+/// A launch record that can no longer be read when a driver lets go of its run is
+/// not a record naming no hooks: the driver says, on the log a detached driver
+/// keeps, that whether the run fires a hook could not be judged, and fires nothing
+/// it could not read the command of.
+#[test]
+fn a_launch_record_unreadable_at_let_go_is_reported_rather_than_read_as_naming_no_hooks() {
+    let world = hooked_world("hooks-unreadable-record");
+    let hook = hook(&world);
+    world.script("build.wait", "hold");
+    let run = "unreadable";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+            ],
+        )
+        .exited(0);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    // llmlint: ignore[tests_mirror_real_usage] a launch record that stops parsing under a
+    // live driver is a storage fault, and no verb writes one; overwriting it is the narrowest
+    // fault that reaches the let-go judgement through the compiled binary, and the detached
+    // driver, its log, the journal and the hook fixture around it are all the real ones.
+    std::fs::write(world.run_file(run, "launch.json"), "not json")
+        .expect("the launch record is overwritten");
+    world.release("build.go");
+    let log = world.run_file(run, "driver.log");
+    world.until("the driver to say the run could not be judged", |_| {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|said| said.contains("fires a run-end hook could not be judged"))
+    });
+
+    let said = std::fs::read_to_string(&log).expect("the driver log is kept");
+    assert!(said.contains("launch.json"), "{said}");
+    assert!(hook_kinds(&world, run).is_empty(), "{:?}", world.kinds(run));
+    assert!(invocations(&world, run).is_empty());
+}
+
 /// A hook whose log cannot be opened could not be started, and is recorded as
 /// that — without its command ever running, and without the run settling any
 /// differently.

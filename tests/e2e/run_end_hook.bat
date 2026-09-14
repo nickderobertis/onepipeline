@@ -14,7 +14,7 @@ if not defined ONEPIPELINE_E2E_HOOK_RECORD (
   exit /b 64
 )
 if not defined ONEPIPELINE_RUN_ID (
-  echo run_end_hook: the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given 1>&2
+  echo run_end_hook: the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given; run this only as the command a launch names with --success-hook or --failure-hook 1>&2
   exit /b 64
 )
 set "record=%ONEPIPELINE_E2E_HOOK_RECORD%"

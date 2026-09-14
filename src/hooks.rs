@@ -304,19 +304,31 @@ pub(crate) fn at_stop(paths: &RunPaths) {
 /// The run, read once, where its record names a hook at all.
 ///
 /// A run whose record names none is a launch that did exactly what launches did
-/// before hooks existed, so nothing is read, judged or journaled for it.
+/// before hooks existed, so nothing is judged or journaled for it. A record that
+/// cannot be read is not one that names none: every caller has just driven or
+/// stopped this run under that record, so it says so rather than firing nothing
+/// in silence.
 fn judged_view(paths: &RunPaths) -> Option<RunView> {
-    let record: LaunchRecord = ledger::read_json_opt(&paths.launch())?;
+    let unjudged = |error: &dyn std::fmt::Display| {
+        eprintln!(
+            "onepipeline: whether run '{}' fires a run-end hook could not be judged: {error}",
+            paths.run
+        );
+    };
+    let record: LaunchRecord = match ledger::read_json(&paths.launch()) {
+        Ok(record) => record,
+        Err(error) => {
+            unjudged(&error);
+            return None;
+        }
+    };
     if record.success_hook().is_none() && record.failure_hook().is_none() {
         return None;
     }
     match RunView::open(paths) {
         Ok(view) => Some(view),
         Err(error) => {
-            eprintln!(
-                "onepipeline: whether run '{}' fires a run-end hook could not be judged: {error}",
-                paths.run
-            );
+            unjudged(&error);
             None
         }
     }

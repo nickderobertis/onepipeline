@@ -43,7 +43,7 @@ broke() {
 }
 
 record=${ONEPIPELINE_E2E_HOOK_RECORD:?ONEPIPELINE_E2E_HOOK_RECORD names no directory to record into; set it to the world scratch run_end_hooks.rs creates}
-run=${ONEPIPELINE_RUN_ID:?the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given}
+run=${ONEPIPELINE_RUN_ID:?the engine named no run in ONEPIPELINE_RUN_ID, which every run-end hook is given; run this only as the command a launch names with --success-hook or --failure-hook}
 # The run id becomes one path segment under the record directory, so it is held to
 # the characters a run id is minted from before anything is written under it: a
 # separator or a `..` would record somewhere the journey never reads.
@@ -86,7 +86,7 @@ cat >"$here/stdin" || broke "cannot write $here/stdin"
 # was kept under now points somewhere else.
 if [ -f "$record/$run.relink" ]; then
   target=$(cat "$record/$run.relink") || broke "cannot read $record/$run.relink"
-  log="${ONEPIPELINE_RUN_ROOT:?the engine named no run root}/hooks/${ONEPIPELINE_HOOK:?the engine named no hook}.log"
+  log="${ONEPIPELINE_RUN_ROOT:?the engine named no run root in ONEPIPELINE_RUN_ROOT; run this only as the command a launch names with --success-hook or --failure-hook}/hooks/${ONEPIPELINE_HOOK:?the engine named no hook in ONEPIPELINE_HOOK; run this only as the command a launch names with --success-hook or --failure-hook}.log"
   ln -sf "$target" "$log" || broke "cannot replace $log with a link to $target"
 fi
 
