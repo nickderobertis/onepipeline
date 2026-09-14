@@ -5789,9 +5789,13 @@ second.
 
 Where that is not what 0.28.2 did:
 
-- **Surface and reply records carry `correlation`.** A question's correlation is
-  written on its surface record and on the verdict bound to it. 0.28.2 wrote no
-  such field, which is why a byte comparison with its directories normalizes it.
+- **Ask and reply records carry `correlation`.** The correlation the bus mints for
+  a question is written on its ask — the surface record `channel serve` queues on
+  `surfaces.jsonl` — and on the reply record on `replies.jsonl` that answers it.
+  0.28.2 wrote no such field, so the byte comparison with 0.28.2's channel
+  (`recorded_channel::a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes`)
+  normalizes that minted correlation as an id on both record kinds, beside the
+  instants.
 - **A listener reads its own question's answer.** It also reads a verdict on any
   other question its asker raised, and a verdict bound to no question — and never a
   verdict on another asker's question. 0.28.2 handed a verdict to whichever reader

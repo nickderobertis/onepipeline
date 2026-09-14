@@ -2590,6 +2590,84 @@ fn a_run_awaiting_an_answer_takes_a_reply_though_its_graph_has_settled() {
     ended(serving);
 }
 
+/// A verdict naming no correlation whose message echoes the token an
+/// outstanding ask minted reaches that ask, whichever order the asks were raised
+/// in — ahead of the older ask a live listener is also waiting on.
+///
+/// Two asks outstanding at once is the case the token exists for: a manager
+/// answering the second question must not have the answer handed to the first
+/// because it arrived first. Run twice, with the order the two askers raise their
+/// questions swapped, and each time the ask raised **second** is answered first.
+#[test]
+fn a_verdict_echoing_an_asks_token_reaches_that_ask_whichever_order_they_were_raised_in() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-token-binding");
+    world.script("build.wait", "hold");
+    let run = running(&world, "tokenbound", vec![agent("build", &[])]);
+
+    for (round, order) in [["alpha", "beta"], ["beta", "alpha"]].iter().enumerate() {
+        let mut sessions = std::collections::BTreeMap::new();
+        for (raised, asker) in order.iter().enumerate() {
+            let token = format!("ask-manager-token:{asker}{round}");
+            let mut serving = world
+                .cmd(&["channel", "serve", &run])
+                .env("ONEPIPELINE_CHANNEL_ASKER", format!("asker-{asker}"))
+                .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("the channel server starts");
+            let mut stdin = serving.stdin.take().expect("stdin is piped");
+            let frame = json!({
+                "kind": "planner-question",
+                "message": format!("{asker} asks, round {round}\n{token}"),
+                "blocking": false,
+            });
+            writeln!(stdin, "{frame}").expect("the frame is written");
+            stdin.flush().expect("flushed");
+            let lines = BufReader::new(serving.stdout.take().expect("stdout is piped")).lines();
+            world.until("the ask to be queued", |world| {
+                world.events_of(&run, "planner-surface-queued").len() > 2 * round + raised
+            });
+            sessions.insert(*asker, (serving, stdin, lines, token));
+        }
+
+        // The ask raised second is answered first, by its token alone.
+        for asker in [order[1], order[0]] {
+            let (_, _, lines, token) = sessions.get_mut(asker).expect("a session");
+            let ruling = format!("for {asker} in round {round}, {token}");
+            world
+                .run_with_stdin(
+                    &["reply", &run],
+                    &json!({"completion": false, "message": ruling}).to_string(),
+                )
+                .exited(0);
+            // The first thing this session reads is its own ruling: a verdict on
+            // the other ask, had it been handed over, would be read here first.
+            let read: Value = serde_json::from_str(
+                &lines
+                    .next()
+                    .expect("the session answered")
+                    .expect("the answer reads"),
+            )
+            .expect("the answer is JSON");
+            assert_eq!(
+                read["message"],
+                json!(ruling),
+                "round {round}: {asker}'s ask was handed another verdict: {read}"
+            );
+        }
+
+        for (_, (serving, stdin, _, _)) in sessions {
+            drop(stdin);
+            ended(serving);
+        }
+    }
+    world.release("build.go");
+}
+
 #[test]
 fn attest_completes_a_ready_waiting_human_action() {
     let world = World::new("channel-attest");
