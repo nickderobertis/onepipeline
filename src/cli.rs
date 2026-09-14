@@ -730,6 +730,11 @@ pub struct ReplyArgs {
     pub run: String,
     /// The reply envelope. Omitted, it is read from stdin.
     pub file: Option<PathBuf>,
+    /// The question a verdict answers, by the correlation its asker was told.
+    /// Omitted, the verdict is bound to the question it can be bound to — see
+    /// `docs/contract.md`'s channel paragraph.
+    #[arg(long, value_name = "C")]
+    pub correlation: Option<onemessagebus::Correlation>,
 }
 
 /// `onepipeline surface`.

@@ -4759,6 +4759,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("32.", "any run of characters including none"),
     ("34.", "body-not-drafted"),
     ("44.", "the minimum this build requires"),
+    ("63.", "--correlation C"),
     ("74.", "holds any node that is not `done`"),
     (
         "75.",

@@ -1579,7 +1579,7 @@ fn wait_for_work(
     paths: &RunPaths,
     rx: &Receiver<Message>,
     channel: &ChannelState,
-    seen: &mut crate::channel::Fingerprint,
+    seen: &mut Vec<onemessagebus::Fingerprint>,
     deadline: Duration,
     outside: &mut dyn FnMut() -> bool,
 ) -> Result<Option<Vec<Message>>> {
@@ -2425,9 +2425,11 @@ fn validate_envelope(
     let mut staged_state: RunState = (**state).clone();
     let mut evaluated = Vec::with_capacity(commands.len());
     for command in commands {
-        let ruling = crate::channel::allows(author, command).and_then(|()| {
-            validate_command(paths, &staged_state, author, command, launch, in_flight)
-        });
+        let ruling = ChannelState::new(paths)
+            .allows(author, command)
+            .and_then(|()| {
+                validate_command(paths, &staged_state, author, command, launch, in_flight)
+            });
         if let Ok(step) = &ruling {
             crate::projection::fold_operations(
                 &mut staged_state,
@@ -2774,6 +2776,7 @@ pub(crate) fn record_rejection(
             abandoned: false,
             asker: None,
             workstream: None,
+            correlation: None,
         },
     )
 }
@@ -3755,6 +3758,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
         abandoned: false,
         asker: None,
         workstream: Some(conflict.node.as_str().to_owned()),
+        correlation: None,
     }
 }
 
@@ -4024,6 +4028,7 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
         abandoned: false,
         asker: None,
         workstream: Some(step.node.clone()),
+        correlation: None,
     }
 }
 
@@ -4432,6 +4437,7 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
         abandoned: false,
         asker: None,
         workstream: stopped.node.clone(),
+        correlation: None,
     }
 }
 
@@ -5139,6 +5145,7 @@ pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
         abandoned: false,
         asker: None,
         workstream: crate::channel::target_of(command),
+        correlation: None,
     })
 }
 
@@ -5169,6 +5176,7 @@ pub(crate) fn finding_surface(
         abandoned: false,
         asker: None,
         workstream: node,
+        correlation: None,
     }
 }
 
@@ -5233,6 +5241,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         abandoned: false,
         asker: None,
         workstream: Some(checked.node.as_str().to_owned()),
+        correlation: None,
     }
 }
 
@@ -5309,6 +5318,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
         abandoned: false,
         asker: None,
         workstream: None,
+        correlation: None,
     }
 }
 
@@ -5388,6 +5398,7 @@ fn watch_for_quiet(
                 abandoned: false,
                 asker: None,
                 workstream: Some(node.clone()),
+                correlation: None,
             },
         )?;
     }

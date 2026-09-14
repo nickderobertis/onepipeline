@@ -4154,7 +4154,7 @@ on its public surface at all — the environment variable, and the `asker` a
 surface `next` hands back now carries — or whether the third clearing should be
 stated in the sentence 61 quotes and the mechanism left unspecified.
 
-## 63. A verdict is claimed by whichever reader polls next, and the question it answers has no claim on it — OPEN
+## 63. A verdict is claimed by whichever reader polls next, and the question it answers has no claim on it — RESOLVED
 
 **Proposal (for the planner who owns the contract): state whether a reply is
 addressed. The contract says a reply is routed by the halves it carries, "never
@@ -4184,14 +4184,32 @@ withdrawn question does not explain a *queued* verdict going unread, because
 `claim_reply` consults neither the pending slot nor the asker and hands an
 unclaimed reply to the next poller whatever became of the surface. This is what
 survives, and it survives 62's repair —
-`channel::a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names`
-drives it end to end on top of that fix: a blocking question in the slot with its
+the journey that drove it end to end on top of that fix placed: a blocking question in the slot with its
 asker between listeners, a second asker's session polling, one ruling, and the
 scoring session reading it back while `status` reports the question answered.
 
-**Why nothing here resolves it.** Addressing a verdict is a change to the routing
-the contract states, and 62's asker is the identity it would be addressed by — so
-the two entries are one decision, not two. Recorded rather than repaired.
+**Why nothing here resolved it then.** Addressing a verdict is a change to the
+routing the contract states, and 62's asker is the identity it would be addressed
+by — so the two entries are one decision, not two. Recorded rather than repaired.
+
+**Ruling: a reply is addressed.** The planner ruled it for
+`onepipeline-adopt-bus-channel`, and `docs/contract.md`'s channel paragraph states
+it, `--correlation` included. The channel is `onemessagebus`'s now, and a question
+`channel serve` raises is asked through the bus, which stamps it with a
+correlation; a verdict is bound to one question and stamped with that question's
+correlation on `replies.jsonl`. `reply --correlation <c>` binds to the question
+`c` names, and refuses, naming it, a correlation no pending question holds. A
+verdict naming none is bound, in order, to the question whose
+`ask-manager-token:` its `message` echoes, to the question the pending slot holds,
+to the oldest outstanding question a listener is waiting on, and failing that to
+the oldest outstanding at all; with no question outstanding it is queued with no
+correlation, as it always was. A listener reads its own question's answer, a
+ruling on any other question its asker raised, and a ruling bound to no question —
+never a ruling on another asker's question.
+`channel::a_verdict_reaches_the_question_it_answers_rather_than_whichever_listener_polls`
+drives the case above end to end: the scoring session is told its own wait
+elapsed, and the blocked agent's next listener reads the ruling without a second
+copy being sent.
 
 ## 64. `reply` answers a JSON object the contract never states — OPEN
 

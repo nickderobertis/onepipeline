@@ -3670,6 +3670,7 @@ mod tests {
                     abandoned: false,
                     asker: None,
                     workstream: None,
+                    correlation: None,
                 })
                 .expect("the surface queues");
         };
@@ -3826,6 +3827,7 @@ mod tests {
                 abandoned: false,
                 asker: None,
                 workstream: Some("build".into()),
+                correlation: None,
             })
             .expect("the surface queues");
 

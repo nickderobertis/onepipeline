@@ -1082,6 +1082,7 @@ impl Watch {
             abandoned: false,
             asker: None,
             workstream: Some(node.to_owned()),
+            correlation: None,
         }
     }
 
