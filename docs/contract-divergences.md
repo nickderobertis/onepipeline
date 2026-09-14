@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34 and 73** have since been **ruled on by the planner who owns
+Entries **1–9, 23–32, 34 and 74** have since been **ruled on by the planner who owns
 the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–72 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40 and 46–73 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, and 46 to 72 — are for the planner who owns the contract, and
+rest — 36 to 40, and 46 to 73 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -942,7 +942,7 @@ the two verbs disagree about what "the event view" means.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
 *describes* a duplication rather than introducing one: it records how the filter grammar
-was held while each producer kept its own copy, and entry 73 records the ruling that ended
+was held while each producer kept its own copy, and entry 74 records the ruling that ended
 that — the filter and the envelope are `onemessagebus-agent`'s, re-exported, with
 `onemessagebus`'s `docs/contract.md` the one source and `tests/contract.rs` driving this
 repository's marked copy through the re-exported types. What remains here is history, and
@@ -961,7 +961,7 @@ fixes as authoritative for all three producers; the gate is `tests/contract.rs`,
 which drives that text's own example through `src/filter.rs`'s types and fails
 this repository's `just check` the moment its copy stops matching. `oneagentgraph`
 and `onevcs` each carry the same text and the same gate. That this grammar had no
-shared crate is superseded by entry 73: the filter and the envelope are now
+shared crate is superseded by entry 74: the filter and the envelope are now
 `onemessagebus-agent`'s, re-exported by all three producers.
 
 What this entry is about is narrower. Three corners of that text do not settle a question
@@ -5374,7 +5374,127 @@ document at all.
 }
 ```
 
-## 73. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
+## 73. A write-back copies every node of the plan to change one — OPEN
+
+**Proposal (for the planner who owns the contract): make the settlement write-back
+**incremental**. An attempt carries only the nodes whose projection changed since the last
+attempt that landed, named to the store's `project copy --member`, and carries the whole
+project only where it has to — the first projection of a driver, the attempt after one that
+failed, and a store that offers no member copy. Every attempt is appended to one record in
+the run's directory, so what a projection carried, how it ended and what it spent is read
+off the run.** It changes no sentence of the contract's *Live edits write through*: "Every
+accepted graph edit updates the onetaskgraph project's tasks" stays true of every task the
+edit changed, and the proposal is that a task the edit did not change is not one it writes.
+
+What the worker did: every change the reconcile loop folds hands it a new snapshot, so a node
+going ready, running and done fires three projections. Each ran `project show`, walked the
+project's `task list`, rebuilt the whole shadow project and ran `project copy` over **every**
+node. Measured on 2026-09-13 against the live `plans` board, one attempt for a ten-item
+project cost about 94 GraphQL points — `project show` 3, `task list` 5, `project copy` 86 —
+about nine per item whatever changed. A run's board cost grew as roughly 3 × N × 9N points,
+so a twenty-node plan spent about 10,000 against an hourly allowance of 5,000, and a person's
+`just plans`, `just check-plan` and `just copy-plan`, and a second run on the same token, were
+left nothing. Nothing in the run said so: the only account of the spend was an agent's guess.
+
+What this crate does now is the block below, and the block is the source.
+
+**Which nodes are carried.** A node changed when its shadow task, as the worker renders it from
+the snapshot alone, differs from the one the last successful projection rendered, or when that
+success did not hold the node. Project-level metadata is carried by the project item, which
+every copy includes, so a projection whose only change is project-level names no task and
+copies with `--no-tasks`. An attempt is whole, as before, for one of the three reasons the block
+names, taken in its precedence order.
+
+**What a member projection reads.** The project item, and each named member the run holds a
+destination item for, one `task show` apiece — its labels are the destination's own, and a
+person may have changed them. It never runs `task list`, and it never reads an unnamed member.
+What a member copy needs of an unnamed member — the destination item its edges resolve to — is
+carried on the run from the last whole projection's page of tasks, updated by what each copy
+since reported creating. A `task show` failure is classified by entry 72's rule, like the three
+commands that entry names. Whatever a member copy does not name, it neither reads at the
+destination nor rewrites, so the module's ownership rule is unchanged and a person's edit on an
+unnamed item stands until that node next changes. Entry 71's deadline and the `Unprojected`
+surface's `items` both count the nodes the copy carries — every node, for a whole copy.
+
+**Whether the store offers a member copy** is decided once per run, before its first projection,
+and never by attempting a copy: against a store without `--member` that is a failed attempt,
+and the attempt after a failure is whole, which is the cost this removes. It is decided off the
+`--version` the launch check every driver already asks — so deciding spends no store command —
+against the first release offering it, and written to the run's directory. A later projection,
+and every driver an `adopt` starts, reads that record rather than deciding again.
+
+**The record** is one JSON object per attempt, landed or failed, appended to
+`<run dir>/writeback-projections.jsonl` and never rewritten; `example` is one line of it. Its
+type is `views::ProjectionRecord`, re-exported beside the other stored shapes a reader names, and
+its flat line admits no contradiction: a member copy names no `whole_because`, a failed attempt
+carries no `actions` or `spent`, and `class` and `kind` come together. `spent` is the copy
+report's own object, verbatim, and is `null` wherever the report carried none — which is every
+copy into a destination that meters nothing, a local Markdown one included.
+
+`tests/contract.rs` holds this block against the published constants and the record type: the
+two paths, the release, the member reads, every field and its admitted values, and the example
+line read and written back byte-equal. `writeback::tests` holds the precedence and the rule for
+a changed node against the worker's own decision. `tests/e2e/writeback_projections.rs` drives the
+compiled binary against the real `onetaskgraph` at 0.2.30, through the store double recording
+every command it is handed and delegating it to that store: a run's first projection whole and
+`first`; a later transition of one node carried alone, its destination item projected, an unnamed
+node's item left byte for byte as a person edited it, and no `task list` and no read of the
+unnamed member in the double's log; a projection after a failed attempt whole and
+`after-failure`; a store reporting an older version projected whole and `store-lacks-members`
+with no `--member` copy attempted, decided once and kept by an adopted driver; and a copy report
+rewritten to carry known `spent` and action counts, recorded exactly.
+
+```json
+{
+  "projection": {
+    "record": "<run dir>/writeback-projections.jsonl",
+    "one_line_per": "attempt",
+    "rewritten": false,
+    "fields": {
+      "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
+      "project": {"type": "string", "is": "the qualified project id"},
+      "scope": {"type": "string", "values": ["whole", "members"]},
+      "whole_because": {"type": ["string", "null"], "values": ["first", "after-failure", "store-lacks-members"], "null_when": "scope is members"},
+      "items": {"type": "array", "of": "string", "is": "the plan node ids the copy carried"},
+      "outcome": {"type": "string", "values": ["projected", "failed"]},
+      "class": {"type": ["string", "null"], "values": ["refused", "transient"], "null_when": "the attempt did not fail with the store's failure document"},
+      "kind": {"type": ["string", "null"], "null_when": "class is null"},
+      "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
+      "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
+      "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned"], "null_when": "no copy report was read"},
+      "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"}
+    },
+    "whole_because": {
+      "store-lacks-members": "the store reported a version older than detection.members_from",
+      "after-failure": "the attempt before this one failed",
+      "first": "nothing has landed in this driver yet, including a driver an adopt started"
+    },
+    "whole_because_precedence": ["store-lacks-members", "after-failure", "first"],
+    "example": {"at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+                "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
+                "outcome": "projected", "class": null, "kind": null, "reason": null,
+                "duration_ms": 1830,
+                "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}}
+  },
+  "detection": {
+    "command": "onetaskgraph --version",
+    "asked_by": "the launch check every driver already runs",
+    "members_from": "0.2.30",
+    "decided": "once per run, before its first projection",
+    "never_by": "attempting a copy",
+    "record": "<run dir>/writeback-store.json",
+    "record_example": {"version": "0.2.30", "members": true}
+  },
+  "member_projection": {
+    "reads": ["project-show", "task-show"],
+    "task_show_per": "named member the run holds a destination item for",
+    "never_reads": ["task-list"],
+    "copy_flag": "--member",
+    "naming_none": "--no-tasks"
+  }
+
+## 74. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
 
 **Ruling: the envelope and filter types are `onemessagebus-agent`'s, re-exported
 here at the paths this crate always published them at, with `onemessagebus`'s own

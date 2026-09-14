@@ -905,9 +905,9 @@ fn converge(
     // after `start` already resolved the same executable requires replacing or deleting the
     // real sibling between two adjacent calls; that is a host sabotage fixture, not a user
     // journey, and the compatibility behavior here is intentionally the absence of a writer.
-    let writeback = crate::taskgraph::Store::resolve()
-        .ok()
-        .and_then(|store| crate::writeback::Writeback::start(store.binary(), paths, launch));
+    let writeback = crate::taskgraph::Store::resolve().ok().and_then(|store| {
+        crate::writeback::Writeback::start(store.binary(), store.reported_version(), paths, launch)
+    });
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let channel = ChannelState::new(paths);
     let rules = executor_rules()?;
