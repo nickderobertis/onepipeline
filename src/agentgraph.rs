@@ -3491,10 +3491,8 @@ mod tests {
         adopt_labels(&mut off_the_wire.labels);
         let in_process = relayed(produced).expect("the library path relays it");
 
-        let root = std::env::temp_dir().join(format!(
-            "onepipeline-relayed-bytes-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-relayed-bytes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = crate::ledger::RunPaths::under(&root, "relayed-bytes");
         paths.create().expect("a scratch run root");
