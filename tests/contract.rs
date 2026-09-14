@@ -637,6 +637,122 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
     assert!(record.to_string().contains("exclude"), "{record}");
 }
 
+/// Every property a JSON Schema document declares for its object, following the
+/// `$ref`s and `allOf`s a flattened field is composed through.
+fn property_names(node: &Value, root: &Value) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if let Some(properties) = node.get("properties").and_then(Value::as_object) {
+        names.extend(properties.keys().cloned());
+    }
+    if let Some(target) = node
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| reference.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        names.extend(property_names(target, root));
+    }
+    if let Some(parts) = node.get("allOf").and_then(Value::as_array) {
+        for part in parts {
+            names.extend(property_names(part, root));
+        }
+    }
+    names
+}
+
+/// Every `` `backticked` `` token in one passage of the contract.
+fn backticked_in(passage: &str) -> BTreeSet<String> {
+    passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The contract's envelope and grammar paragraphs are a **marked copy** of
+/// `onemessagebus`'s contract, so they are reconciled against the released bus
+/// itself, not only against fixtures written here: a bus release that adds a
+/// matcher field or a source, or a lock that moves to a release the copy was not
+/// decided against, fails this gate instead of leaving the copy stale in silence.
+#[test]
+fn the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus() {
+    // The release the copy was decided against is the one this build links.
+    let decided = CONTRACT
+        .split_once("decided against `onemessagebus` ")
+        .and_then(|(_, rest)| {
+            rest.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .next()
+        })
+        .map(|version| version.trim_end_matches('.'))
+        .filter(|version| !version.is_empty())
+        .expect("the contract names the bus release its marked copy was decided against");
+    let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).expect("the lock ships");
+    for bus in ["onemessagebus", "onemessagebus-agent"] {
+        let resolved: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|package| {
+                package
+                    .lines()
+                    .any(|line| line == format!("name = \"{bus}\""))
+            })
+            .filter_map(|package| {
+                package
+                    .lines()
+                    .find_map(|line| line.strip_prefix("version = \""))
+                    .map(|version| version.trim_end_matches('"'))
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![decided],
+            "docs/contract.md's copy was decided against `onemessagebus` {decided}, and the lock \
+             resolves {bus} at {resolved:?}: re-decide the copy against the linked release"
+        );
+    }
+
+    // The matcher fields the grammar paragraph names are exactly the fields the
+    // bus's own matcher document declares.
+    let grammar = CONTRACT
+        .lines()
+        .find(|line| line.starts_with("**Filtering is owned by the stream's source.**"))
+        .expect("the contract states the filter grammar");
+    let fields = grammar
+        .split_once("A matcher's fields are all optional")
+        .and_then(|(_, rest)| rest.split_once("An absent or empty"))
+        .map(|(clause, _)| clause)
+        .expect("the grammar paragraph lists the matcher's fields");
+    let named: BTreeSet<String> = backticked_in(fields)
+        .into_iter()
+        .filter(|token| token.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        // The clause names `onevcs` as the producer that stamps `phase`; it is
+        // the one lowercase token in it that is not a field.
+        .filter(|token| token != "onevcs")
+        .collect();
+    let document = serde_json::to_value(schemars::schema_for!(Matcher))
+        .expect("the bus's matcher document serializes");
+    assert_eq!(
+        named,
+        property_names(&document, &document),
+        "the grammar paragraph's matcher fields are not the ones the linked bus declares"
+    );
+
+    // And the sources the merged-stream paragraph names are the bus's own set.
+    let sources = CONTRACT
+        .split_once("interleaving the three sources ")
+        .and_then(|(_, rest)| rest.split_once('.'))
+        .map(|(list, _)| backticked_in(list))
+        .expect("the contract names the merged stream's sources");
+    assert_eq!(
+        sources,
+        Source::every()
+            .iter()
+            .map(|source| source.as_str().to_owned())
+            .collect::<BTreeSet<_>>(),
+        "the contract's sources are not the ones the linked bus declares"
+    );
+}
+
 /// `exclude` wins, an absent `include` admits everything, and a glob is `*`.
 #[test]
 fn the_grammar_matches_the_way_the_contract_says_it_does() {

@@ -5502,6 +5502,13 @@ rewritten to carry known `spent` and action counts, recorded exactly.
 
 ## 74. The envelope and the filter are the bus's types, and three corners of them are not what this crate did — RESOLVED
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the
+dated record of a ruling, decided against `onemessagebus` 0.4.0, and not a live contract:
+it says what moved and why, which is a restatement by nature. The live shape it describes
+has its gate in `tests/contract.rs` — the re-exported types are the bus's own by type
+identity, and `the_marked_copy_of_the_bus_contract_is_reconciled_against_the_released_bus`
+holds `docs/contract.md`'s marked copy to the release `Cargo.lock` resolves, its matcher
+fields to the bus's own `Matcher` document, and its sources to the bus's `Source` set. -->
 **Ruling: the envelope and filter types are `onemessagebus-agent`'s, re-exported
 here at the paths this crate always published them at, with `onemessagebus`'s own
 `docs/contract.md` the one source of the text `docs/contract.md` keeps as a marked
@@ -5595,6 +5602,7 @@ it as a regression:
   stays this crate's own newtype, as it stays `onevcs`'s; and
   `Envelope::written_at_a_known_version` is no longer a public method, because an
   inherent method cannot be declared on another crate's type.
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
 
 ```json
 {
