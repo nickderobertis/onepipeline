@@ -810,12 +810,6 @@ fn project(
             exit(&output.status),
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        // llmlint: ignore[changed_behavior_has_e2e] the copy is classed by the same
-        // `Failed::answered` the project read is, and the worker's branch on the result does
-        // not know which command failed — so `store::a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_graph_changes`
-        // drives this decision end to end. A copy the real store refuses on its own needs its
-        // destination to change between the two reads before it, which is a race rather than a
-        // journey; the refused-and-unclassified copy is `a_project_copy_refusal_is_reported_retried_and_recovers`.
         Err(Failed::answered(&output, reason))
     }
 }
@@ -920,11 +914,6 @@ fn destination_origins(
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
-            // llmlint: ignore[changed_behavior_has_e2e] classed by the same `Failed::answered`
-            // the project read's refusal journey drives end to end, into a worker branch that
-            // does not know which command failed. The page is read straight after `project show`
-            // succeeded against the same source, so a store refusing it alone is a race between
-            // two reads rather than an input either CLI exposes.
             return Err(Failed::answered(&output, reason));
         }
         // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the
@@ -1062,12 +1051,6 @@ fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> 
 /// rather than stopping it.
 fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
     match code? {
-        // llmlint: ignore[changed_behavior_has_e2e] the refused half of this arm is driven end to
-        // end against the real store. A document classed `transient` is `rate-limited` or
-        // `unavailable`, which only a hosted source answers and no offline store can be made to;
-        // and what it leads to is the retry schedule an unclassified failure already takes,
-        // which the schedule journeys in `tests/e2e/store.rs` drive. The unit test holds the
-        // class it reads against entry 72.
         WRITEBACK_FAILURE_EXIT => {
             let document: FailureDocument = serde_json::from_slice(stdout).ok()?;
             Some(Classified {
@@ -1075,13 +1058,6 @@ fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
                 kind: document.failure.kind,
             })
         }
-        // llmlint: ignore[changed_behavior_has_e2e] driven end to end already: a `local-md` root
-        // that has gone is answered by the real store as exit 4 with every entry `refused`, and
-        // `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`
-        // asserts the `class: refused, kind: config` only this arm produces, while the four
-        // store-outage journeys assert the timer stays off. The mixed case needs two sources, one
-        // unreachable and one refusing, which no offline store can be made to answer; the unit
-        // test holds it against entry 72's rule.
         WRITEBACK_PARTIAL_EXIT => {
             let answer: PartialAnswer = serde_json::from_slice(stdout).ok()?;
             if answer.errors.is_empty() {
