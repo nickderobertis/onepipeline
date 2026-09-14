@@ -48,7 +48,9 @@ if not exist "!here!\stdin" (call :broke "cannot write !here!\stdin" & exit /b 7
 )>"!here!\env" || (call :broke "cannot write !here!\env" & exit /b 70)
 
 for /l %%i in (1,1,25) do echo said line %%i
-echo said on stderr 1>&2
+rem Parenthesised, because cmd's `echo` keeps the space before a trailing
+rem redirection as part of what it says, and the journeys read this line exactly.
+(echo said on stderr)1>&2
 type nul >"!here!\started" || (call :broke "cannot write !here!\started" & exit /b 70)
 
 if not exist "%record%\%run%.hold" goto finish

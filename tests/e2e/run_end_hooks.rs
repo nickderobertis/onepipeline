@@ -172,7 +172,9 @@ fn not_done(result: &Value) -> Value {
 fn output_lines(results: &str) -> Vec<String> {
     results
         .lines()
-        .filter_map(|line| line.trim().strip_prefix("output: "))
+        // Only the view's own indent is stripped: what follows `output: ` is the
+        // log's line as the hook wrote it, trailing whitespace included.
+        .filter_map(|line| line.trim_start().strip_prefix("output: "))
         .map(str::to_string)
         .collect()
 }
