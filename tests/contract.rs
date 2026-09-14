@@ -21,8 +21,10 @@ use onepipeline::channel::{
 };
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_COMMAND_FLOOR_SECONDS,
-    WRITEBACK_ITEM_BUDGET_ENV,
+    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_CLASS_MEMBER, WRITEBACK_FAILURE_EXIT,
+    WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_PARTIAL_CLASS_MEMBER, WRITEBACK_PARTIAL_EXIT,
+    WRITEBACK_REFUSED_CLASS,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -2574,6 +2576,66 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
             "the README no longer states that the write-back budget is {promise}"
         );
     }
+}
+
+/// The write-back's refusal rule this build carries **beyond** the contract.
+///
+/// The contract says write-back is "retried off the reconcile loop" and nothing
+/// narrower, so entry 72 is the only place the narrowing is written down — and a
+/// divergence nothing gates quietly stops being true. The entry's own block is the
+/// source: the member the worker branches on, the value that stops its timer, the
+/// commands whose failures it reads and the partial-answer rule are each the
+/// constant the code carries. The contract's own sentence is held too, because it
+/// is approved as written and this entry is a proposal against it rather than an
+/// edit of it.
+#[test]
+fn the_writeback_refusal_rule_is_what_the_divergence_record_names() {
+    let block = divergence_block("72.");
+    let rule = &block["failure"];
+    assert_eq!(
+        rule["member"].as_str(),
+        Some(WRITEBACK_FAILURE_CLASS_MEMBER),
+        "entry 72 names a different member than the worker branches on"
+    );
+    assert_eq!(
+        rule["stops_the_timer"].as_str(),
+        Some(WRITEBACK_REFUSED_CLASS),
+        "entry 72 names a different class than the one that stops the retry timer"
+    );
+    assert_eq!(
+        rule["failure_document_exit"].as_i64(),
+        Some(i64::from(WRITEBACK_FAILURE_EXIT)),
+        "entry 72 reads the failure document under a different exit than the worker does"
+    );
+    assert_eq!(
+        rule["commands"],
+        json!(WRITEBACK_CLASSIFIED_COMMANDS),
+        "entry 72 names different commands than the worker reads a class off"
+    );
+
+    let partial = &rule["partial_answer"];
+    assert_eq!(
+        partial["exit"].as_i64(),
+        Some(i64::from(WRITEBACK_PARTIAL_EXIT)),
+        "entry 72 reads a partial answer under a different exit than the worker does"
+    );
+    assert_eq!(
+        partial["member"].as_str(),
+        Some(WRITEBACK_PARTIAL_CLASS_MEMBER),
+        "entry 72 names a different partial-answer member than the worker reads"
+    );
+    assert_eq!(
+        partial["refused_when"].as_str(),
+        Some("every"),
+        "entry 72 states a partial answer is refused on something other than every entry"
+    );
+
+    let contract =
+        std::fs::read_to_string(repo_root().join("docs/contract.md")).expect("the contract reads");
+    assert!(
+        contract.contains("Write-back is best effort and retried off the reconcile loop"),
+        "the sentence entry 72 proposes to narrow is no longer the contract's"
+    );
 }
 
 /// The criterion check this build carries **beyond** the contract is exactly what

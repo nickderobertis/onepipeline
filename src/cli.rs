@@ -46,6 +46,33 @@ pub const DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS: NonZeroU64 = NonZeroU64::new(10
 /// the projection stays off the reconcile loop while the child runs.
 pub const WRITEBACK_COMMAND_FLOOR_SECONDS: u64 = 60;
 
+/// The store commands one write-back attempt runs, and whose failures it reads the store's
+/// own class off: the project, each page of its tasks, and the copy.
+///
+/// Any one of them answering [`WRITEBACK_REFUSED_CLASS`] makes the whole attempt refused,
+/// because a projection needs all three.
+pub const WRITEBACK_CLASSIFIED_COMMANDS: [&str; 3] = ["project-show", "task-list", "project-copy"];
+
+/// The member of a store's failure document the write-back branches on, as a path.
+pub const WRITEBACK_FAILURE_CLASS_MEMBER: &str = "failure.class";
+
+/// The member of each entry of a store's partial answer the write-back reads, as a path.
+pub const WRITEBACK_PARTIAL_CLASS_MEMBER: &str = "errors[].class";
+
+/// The class that stops the write-back's retry timer: a failure asking again cannot change.
+///
+/// A projection refused under it is reported once and attempted again only when a snapshot
+/// different from the refused one is published. Every other failure — another class, or no
+/// class at all — keeps the growing retry schedule.
+pub const WRITEBACK_REFUSED_CLASS: &str = "refused";
+
+/// The exit status a store command writes its failure document under.
+pub const WRITEBACK_FAILURE_EXIT: i32 = 1;
+
+/// The exit status a store command writes a partial answer under. Refused only where every
+/// entry of its `errors` carries [`WRITEBACK_REFUSED_CLASS`].
+pub const WRITEBACK_PARTIAL_EXIT: i32 = 4;
+
 /// The environment variable naming the write-back's per-item budget, in seconds.
 ///
 /// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`

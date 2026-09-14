@@ -2,7 +2,9 @@
 //!
 //! The reconcile loop remains the only author of graph state: it hands immutable folded
 //! snapshots to this worker, and the worker only projects them. Store reads never feed back
-//! into scheduling, and a failed or slow write is reported and retried off the engine thread.
+//! into scheduling, and a failed or slow write is reported and retried off the engine thread
+//! — unless the store *refused* it, which no retry changes: that is reported once and
+//! attempted again only when the run's graph does. See [`FailureClass`].
 //!
 //! # Ownership: the write-back owns exactly what the plan document declares
 //!
@@ -61,7 +63,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::cli::{DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_COMMAND_FLOOR_SECONDS};
+use crate::cli::{
+    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_EXIT, WRITEBACK_PARTIAL_EXIT,
+    WRITEBACK_REFUSED_CLASS,
+};
 use crate::edits::Operation;
 use crate::event::Source;
 use crate::graph::{Landing, NodeStatus};
@@ -102,6 +108,11 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
+// The three store commands one attempt runs, by the name each one's capture files and
+// refusals carry. The store's own class is read off a failure of any of them.
+const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
+const TASK_LIST: &str = WRITEBACK_CLASSIFIED_COMMANDS[1];
+const PROJECT_COPY: &str = WRITEBACK_CLASSIFIED_COMMANDS[2];
 
 /// How long one store command may run, and the account a refusal gives of the figure.
 ///
@@ -231,6 +242,94 @@ pub(crate) struct Unprojected {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// What the sibling, or this worker, said went wrong.
     pub reason: String,
+    /// What the store classed the failure as, where it wrote a class this worker reads.
+    pub classified: Option<Classified>,
+}
+
+/// Whether asking the store again, unchanged, could change its answer — the store's own
+/// word, and the one thing this worker branches on.
+///
+/// `refused` is a failure no retry can change: a projection the store refused never reaches
+/// the board however often it is asked, and each attempt against a hosted destination spends
+/// its allowance for nothing. `transient` is everything a wait can change. The mapping from a
+/// failure to its class is the store's and is never restated here, and the message beside it
+/// is never read to decide. A class this build has never heard of does not parse, which
+/// leaves the failure unclassified and so on the retry schedule rather than off it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FailureClass {
+    Refused,
+    Transient,
+}
+
+impl FailureClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Refused => WRITEBACK_REFUSED_CLASS,
+            Self::Transient => "transient",
+        }
+    }
+}
+
+/// What the store said about one failed attempt: its class, and the kind of failure it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Classified {
+    pub class: FailureClass,
+    // llmlint: ignore[invalid_states_unrepresentable] the store's `kind` is open by its own
+    // contract — a source error's kind is copied through verbatim, and a plugin a release
+    // newer than this build speaks kinds this one has never seen — and it is only ever
+    // named to a reader. `class` is the closed half this worker acts on.
+    pub kind: String,
+}
+
+impl Classified {
+    /// The class and kind, as the line and the surface each name them.
+    pub(crate) fn said(&self) -> String {
+        format!("class: {}, kind: {}", self.class.as_str(), self.kind)
+    }
+
+    fn refused(&self) -> bool {
+        self.class == FailureClass::Refused
+    }
+}
+
+/// One projection attempt that did not land.
+struct Failed {
+    reason: String,
+    classified: Option<Classified>,
+}
+
+impl Failed {
+    /// A store command that exited unsuccessfully, classed by what it wrote on stdout.
+    fn answered(output: &Output, reason: String) -> Self {
+        Self {
+            reason,
+            classified: classified(output.status.code(), &output.stdout),
+        }
+    }
+
+    fn refused(&self) -> bool {
+        self.classified.as_ref().is_some_and(Classified::refused)
+    }
+
+    /// The reason, with the store's class and kind beside it where it gave them.
+    fn said(&self) -> String {
+        match &self.classified {
+            Some(classified) => format!("{} ({})", self.reason, classified.said()),
+            None => self.reason.clone(),
+        }
+    }
+}
+
+/// A failure the store wrote nothing about: this worker's own, or a command that never
+/// answered.
+impl From<String> for Failed {
+    fn from(reason: String) -> Self {
+        Self {
+            reason,
+            classified: None,
+        }
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -260,6 +359,11 @@ enum RunPhase {
 struct Pending {
     latest: Option<Snapshot>,
     last_success: Option<Snapshot>,
+    /// The snapshot the store last refused, until the worker takes another.
+    ///
+    /// Remembered so that publishing it again attempts nothing: the store would refuse the
+    /// same projection the same way, and only a graph that changed is worth asking about.
+    refused: Option<Snapshot>,
     worker: WorkerState,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
@@ -276,7 +380,8 @@ impl Pending {
         }
         if self.worker == WorkerState::Idle
             && self.latest.is_none()
-            && self.last_success.as_ref() == Some(&snapshot)
+            && (self.last_success.as_ref() == Some(&snapshot)
+                || self.refused.as_ref() == Some(&snapshot))
         {
             return false;
         }
@@ -470,9 +575,11 @@ fn worker(
     per_item: NonZeroU64,
     pending: Arc<(Mutex<Pending>, Condvar)>,
 ) {
-    // The consecutive failures of the streak in progress, and the whole of what this worker
-    // remembers about one: zero is a projection that is landing.
+    // The consecutive failures of the retried streak in progress, and the whole of what this
+    // worker remembers about one: zero is a projection that is landing, or one refused.
     let mut failures: u32 = 0;
+    // Whether the last attempt was refused, which a projection that then lands recovers from.
+    let mut refused = false;
     loop {
         let snapshot = {
             let (lock, ready) = &*pending;
@@ -490,6 +597,7 @@ fn worker(
                 return;
             }
             state.worker = WorkerState::Working;
+            state.refused = None;
             state
                 .latest
                 .take()
@@ -497,13 +605,14 @@ fn worker(
         };
         match project(&binary, &launch_dir, &run_dir, per_item, &snapshot) {
             Ok(()) => {
-                if failures > 0 {
+                if failures > 0 || refused {
                     eprintln!(
                         "onetaskgraph write-back recovered for '{}'",
                         snapshot.project
                     );
                 }
                 failures = 0;
+                refused = false;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
@@ -512,17 +621,51 @@ fn worker(
                     }
                 }
             }
-            Err(error) => {
+            Err(failed) if failed.refused() => {
+                // Reported on every refused attempt, which is at most once per graph the run
+                // publishes: nothing here asks again on a timer, so there is no streak of
+                // retries for a line per attempt to bury. The line says so, because whether
+                // to expect another attempt is an operator's next question.
+                eprintln!(
+                    "onetaskgraph write-back failed for '{}': {}; the store refused it, so it \
+                     is not attempted again on a timer — the projection will be attempted again \
+                     when the run's graph next changes",
+                    snapshot.project,
+                    failed.said()
+                );
+                failures = 0;
+                refused = true;
+                let (lock, _) = &*pending;
+                if let Ok(mut state) = lock.lock() {
+                    state.unprojected.push(Unprojected {
+                        project: snapshot.project.clone(),
+                        items: snapshot.nodes.keys().cloned().collect(),
+                        reason: failed.reason,
+                        classified: failed.classified,
+                    });
+                    // The same graph published while it was being refused is the same refusal.
+                    if state.latest.as_ref() == Some(&snapshot) {
+                        state.latest = None;
+                    }
+                    state.refused = Some(snapshot);
+                    if state.phase == RunPhase::Stopping && state.latest.is_none() {
+                        return;
+                    }
+                }
+            }
+            Err(failed) => {
                 let first = failures == 0;
                 failures = failures.saturating_add(1);
+                refused = false;
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to
                     // expect another attempt in a moment or in a minute.
                     eprintln!(
-                        "onetaskgraph write-back failed for '{}': {error}; retrying, spacing \
+                        "onetaskgraph write-back failed for '{}': {}; retrying, spacing \
                          further attempts out to {} seconds apart while it keeps failing",
                         snapshot.project,
+                        failed.said(),
                         RETRY_CEILING.as_secs()
                     );
                 }
@@ -542,7 +685,8 @@ fn worker(
                     state.unprojected.push(Unprojected {
                         project: snapshot.project.clone(),
                         items: snapshot.nodes.keys().cloned().collect(),
-                        reason: error,
+                        reason: failed.reason,
+                        classified: failed.classified,
                     });
                 }
                 if state.phase == RunPhase::Stopping {
@@ -610,7 +754,7 @@ fn project(
     run_dir: &Path,
     per_item: NonZeroU64,
     snapshot: &Snapshot,
-) -> Result<(), String> {
+) -> Result<(), Failed> {
     let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
     let origins = destination_origins(binary, launch_dir, run_dir, snapshot)?;
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
@@ -638,15 +782,16 @@ fn project(
         per_item,
         items: snapshot.nodes.len(),
     };
-    let output = bounded_output(binary, launch_dir, run_dir, "project-copy", &args, deadline)?;
+    let output = bounded_output(binary, launch_dir, run_dir, PROJECT_COPY, &args, deadline)?;
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!(
+        let reason = format!(
             "copy exited {}: {}",
             exit(&output.status),
             String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        );
+        Err(Failed::answered(&output, reason))
     }
 }
 
@@ -655,22 +800,23 @@ fn destination_project(
     launch_dir: &Path,
     run_dir: &Path,
     snapshot: &Snapshot,
-) -> Result<DestinationProjectItem, String> {
+) -> Result<DestinationProjectItem, Failed> {
     let args = ["project", "show", snapshot.project.as_str(), "--json"];
     let output = bounded_output(
         binary,
         launch_dir,
         run_dir,
-        "project-show",
+        PROJECT_SHOW,
         &args,
         Deadline::Floor,
     )?;
     if !output.status.success() {
-        return Err(format!(
+        let reason = format!(
             "project show exited {}: {}",
             exit(&output.status),
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        );
+        return Err(Failed::answered(&output, reason));
     }
     // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the compiled
     // sibling's machine contract. Producing malformed JSON, partial results, no project,
@@ -679,7 +825,7 @@ fn destination_project(
     // total-replacement copy, and preservation of present and absent content end to end.
     let response: ProjectPage = answered(&output.stdout)?;
     if !response.errors.is_empty() {
-        return Err("project show returned partial results".to_owned());
+        return Err("project show returned partial results".to_owned().into());
     }
     let mut items = response.items.into_iter();
     let project = items
@@ -689,7 +835,8 @@ fn destination_project(
         return Err(format!(
             "project show returned the wrong project for '{}'",
             snapshot.project
-        ));
+        )
+        .into());
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(project.item)
@@ -711,7 +858,7 @@ fn destination_origins(
     launch_dir: &Path,
     run_dir: &Path,
     snapshot: &Snapshot,
-) -> Result<BTreeMap<String, Origin>, String> {
+) -> Result<BTreeMap<String, Origin>, Failed> {
     let mut origins = BTreeMap::new();
     let mut page: Option<String> = None;
     let mut cursors = BTreeSet::new();
@@ -737,17 +884,18 @@ fn destination_origins(
             binary,
             launch_dir,
             run_dir,
-            "task-list",
+            TASK_LIST,
             &args,
             Deadline::Floor,
         )?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         if !output.status.success() {
-            return Err(format!(
+            let reason = format!(
                 "task list exited {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            );
+            return Err(Failed::answered(&output, reason));
         }
         // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the
         // compiled sibling's machine contract. Producing malformed JSON, partial errors,
@@ -756,7 +904,7 @@ fn destination_origins(
         // success and outage/recovery are driven end to end instead.
         let response: TaskPage = answered(&output.stdout)?;
         if !response.errors.is_empty() {
-            return Err("task list returned partial results".to_owned());
+            return Err("task list returned partial results".to_owned().into());
         }
         for task in response.items {
             let node = task
@@ -777,15 +925,17 @@ fn destination_origins(
                 )
                 .is_some()
             {
-                return Err(format!("project has more than one task for node '{node}'"));
+                return Err(format!("project has more than one task for node '{node}'").into());
             }
         }
         let Some(next) = response.next else { break };
         if next.is_empty() {
-            return Err("task list returned an empty next-page cursor".to_owned());
+            return Err("task list returned an empty next-page cursor"
+                .to_owned()
+                .into());
         }
         if !cursors.insert(next.clone()) {
-            return Err("task list repeated a next-page cursor".to_owned());
+            return Err("task list repeated a next-page cursor".to_owned().into());
         }
         page = Some(next);
     }
@@ -871,6 +1021,53 @@ fn answered<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, String> 
     Ok(response)
 }
 
+/// What the store classed one failed command as, read off its own answer and nothing else.
+///
+/// Exit [`WRITEBACK_FAILURE_EXIT`] carries one failure document. Exit
+/// [`WRITEBACK_PARTIAL_EXIT`] carries a partial answer each of whose `errors` names a class,
+/// and that answer is refused only where **every** entry is: a source that could not be reached
+/// beside one that refused could still answer next time. Anything else is `None`, and so is an
+/// answer that does not parse — a store release that predates the document, a command killed
+/// at its deadline, and a class this build has never heard of all keep the retry schedule
+/// rather than stopping it.
+fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
+    match code? {
+        WRITEBACK_FAILURE_EXIT => {
+            let document: FailureDocument = serde_json::from_slice(stdout).ok()?;
+            Some(Classified {
+                class: document.failure.class,
+                kind: document.failure.kind,
+            })
+        }
+        WRITEBACK_PARTIAL_EXIT => {
+            let answer: PartialAnswer = serde_json::from_slice(stdout).ok()?;
+            if answer.errors.is_empty() {
+                return None;
+            }
+            let class = if answer
+                .errors
+                .iter()
+                .all(|entry| entry.class == FailureClass::Refused)
+            {
+                FailureClass::Refused
+            } else {
+                FailureClass::Transient
+            };
+            let mut kinds: Vec<String> = Vec::new();
+            for entry in answer.errors {
+                if !kinds.contains(&entry.error.kind) {
+                    kinds.push(entry.error.kind);
+                }
+            }
+            Some(Classified {
+                class,
+                kind: kinds.join(", "),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn exit(status: &ExitStatus) -> String {
     status
         .code()
@@ -884,6 +1081,42 @@ fn exit(status: &ExitStatus) -> String {
 // authors and reads back is the opposite case and keeps the deny; this module authors only
 // the shadow project, which nothing reads back through a type. What the projection
 // consumes stays required and typed, and what it never read is no longer enumerated.
+
+/// What a store command writes on stdout when it exits [`WRITEBACK_FAILURE_EXIT`].
+#[derive(Deserialize)]
+struct FailureDocument {
+    failure: StoreFailure,
+}
+
+/// The two members of a store's failure this worker reads. Its `message` is the stderr line
+/// already carried as the reason, and is never read to decide anything.
+#[derive(Deserialize)]
+struct StoreFailure {
+    class: FailureClass,
+    // llmlint: ignore[invalid_states_unrepresentable] open by the store's own contract, for
+    // the reason `Classified::kind` records; only ever named to a reader.
+    kind: String,
+}
+
+/// The half of a partial answer — exit [`WRITEBACK_PARTIAL_EXIT`] — this worker reads.
+#[derive(Deserialize)]
+struct PartialAnswer {
+    errors: Vec<PartialError>,
+}
+
+/// One source's failure in a partial answer, carrying the store's class for it.
+#[derive(Deserialize)]
+struct PartialError {
+    class: FailureClass,
+    error: PartialCause,
+}
+
+#[derive(Deserialize)]
+struct PartialCause {
+    // llmlint: ignore[invalid_states_unrepresentable] a source error's kind, copied through
+    // verbatim by the store and open for the reason `Classified::kind` records.
+    kind: String,
+}
 
 /// One page of the store's answer to `task list`.
 #[derive(Deserialize)]
@@ -1259,9 +1492,10 @@ fn encoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        per_item_budget, projected, write_shadow, Deadline, DestinationLabel,
-        DestinationProjectItem, Landing, Origin, Pending, ProjectedStatus, Snapshot, WorkerState,
-        Writeback, CHANGE_URL_KEY, COMMAND_FLOOR, LANDING_COMMIT_KEY, LANDING_KEY,
+        classified, per_item_budget, projected, write_shadow, Classified, Deadline,
+        DestinationLabel, DestinationProjectItem, FailureClass, Landing, Origin, Pending,
+        ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY, COMMAND_FLOOR,
+        LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -1453,6 +1687,179 @@ mod tests {
         );
     }
 
+    /// The block of one entry of the divergence record, parsed.
+    fn divergence_block(number: &str) -> Value {
+        let record = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with(number))
+            .unwrap_or_else(|| panic!("the record still carries entry {number}"));
+        let block = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .unwrap_or_else(|| panic!("entry {number} carries its json block"));
+        serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block: {e}"))
+    }
+
+    /// A snapshot the store refused is not attempted again when it is published again, and
+    /// any snapshot that differs from it is.
+    ///
+    /// The store would refuse the same projection the same way, so the only thing worth
+    /// asking it about again is a graph that has changed.
+    #[test]
+    fn a_refused_snapshot_published_again_is_not_queued_and_a_different_one_is() {
+        let refused = snapshot(NodeStatus::Failed);
+        let mut pending = Pending {
+            refused: Some(refused.clone()),
+            ..Pending::default()
+        };
+
+        assert!(
+            !pending.queue(refused.clone()),
+            "the snapshot the store refused was queued to be refused again"
+        );
+        assert!(pending.latest.is_none());
+
+        let changed = snapshot(NodeStatus::Done);
+        assert!(
+            pending.queue(changed.clone()),
+            "a changed graph was not queued after a refusal"
+        );
+        assert!(pending.latest.as_ref() == Some(&changed));
+    }
+
+    /// Entry 72's rule is the one the worker classifies by: the member and value it names
+    /// make a failure document refused, the commands it names are the three an attempt runs,
+    /// and a partial answer is refused only where every entry is.
+    ///
+    /// `tests/contract.rs` holds the same block against the published constants; the
+    /// classifier and the type it reads through are private, so this is where the block
+    /// meets what actually decides whether a retry is scheduled.
+    #[test]
+    fn the_divergence_records_refusal_rule_is_the_one_the_worker_classifies_by() {
+        let block = divergence_block("72.");
+        let rule = &block["failure"];
+        assert_eq!(
+            rule["commands"],
+            json!([super::PROJECT_SHOW, super::TASK_LIST, super::PROJECT_COPY]),
+            "entry 72 names other commands than the three an attempt runs"
+        );
+
+        let stops = rule["stops_the_timer"]
+            .as_str()
+            .expect("entry 72 names the class that stops the timer");
+        let (object, member) = rule["member"]
+            .as_str()
+            .and_then(|path| path.split_once('.'))
+            .expect("entry 72 names the member as a path");
+        let document = |class: &str| {
+            let mut failure = Map::new();
+            failure.insert(member.to_owned(), json!(class));
+            failure.insert("kind".to_owned(), json!("stale-origin"));
+            failure.insert("source".to_owned(), Value::Null);
+            failure.insert("message".to_owned(), json!("the store's own words"));
+            failure.insert("retry_after_seconds".to_owned(), Value::Null);
+            let mut document = Map::new();
+            document.insert(object.to_owned(), Value::Object(failure));
+            Value::Object(document).to_string()
+        };
+        let exit = rule["failure_document_exit"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .expect("entry 72 names the exit a failure document is written under");
+        let refused = Some(Classified {
+            class: FailureClass::Refused,
+            kind: "stale-origin".to_owned(),
+        });
+        assert_eq!(
+            classified(Some(exit), document(stops).as_bytes()),
+            refused,
+            "the document entry 72 describes is not one the worker reads as refused"
+        );
+        assert_eq!(
+            classified(Some(exit), document("transient").as_bytes()).map(|c| c.class),
+            Some(FailureClass::Transient)
+        );
+        // Unclassified, so on the schedule: the same document under an exit that does not
+        // carry one, a class nobody has named, words that are not a document at all, and a
+        // command that ended on a signal.
+        assert_eq!(classified(Some(2), document(stops).as_bytes()), None);
+        assert_eq!(classified(Some(exit), document("maybe").as_bytes()), None);
+        assert_eq!(classified(Some(exit), b"no project with that id"), None);
+        assert_eq!(classified(None, document(stops).as_bytes()), None);
+
+        let partial = &rule["partial_answer"];
+        assert_eq!(
+            partial["refused_when"].as_str(),
+            Some("every"),
+            "entry 72 states a partial-answer rule other than the one the worker applies"
+        );
+        let partial_exit = partial["exit"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .expect("entry 72 names the exit a partial answer is written under");
+        let (list, member) = partial["member"]
+            .as_str()
+            .and_then(|path| path.split_once("[]."))
+            .expect("entry 72 names the partial member as a path");
+        let answer = |classes: &[Option<&str>]| {
+            let entries: Vec<Value> = classes
+                .iter()
+                .enumerate()
+                .map(|(n, class)| {
+                    let mut entry = Map::new();
+                    entry.insert("source".to_owned(), json!(format!("source{n}")));
+                    entry.insert(
+                        "error".to_owned(),
+                        json!({"kind": if n == 0 { "config" } else { "unavailable" },
+                               "message": "the store's own words"}),
+                    );
+                    if let Some(class) = class {
+                        entry.insert(member.to_owned(), json!(class));
+                    }
+                    Value::Object(entry)
+                })
+                .collect();
+            let mut answer = Map::new();
+            answer.insert("items".to_owned(), json!([]));
+            answer.insert("next".to_owned(), Value::Null);
+            answer.insert(list.to_owned(), Value::Array(entries));
+            Value::Object(answer).to_string()
+        };
+        assert_eq!(
+            classified(Some(partial_exit), answer(&[Some(stops)]).as_bytes()),
+            Some(Classified {
+                class: FailureClass::Refused,
+                kind: "config".to_owned(),
+            })
+        );
+        assert_eq!(
+            classified(
+                Some(partial_exit),
+                answer(&[Some(stops), Some("transient")]).as_bytes()
+            ),
+            Some(Classified {
+                class: FailureClass::Transient,
+                kind: "config, unavailable".to_owned(),
+            }),
+            "a partial answer with one entry a wait could change was read as refused"
+        );
+        assert_eq!(
+            classified(Some(partial_exit), answer(&[]).as_bytes()),
+            None,
+            "a partial answer naming no failure was classified"
+        );
+        assert_eq!(
+            classified(Some(partial_exit), answer(&[Some(stops), None]).as_bytes()),
+            None,
+            "an entry from a store that writes no class was read as a refusal"
+        );
+    }
+
     #[test]
     fn returning_to_the_last_success_supersedes_a_different_pending_snapshot() {
         let first = snapshot(NodeStatus::Pending);
@@ -1460,6 +1867,7 @@ mod tests {
         let mut pending = Pending {
             latest: Some(superseded),
             last_success: Some(first.clone()),
+            refused: None,
             worker: WorkerState::Working,
             phase: super::RunPhase::Running,
             unprojected: Vec::new(),

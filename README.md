@@ -205,7 +205,9 @@ The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's
 ownership lock. Node status, settlement metadata, and accepted live graph edits
 are projected back onto the onetaskgraph project in the background. A failed
-write is reported and retried; it never changes execution or an edit ruling.
+write is reported and retried — unless the store refused it, which is reported
+once and attempted again when the run's graph next changes; it never changes
+execution or an edit ruling.
 
 ## What it does
 
