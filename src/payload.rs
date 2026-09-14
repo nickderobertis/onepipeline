@@ -18,7 +18,7 @@
 //! one, and a record a later build wrote is the ordinary contents of a runs root.
 
 use onemessagebus::{Message, Registry, SchemaId};
-use schemars::{JsonSchema, Schema, SchemaGenerator};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -27,158 +27,214 @@ use crate::event::PipelineKind;
 /// A JSON object whose members this crate reads through a type of its own.
 type Object = Map<String, Value>;
 
-/// A string document admitting exactly `words`.
-fn one_of(words: impl IntoIterator<Item = String>) -> Schema {
-    let words: Vec<String> = words.into_iter().collect();
-    schemars::json_schema!({"type": "string", "enum": words})
+// Each closed word a payload carries is an enum here, spelled as its emitter writes
+// it and built from the type that owns the vocabulary through an exhaustive `From`:
+// a word that owner adds fails to compile here, and
+// `tests::every_payload_word_is_its_owners_own_spelling` holds each spelling to the
+// owner's own.
+
+/// A node's status, as a settlement records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Status {
+    /// `pending`.
+    Pending,
+    /// `ready`.
+    Ready,
+    /// `running`.
+    Running,
+    /// `waiting`.
+    Waiting,
+    /// `blocked`.
+    Blocked,
+    /// `parked`.
+    Parked,
+    /// `cancelled`.
+    Cancelled,
+    /// `done`.
+    Done,
+    /// `complete-but-draft`.
+    #[serde(rename = "complete-but-draft")]
+    CompleteDraft,
+    /// `failed`.
+    Failed,
+    /// `skipped`.
+    Skipped,
 }
 
-/// A value's wire word, through the owning type's own serializer — under `tag`
-/// for an internally tagged enum, and as the value itself otherwise.
-fn spelled<T: Serialize>(value: &T, tag: Option<&str>) -> String {
-    let wire = serde_json::to_value(value).expect("a vocabulary value serializes");
-    let word = match tag {
-        Some(tag) => wire.get(tag).cloned(),
-        None => Some(wire),
-    };
-    word.and_then(|word| word.as_str().map(str::to_owned))
-        .expect("a vocabulary value serializes to a word")
-}
-
-// Each closed vocabulary below is read off the type that owns it. The match beside
-// each list names every variant, so a variant its owner adds fails to compile here,
-// beside the list it has to join — and the words are that type's own spelling, so
-// a word it renames is renamed here too.
-
-/// `NodeStatus`'s words.
-fn statuses(_: &mut SchemaGenerator) -> Schema {
-    use crate::graph::NodeStatus as S;
-    let listed = |status: S| match status {
-        S::Pending
-        | S::Ready
-        | S::Running
-        | S::Waiting
-        | S::Blocked
-        | S::Parked
-        | S::Cancelled
-        | S::Done
-        | S::CompleteDraft
-        | S::Failed
-        | S::Skipped => status.as_str().to_owned(),
-    };
-    one_of(
-        [
-            S::Pending,
-            S::Ready,
-            S::Running,
-            S::Waiting,
-            S::Blocked,
-            S::Parked,
-            S::Cancelled,
-            S::Done,
-            S::CompleteDraft,
-            S::Failed,
-            S::Skipped,
-        ]
-        .map(listed),
-    )
-}
-
-/// `Landing`'s words.
-fn landings(_: &mut SchemaGenerator) -> Schema {
-    use crate::graph::Landing as L;
-    let listed = |landing: L| match landing {
-        L::Landed | L::Unlanded => landing.as_str().to_owned(),
-    };
-    one_of([L::Landed, L::Unlanded].map(listed))
-}
-
-/// A reply's `Author`'s words.
-fn authors(_: &mut SchemaGenerator) -> Schema {
-    use crate::channel::Author as A;
-    let listed = |author: A| match author {
-        A::Planner | A::Monitor => author.as_str().to_owned(),
-    };
-    one_of([A::Planner, A::Monitor].map(listed))
-}
-
-/// The words a release note's delivery is recorded under.
-fn deliveries(_: &mut SchemaGenerator) -> Schema {
-    use crate::edits::Delivery as D;
-    let listed = |delivery: D| match delivery {
-        D::Live | D::Deferred => crate::engine::adoption_delivery(delivery).to_owned(),
-    };
-    one_of([D::Live, D::Deferred].map(listed))
-}
-
-/// A checked criterion's `Answer` words.
-fn answers(_: &mut SchemaGenerator) -> Schema {
-    use crate::criteria::Answer as A;
-    let listed = |answer: A| match answer {
-        A::Match | A::Mismatch { .. } | A::Unread { .. } => answer.as_str().to_owned(),
-    };
-    one_of(
-        [
-            A::Match,
-            A::Mismatch {
-                holds: String::new(),
-            },
-            A::Unread {
-                reason: String::new(),
-            },
-        ]
-        .map(listed),
-    )
-}
-
-/// An undrafted body's endings.
-fn endings(_: &mut SchemaGenerator) -> Schema {
-    use crate::lifecycle::Undrafted as U;
-    let listed = |undrafted: U| match undrafted {
-        U::Dispatch(_) | U::SchemaRefused | U::Bodyless => undrafted.ending().to_owned(),
-    };
-    one_of([U::Dispatch(String::new()), U::SchemaRefused, U::Bodyless].map(listed))
-}
-
-/// Where a note `Reached`, as the tag its record carries.
-fn reaches(_: &mut SchemaGenerator) -> Schema {
-    use crate::note::Reached as R;
-    let listed = |reached: R| match reached {
-        R::Queued | R::Worker | R::Supervisor | R::JudgedWith { .. } | R::Carried => {
-            spelled(&reached, Some("reached"))
+impl From<crate::graph::NodeStatus> for Status {
+    fn from(status: crate::graph::NodeStatus) -> Self {
+        use crate::graph::NodeStatus as S;
+        match status {
+            S::Pending => Self::Pending,
+            S::Ready => Self::Ready,
+            S::Running => Self::Running,
+            S::Waiting => Self::Waiting,
+            S::Blocked => Self::Blocked,
+            S::Parked => Self::Parked,
+            S::Cancelled => Self::Cancelled,
+            S::Done => Self::Done,
+            S::CompleteDraft => Self::CompleteDraft,
+            S::Failed => Self::Failed,
+            S::Skipped => Self::Skipped,
         }
-    };
-    one_of(
-        [
-            R::Queued,
-            R::Worker,
-            R::Supervisor,
-            R::JudgedWith {
-                completion_reason: String::new(),
-            },
-            R::Carried,
-        ]
-        .map(listed),
-    )
+    }
+}
+
+/// Whether a published change reached its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LandingWord {
+    /// `landed`.
+    Landed,
+    /// `unlanded`.
+    Unlanded,
+}
+
+impl From<crate::graph::Landing> for LandingWord {
+    fn from(landing: crate::graph::Landing) -> Self {
+        match landing {
+            crate::graph::Landing::Landed => Self::Landed,
+            crate::graph::Landing::Unlanded => Self::Unlanded,
+        }
+    }
+}
+
+/// Who submitted a command or a reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AuthorWord {
+    /// `planner`.
+    Planner,
+    /// `monitor`.
+    Monitor,
+}
+
+impl From<crate::channel::Author> for AuthorWord {
+    fn from(author: crate::channel::Author) -> Self {
+        match author {
+            crate::channel::Author::Planner => Self::Planner,
+            crate::channel::Author::Monitor => Self::Monitor,
+        }
+    }
+}
+
+/// Where a release note was delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DeliveryWord {
+    /// `live`: into the running turn.
+    Live,
+    /// `next`: onto the node's next dispatch.
+    Next,
+}
+
+impl From<crate::edits::Delivery> for DeliveryWord {
+    fn from(delivery: crate::edits::Delivery) -> Self {
+        match delivery {
+            crate::edits::Delivery::Live => Self::Live,
+            crate::edits::Delivery::Deferred => Self::Next,
+        }
+    }
+}
+
+/// What checking a criterion answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AnswerWord {
+    /// `match`.
+    Match,
+    /// `mismatch`.
+    Mismatch,
+    /// `unread`.
+    Unread,
+}
+
+impl From<&crate::criteria::Answer> for AnswerWord {
+    fn from(answer: &crate::criteria::Answer) -> Self {
+        match answer {
+            crate::criteria::Answer::Match => Self::Match,
+            crate::criteria::Answer::Mismatch { .. } => Self::Mismatch,
+            crate::criteria::Answer::Unread { .. } => Self::Unread,
+        }
+    }
+}
+
+/// How a drafting dispatch ended without a body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EndingWord {
+    /// `dispatch-failed`.
+    DispatchFailed,
+    /// `schema-refused`.
+    SchemaRefused,
+    /// `no-body`.
+    NoBody,
+}
+
+impl From<&crate::lifecycle::Undrafted> for EndingWord {
+    fn from(undrafted: &crate::lifecycle::Undrafted) -> Self {
+        match undrafted {
+            crate::lifecycle::Undrafted::Dispatch(_) => Self::DispatchFailed,
+            crate::lifecycle::Undrafted::SchemaRefused => Self::SchemaRefused,
+            crate::lifecycle::Undrafted::Bodyless => Self::NoBody,
+        }
+    }
+}
+
+/// Where a note reached, as its record's tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReachedWord {
+    /// `queued`.
+    Queued,
+    /// `worker`.
+    Worker,
+    /// `supervisor`.
+    Supervisor,
+    /// `judged-with`.
+    JudgedWith,
+    /// `carried`.
+    Carried,
+}
+
+impl From<&crate::note::Reached> for ReachedWord {
+    fn from(reached: &crate::note::Reached) -> Self {
+        use crate::note::Reached as R;
+        match reached {
+            R::Queued => Self::Queued,
+            R::Worker => Self::Worker,
+            R::Supervisor => Self::Supervisor,
+            R::JudgedWith { .. } => Self::JudgedWith,
+            R::Carried => Self::Carried,
+        }
+    }
 }
 
 /// What a `note-shown` was decided from.
-fn evidences(_: &mut SchemaGenerator) -> Schema {
-    use crate::note::Evidence as E;
-    let listed = |evidence: E| match evidence {
-        E::DeliveredOrigin | E::OpeningTask | E::InstructionText | E::AnsweringTurn => {
-            spelled(&evidence, None)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EvidenceWord {
+    /// `delivered-origin`.
+    DeliveredOrigin,
+    /// `opening-task`.
+    OpeningTask,
+    /// `instruction-text`.
+    InstructionText,
+    /// `answering-turn`.
+    AnsweringTurn,
+}
+
+impl From<crate::note::Evidence> for EvidenceWord {
+    fn from(evidence: crate::note::Evidence) -> Self {
+        use crate::note::Evidence as E;
+        match evidence {
+            E::DeliveredOrigin => Self::DeliveredOrigin,
+            E::OpeningTask => Self::OpeningTask,
+            E::InstructionText => Self::InstructionText,
+            E::AnsweringTurn => Self::AnsweringTurn,
         }
-    };
-    one_of(
-        [
-            E::DeliveredOrigin,
-            E::OpeningTask,
-            E::InstructionText,
-            E::AnsweringTurn,
-        ]
-        .map(listed),
-    )
+    }
 }
 
 /// `run-started`: the plan the run was launched with, and how it is driven.
@@ -253,8 +309,7 @@ pub(crate) struct NodeDispatched {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct NodeSettled {
     /// The terminal status.
-    #[schemars(schema_with = "statuses")]
-    pub(crate) status: String,
+    pub(crate) status: Status,
     /// The word its settlement was reached under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<String>,
@@ -275,8 +330,7 @@ pub(crate) struct NodeSettled {
     pub(crate) head: Option<String>,
     /// Whether the change reached its base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "landings")]
-    pub(crate) landing: Option<String>,
+    pub(crate) landing: Option<LandingWord>,
     /// The steps the branch carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completed_steps: Option<Vec<String>>,
@@ -286,7 +340,7 @@ pub(crate) struct NodeSettled {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct EditCommitted {
     /// Who submitted it.
-    pub(crate) author: String,
+    pub(crate) author: AuthorWord,
     /// The command as submitted.
     pub(crate) command: Object,
     /// The operations it compiled to.
@@ -299,7 +353,7 @@ pub(crate) struct EditCommitted {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct CommandAccepted {
     /// Who submitted it.
-    pub(crate) author: String,
+    pub(crate) author: AuthorWord,
     /// The command as submitted.
     pub(crate) command: Object,
     /// The operations it compiled to.
@@ -312,7 +366,7 @@ pub(crate) struct CommandAccepted {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct EditRejected {
     /// Who submitted it.
-    pub(crate) author: String,
+    pub(crate) author: AuthorWord,
     /// The command as submitted.
     pub(crate) command: Object,
     /// Why it was refused.
@@ -353,8 +407,7 @@ pub(crate) struct PlannerSurfaced {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerReplied {
     /// Who replied.
-    #[schemars(schema_with = "authors")]
-    pub(crate) author: String,
+    pub(crate) author: AuthorWord,
     /// Whether it declared completion, `null` for no word.
     #[serde(default)]
     pub(crate) completion: Option<bool>,
@@ -519,8 +572,7 @@ pub(crate) struct ReleaseAdopted {
     /// The node.
     pub(crate) node: String,
     /// Whether the note reached a running turn or its next dispatch.
-    #[schemars(schema_with = "deliveries")]
-    pub(crate) delivery: String,
+    pub(crate) delivery: DeliveryWord,
     /// The releases it was told of.
     pub(crate) versions: Vec<AdoptedVersion>,
 }
@@ -558,8 +610,7 @@ pub(crate) struct CriterionChecked {
     /// The literal it expects.
     pub(crate) expected: String,
     /// `match`, `mismatch`, or `unread`.
-    #[schemars(schema_with = "answers")]
-    pub(crate) answer: String,
+    pub(crate) answer: AnswerWord,
     /// What the file holds instead, on a mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) holds: Option<String>,
@@ -572,8 +623,7 @@ pub(crate) struct CriterionChecked {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BodyNotDrafted {
     /// Which of the three endings.
-    #[schemars(schema_with = "endings")]
-    pub(crate) ending: String,
+    pub(crate) ending: EndingWord,
     /// The detail the settlement carries too.
     pub(crate) detail: String,
 }
@@ -586,8 +636,7 @@ pub(crate) struct NoteShown {
     /// The note.
     pub(crate) text: String,
     /// Where it reached.
-    #[schemars(schema_with = "reaches")]
-    pub(crate) reached: String,
+    pub(crate) reached: ReachedWord,
     /// The criterion it carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) criterion: Option<String>,
@@ -599,8 +648,7 @@ pub(crate) struct NoteShown {
     /// The turn the presentation opened.
     pub(crate) turn: u64,
     /// What showed the presentation happening.
-    #[schemars(schema_with = "evidences")]
-    pub(crate) evidence: String,
+    pub(crate) evidence: EvidenceWord,
 }
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
@@ -799,6 +847,101 @@ mod tests {
                 }
                 other => panic!("{kind} without `{key}` was not refused: {other:?}"),
             }
+        }
+    }
+
+    /// Every payload word is spelled exactly as the type that owns its vocabulary
+    /// spells it, variant by variant — which is what lets a document admit only the
+    /// words an emitter can write.
+    #[test]
+    fn every_payload_word_is_its_owners_own_spelling() {
+        fn word<T: Serialize>(value: &T) -> String {
+            serde_json::to_value(value)
+                .expect("a word serializes")
+                .as_str()
+                .expect("a word is text")
+                .to_owned()
+        }
+        use crate::graph::NodeStatus as S;
+        for status in [
+            S::Pending,
+            S::Ready,
+            S::Running,
+            S::Waiting,
+            S::Blocked,
+            S::Parked,
+            S::Cancelled,
+            S::Done,
+            S::CompleteDraft,
+            S::Failed,
+            S::Skipped,
+        ] {
+            assert_eq!(word(&Status::from(status)), status.as_str());
+        }
+        for landing in [
+            crate::graph::Landing::Landed,
+            crate::graph::Landing::Unlanded,
+        ] {
+            assert_eq!(word(&LandingWord::from(landing)), landing.as_str());
+        }
+        for author in [
+            crate::channel::Author::Planner,
+            crate::channel::Author::Monitor,
+        ] {
+            assert_eq!(word(&AuthorWord::from(author)), author.as_str());
+            assert_eq!(word(&AuthorWord::from(author)), word(&author));
+        }
+        for delivery in [
+            crate::edits::Delivery::Live,
+            crate::edits::Delivery::Deferred,
+        ] {
+            assert_eq!(
+                word(&DeliveryWord::from(delivery)),
+                crate::engine::adoption_delivery(delivery)
+            );
+        }
+        for answer in [
+            crate::criteria::Answer::Match,
+            crate::criteria::Answer::Mismatch {
+                holds: String::new(),
+            },
+            crate::criteria::Answer::Unread {
+                reason: String::new(),
+            },
+        ] {
+            assert_eq!(word(&AnswerWord::from(&answer)), answer.as_str());
+        }
+        for undrafted in [
+            crate::lifecycle::Undrafted::Dispatch(String::new()),
+            crate::lifecycle::Undrafted::SchemaRefused,
+            crate::lifecycle::Undrafted::Bodyless,
+        ] {
+            assert_eq!(word(&EndingWord::from(&undrafted)), undrafted.ending());
+        }
+        use crate::note::Reached as R;
+        for reached in [
+            R::Queued,
+            R::Worker,
+            R::Supervisor,
+            R::JudgedWith {
+                completion_reason: String::new(),
+            },
+            R::Carried,
+        ] {
+            let tagged = serde_json::to_value(&reached).expect("a delivery serializes");
+            assert_eq!(
+                serde_json::json!(word(&ReachedWord::from(&reached))),
+                tagged["reached"]
+            );
+        }
+        use crate::note::Evidence as E;
+        for evidence in [
+            E::DeliveredOrigin,
+            E::OpeningTask,
+            E::InstructionText,
+            E::AnsweringTurn,
+        ] {
+            assert_eq!(word(&EvidenceWord::from(evidence)), word(&evidence));
         }
     }
 }
