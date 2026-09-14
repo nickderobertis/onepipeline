@@ -56,7 +56,7 @@ const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
 ///
 /// The word `start` and `adopt` print on their settlement line for the same
 /// state, which is what a withheld hook's record carries so the two read alike.
-const PAUSED: &str = "awaiting-planner";
+pub(crate) const PAUSED: &str = "awaiting-planner";
 
 /// One of the two run-end hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

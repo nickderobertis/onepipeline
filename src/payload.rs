@@ -719,7 +719,7 @@ pub(crate) struct UnsettledNode {
     /// The node.
     pub(crate) id: String,
     /// Its status word.
-    pub(crate) status: String,
+    pub(crate) status: Status,
     /// Its outcome, written as `null` rather than omitted where it has none.
     pub(crate) outcome: Option<String>,
 }
@@ -771,11 +771,19 @@ pub(crate) struct RunHookFinished {
     pub(crate) log: String,
 }
 
+/// The settlement a run is withheld its hook under: the one that pauses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WithheldSettlementWord {
+    /// `awaiting-planner`: a decision is outstanding.
+    AwaitingPlanner,
+}
+
 /// `run-hook-withheld`: a driver let go of a paused run without firing a hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RunHookWithheld {
     /// The settlement word the run was left under.
-    pub(crate) settlement: String,
+    pub(crate) settlement: WithheldSettlementWord,
 }
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
@@ -1077,6 +1085,10 @@ mod tests {
                 tagged["reached"]
             );
         }
+        assert_eq!(
+            word(&WithheldSettlementWord::AwaitingPlanner),
+            crate::hooks::PAUSED
+        );
         use crate::note::Evidence as E;
         for evidence in [
             E::DeliveredOrigin,
