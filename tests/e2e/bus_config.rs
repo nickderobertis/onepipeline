@@ -29,7 +29,6 @@ const WITHOUT_CANCEL: &str = "version: 1\n\
                               profile: planner-channel\n\
                               authors:\n  monitor: {capabilities: [retry]}\n";
 
-/// Write one configuration file into the world's root.
 fn configuration(world: &World, name: &str, body: &str) -> String {
     let path = world.root.join(name);
     std::fs::write(&path, body).expect("the configuration is written");
@@ -62,12 +61,10 @@ fn launched(world: &World, path: &str, run: &str, extra: &[&str]) {
     });
 }
 
-/// What one of a run's channel files holds, or nothing where there is no file.
 fn channel_file(world: &World, run: &str, file: &str) -> String {
     std::fs::read_to_string(world.run_file(run, &format!("channel/{file}"))).unwrap_or_default()
 }
 
-/// A reply envelope carrying `commands`, written by the monitor.
 fn from_the_monitor(commands: Value) -> String {
     json!({"version": 3, "author": "monitor", "commands": commands}).to_string()
 }
@@ -565,6 +562,7 @@ fn a_validator_on_the_commands_queue_judges_the_edits_a_reply_carries() {
 /// within a bounded margin after it, and one answered inside the window is
 /// answered with the ruling.
 #[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the six seconds are the claim rather than a knob: what this proves is that `channel serve` waits no less than the window a configuration sets, which only a wait of that window can show, and the window is read by the crate's own launch and serve code, so any change under `src/` can cut it short. The one separately-edged project here, `onepipeline-note-journeys`, is edged on conversational cost and would put it where a change to `src/driver.rs` does not run it.
 fn the_reply_window_a_bus_config_sets_is_how_long_channel_serve_waits() {
     const WINDOW: u64 = 6;
     let world = World::new("bus-config-window");

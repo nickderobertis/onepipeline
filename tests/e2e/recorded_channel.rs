@@ -60,7 +60,6 @@ fn recorded(relative: &str) -> PathBuf {
         .join(relative)
 }
 
-/// Copy every file of a recorded directory into `into`.
 fn copied(from: &Path, into: &Path) {
     std::fs::create_dir_all(into).expect("a directory to seed");
     for entry in std::fs::read_dir(from).expect("a recorded directory") {
@@ -72,7 +71,6 @@ fn copied(from: &Path, into: &Path) {
     }
 }
 
-/// A world holding the recorded run root, with `fixture` as its channel.
 fn seeded(world: &World, fixture: &str) -> PathBuf {
     let root = world.runs.join(RUN);
     copied(&recorded(&format!("run-root/{RUN}")), &root);
@@ -138,7 +136,6 @@ fn journalled_here(text: &str, recorded: &BTreeSet<String>) -> String {
     out
 }
 
-/// The streams the recorded run root's journal carries.
 fn recorded_streams() -> BTreeSet<String> {
     std::fs::read_to_string(recorded(&format!("run-root/{RUN}/events.jsonl")))
         .expect("the recorded journal reads")
@@ -225,12 +222,38 @@ fn answers_over(fixture: &str, program: &Path) -> Value {
     })
 }
 
+/// The version every answer under `tests/recorded/answers/` is the answer of.
+const RELEASE: &str = "onepipeline 0.28.2";
+
+/// The executable [`CAPTURE_ENV`] names, refused unless it runs and reports
+/// [`RELEASE`] — so an answer file is never overwritten with what some other
+/// program, or another release, answered.
+fn the_release_named(program: &Path) -> PathBuf {
+    let reported = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "{CAPTURE_ENV} names {}, which cannot be run: {error}",
+                program.display()
+            )
+        });
+    let version = String::from_utf8_lossy(&reported.stdout);
+    assert!(
+        reported.status.success() && version.trim() == RELEASE,
+        "{CAPTURE_ENV} names {}, which reports {:?} rather than {RELEASE}; nothing was captured",
+        program.display(),
+        version.trim()
+    );
+    program.to_path_buf()
+}
+
 /// Capture what the release does into `answers/<name>.json` and answer `None`,
 /// or answer what the release did beside what this build does.
 fn against_the_release(name: &str, produce: impl Fn(&Path) -> Value) -> Option<(Value, Value)> {
     let path = recorded(&format!("answers/{name}.json"));
     if let Some(release) = std::env::var_os(CAPTURE_ENV) {
-        let answers = produce(Path::new(&release));
+        let answers = produce(&the_release_named(Path::new(&release)));
         std::fs::create_dir_all(path.parent().expect("an answers directory"))
             .expect("the answers directory is created");
         let mut written = serde_json::to_string_pretty(&answers).expect("the answers serialize");
@@ -371,10 +394,8 @@ fn normalized(text: &str) -> String {
     out
 }
 
-/// The run the write-side journey launches, and the id each binary mints for it.
 const WRITTEN: &str = "written";
 
-/// The lines of a view that count what is unread, without how long for.
 fn unread_lines(stdout: &str) -> Vec<String> {
     stdout
         .lines()
@@ -591,6 +612,7 @@ fn written_by(program: &Path) -> Value {
 /// every file either binary writes is compared, the command queue and its
 /// outcomes included.
 #[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey's cost is its steps — three `channel serve` sessions, one of which waits out its reply window, over a driver held live — and every byte it compares is written by the crate's own channel verbs, so any change under `src/` can move them. The one separately-edged project here, `onepipeline-note-journeys`, is edged on conversational cost and would put it where a change to `src/channel.rs` does not run it, which is the one change that must.
 fn a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes() {
     let Some((expected, actual)) = against_the_release("written-channel", written_by) else {
         return;

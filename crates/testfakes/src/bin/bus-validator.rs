@@ -39,7 +39,10 @@ fn main() -> std::process::ExitCode {
         )),
     };
     let queue = match std::env::var(QUEUE_ENV) {
-        Ok(queue) => queue,
+        Ok(queue) if !queue.trim().is_empty() => queue,
+        Ok(_) => fake::fail(&format!(
+            "the bus named no queue this message is offered to: {QUEUE_ENV} is blank"
+        )),
         Err(error) => fake::fail(&format!(
             "the bus did not name the queue this message is offered to in {QUEUE_ENV}: {error}"
         )),

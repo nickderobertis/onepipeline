@@ -6,6 +6,48 @@
 //! the capturing journeys. Those three stand first on `PATH` here as programs that
 //! record what they were asked, so each refusal and the capture itself are proven
 //! through the real script without the network or a second run of the suite.
+//!
+//! What the stand-in `just` is asked is only as good as the recipe it stands in
+//! for, so the real `test-e2e` recipe is driven too, through `just --dry-run`,
+//! which evaluates the filter it is handed without running the suite.
+
+use std::path::Path;
+use std::process::Command;
+
+fn dry_run_of_test_e2e(filter: Option<&str>) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut just = Command::new("just");
+    just.arg("--justfile")
+        .arg(root.join("justfile"))
+        .arg("--working-directory")
+        .arg(root)
+        .arg("--dry-run")
+        .arg("test-e2e");
+    if let Some(filter) = filter {
+        just.arg(filter);
+    }
+    let output = just
+        .output()
+        .expect("`just` runs, as every recipe in this repository does");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stderr).trim().to_owned()
+}
+
+#[test]
+fn the_e2e_recipe_narrows_the_binary_to_a_filter_and_runs_all_of_it_without_one() {
+    assert_eq!(
+        dry_run_of_test_e2e(Some("test(/^recorded_channel::/)")),
+        "cargo nextest run --locked -E 'binary(e2e) and (test(/^recorded_channel::/))'"
+    );
+    assert_eq!(
+        dry_run_of_test_e2e(None),
+        "cargo nextest run --locked -E 'binary(e2e)'"
+    );
+}
 
 #[cfg(unix)]
 mod unix {
@@ -21,7 +63,6 @@ mod unix {
 
     const REFUSED: i32 = 2;
 
-    /// A directory of its own, holding the three programs and what each was asked.
     struct Scratch(PathBuf);
 
     impl Scratch {
@@ -74,7 +115,6 @@ mod unix {
                 .expect("the script runs")
         }
 
-        /// Everything `tool` was asked, one invocation per line.
         fn asked(&self, tool: &str) -> String {
             fs::read_to_string(self.0.join(format!("{tool}.asked"))).unwrap_or_default()
         }
