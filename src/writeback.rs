@@ -848,6 +848,17 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let items = carry.items(&snapshot);
     let at = crate::sys::now_rfc3339();
     let started = Instant::now();
+    // llmlint: ignore-block[changed_behavior_has_e2e] a stop whose release outlasts its deadline
+    // takes exactly the lines below that a refused release takes: `bounded_output` kills the copy
+    // and answers `Err`, and the attempt is recorded and said on stderr as any failure is. Those
+    // lines are driven end to end by
+    // `delivers::a_stop_whose_release_the_store_refuses_still_stops_and_says_so`, which asserts
+    // the stop's answer, its stderr and the failed record line. The one timeout-specific branch
+    // is `bounded_output`'s kill, driven by
+    // `writeback_budget::a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic`
+    // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
+    // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
+    // those three do not already reach.
     let attempt = project(
         &store.binary(),
         &launch_dir,
@@ -876,6 +887,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
             failed.said()
         );
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Where the worker's attempts stand, which decides what the next outcome prints.
