@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0](https://github.com/nickderobertis/onepipeline/compare/v0.31.0...v0.32.0) - 2026-09-15
+
+### Added
+
+- *(channel)* run the planner channel on onemessagebus queues, asks and validators, and take a bus config at launch ([#293](https://github.com/nickderobertis/onepipeline/pull/293))
+
 ## [0.31.0](https://github.com/nickderobertis/onepipeline/compare/v0.30.0...v0.31.0) - 2026-09-14
 
 ### Changed
