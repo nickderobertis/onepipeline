@@ -185,6 +185,15 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
         floor + 5,
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     );
+    // And nothing was dispatched: this copy is the launching driver's claim, and the wait before
+    // its first dispatch is bounded by the same lifted deadline the copy runs under — not by the
+    // floor, which this hold has already outlasted.
+    assert_eq!(
+        world.events_of(run, "node-dispatched").len(),
+        0,
+        "the driver dispatched while its claim was still inside a deadline of {items} × \
+         {per_item} seconds"
+    );
 
     // Let the held copy answer. Later copies are not held: the deadline is the
     // subject, and one copy past it is the evidence.

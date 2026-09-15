@@ -450,6 +450,9 @@ struct Pending {
     /// How many attempts this worker has ended, landed or not: what a driver's launch wait
     /// ends on.
     attempts: u64,
+    /// How many nodes the snapshot most recently queued carries, kept when the worker takes it:
+    /// what a driver's launch wait is bounded by, however soon the worker picks that snapshot up.
+    queued_items: usize,
     worker: WorkerState,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
@@ -471,6 +474,7 @@ impl Pending {
         {
             return false;
         }
+        self.queued_items = snapshot.nodes.len();
         self.latest = Some(snapshot);
         true
     }
@@ -600,16 +604,7 @@ impl Writeback {
     pub fn wait_for_first_attempt(&self) {
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
-        let items = pending
-            .latest
-            .as_ref()
-            .map_or(0, |snapshot| snapshot.nodes.len());
-        let deadline = Instant::now()
-            + Deadline::Copy {
-                per_item: self.per_item,
-                items,
-            }
-            .within();
+        let deadline = Instant::now() + launch_wait(self.per_item, &pending);
         while pending.attempts == 0 && Instant::now() < deadline {
             let wait = deadline.saturating_duration_since(Instant::now());
             let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
@@ -788,6 +783,21 @@ fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
     launch
         .item_budget()
         .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
+}
+
+/// How long a driver waits for its first projection before it dispatches: the copy deadline of
+/// the snapshot it queued for that projection.
+///
+/// Counted off what was queued rather than off the queue itself, because the worker may already
+/// have taken that snapshot to project it by the time the driver asks. Read off the queue then,
+/// the count would be zero and the wait the floor, dispatching inside the deadline a large plan's
+/// copy still runs under.
+fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
+    Deadline::Copy {
+        per_item,
+        items: pending.queued_items,
+    }
+    .within()
 }
 
 /// Release what a run a `stop` ended had claimed and never started: one whole projection, in
@@ -3074,6 +3084,7 @@ mod tests {
             last_success: Some(first.clone()),
             refused: None,
             attempts: 0,
+            queued_items: 0,
             worker: WorkerState::Working,
             phase: super::RunPhase::Running,
             unprojected: Vec::new(),
@@ -3220,6 +3231,33 @@ mod tests {
             "heartbeat_interval": 1_800,
         }))
         .expect("a launch record")
+    }
+
+    /// The launch wait is bounded by the copy deadline of the snapshot the driver queued, even
+    /// once the worker has taken that snapshot to project it — which it may do before the driver
+    /// asks how long to wait. A bound read off the queue after that take counts no nodes and
+    /// falls back to the floor, so a plan large enough to lift its copy's deadline would be
+    /// dispatched while its claim was still inside it.
+    #[test]
+    fn the_launch_wait_is_bounded_by_what_was_queued_after_the_worker_takes_it() {
+        let per_item = NonZeroU64::new(10).expect("a budget");
+        let nodes: BTreeMap<String, Node> = (0..12)
+            .map(|index| {
+                let id = format!("n{index}");
+                let node = serde_json::from_value(json!({"id": id})).expect("a node");
+                (id, node)
+            })
+            .collect();
+        let snapshot = Fixture::new("launch-wait").snapshot_with(|snapshot| snapshot.nodes = nodes);
+        let mut pending = Pending::default();
+        assert!(pending.queue(snapshot), "the first snapshot is queued");
+        // The worker takes it to project it before the driver asks how long to wait.
+        assert!(pending.latest.take().is_some());
+        assert_eq!(
+            super::launch_wait(per_item, &pending),
+            Duration::from_secs(120),
+            "the launch wait did not follow the 12 × 10 second deadline of the queued copy"
+        );
     }
 
     /// The gate over `WRITEBACK_DELIVERS_FROM`, on both sides of the boundary: the release it
