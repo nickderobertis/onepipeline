@@ -2593,9 +2593,11 @@ struct ProjectionWire {
     actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
     /// The one key a line may leave off: absent where no ticket was reported, so a line that
-    /// reached none reads exactly as it did before tickets were.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    delivered: Vec<Map<String, Value>>,
+    /// reached none reads exactly as it did before tickets were. Held as an `Option` because
+    /// version 1 is refused by this key's own name — so a line that *names* it, even as an
+    /// empty list, has to be told apart from one that leaves it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivered: Option<Vec<Map<String, Value>>>,
 }
 
 /// The version of a projection line that names none: the shape before `delivered` existed.
@@ -2623,7 +2625,7 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
     fn try_from(wire: ProjectionWire) -> Result<Self, String> {
         match wire.schema_version {
             WRITEBACK_PROJECTIONS_SCHEMA_VERSION => {}
-            1 if wire.delivered.is_empty() => {}
+            1 if wire.delivered.is_none() => {}
             1 => {
                 return Err(format!(
                     "a version 1 line names `delivered`, which version \
@@ -2700,7 +2702,7 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             items: wire.items,
             duration_ms: wire.duration_ms,
             ended,
-            delivered: wire.delivered,
+            delivered: wire.delivered.unwrap_or_default(),
         })
     }
 }
@@ -2736,7 +2738,7 @@ impl From<ProjectionRecord> for ProjectionWire {
             duration_ms: record.duration_ms,
             actions,
             spent,
-            delivered: record.delivered,
+            delivered: (!record.delivered.is_empty()).then_some(record.delivered),
         }
     }
 }

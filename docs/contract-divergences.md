@@ -5515,8 +5515,8 @@ gave tasks a `delivers`.
 **The record is versioned.** Every line names its `schema_version`, and `schema.current` is
 `WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 2, the version that added `delivered`. A line
 naming no version is version 1, the shape before it, and still reads — it is written back at the
-current version; a version 1 line naming `delivered`, and a version this build has never written,
-are refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
+current version; a version 1 line naming `delivered` — by the key's own name, an empty list
+included — and a version this build has never written, are refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
 member this build never names included, and it writes back as itself.
 
 `tests/contract.rs` holds this block against the published constants and the record type: the

@@ -3395,6 +3395,13 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             "a version 1 line naming `delivered`",
             json!({"schema_version": 1, "delivered": delivered_example["delivered"]}),
         ),
+        // Refused by the key's own name rather than by what it holds: a line that names it
+        // empty is still a version 1 line naming a key version 2 added, and reading it as
+        // one that left the key off would let that shape through the boundary unremarked.
+        (
+            "a version 1 line naming an empty `delivered`",
+            json!({"schema_version": 1, "delivered": []}),
+        ),
         (
             "a version this build has never written",
             json!({"schema_version": current + 1}),
