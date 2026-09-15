@@ -5512,6 +5512,13 @@ on a landed attempt and on a failed one alike, and it is the one key a line leav
 wherever the report named no ticket, so a line that reached none reads as it did before entry 50
 gave tasks a `delivers`.
 
+**The record is versioned.** Every line names its `schema_version`, and `schema.current` is
+`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 2, the version that added `delivered`. A line
+naming no version is version 1, the shape before it, and still reads — it is written back at the
+current version; a version 1 line naming `delivered`, and a version this build has never written,
+are refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
+member this build never names included, and it writes back as itself.
+
 `tests/contract.rs` holds this block against the published constants and the record type: the
 two paths, the release, the member reads, every field and its admitted values, and the example
 line read and written back byte-equal. `writeback::tests` holds the precedence and the rule for
@@ -5531,7 +5538,9 @@ rewritten to carry known `spent` and action counts, recorded exactly.
     "record": "<run dir>/writeback-projections.jsonl",
     "one_line_per": "attempt",
     "rewritten": false,
+    "schema": {"current": 2, "read": [1, 2], "absent_means": 1, "added_at_2": ["delivered"]},
     "fields": {
+      "schema_version": {"type": "integer", "is": "the schema version the line is written at"},
       "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
       "project": {"type": "string", "is": "the qualified project id"},
       "scope": {"type": "string", "values": ["whole", "members"]},
@@ -5552,12 +5561,21 @@ rewritten to carry known `spent` and action counts, recorded exactly.
       "first": "nothing has landed in this driver yet, including a driver an adopt started"
     },
     "whole_because_precedence": ["store-lacks-members", "after-failure", "first"],
-    "example": {"at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+    "example": {"schema_version": 2, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
                 "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
                 "outcome": "projected", "class": null, "kind": null, "reason": null,
                 "duration_ms": 1830,
                 "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
-                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}}
+                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}},
+    "example_delivered": {"schema_version": 2, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
+                          "scope": "whole", "whole_because": "first", "items": ["build"],
+                          "outcome": "projected", "class": null, "kind": null, "reason": null,
+                          "duration_ms": 412,
+                          "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                          "spent": null,
+                          "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
+                                         "outcome": "written", "from": "todo", "to": "queued",
+                                         "pruned": ["plans:delivers-plan/gone"]}]}
   },
   "detection": {
     "command": "onetaskgraph --version",

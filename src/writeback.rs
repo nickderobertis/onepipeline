@@ -80,7 +80,8 @@ use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
     WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_DELIVERS_FROM, WRITEBACK_FAILURE_EXIT,
     WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ, WRITEBACK_PARTIAL_EXIT,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_STORE_FILE,
+    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_PROJECTIONS_SCHEMA_VERSION, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_STORE_FILE,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -2575,6 +2576,10 @@ impl ProjectionRecord {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectionWire {
+    /// Written on every line as [`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`]; a line an earlier build
+    /// wrote names none, and is version 1.
+    #[serde(default = "unversioned_projection_line")]
+    schema_version: u32,
     at: String,
     project: String,
     scope: ScopeWord,
@@ -2591,6 +2596,11 @@ struct ProjectionWire {
     /// reached none reads exactly as it did before tickets were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     delivered: Vec<Map<String, Value>>,
+}
+
+/// The version of a projection line that names none: the shape before `delivered` existed.
+fn unversioned_projection_line() -> u32 {
+    1
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2611,6 +2621,22 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
     type Error = String;
 
     fn try_from(wire: ProjectionWire) -> Result<Self, String> {
+        match wire.schema_version {
+            WRITEBACK_PROJECTIONS_SCHEMA_VERSION => {}
+            1 if wire.delivered.is_empty() => {}
+            1 => {
+                return Err(format!(
+                    "a version 1 line names `delivered`, which version \
+                     {WRITEBACK_PROJECTIONS_SCHEMA_VERSION} added"
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "`schema_version` {other} is not one this build reads (1, \
+                     {WRITEBACK_PROJECTIONS_SCHEMA_VERSION})"
+                ))
+            }
+        }
         if !(crate::watchers::is_rfc3339(&wire.at) && wire.at.ends_with(['Z', 'z'])) {
             return Err(format!("`at` is not an RFC 3339 UTC time: {:?}", wire.at));
         }
@@ -2697,6 +2723,7 @@ impl From<ProjectionRecord> for ProjectionWire {
             }
         };
         Self {
+            schema_version: WRITEBACK_PROJECTIONS_SCHEMA_VERSION,
             at: record.at,
             project: record.project,
             scope,

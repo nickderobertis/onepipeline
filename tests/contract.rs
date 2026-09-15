@@ -3324,6 +3324,92 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             "{contradiction} was read as a record: {line}"
         );
     }
+
+    // The record's schema version: the constant the worker writes is the one the entry names,
+    // and both golden lines are written at it.
+    let schema = &projection["schema"];
+    let current = onepipeline::cli::WRITEBACK_PROJECTIONS_SCHEMA_VERSION;
+    assert_eq!(
+        schema["current"].as_u64(),
+        Some(u64::from(current)),
+        "entry 73 names a different current schema version than the worker writes"
+    );
+    assert_eq!(schema["read"], json!([1, current]));
+    assert_eq!(schema["absent_means"], json!(1));
+    assert_eq!(schema["added_at_2"], json!(["delivered"]));
+    let delivered_example = &projection["example_delivered"];
+    for golden in [example, delivered_example] {
+        assert_eq!(
+            golden["schema_version"].as_u64(),
+            Some(u64::from(current)),
+            "a golden line of entry 73 is not at the current schema version: {golden}"
+        );
+    }
+
+    // `delivered` round-trips verbatim — every member the store wrote, one this build never
+    // names included — and a line that reached no ticket writes no `delivered` key at all.
+    assert!(
+        delivered_example["delivered"][0].get("pruned").is_some(),
+        "the golden entry carries no member this build never names, so verbatim proves nothing"
+    );
+    let with_tickets: ProjectionRecord = serde_json::from_value(delivered_example.clone())
+        .unwrap_or_else(|error| panic!("entry 73's delivered example is not a record: {error}"));
+    assert_eq!(
+        json!(with_tickets.delivered),
+        delivered_example["delivered"],
+        "the delivered entries were not kept verbatim"
+    );
+    assert_eq!(
+        serde_json::to_value(&with_tickets).expect("a record serializes"),
+        *delivered_example,
+        "entry 73's delivered example does not write back as itself"
+    );
+    assert!(
+        record.delivered.is_empty() && example.get("delivered").is_none(),
+        "the plain golden line was meant to name no ticket"
+    );
+    assert!(
+        serde_json::to_value(&record)
+            .expect("a record serializes")
+            .get("delivered")
+            .is_none(),
+        "a line that reached no ticket wrote a `delivered` key"
+    );
+
+    // A line an earlier build wrote names no version and no `delivered`: it still reads, as
+    // version 1, and is written back at the current version.
+    let mut unversioned = example.clone();
+    unversioned
+        .as_object_mut()
+        .expect("a line is an object")
+        .remove("schema_version");
+    let older: ProjectionRecord = serde_json::from_value(unversioned)
+        .unwrap_or_else(|error| panic!("a version 1 line did not read: {error}"));
+    assert_eq!(
+        serde_json::to_value(&older).expect("a record serializes"),
+        *example,
+        "a version 1 line was not written back at the current version"
+    );
+    for (refused, patch) in [
+        (
+            "a version 1 line naming `delivered`",
+            json!({"schema_version": 1, "delivered": delivered_example["delivered"]}),
+        ),
+        (
+            "a version this build has never written",
+            json!({"schema_version": current + 1}),
+        ),
+        ("version 0", json!({"schema_version": 0})),
+    ] {
+        let mut line = example.clone();
+        for (key, value) in patch.as_object().expect("a patch") {
+            line[key] = value.clone();
+        }
+        assert!(
+            serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
+            "{refused} was read as a record: {line}"
+        );
+    }
 }
 
 /// The criterion check this build carries **beyond** the contract is exactly what
