@@ -39,7 +39,7 @@ set positional-arguments := true
 # it, and `taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
 # fails if it falls below that floor, is named twice, or stops being what the
 # recipe installs.
-onetaskgraph-version := "0.2.30"
+onetaskgraph-version := "0.2.32"
 
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
 # cannot promise a floor the manifest no longer declares. CI reads the same field.

@@ -38,6 +38,7 @@ mod checkpoint;
 mod concurrency;
 mod criteria;
 mod crossdag;
+mod delivers;
 mod destination;
 mod dispatch;
 mod driver;

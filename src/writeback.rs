@@ -78,9 +78,9 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_FAILURE_EXIT, WRITEBACK_MEMBERS_FROM,
-    WRITEBACK_MEMBER_READ, WRITEBACK_PARTIAL_EXIT, WRITEBACK_PROJECTIONS_FILE,
-    WRITEBACK_REFUSED_CLASS, WRITEBACK_STORE_FILE,
+    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_DELIVERS_FROM, WRITEBACK_FAILURE_EXIT,
+    WRITEBACK_MEMBERS_FROM, WRITEBACK_MEMBER_READ, WRITEBACK_PARTIAL_EXIT,
+    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_STORE_FILE,
 };
 use crate::edits::Operation;
 use crate::event::Source;
@@ -103,6 +103,9 @@ const LANDING_KEY: &str = "onepipeline.landing";
 const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
 /// The reserved key naming where a person reads the change a node published.
 const CHANGE_URL_KEY: &str = "onepipeline.change_url";
+/// The shadow task's own top-level field carrying the tickets a node delivers, held against
+/// the same document as the words and keys above.
+const DELIVERS_FIELD: &str = "delivers";
 // Cross-platform runners have measured real sibling commands taking longer than ten seconds
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs. It is the
@@ -238,6 +241,23 @@ struct Snapshot {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     settlements: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,
+    /// Whether a node the run has not started is written as claimed or released.
+    claim: Claim,
+    /// Whether the store offers `delivers`, so the shadow task carries each node's.
+    delivers: bool,
+}
+
+/// What a node the run has not started says about the work it names.
+///
+/// While a driver drives the run, the run has claimed its whole plan, and an unstarted node
+/// is written `queued`, which the store counts as a claim on every ticket it delivers. At
+/// closeout — settled or stopped — a node that never started is written `todo`, which the
+/// store counts as a release. A store older than [`WRITEBACK_DELIVERS_FROM`] has no `queued`,
+/// so every snapshot projected into one releases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Claim {
+    Held,
+    Released,
 }
 
 /// One projection that failed, as the planner is told about it.
@@ -315,6 +335,8 @@ impl Classified {
 struct Failed {
     reason: String,
     classified: Option<Classified>,
+    /// The copy report's `delivered` entries, where a copy that exited unsuccessfully wrote one.
+    delivered: Vec<Map<String, Value>>,
 }
 
 impl Failed {
@@ -323,6 +345,7 @@ impl Failed {
         Self {
             reason,
             classified: classified(output.status.code(), &output.stdout),
+            delivered: Vec::new(),
         }
     }
 
@@ -355,6 +378,7 @@ impl From<String> for Failed {
         Self {
             reason,
             classified: None,
+            delivered: Vec::new(),
         }
     }
 }
@@ -391,6 +415,9 @@ struct Pending {
     /// Remembered so that publishing it again attempts nothing: the store would refuse the
     /// same projection the same way, and only a graph that changed is worth asking about.
     refused: Option<Snapshot>,
+    /// How many attempts this worker has ended, landed or not: what a driver's launch wait
+    /// ends on.
+    attempts: u64,
     worker: WorkerState,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
@@ -420,6 +447,12 @@ impl Pending {
 /// A non-blocking handle owned by the one reconcile loop.
 pub struct Writeback {
     pending: Arc<(Mutex<Pending>, Condvar)>,
+    /// Whether the store offers `queued` and `delivers`, from the version the launch check read.
+    delivers: bool,
+    /// The copy's per-item budget, which bounds the launch wait as it bounds the copy.
+    per_item: NonZeroU64,
+    /// Whether this driver has said why a plan's tickets are not moved by an older store.
+    told_why_not_delivered: std::sync::atomic::AtomicBool,
 }
 
 impl Writeback {
@@ -437,6 +470,7 @@ impl Writeback {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
+        let delivers = crate::taskgraph::at_least(version, WRITEBACK_DELIVERS_FROM);
         let version = version.to_owned();
         let launch_dir = if launch.dir.as_os_str().is_empty() {
             PathBuf::from(".")
@@ -463,7 +497,12 @@ impl Writeback {
             })
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let writer = Self { pending };
+        let writer = Self {
+            pending,
+            delivers,
+            per_item,
+            told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
+        };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
         Some(writer)
@@ -483,40 +522,71 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        let Ok(project) = launch.project.parse() else {
+        let claim = if self.delivers {
+            Claim::Held
+        } else {
+            Claim::Released
+        };
+        let Some(snapshot) = snapshot_of(paths, launch, state, statuses, claim, self.delivers)
+        else {
             return;
         };
-        let snapshot = Snapshot {
-            project,
-            dir: paths.dir.join("writeback"),
-            nodes: all_nodes(paths, state),
-            statuses: statuses.clone(),
-            outcomes: state.outcomes.clone(),
-            landings: state.landings.clone(),
-            landing_commits: state.landing_commits.clone(),
-            change_urls: state.change_urls.clone(),
-            settlements: settlements(paths),
-            project_metadata: state
-                .plan
-                .as_ref()
-                .map(|plan| {
-                    let mut metadata = BTreeMap::from([
-                        (
-                            "onepipeline.schema_version".into(),
-                            json!(plan.schema_version),
-                        ),
-                        ("onepipeline.concurrency".into(), json!(plan.concurrency)),
-                    ]);
-                    if let Some(goal) = &plan.goal {
-                        metadata.insert("onepipeline.goal".into(), json!(goal));
-                    }
-                    if let Some(name) = &plan.name {
-                        metadata.insert("onepipeline.name".into(), json!(name));
-                    }
-                    metadata
-                })
-                .unwrap_or_default(),
-        };
+        self.say_once_why_tickets_are_not_moved(&snapshot);
+        self.queue(snapshot);
+    }
+
+    /// The same, for the snapshot a closeout projects: a node that never started is written
+    /// `todo`, releasing the claim on every ticket it delivers.
+    pub fn publish_closeout(
+        &self,
+        paths: &RunPaths,
+        launch: &LaunchRecord,
+        state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) {
+        if let Some(snapshot) = snapshot_of(
+            paths,
+            launch,
+            state,
+            statuses,
+            Claim::Released,
+            self.delivers,
+        ) {
+            self.queue(snapshot);
+        }
+    }
+
+    /// Wait for this worker to end one attempt, bounded by the store command deadline for a
+    /// whole copy of what is queued.
+    ///
+    /// What a driver asks before its first dispatch, so the run's claim — and the store's
+    /// propagation of it to every delivered ticket — reaches the board before any of the work
+    /// it claims starts. An attempt that fails or outlasts the bound ends the wait all the
+    /// same: the dispatch goes ahead, and the failure reaches the planner as every failed
+    /// projection does.
+    pub fn wait_for_first_attempt(&self) {
+        let (lock, ready) = &*self.pending;
+        let Ok(mut pending) = lock.lock() else { return };
+        let items = pending
+            .latest
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.nodes.len());
+        let deadline = Instant::now()
+            + Deadline::Copy {
+                per_item: self.per_item,
+                items,
+            }
+            .within();
+        while pending.attempts == 0 && Instant::now() < deadline {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
+                return;
+            };
+            pending = next;
+        }
+    }
+
+    fn queue(&self, snapshot: Snapshot) {
         crate::loopstats::published();
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
@@ -526,6 +596,76 @@ impl Writeback {
         }
     }
 
+    /// Against a store that has no `delivers`, a plan whose nodes deliver tickets is told once,
+    /// on the driver's standard error, that nothing will move them.
+    fn say_once_why_tickets_are_not_moved(&self, snapshot: &Snapshot) {
+        if self.delivers || snapshot.nodes.values().all(|node| node.delivers.is_empty()) {
+            return;
+        }
+        if self
+            .told_why_not_delivered
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        eprintln!(
+            "onetaskgraph write-back will not move the tickets this plan's tasks deliver for \
+             '{}': the store reports a version older than {WRITEBACK_DELIVERS_FROM}, the first \
+             release carrying `queued` and `delivers`, so unstarted nodes are written `todo` and \
+             no task carries `delivers` — install onetaskgraph {WRITEBACK_DELIVERS_FROM} or newer",
+            snapshot.project
+        );
+    }
+}
+
+/// The snapshot one publish hands the worker, or `None` for a launch naming no project.
+fn snapshot_of(
+    paths: &RunPaths,
+    launch: &LaunchRecord,
+    state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
+    claim: Claim,
+    delivers: bool,
+) -> Option<Snapshot> {
+    let Ok(project) = launch.project.parse() else {
+        return None;
+    };
+    Some(Snapshot {
+        project,
+        dir: paths.dir.join("writeback"),
+        nodes: all_nodes(paths, state),
+        statuses: statuses.clone(),
+        outcomes: state.outcomes.clone(),
+        landings: state.landings.clone(),
+        landing_commits: state.landing_commits.clone(),
+        change_urls: state.change_urls.clone(),
+        settlements: settlements(paths),
+        project_metadata: state
+            .plan
+            .as_ref()
+            .map(|plan| {
+                let mut metadata = BTreeMap::from([
+                    (
+                        "onepipeline.schema_version".into(),
+                        json!(plan.schema_version),
+                    ),
+                    ("onepipeline.concurrency".into(), json!(plan.concurrency)),
+                ]);
+                if let Some(goal) = &plan.goal {
+                    metadata.insert("onepipeline.goal".into(), json!(goal));
+                }
+                if let Some(name) = &plan.name {
+                    metadata.insert("onepipeline.name".into(), json!(name));
+                }
+                metadata
+            })
+            .unwrap_or_default(),
+        claim,
+        delivers,
+    })
+}
+
+impl Writeback {
     /// Whether the worker has a failed projection the planner has not been told
     /// about.
     ///
@@ -615,6 +755,64 @@ fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
         .unwrap_or(DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS)
 }
 
+/// Release what a run a `stop` ended had claimed and never started: one whole projection, in
+/// the stopping process, writing every node the run had not started `todo`.
+///
+/// A stopped driver takes no closeout of its own — the stop's signal ends it where it stands —
+/// so this is the closeout's release, made by the verb that ended it. Best effort like every
+/// projection: bounded by the same command deadlines, appended to the same record, and a
+/// failure is said on this process's standard error and changes nothing about the stop. A
+/// driver that adopts the run claims those nodes again before its first dispatch.
+pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
+    let Ok(store) = crate::taskgraph::Store::resolve() else {
+        return;
+    };
+    let state = crate::checkpoint::Projected::open(paths);
+    let statuses = state.statuses();
+    let delivers = crate::taskgraph::at_least(store.reported_version(), WRITEBACK_DELIVERS_FROM);
+    let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released, delivers)
+    else {
+        return;
+    };
+    let launch_dir = if launch.dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        launch.dir.clone()
+    };
+    let carry = Carry::Whole(WholeBecause::First);
+    let items = carry.items(&snapshot);
+    let at = crate::sys::now_rfc3339();
+    let started = Instant::now();
+    let attempt = project(
+        &store.binary(),
+        &launch_dir,
+        &paths.dir,
+        per_item_budget(launch),
+        &snapshot,
+        &carry,
+        &BTreeMap::new(),
+    );
+    append_record(
+        &paths.dir,
+        &ProjectionRecord::of(
+            at,
+            &snapshot.project,
+            &carry,
+            items,
+            started.elapsed(),
+            &attempt,
+        ),
+    );
+    if let Err(failed) = attempt {
+        eprintln!(
+            "onetaskgraph write-back could not release the nodes this stopped run never started \
+             for '{}': {}",
+            snapshot.project,
+            failed.said()
+        );
+    }
+}
+
 /// Where the worker's attempts stand, which decides what the next outcome prints.
 ///
 /// One value, because these are mutually exclusive: a projection is landing, or it is part-way
@@ -694,6 +892,13 @@ fn worker(
                 &attempt,
             ),
         );
+        {
+            let (lock, ready) = &*pending;
+            if let Ok(mut state) = lock.lock() {
+                state.attempts = state.attempts.saturating_add(1);
+                ready.notify_all();
+            }
+        }
         match attempt {
             Ok(landed) => {
                 if standing != Standing::Landing {
@@ -850,6 +1055,7 @@ struct Landed {
     origins: BTreeMap<String, Origin>,
     actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
+    delivered: Vec<Map<String, Value>>,
 }
 
 fn project(
@@ -908,26 +1114,77 @@ fn project(
         items: carry.items(snapshot).len(),
     };
     let output = bounded_output(binary, launch_dir, run_dir, PROJECT_COPY, &args, deadline)?;
+    // Read for what the copy says it did. A report this build cannot read leaves that unsaid
+    // on the record rather than failing a copy the store says landed.
+    let report: Option<CopyReport> = serde_json::from_slice(&output.stdout).ok();
     if output.status.success() {
-        // Read for what the copy says it did. A report this build cannot read leaves that
-        // unsaid on the record rather than failing a copy the store says landed.
-        let report: Option<CopyReport> = serde_json::from_slice(&output.stdout).ok();
         if let Some(report) = &report {
             report.learn(&mut origins, snapshot);
         }
+        let actions = report.as_ref().map(CopyReport::actions);
+        let (spent, delivered) = report
+            .map(|report| (report.spent, report.delivered))
+            .unwrap_or_default();
         Ok(Landed {
             origins,
-            actions: report.as_ref().map(CopyReport::actions),
-            spent: report.and_then(|report| report.spent),
+            actions,
+            spent,
+            delivered,
         })
     } else {
-        let reason = format!(
-            "copy exited {}: {}",
-            exit(&output.status),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        Err(Failed::answered(&output, reason))
+        let delivered = report.map(|report| report.delivered).unwrap_or_default();
+        // A copy whose own writes landed and whose delivered tickets the store could not keep
+        // in step exits as a partial answer, and is a projection that did not fully land: the
+        // tickets are behind the run. So it is failed, surfaced and retried whole exactly as
+        // any partial projection is, with the tickets and what the store said of each as the
+        // reason.
+        let reason = match failed_deliveries(&delivered) {
+            Some(tickets) if output.status.code() == Some(WRITEBACK_PARTIAL_EXIT) => format!(
+                "the copy landed, but the store could not keep every delivered ticket in step: \
+                 {tickets}"
+            ),
+            _ => format!(
+                "copy exited {}: {}",
+                exit(&output.status),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        };
+        let mut failed = Failed::answered(&output, reason);
+        failed.delivered = delivered;
+        Err(failed)
     }
+}
+
+/// Each ticket a copy report says the store failed to keep in step, with its deliverer and the
+/// store's own words about it, or `None` where it failed none.
+fn failed_deliveries(delivered: &[Map<String, Value>]) -> Option<String> {
+    let said = |entry: &Map<String, Value>, key: &str| {
+        entry
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("an unnamed task")
+            .to_owned()
+    };
+    let failed: Vec<String> = delivered
+        .iter()
+        .filter(|entry| entry.get("outcome").and_then(Value::as_str) == Some("failed"))
+        .map(|entry| {
+            let failure = entry
+                .get("failure")
+                .and_then(|failure| failure.get("message"))
+                .and_then(Value::as_str)
+                .map_or_else(
+                    || "the store gave no reason".to_owned(),
+                    |message| message.split_whitespace().collect::<Vec<_>>().join(" "),
+                );
+            format!(
+                "ticket {} (delivered by {}): {failure}",
+                said(entry, "ticket"),
+                said(entry, "deliverer")
+            )
+        })
+        .collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
 }
 
 fn destination_project(
@@ -1176,23 +1433,39 @@ fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
             })
         }
         WRITEBACK_PARTIAL_EXIT => {
-            let answer: PartialAnswer = serde_json::from_slice(stdout).ok()?;
-            if answer.errors.is_empty() {
+            // A partial read names its failures under `errors`; a copy whose delivered tickets
+            // the store could not keep in step names them under `delivered`, each with the
+            // store's own failure. Either is refused only where every failure it names is.
+            let failures: Vec<(FailureClass, String)> =
+                match serde_json::from_slice::<PartialAnswer>(stdout) {
+                    Ok(answer) if !answer.errors.is_empty() => answer
+                        .errors
+                        .into_iter()
+                        .map(|entry| (entry.class, entry.error.kind))
+                        .collect(),
+                    _ => serde_json::from_slice::<DeliveredAnswer>(stdout)
+                        .ok()?
+                        .delivered
+                        .into_iter()
+                        .filter(|entry| entry.outcome == DeliveredOutcome::Failed)
+                        .map(|entry| entry.failure.map(|failure| (failure.class, failure.kind)))
+                        .collect::<Option<Vec<_>>>()?,
+                };
+            if failures.is_empty() {
                 return None;
             }
-            let class = if answer
-                .errors
+            let class = if failures
                 .iter()
-                .all(|entry| entry.class == FailureClass::Refused)
+                .all(|(class, _)| *class == FailureClass::Refused)
             {
                 FailureClass::Refused
             } else {
                 FailureClass::Transient
             };
             let mut kinds: Vec<String> = Vec::new();
-            for entry in answer.errors {
-                if !kinds.contains(&entry.error.kind) {
-                    kinds.push(entry.error.kind);
+            for (_, kind) in failures {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
                 }
             }
             Some(Classified {
@@ -1245,6 +1518,31 @@ struct PartialAnswer {
 struct PartialError {
     class: FailureClass,
     error: PartialCause,
+}
+
+/// The half of a copy report a partial copy is classified by: each delivered ticket's outcome,
+/// and the store's failure for one it could not keep in step.
+#[derive(Deserialize)]
+struct DeliveredAnswer {
+    delivered: Vec<DeliveredEntry>,
+}
+
+#[derive(Deserialize)]
+struct DeliveredEntry {
+    outcome: DeliveredOutcome,
+    #[serde(default)]
+    failure: Option<StoreFailure>,
+}
+
+/// What the store did to one delivered ticket. An outcome this build has never heard of leaves
+/// the answer unclassified, and so on the retry schedule.
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum DeliveredOutcome {
+    Written,
+    Unchanged,
+    Left,
+    Failed,
 }
 
 #[derive(Deserialize)]
@@ -1438,6 +1736,12 @@ fn task_document(
     let repo = wire
         .remove("repo")
         .and_then(|v| v.as_str().map(str::to_owned));
+    // The store's own field, never a reserved key: taken out of the wire whether or not the
+    // store offers it, so an older store is handed no `onepipeline.delivers` either.
+    let delivers = wire
+        .remove(DELIVERS_FIELD)
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
     wire.remove("id");
     let mut metadata = Map::new();
     metadata.insert("onepipeline.id".into(), json!(id));
@@ -1500,9 +1804,17 @@ fn task_document(
         "status".into(),
         json!(projected(
             status,
-            snapshot.outcomes.get(id).map(String::as_str)
+            snapshot.outcomes.get(id).map(String::as_str),
+            snapshot.claim
         )),
     );
+    // Plan-declared, so owned: the copy is a total replacement, and a node delivering
+    // nothing writes none, which is the plan saying so. Every entry is already qualified —
+    // `graph::check_node` refused any that was not — so the store carries each one through
+    // as the ticket it names rather than as an id of the shadow source.
+    if snapshot.delivers && !delivers.is_empty() {
+        front.insert(DELIVERS_FIELD.into(), json!(delivers));
+    }
     // A node the plan has just added has no destination item yet, so there is nothing
     // to preserve and the created task starts with none.
     front.insert(
@@ -1550,6 +1862,8 @@ enum ProjectedStatus {
     Skipped,
     #[serde(rename = "todo")]
     Todo,
+    #[serde(rename = "queued")]
+    Queued,
 }
 
 /// Mirror one node's settlement onto the word its destination item reads under.
@@ -1558,7 +1872,7 @@ enum ProjectedStatus {
 /// carries: a dispatch its provider killed and a task its agent failed both
 /// settle [`NodeStatus::Failed`], and a reader who cannot tell them apart goes
 /// looking for what the work got wrong when nothing was wrong with the work.
-fn projected(status: NodeStatus, outcome: Option<&str>) -> ProjectedStatus {
+fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> ProjectedStatus {
     match status {
         // The one node here projected under a word that is not its own: a draft
         // has not settled, so `done` and `cancelled` would both be false, and
@@ -1573,7 +1887,10 @@ fn projected(status: NodeStatus, outcome: Option<&str>) -> ProjectedStatus {
         NodeStatus::Parked => ProjectedStatus::Parked,
         NodeStatus::Skipped => ProjectedStatus::Skipped,
         NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Waiting | NodeStatus::Blocked => {
-            ProjectedStatus::Todo
+            match claim {
+                Claim::Held => ProjectedStatus::Queued,
+                Claim::Released => ProjectedStatus::Todo,
+            }
         }
     }
 }
@@ -1791,6 +2108,10 @@ struct CopyReport {
     /// Verbatim: the store's own account, absent where no source in the command meters.
     #[serde(default)]
     spent: Option<Map<String, Value>>,
+    /// Verbatim: what the store did to each ticket a carried task delivers, absent from a store
+    /// that has no `delivers`.
+    #[serde(default)]
+    delivered: Vec<Map<String, Value>>,
 }
 
 #[derive(Deserialize)]
@@ -2024,6 +2345,10 @@ pub struct ProjectionRecord {
     pub duration_ms: u64,
     /// How the attempt ended, and what the store said about it.
     pub ended: ProjectionEnded,
+    /// The copy report's `delivered` entries, verbatim: what the store did to each ticket a
+    /// carried task delivers, whether the attempt landed or not. Empty where the report carried
+    /// none, and then left off the line.
+    pub delivered: Vec<Map<String, Value>>,
 }
 
 /// What one projection attempt carried.
@@ -2130,6 +2455,10 @@ impl ProjectionRecord {
                     reason: failed.reason.clone(),
                 },
             },
+            delivered: match attempt {
+                Ok(landed) => landed.delivered.clone(),
+                Err(failed) => failed.delivered.clone(),
+            },
         }
     }
 }
@@ -2151,6 +2480,10 @@ struct ProjectionWire {
     duration_ms: u64,
     actions: Option<ProjectionActions>,
     spent: Option<Map<String, Value>>,
+    /// The one key a line may leave off: absent where no ticket was reported, so a line that
+    /// reached none reads exactly as it did before tickets were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    delivered: Vec<Map<String, Value>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2234,6 +2567,7 @@ impl TryFrom<ProjectionWire> for ProjectionRecord {
             items: wire.items,
             duration_ms: wire.duration_ms,
             ended,
+            delivered: wire.delivered,
         })
     }
 }
@@ -2268,6 +2602,7 @@ impl From<ProjectionRecord> for ProjectionWire {
             duration_ms: record.duration_ms,
             actions,
             spent,
+            delivered: record.delivered,
         }
     }
 }
@@ -2275,10 +2610,10 @@ impl From<ProjectionRecord> for ProjectionWire {
 #[cfg(test)]
 mod tests {
     use super::{
-        classified, per_item_budget, projected, write_shadow, Classified, Deadline,
+        classified, per_item_budget, projected, write_shadow, Claim, Classified, Deadline,
         DestinationLabel, DestinationProjectItem, FailureClass, Landing, Origin, Pending,
         ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY, COMMAND_FLOOR,
-        LANDING_COMMIT_KEY, LANDING_KEY,
+        DELIVERS_FIELD, LANDING_COMMIT_KEY, LANDING_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -2653,6 +2988,7 @@ mod tests {
             latest: Some(superseded),
             last_success: Some(first.clone()),
             refused: None,
+            attempts: 0,
             worker: WorkerState::Working,
             phase: super::RunPhase::Running,
             unprojected: Vec::new(),
@@ -2674,6 +3010,9 @@ mod tests {
     fn the_close_out_phase_is_lifted_when_the_run_is_driven_again() {
         let writeback = Writeback {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
+            delivers: true,
+            per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+            told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
         };
         writeback.wait_briefly();
         assert!(
@@ -2804,6 +3143,7 @@ mod tests {
     fn every_projected_word() -> Vec<String> {
         [
             ProjectedStatus::Todo,
+            ProjectedStatus::Queued,
             ProjectedStatus::InProgress,
             ProjectedStatus::Done,
             ProjectedStatus::Failed,
@@ -2815,6 +3155,7 @@ mod tests {
         .into_iter()
         .inspect(|status| match status {
             ProjectedStatus::Todo
+            | ProjectedStatus::Queued
             | ProjectedStatus::InProgress
             | ProjectedStatus::Done
             | ProjectedStatus::Failed
@@ -2849,12 +3190,22 @@ mod tests {
                 "docs/contract-divergences.md does not name the reserved key `{key}`"
             );
         }
+        // The task fields a shadow task carries at its top level because the plan declares
+        // them, beyond the title, body, status and edges the contract already names.
+        let fields = [DELIVERS_FIELD];
+        for field in fields {
+            assert!(
+                divergence.contains(&format!("`{field}`")),
+                "docs/contract-divergences.md does not name the task field `{field}`"
+            );
+        }
         // And how many of each, because naming them all is not the same as
         // counting them: a document that lists eight words and then says six has
         // one sentence a reader trusts and one that is wrong.
         for stated in [
-            format!("{} words where the contract names 4", words.len()),
+            format!("{} words where the contract names 5", words.len()),
             format!("the {} reserved keys beside the settlement", keys.len()),
+            format!("the {} task field the write-back owns", fields.len()),
         ] {
             assert!(
                 divergence.contains(&stated),
@@ -2874,6 +3225,7 @@ mod tests {
         let contract = include_str!("../docs/contract.md");
         for status in [
             ProjectedStatus::Todo,
+            ProjectedStatus::Queued,
             ProjectedStatus::InProgress,
             ProjectedStatus::Done,
             ProjectedStatus::Cancelled,
@@ -2908,7 +3260,7 @@ mod tests {
         ];
         let mut seen: BTreeMap<String, &str> = BTreeMap::new();
         for (settlement, status, outcome) in settlements {
-            let projected = word(projected(status, outcome));
+            let projected = word(projected(status, outcome, Claim::Held));
             if let Some(shared) = seen.insert(projected.clone(), settlement) {
                 panic!(
                     "'{settlement}' and '{shared}' are both projected as `{projected}`, so a \
@@ -3055,6 +3407,8 @@ mod tests {
                         "onepipeline.concurrency".into(),
                         json!(4),
                     )]),
+                    claim: Claim::Held,
+                    delivers: true,
                 },
                 // Only `build`. A node the plan has just added has no destination
                 // task at all, and holding both kinds in one fixture is what makes
@@ -3532,7 +3886,7 @@ mod tests {
         for settled in [NodeStatus::Done, NodeStatus::Cancelled] {
             assert_ne!(
                 build["status"].as_str(),
-                Some(word(projected(settled, None)).as_str()),
+                Some(word(projected(settled, None, Claim::Held)).as_str()),
                 "a draft-complete node took the board word `{}` settles under",
                 settled.as_str()
             );

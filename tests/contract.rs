@@ -1091,6 +1091,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         adoption: Some(Adoption::Published),
         amendment: Some("changed requirements".into()),
         consumes: std::collections::BTreeMap::new(),
+        delivers: vec!["tickets:t-1".into()],
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -3131,22 +3132,62 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             },
             ..record.clone()
         },
+        // A partial copy: the deliverer's own write landed and a ticket it delivers did not.
+        ProjectionRecord {
+            scope: ProjectionScope::Whole(WholeBecause::First),
+            ended: ProjectionEnded::Failed {
+                classified: Some(ProjectionFailure {
+                    class: FailureClass::Transient,
+                    kind: "unavailable".to_owned(),
+                }),
+                reason: "the copy landed, but the store could not keep every delivered ticket \
+                         in step"
+                    .to_owned(),
+            },
+            delivered: vec![json!({
+                "ticket": "tickets:t/one", "deliverer": "plans:p/a", "outcome": "failed",
+                "from": "queued",
+                "failure": {"class": "transient", "kind": "unavailable", "source": "tickets",
+                            "message": "cannot write", "retry_after_seconds": null}
+            })
+            .as_object()
+            .cloned()
+            .expect("a delivered entry is an object")],
+            ..record.clone()
+        },
     ];
     let fields = projection["fields"]
         .as_object()
         .expect("entry 73 names the record's fields");
+    // A field the entry says a line leaves off under a condition is the one kind of key a line
+    // may lack; every other key is on every line.
+    let always: BTreeSet<&String> = fields
+        .iter()
+        .filter(|(_, field)| field["omitted_when"].is_null())
+        .map(|(name, _)| name)
+        .collect();
+    let mut written_keys: BTreeSet<String> = BTreeSet::new();
     let mut written_words: std::collections::BTreeMap<String, BTreeSet<String>> =
         std::collections::BTreeMap::new();
     for line in &lines {
         let written = serde_json::to_value(line).expect("a record serializes");
         let written = written.as_object().expect("a record is one object");
-        assert_eq!(
-            written.keys().collect::<BTreeSet<_>>(),
-            fields.keys().collect::<BTreeSet<_>>(),
-            "the record writes other keys than entry 73 names"
+        let keys: BTreeSet<&String> = written.keys().collect();
+        assert!(
+            always.is_subset(&keys) && keys.iter().all(|key| fields.contains_key(*key)),
+            "the record writes other keys than entry 73 names: {keys:?}"
         );
+        written_keys.extend(written.keys().cloned());
+        if line.delivered.is_empty() {
+            assert!(
+                !written.contains_key("delivered"),
+                "a line that reached no ticket wrote `delivered`: {written:?}"
+            );
+        }
         for (name, field) in fields {
-            let value = &written[name];
+            let Some(value) = written.get(name) else {
+                continue;
+            };
             let types: Vec<&str> = match &field["type"] {
                 Value::String(one) => vec![one.as_str()],
                 Value::Array(several) => several.iter().filter_map(Value::as_str).collect(),
@@ -3180,6 +3221,11 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             }
         }
     }
+    assert_eq!(
+        written_keys.iter().collect::<BTreeSet<_>>(),
+        fields.keys().collect::<BTreeSet<_>>(),
+        "a key entry 73 names is written on no shape of line"
+    );
     // And every word entry 73 admits for the scope, the outcome and the reasons is one the
     // record writes — asked of the serializer rather than restated.
     for name in ["scope", "outcome"] {

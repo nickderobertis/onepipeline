@@ -114,6 +114,11 @@ struct StoreTask {
     repositories: Vec<String>,
     #[serde(default)]
     metadata: BTreeMap<String, Value>,
+    /// The tasks this one delivers, every entry qualified, as onetaskgraph 0.2.32 answers them.
+    /// Skipped on the way out when empty, so a task delivering nothing renders exactly as it did
+    /// before the store carried the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    delivers: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -148,6 +153,7 @@ struct StoreStatus {
 enum StoreStatusCategory {
     Backlog,
     Todo,
+    Queued,
     InProgress,
     Done,
     Cancelled,
@@ -2115,8 +2121,15 @@ impl World {
                 metadata.insert("onepipeline.repo".into(), json!(repo));
             }
         }
+        // What a task delivers is the store's own field on the task, never a reserved key.
+        if let Some(delivers) = node.get("delivers") {
+            front.push(("delivers", delivers.clone()));
+        }
         for (key, value) in node {
-            if matches!(key.as_str(), "id" | "title" | "task" | "deps" | "repo") {
+            if matches!(
+                key.as_str(),
+                "id" | "title" | "task" | "deps" | "repo" | "delivers"
+            ) {
                 continue;
             }
             metadata.insert(reserved(key), value.clone());

@@ -86,6 +86,14 @@ pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
 /// report carries `spent`. A store reporting an older version is projected whole.
 pub const WRITEBACK_MEMBERS_FROM: &str = "0.2.30";
 
+/// The first `onetaskgraph` release whose status vocabulary carries `queued` and whose tasks
+/// carry `delivers`, re-evaluating each delivered task on every write of its deliverer.
+///
+/// Against a store reporting an older version, a node the run has not started is written
+/// `todo`, the shadow task carries no `delivers`, and a plan whose tasks deliver tickets is
+/// told once why they are not moved.
+pub const WRITEBACK_DELIVERS_FROM: &str = "0.2.32";
+
 /// The store command a member projection reads one named member's destination item with,
 /// by the name its capture files and refusals carry. It stands in for
 /// [`WRITEBACK_CLASSIFIED_COMMANDS`]' page of tasks, which a member projection never reads,

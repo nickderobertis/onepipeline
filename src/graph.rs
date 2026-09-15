@@ -555,6 +555,9 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
     }
 
     let mut seen = BTreeSet::new();
+    // One ticket, one node: two deliverers in one plan would each claim and release the
+    // same ticket on the store, and which of them it followed would be whichever wrote last.
+    let mut delivered: BTreeMap<&str, &str> = BTreeMap::new();
     for node in &plan.tasks {
         if node.id.trim().is_empty() {
             return Err(Refusal::plain("every node needs a non-empty id").field("id"));
@@ -565,6 +568,22 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
             );
         }
         check_node(node)?;
+        for ticket in &node.delivers {
+            match delivered.insert(ticket, &node.id) {
+                Some(first) if first != node.id => {
+                    return Err(Refusal::about(
+                        &node.id,
+                        format!(
+                            "nodes '{first}' and '{}' both deliver the ticket '{ticket}'; a \
+                             ticket is delivered by one node of a plan",
+                            node.id
+                        ),
+                    )
+                    .field("delivers"));
+                }
+                _ => {}
+            }
+        }
     }
 
     for node in &plan.tasks {
@@ -635,6 +654,18 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     let named = |what: &str| Refusal::node(&node.id, what);
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
+    }
+
+    // What a node delivers is written onto the board as the store's own relation, and the
+    // store resolves each entry by its source: an entry naming none would be resolved
+    // against whichever source the shadow copy happened to read it from.
+    for entry in &node.delivers {
+        if let Err(why) = crate::taskgraph::QualifiedId::try_from(entry.clone()) {
+            return Err(named(&format!(
+                "`delivers` names '{entry}', which is not a qualified task id: {why}"
+            ))
+            .field("delivers"));
+        }
     }
 
     // A title is only ever the subject of a publication, and only a node that
@@ -1548,6 +1579,54 @@ mod tests {
             },
         ]);
         validate(&plan).expect("the plan is legal");
+    }
+
+    fn delivering(id: &str, tickets: &[&str]) -> Node {
+        Node {
+            delivers: tickets.iter().map(|ticket| (*ticket).to_owned()).collect(),
+            ..agent(id, &[])
+        }
+    }
+
+    #[test]
+    fn a_delivered_ticket_is_a_qualified_task_id_and_one_nodes_alone() {
+        validate(&plan_of(vec![
+            delivering("a", &["tickets:t-1", "plans:t-2"]),
+            delivering("b", &["tickets:t-3"]),
+            agent("c", &[]),
+        ]))
+        .expect("distinct qualified tickets are legal");
+
+        for entry in ["t-1", "Tickets:t-1", "tickets:", ""] {
+            let message = validate(&plan_of(vec![delivering("a", &[entry])]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains("'a'")
+                    && message.contains(&format!("'{entry}'"))
+                    && message.contains("not a qualified task id"),
+                "{message}"
+            );
+        }
+
+        let message = validate(&plan_of(vec![
+            delivering("a", &["tickets:t-1"]),
+            agent("between", &[]),
+            delivering("b", &["tickets:t-2", "tickets:t-1"]),
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("'a'") && message.contains("'b'") && message.contains("tickets:t-1"),
+            "{message}"
+        );
+
+        // A node naming one ticket twice is still one node delivering it.
+        validate(&plan_of(vec![delivering(
+            "a",
+            &["tickets:t-1", "tickets:t-1"],
+        )]))
+        .expect("one node naming its ticket twice is not two deliverers");
     }
 
     #[test]

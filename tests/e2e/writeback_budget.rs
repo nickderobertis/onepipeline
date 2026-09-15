@@ -238,8 +238,11 @@ fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-floor", run, items, &[flag.as_str(), "1"]);
 
-    // The launching driver's first copy is let go at once, so it lands and the run
-    // is quiet: nothing has failed yet, and the driver is one an adoption may end.
+    // The launching driver's copies are let go at once, so they land and the run is
+    // quiet: nothing has failed yet, and the driver is one an adoption may end. There
+    // are two of them — the claim a driver projects before its first dispatch, which
+    // writes the held node `queued`, and the projection of that node running.
+    meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
@@ -333,8 +336,10 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-older-record", run, items, &[]);
 
-    // The launching driver's first copy is let go at once, so the run is quiet and
+    // The launching driver's copies are let go at once — its claim before the first
+    // dispatch, and the projection of the held node running — so the run is quiet and
     // an adoption may end its driver.
+    meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")

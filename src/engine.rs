@@ -1012,6 +1012,9 @@ fn converge(
     // snapshot is made of — the number of times the board can actually be
     // behind — rather than once per pass.
     let mut unpublished = true;
+    // Whether this driver has made its one bounded attempt at claiming the plan on the store,
+    // which it does before it starts any of the work that plan names.
+    let mut claimed = false;
     // What the channel looked like when this loop last read it.
     let mut channel_seen = channel.fingerprint();
     // And what every upstream ledger this graph's edges are answered by looked
@@ -1132,6 +1135,19 @@ fn converge(
         // settlement unrecorded, with nothing for a later `attest` to validate
         // against.
         let statuses = statuses_of(&mut derived, state);
+        // The run claims its whole plan before it starts any of it: every node not yet started
+        // is written `queued`, and the store moves each ticket those tasks deliver. Waited on
+        // once per driver — a launch's and an adoption's alike — and bounded by the store's
+        // command deadline, so a store that fails or stalls reports it and delays nothing more.
+        // Every later projection stays on the worker's own thread.
+        if !claimed {
+            claimed = true;
+            if let Some(writeback) = &writeback {
+                writeback.publish(paths, launch, state, &statuses);
+                writeback.wait_for_first_attempt();
+                unpublished = false;
+            }
+        }
         if start_ready(
             paths,
             journal,
@@ -1496,7 +1512,10 @@ fn close_out_and_drain(
     // answered has said nothing to report.
     crate::loopstats::flush(paths)?;
     if let Some(writeback) = writeback {
-        writeback.publish(paths, launch, state, final_statuses);
+        // A node that never started is released at closeout, so another reader may take up
+        // what this run claimed and did not begin. A driver that goes on driving after an
+        // edit found here publishes it `queued` again on its next pass.
+        writeback.publish_closeout(paths, launch, state, final_statuses);
         writeback.wait_briefly();
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
