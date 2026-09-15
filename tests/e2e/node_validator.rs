@@ -284,6 +284,115 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
     world.release("slow.go");
 }
 
+/// The node validator is the bus's command validator over the node each edit
+/// produces, offered where the reconciler has always offered it.
+///
+/// One journey through every verdict it can give, against a scripted command: an
+/// `add` it refuses is refused with its stderr as the reason and never joins the
+/// graph; a `retry` carrying an amended task it cannot judge is refused naming
+/// the validator, and applies nothing; an `add` it passes is applied, and what
+/// crossed its stdin is the node as the plan states it; and a `finding` or a
+/// `complete`, which produce no node, spawn it not at all.
+#[test]
+fn the_node_validator_judges_the_node_an_edit_produces_and_nothing_else() {
+    let world = World::new("validator-verdicts");
+    let validator = validator_named(&world, "judge-node");
+    world.script("build.fail", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "validatorverdicts",
+        &plan_of(
+            "validatorverdicts",
+            vec![agent("slow", &[]), agent("build", &[])],
+        ),
+    );
+    world
+        .run(&["start", &path, "--node-validator", &validator, "--detach"])
+        .exited(0);
+    let run = "validatorverdicts";
+    world.until("the node that fails to settle", |world| {
+        settled(world, run, "build", "failed")
+    });
+    let committed = |world: &World| world.events_of(run, "edit-committed").len();
+
+    world.script("validator.refuse", RULES);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
+        )
+        .exited(REFUSED)
+        .err_has(&format!("judge-node: {RULES}"));
+    world.run(&["results", run]).exited(0).out_lacks("fresh");
+    std::fs::remove_file(world.fakes.join("validator.refuse")).expect("the scenario is lifted");
+
+    // No verdict: a validator that exits with neither a pass nor a refusal is
+    // named, and the retry it could not judge applies nothing at all.
+    world.script("validator.silent", "");
+    let before = committed(&world);
+    let mut replacement = agent("build-2", &[]);
+    replacement["task"] = json!("## What\nbuild it again, differently");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "retry", "id": "build", "node": replacement}])),
+        )
+        .exited(REFUSED)
+        .err_has(&format!("the node validator '{validator}'"))
+        .err_has("gave no verdict")
+        .err_has("checked by nothing");
+    world.run(&["results", run]).exited(0).out_lacks("build-2");
+    assert_eq!(
+        committed(&world),
+        before,
+        "a retry nothing judged was committed"
+    );
+    std::fs::remove_file(world.fakes.join("validator.silent")).expect("the scenario is lifted");
+
+    let fresh = agent("fresh", &[]);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "add", "node": fresh}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the added node to reach the graph", |world| {
+        world.run(&["results", run]).stdout.contains("fresh")
+    });
+    let (_, crossed) = offered(&world)
+        .into_iter()
+        .rfind(|(_, node)| node["id"] == json!("fresh"))
+        .expect("the passed node was offered");
+    // The node as the plan type writes it, which is the document this hook has
+    // always been handed: an empty `deps` is omitted, as a plan file omits it.
+    let written = serde_json::to_value(
+        serde_json::from_value::<onepipeline::plan::Node>(fresh).expect("the node parses"),
+    )
+    .expect("the node serializes");
+    assert_eq!(
+        crossed, written,
+        "the validator was handed another document than the node"
+    );
+
+    let offerings = offered(&world).len();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([
+                {"op": "finding", "message": "the fixture is slow", "id": "slow"},
+                {"op": "complete", "reason": "nothing left to judge"}
+            ])),
+        )
+        .exited(0);
+    assert_eq!(
+        offered(&world).len(),
+        offerings,
+        "an op that produces no node was offered to the validator"
+    );
+    world.release("slow.go");
+}
+
 /// The three names, in the order the record states, proven by driving them
 /// rather than by asserting the order in prose.
 ///
@@ -581,7 +690,7 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
                 &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
             )
             .exited(REFUSED)
-            .err_has("without a status");
+            .err_has("ended by a signal");
         world.run(&["results", &run]).exited(0).out_lacks("fresh");
         std::fs::remove_file(world.fakes.join("validator.signal")).expect("the scenario is lifted");
     }
@@ -615,7 +724,7 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
             &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
         )
         .exited(REFUSED)
-        .err_has("could not be started")
+        .err_has("could not be run")
         .err_has("checked by nothing");
     world
         .run(&["results", "validatormissing"])

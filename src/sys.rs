@@ -1356,9 +1356,11 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// Open an append-only file so this process is its **only** appender until the
 /// handle is dropped.
 ///
-/// Every append to a run's files goes through one choke point —
-/// [`ledger::append_line`](crate::ledger::append_line) — and that function both
-/// appends and, when it finds a fragment a dead writer left, truncates it away.
+/// Every append to a run's own ledger files goes through one choke point —
+/// [`ledger::append_line_healed`](crate::ledger::append_line_healed) — and that
+/// function both appends and, when it finds a fragment a dead writer left,
+/// truncates it away. The channel's files are not among them: they are the bus's
+/// queues, appended through its transport, which takes a lock of its own.
 /// Truncation is what makes the exclusion load-bearing: a writer that took no
 /// lock and truncated back to the last record boundary would destroy a *whole*
 /// record a second writer had appended in between, which is exactly the loss the
@@ -1379,7 +1381,7 @@ pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::Fi
 /// here, since a writer dying mid-record is what leaves the fragment.
 ///
 /// Advisory means it excludes only the writers that take it, which is why
-/// `append_line` must stay the sole appender. The runs root is host-local, so
+/// `append_line_healed` must stay the sole appender of those files. The runs root is host-local, so
 /// the caveat about locks over NFS does not apply.
 #[cfg(unix)]
 fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {

@@ -657,6 +657,17 @@ pub struct LaunchRecord {
     /// after it shipped, so a build that predates it still reads what it wrote.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub envelope_reviewer: String,
+    /// The command whose output fingerprints the bar this run's envelope
+    /// reviewer judges against, when the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, and
+    /// the launch config in that order. What it prints is read each time a pass
+    /// is looked for rather than here, so a bar that moves between two envelopes
+    /// of one run runs the reviewer again. Read it through
+    /// [`envelope_reviewer_bar`](Self::envelope_reviewer_bar). Omitted when empty,
+    /// like every other field added to this record after it shipped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub envelope_reviewer_bar: String,
     /// The launcher, as the environment reported it.
     ///
     /// Defaulted to [`sys::UNKNOWN_LAUNCHER`] on a record that carries no such
@@ -805,6 +816,18 @@ pub struct LaunchRecord {
     /// after it shipped, so a build that predates it still reads what it wrote.
     #[serde(default, skip_serializing_if = "Filters::is_empty")]
     pub filters: Filters,
+    /// The `onemessagebus` configuration this run's channel is kept under, when
+    /// the launch named one.
+    ///
+    /// The document as the launch read and checked it — its transport the local
+    /// one with no directory of its own, its profile `planner-channel` — retained
+    /// whole rather than as the path it was read from, so a `reply` typed in
+    /// another shell, a later `channel serve`, and every driver that adopts the
+    /// run enforce the configuration the run was launched under rather than
+    /// whatever that file says now. Omitted when absent, so a record written
+    /// before this field existed reads as a run under the profile as declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_config: Option<onemessagebus::Config>,
 }
 
 impl LaunchRecord {
@@ -887,6 +910,12 @@ impl LaunchRecord {
     /// and this is the one place that absence becomes "there is none" again.
     pub fn envelope_reviewer(&self) -> Option<&str> {
         (!self.envelope_reviewer.is_empty()).then_some(self.envelope_reviewer.as_str())
+    }
+
+    /// The bar this run's envelope reviewer judges against, when the launch
+    /// named one — read as [`envelope_reviewer`](Self::envelope_reviewer) is.
+    pub fn envelope_reviewer_bar(&self) -> Option<&str> {
+        (!self.envelope_reviewer_bar.is_empty()).then_some(self.envelope_reviewer_bar.as_str())
     }
 
     /// Whether `session` is the session that launched this run.
@@ -1210,6 +1239,7 @@ pub struct Record {
 // record onto half of one again. The loss log is that heal's report rather than a second
 // output a caller chooses. A name carrying both would be describing the two failures this
 // function exists to survive rather than the operation every caller asks for.
+#[cfg(test)]
 pub fn append_line(path: &Path, line: &str) -> Result<()> {
     append_line_healed(path, line).map(|_| ())
 }
@@ -1226,7 +1256,7 @@ pub fn append_line(path: &Path, line: &str) -> Result<()> {
 /// record it just wrote. A heal moves it **down**, by bytes the record does not
 /// replace — and a writer that did not hear about it goes on counting from an
 /// offset the file no longer has a record boundary at, which is
-/// [`read_records_from`]'s one precondition. Every other caller appends to a
+/// the one thing a reader folding from that offset needs. Every other caller appends to a
 /// file nothing accounts for and takes the shorter form above.
 ///
 /// An append that failed still reports nothing: the error is what happened, and
@@ -1317,76 +1347,6 @@ fn write_record(path: &Path, file: &mut fs::File, line: &str) -> Result<()> {
             // llmlint: ignore-end[no_panics_on_recoverable_errors]
             Err(ledger(e))
         }
-    }
-}
-
-/// An append-only file held open as its **only** appender, for the one caller
-/// that derives what it appends from what the file already holds.
-///
-/// [`append_line`] takes the lock, appends, and lets go; a record whose content
-/// depends on the records before it — an id allocated as the next one the file
-/// has not used — cannot be derived outside that lock without two writers
-/// deriving the same one. So this holds the lock open across the read and the
-/// append, healed exactly as `append_line` heals: the file ends on a record
-/// boundary from the moment it is opened until the handle is dropped, and
-/// nothing else appends in between. Every write goes through the same
-/// [`write_record`] as every other append, roll-back included.
-///
-/// The lock is released when the value is dropped, so a holder that dies
-/// releases it too.
-pub(crate) struct Appender {
-    path: PathBuf,
-    file: fs::File,
-}
-
-impl Appender {
-    /// Take the file's append lock and heal its tail, reporting what was healed
-    /// exactly as [`append_line`] does.
-    pub(crate) fn open(path: &Path) -> Result<Self> {
-        let (healed, opened) = open_healed(path);
-        if let Some(torn) = &healed {
-            report_torn_tail(path, torn);
-        }
-        Ok(Self {
-            path: path.to_path_buf(),
-            file: opened?,
-        })
-    }
-
-    /// The file's length, which under this lock is the boundary the next
-    /// append starts on.
-    pub(crate) fn len(&self) -> Result<u64> {
-        self.file
-            .metadata()
-            .map(|metadata| metadata.len())
-            .map_err(|e| Error::Ledger {
-                path: self.path.clone(),
-                source: e,
-            })
-    }
-
-    /// Every record the file holds from its first `from` bytes, read through
-    /// this handle. `from` must be a record boundary, as [`read_records_from`]
-    /// requires; the file cannot change under this lock, so the answer is exactly
-    /// what it holds.
-    pub(crate) fn records_from(&mut self, from: u64) -> Result<Vec<Record>> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        let ledger = |e: io::Error| Error::Ledger {
-            path: self.path.clone(),
-            source: e,
-        };
-        self.file.seek(SeekFrom::Start(from)).map_err(ledger)?;
-        let mut bytes = Vec::new();
-        self.file.read_to_end(&mut bytes).map_err(ledger)?;
-        counted(bytes.len(), ());
-        Ok(records_of(&bytes, from))
-    }
-
-    /// Append one record, leaving the file on the boundary it started on when
-    /// the write fails.
-    pub(crate) fn append(&mut self, line: &str) -> Result<()> {
-        write_record(&self.path, &mut self.file, line)
     }
 }
 
@@ -1523,42 +1483,6 @@ fn records_of(bytes: &[u8], base: u64) -> Vec<Record> {
         offset += line.len() as u64;
     }
     records
-}
-
-/// Every line an append-only file has grown by since its first `from` bytes.
-///
-/// The bounded counterpart of [`read_records`], for the one reader that already
-/// knows how much of the file it has accounted for: a run's summary is kept
-/// current by folding what the store has grown by, and a reader that had to
-/// re-read the whole store to find that out would be paying exactly the cost the
-/// summary exists to remove.
-///
-/// `from` **must** be a record boundary, which is what its only caller counts:
-/// whole records, added up. A file shorter than `from` — healed of a torn tail,
-/// or replaced — hands back nothing, and the caller reads the whole store again
-/// rather than folding a tail it cannot place. Offsets stay the file's own;
-/// [`Record::line`] is the tail's own count and **not** the file's, because
-/// nothing before `from` was read to number against. The one reader here folds
-/// records and reports no line, and any reader that reports one takes the whole
-/// file.
-pub fn read_records_from(path: &Path, from: u64) -> Vec<Record> {
-    // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
-    // ledger reader here follows, stated on `read_records` above: a file this process
-    // cannot open reads as one that is not there.
-    let Ok(mut file) = fs::File::open(path) else {
-        return Vec::new();
-    };
-    use std::io::{Read, Seek, SeekFrom};
-    if file.seek(SeekFrom::Start(from)).is_err() {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    // llmlint: ignore-end[no_panics_on_recoverable_errors]
-    counted(bytes.len(), ());
-    records_of(&bytes, from)
 }
 
 /// One line of a run's journal as the bus [`Reader`](onemessagebus::Reader) read
@@ -2932,6 +2856,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         }
     }
 
@@ -3662,6 +3588,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -3696,6 +3624,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

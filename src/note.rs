@@ -47,6 +47,8 @@
 //! [`Amend`](crate::channel::Command::Amend) is still the lever for a ruling that
 //! has to survive a re-dispatch, and the two are deliberately not the same op.
 
+use std::path::PathBuf;
+
 use oneagentgraph::note::Accepted;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -625,6 +627,99 @@ pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     // llmlint: ignore-end[boundary_inputs_validated]
 }
 
+/// The directory under a run that holds one carry store per node a note was
+/// carried to.
+pub(crate) const CARRY_DIR: &str = "notes";
+
+/// Where the notes carried to `node` wait for its next dispatch: an
+/// `onemessagebus` carry store of its own.
+///
+/// A node id is plan input and may hold anything, so every byte outside
+/// `[A-Za-z0-9_-]` is written as `%XX`: the name stays one segment under
+/// [`CARRY_DIR`], and two ids never share a store.
+pub(crate) fn carry_store(paths: &RunPaths, node: &str) -> PathBuf {
+    let name: String = node
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => char::from(byte).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect();
+    paths
+        .dir
+        .join(CARRY_DIR)
+        .join(format!("{name}.carried.jsonl"))
+}
+
+/// Carry a note no turn took to `node`'s next dispatch, through the bus's carry
+/// backend.
+///
+/// Called after the commit naming it `carried` is journalled, so the store never
+/// holds a note the run's record does not owe.
+///
+/// # Errors
+///
+/// [`Error::Ledger`] when the store's directory cannot be made, and
+/// [`Error::Invalid`] naming the store when the note cannot be built or the bus
+/// cannot carry it there.
+pub(crate) fn carry(
+    paths: &RunPaths,
+    node: &str,
+    addressee: Addressee,
+    text: &NoteText,
+    criterion: Option<&Criterion>,
+) -> Result<()> {
+    let store = carry_store(paths, node);
+    let dir = paths.dir.join(CARRY_DIR);
+    std::fs::create_dir_all(&dir).map_err(|source| Error::Ledger { path: dir, source })?;
+    of(addressee, text, criterion)
+        .map_err(|why| why.to_string())
+        .and_then(|note| {
+            onemessagebus::Carry::sender::<Note, Accepted>(&store)
+                .send(note)
+                .map(drop)
+                .map_err(|why| why.to_string())
+        })
+        .map_err(|why| {
+            Error::Invalid(format!(
+                "the note for node '{node}' could not be carried to its next dispatch in {}: {why}",
+                store.display()
+            ))
+        })
+}
+
+/// `standing`, with the notes carried to `node` taken out of its carry store as
+/// the dispatch that will carry them is composed.
+///
+/// The store is drained here, through [`Inbox::adopt_carried`], so each carried
+/// note is handed over once. What the dispatch is composed with is still the
+/// fold's, in the fold's order, because the journal is the record a crash leaves
+/// whole: a note the fold owes that the store no longer holds — carried by a build
+/// that kept no store, or drained by a dispatch that ended before it was
+/// announced — is still composed, and a stored note the fold does not owe was
+/// already composed into a dispatch and is not composed twice.
+///
+/// [`Inbox::adopt_carried`]: onemessagebus::Inbox::adopt_carried
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the store when it is not one this build can read,
+/// which ends the dispatch as an unreadable journal record does.
+pub(crate) fn drain_carried(paths: &RunPaths, node: &str, standing: Standing) -> Result<Standing> {
+    let store = carry_store(paths, node);
+    let inbox = onemessagebus::Inbox::<Note, Accepted>::new();
+    inbox.adopt_carried(&store).map_err(|why| {
+        Error::Invalid(format!(
+            "the notes carried to node '{node}' cannot be read from {}: {why}",
+            store.display()
+        ))
+    })?;
+    // Nobody waits on a carried note — its sender was answered when it was
+    // carried — so taking each is the whole of the hand-over.
+    while inbox.take().is_some() {}
+    Ok(standing)
+}
+
 /// Where a note stands on the way from the worker to the judge, for a route on
 /// which the judge is shown it only after the worker: the judge receives a note
 /// the worker's turn carried *with* that turn's response, so a supervisor turn
@@ -991,6 +1086,111 @@ mod tests {
     use crate::event::{Labels, Source, ENVELOPE_VERSION};
     use crate::journal::{self, labels, payload};
     use serde_json::json;
+
+    /// A note carried to a node waits in that node's own carry store, is taken
+    /// out once by the dispatch composed with it, and what that dispatch is
+    /// composed with is the fold's — so a store emptied early loses nothing and a
+    /// store the fold no longer owes adds nothing.
+    #[test]
+    fn a_carried_note_waits_in_its_nodes_store_and_one_dispatch_takes_it() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-note-carry-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let texts = |standing: &Standing| -> Vec<String> {
+            standing
+                .carried()
+                .iter()
+                .map(|note| note.text.as_str().to_owned())
+                .collect()
+        };
+        let stored = |node: &str| {
+            onemessagebus::Carry::read(&carry_store(&paths, node)).map(|entries| entries.len())
+        };
+
+        let text = |said: &str| -> NoteText { said.parse().expect("a readable note") };
+        carry(&paths, "later", Addressee::Worker, &text("first"), None).expect("carried");
+        carry(&paths, "later", Addressee::Worker, &text("second"), None).expect("carried");
+        carry(
+            &paths,
+            "a/../b",
+            Addressee::Worker,
+            &text("elsewhere"),
+            None,
+        )
+        .expect("carried");
+        assert_eq!(stored("later").expect("a store"), 2);
+        assert_eq!(
+            carry_store(&paths, "a/../b")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("a%2F%2E%2E%2Fb.carried.jsonl"),
+            "a node id that navigates was not kept to one segment"
+        );
+
+        let journal = vec![
+            delivered(1, "later", "first", Reached::Carried),
+            delivered(2, "later", "second", Reached::Carried),
+        ];
+        let owed = standing(&journal, "later").expect("the fold reads");
+        let adopted = drain_carried(&paths, "later", owed.clone()).expect("the store reads");
+        assert_eq!(texts(&adopted), vec!["first", "second"]);
+        assert_eq!(
+            adopted, owed,
+            "the store decided what a dispatch is composed with"
+        );
+        assert_eq!(
+            stored("later").expect("a store"),
+            0,
+            "the store was not drained"
+        );
+        assert_eq!(
+            stored("a/../b").expect("a store"),
+            1,
+            "another node's store was drained"
+        );
+
+        // Drained already, the fold still owes both until a dispatch is announced.
+        let again = drain_carried(&paths, "later", owed).expect("an empty store reads");
+        assert_eq!(texts(&again), vec!["first", "second"]);
+        // A node nothing was carried to has no store, and that is no refusal.
+        let none = drain_carried(&paths, "never", Standing::default()).expect("no store");
+        assert!(none.held.is_empty());
+
+        std::fs::write(carry_store(&paths, "later"), "not a carry store\n").expect("written");
+        let refused = drain_carried(&paths, "later", Standing::default())
+            .expect_err("a store this build cannot read is refused");
+        assert!(
+            refused.to_string().contains("node 'later'")
+                && refused.to_string().contains("later.carried.jsonl"),
+            "{refused}"
+        );
+
+        // A store the bus cannot carry into is refused naming the node and the
+        // store, and nothing is carried.
+        std::fs::create_dir_all(carry_store(&paths, "blocked"))
+            .expect("a directory where the store would go");
+        let refused = carry(&paths, "blocked", Addressee::Worker, &text("held"), None)
+            .expect_err("a store that is a directory is refused");
+        assert!(
+            refused.to_string().contains("node 'blocked'")
+                && refused.to_string().contains("blocked.carried.jsonl"),
+            "{refused}"
+        );
+
+        // And a run whose notes directory cannot be made is refused naming it.
+        let filed = RunPaths::under(&root, "filed");
+        filed.create().expect("the run directory");
+        std::fs::write(filed.dir.join(CARRY_DIR), "not a directory").expect("written");
+        let refused = carry(&filed, "later", Addressee::Worker, &text("held"), None)
+            .expect_err("a notes directory that cannot be made is refused");
+        assert!(
+            matches!(&refused, Error::Ledger { path, .. } if path == &filed.dir.join(CARRY_DIR)),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn pipeline(
         kind: journal::PipelineKind,

@@ -354,6 +354,13 @@ waiting for something to drive the run, and never an instruction to send again,
 which the reply says in words on stderr — and `2` when it was refused. A
 non-zero status from this verb is a rejection to correct.
 
+A verdict answers one question: `reply --correlation C` names it, and one naming
+none binds first to the question whose `ask-manager-token:` its `message` echoes.
+The whole binding order is the channel section of
+[`docs/contract.md`](docs/contract.md), and what `channel serve` answers when
+nobody rules in time is entry 77 of
+[`docs/contract-divergences.md`](docs/contract-divergences.md).
+
 Two of those ops reach a node that is already running, and they are deliberately
 not the same lever:
 
@@ -403,8 +410,9 @@ running now — is a decomposition decision rather than an observation.
 A launch may also name a **node validator** — a command of the host's own, which
 every op that introduces or changes a node's task (`add`, `retry`, a `requeue`
 whose amendment touches `task`, and `amend`) is offered the resulting node to, as
-JSON on its stdin. Exit `0` accepts the edit; a non-zero exit refuses it with the
-command's own stderr as the reason. It is named by `--node-validator COMMAND`, by
+JSON on its stdin. Exit `0` accepts the edit; exit `1` refuses it with the
+command's own stderr as the reason; any other exit, a command that cannot be run,
+or one a signal ended gives no verdict, and refuses the edit naming the validator. It is named by `--node-validator COMMAND`, by
 `ONEPIPELINE_NODE_VALIDATOR`, or by a launch config's `node_validator`, in that
 order of precedence; naming none is the default and runs no validator at all.
 
@@ -416,8 +424,8 @@ node the envelope introduces or changes with the op that produced each, and the
 plan they are being edited into, as the envelope leaves it. That is the review no
 per-node check can make — two added nodes that duplicate each other, a contract
 seam between two nodes of one edit, the dependency edges the edit introduces, or
-whether the edited graph still delivers the goal. Exit `0` accepts it; a non-zero
-exit **refuses the whole envelope**, so no command of it half-applies, with the
+whether the edited graph still delivers the goal. Exit `0` accepts it; exit `1`
+**refuses the whole envelope**, so no command of it half-applies, with the
 command's own stderr as the reason and every op and node the envelope carried
 named beside it. The refusal also names the node the reviewer **objected to**,
 which is not the same set: the reviewer declares it on a line of its stderr
@@ -431,6 +439,16 @@ submission check is the only place a refusal is still whole. It is named by
 `--envelope-reviewer COMMAND`, by `ONEPIPELINE_ENVELOPE_REVIEWER`, or by a launch
 config's `envelope_reviewer`, in that order of precedence; naming none is the
 default and runs no reviewer at all.
+
+A reviewer may also be given a **bar** — a command whose output fingerprints what
+the reviewer judges against — so that an envelope it already passed under an
+unmoved bar is not offered to it again. Entry 77 of
+[`docs/contract-divergences.md`](docs/contract-divergences.md) says how the bar is
+named and what is kept.
+
+A launch may also keep its channel under an **`onemessagebus` configuration**
+(`--bus-config PATH`). What that configuration may set, and what the launch
+refuses, is the channel section of [`docs/contract.md`](docs/contract.md).
 
 A launch may also set the **write-back item budget** — how long the settlement
 write-back allows its store's `project copy` per item it writes. The copy's

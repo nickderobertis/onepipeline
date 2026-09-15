@@ -385,7 +385,7 @@ fn an_unstartable_reviewer_fails_closed_and_a_launch_naming_none_is_unchanged() 
         .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
         .exited(REFUSED)
         .err_has("reviewed by nothing")
-        .err_has("could not be started");
+        .err_has("could not be run");
     world.run(&["results", &run]).exited(0).out_lacks("cover");
     world.release("slow.go");
 
@@ -493,6 +493,83 @@ fn the_flag_beats_the_environment_which_beats_the_config() {
                 refused.err_lacks(other);
             }
         }
+        world.release("slow.go");
+    }
+}
+
+/// The bar is resolved as the reviewer is: with no flag naming it, from
+/// `ONEPIPELINE_ENVELOPE_REVIEWER_BAR`, and with neither, from a launch config's
+/// `envelope_reviewer_bar`. A pass is kept under whichever rung named it, the
+/// launch record carries the bar it resolved, and a launch naming no bar keeps
+/// no pass and offers every envelope.
+#[test]
+fn a_bar_named_by_the_environment_or_the_launch_config_keeps_passes_as_the_flag_does() {
+    const BAR_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER_BAR";
+    let world = World::new("reviewer-bar-rungs");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!("schema_version: 7\nenvelope_reviewer_bar: {bar:?}\n"),
+    )
+    .expect("the launch config is written");
+    let finding = envelope(json!([{"op": "finding", "message": "the fixture is slow"}]));
+
+    for (name, by_config, environment) in [
+        ("barbyenvironment", false, Some(bar.as_str())),
+        ("barbyconfig", true, None),
+        ("barbynone", false, None),
+    ] {
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+        world.script("slow.wait", "hold");
+        let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
+        let mut args = vec![
+            "start".to_string(),
+            path,
+            spelling("flag"),
+            reviewer.clone(),
+        ];
+        if by_config {
+            args.push("--launch-config".to_string());
+            args.push(config.to_string_lossy().into_owned());
+        }
+        args.push("--detach".to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = world.cmd(&borrowed);
+        match environment {
+            Some(value) => command.env(BAR_ENV, value),
+            None => command.env_remove(BAR_ENV),
+        };
+        world.run_on(command, "start").exited(0);
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", name])
+                .stdout
+                .contains("slow: running")
+        });
+
+        let before = offered(&world).len();
+        for _ in 0..2 {
+            world.run_with_stdin(&["reply", name], &finding).exited(0);
+        }
+        let passes = std::fs::read_dir(world.run_file(name, "validator-passes"))
+            .map_or(0, |passes| passes.count());
+        let (reviews, kept, recorded) = match name {
+            "barbynone" => (2, 0, Value::Null),
+            _ => (1, 1, json!(bar)),
+        };
+        assert_eq!(
+            (offered(&world).len() - before, passes),
+            (reviews, kept),
+            "{name}: the reviews run and the passes kept are not what its bar asks for"
+        );
+        assert_eq!(
+            world.run_json(name, "launch.json")["envelope_reviewer_bar"],
+            recorded,
+            "{name}: the launch record does not carry the bar the launch resolved"
+        );
         world.release("slow.go");
     }
 }
@@ -711,7 +788,7 @@ fn a_refusal_carries_what_the_reviewer_said_without_its_escape_codes_or_its_trac
         .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
         .exited(REFUSED)
         .err_has("exited 5")
-        .err_has("said nothing on stderr");
+        .err_has("neither a pass (0) nor a refusal (1)");
 
     // And the edits are still refused rather than lost in the noise.
     world.run(&["results", &run]).exited(0).out_lacks("cover");
@@ -822,6 +899,21 @@ fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
             "the refusal does not name the variable: {}",
             refused.stderr
         );
+
+        // The bar's variable is read the same way, and refused the same way.
+        const BAR_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER_BAR";
+        let mut command = world.cmd(&["start", &path, "--detach"]);
+        command
+            .env_remove(spelling("environment"))
+            .env(BAR_ENV, std::ffi::OsStr::from_bytes(&[0x2e, 0xff, 0x2e]));
+        world
+            .run_on(command, "start")
+            .exited(REFUSED)
+            .err_has(BAR_ENV);
+        assert!(
+            !world.runs.join(name).exists(),
+            "a launch refused for an unreadable variable minted a run"
+        );
     }
 }
 
@@ -868,4 +960,118 @@ fn the_resolved_reviewer_is_in_the_launch_record_and_survives_an_adoption() {
         .exited(REFUSED)
         .err_has(&format!("by-flag: {RULES}"))
         .err_lacks("somewhere-else");
+}
+
+/// A pass the reviewer gives is kept under the run's own root, keyed on the
+/// document it judged and on what the bar prints: an identical envelope under an
+/// unchanged bar is passed without the reviewer being spawned, a bar that moved
+/// spawns it again, and a bar that prints nothing keys nothing — said on stderr,
+/// with the envelope reviewed uncached.
+#[test]
+fn a_pass_is_kept_under_the_bar_and_a_moved_bar_runs_the_reviewer_again() {
+    let world = World::new("reviewer-passes");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let run = live_run(
+        &world,
+        "reviewerpasses",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--envelope-reviewer-bar",
+            &bar,
+        ],
+    );
+    let finding = envelope(json!([{"op": "finding", "message": "the fixture is slow"}]));
+    let passes = || {
+        std::fs::read_dir(world.run_file(&run, "validator-passes"))
+            .map_or(0, |passes| passes.count())
+    };
+
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (1, 1),
+        "the first review was not run and recorded"
+    );
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (1, 1),
+        "an identical envelope under an unchanged bar spawned the reviewer again"
+    );
+
+    world.script("reviewer-bar.fingerprint", "criteria revision 2");
+    world.run_with_stdin(&["reply", &run], &finding).exited(0);
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (2, 2),
+        "a moved bar was passed from the record kept under the old one"
+    );
+
+    std::fs::remove_file(world.fakes.join("reviewer-bar.fingerprint")).expect("the bar is lifted");
+    world
+        .run_with_stdin(&["reply", &run], &finding)
+        .exited(0)
+        .err_has("printed no fingerprint");
+    assert_eq!(
+        (offered(&world).len(), passes()),
+        (3, 2),
+        "a bar that printed nothing keyed a pass"
+    );
+    world.release("slow.go");
+}
+
+/// A review that refuses, and one that gives no verdict at all, each refuse the
+/// reply with nothing queued and record no pass — the refusal in the reviewer's
+/// own words, and the missing verdict naming how the reviewer ended.
+#[test]
+fn a_review_that_refuses_or_gives_no_verdict_queues_nothing_and_records_no_pass() {
+    let world = World::new("reviewer-no-pass");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let run = live_run(
+        &world,
+        "reviewernopass",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--envelope-reviewer-bar",
+            &bar,
+        ],
+    );
+    let passes = || {
+        std::fs::read_dir(world.run_file(&run, "validator-passes"))
+            .map_or(0, |passes| passes.count())
+    };
+    let queued = || {
+        std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl")).unwrap_or_default()
+    };
+
+    world.script("reviewer.refuse", RULES);
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has(RULES);
+    assert_eq!(
+        (passes(), queued()),
+        (0, String::new()),
+        "a refusal queued or recorded"
+    );
+    std::fs::remove_file(world.fakes.join("reviewer.refuse")).expect("the scenario is lifted");
+
+    world.script("reviewer.silent", "");
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has("gave no verdict")
+        .err_has("exited 5");
+    assert_eq!(
+        (passes(), queued()),
+        (0, String::new()),
+        "no verdict queued or recorded"
+    );
+    world.release("slow.go");
 }

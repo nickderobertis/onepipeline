@@ -1,0 +1,15 @@
+{
+  "waiting": [],
+  "pending": {
+    "id": 3,
+    "kind": "planner-question",
+    "message": "Recorded for the onepipeline channel fixtures: a blocking question raised through channel serve, left pending by next.",
+    "source": "proposal",
+    "blocking": true,
+    "queued_at": 1789409111802,
+    "asker": "fixture-listener"
+  },
+  "next_id": 4,
+  "accounted": 18971,
+  "seal": "716fe05c83d09eb42c37cd6b9a16e008"
+}

@@ -10,6 +10,8 @@ files:
   # List committed files that shouldn't be judged (lock files, generated output).
   exclude:
     - "**/.git/**"
+    # A recorded journal the recorded-channel journey reads byte for byte; it quotes another repository's directives, which the parser would read as this one's.
+    - "tests/recorded/run-root/**"
 rationales: true
 # No `agents` block: the harness/model are NOT pinned here. `oneharness.toml`
 # (composed alongside this file) selects them in fallback mode — codex + gpt-5.5

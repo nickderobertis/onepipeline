@@ -1,0 +1,41 @@
+{
+  "schema_version": 7,
+  "filters": {
+    "agentgraph": {
+      "exclude": [
+        {
+          "kind": "turn-activity"
+        }
+      ]
+    },
+    "vcs": {
+      "include": [
+        {
+          "kind": "gate-*"
+        },
+        {
+          "kind": "session-closed"
+        }
+      ]
+    },
+    "profiles": {
+      "monitor": {},
+      "planner": {
+        "include": [
+          {
+            "source": "pipeline"
+          }
+        ]
+      }
+    }
+  },
+  "pr_author_graph": "./graphs/pr-author.yaml",
+  "node_validator": "./scripts/check-node.sh",
+  "envelope_reviewer": "./scripts/review-envelope.sh",
+  "envelope_reviewer_bar": "./scripts/reviewer-bar.sh",
+  "writeback_item_budget": 10,
+  "success_hook": "./scripts/follow-up.sh",
+  "failure_hook": "./scripts/report-failure.sh",
+  "hook_timeout": 600,
+  "bus_config": "./onemessagebus.yaml"
+}

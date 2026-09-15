@@ -1,0 +1,24 @@
+{
+  "waiting": [
+    {
+      "id": 1,
+      "kind": "check-in",
+      "message": "second",
+      "source": "check-in",
+      "blocking": false,
+      "queued_at": 1789420650296
+    },
+    {
+      "id": 2,
+      "kind": "finding",
+      "message": "a finding",
+      "source": "proposal",
+      "blocking": false,
+      "queued_at": 1789420650300
+    }
+  ],
+  "pending": null,
+  "next_id": 3,
+  "accounted": 379,
+  "seal": "483f564f721c5802d504c1125ef4fadd"
+}

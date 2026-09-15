@@ -931,8 +931,8 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
     };
     for (config, named) in [
         (
-            written("later.yaml", "schema_version: 7\n"),
-            "schema_version 7",
+            written("later.yaml", "schema_version: 8\n"),
+            "schema_version 8",
         ),
         // A key the version this document declares never had, refused by that
         // key's name: an operator who wrote a drafting graph at the earlier

@@ -1,0 +1,3 @@
+{"event":"queued","id":0,"kind":"check-in","message":"first","source":"check-in","blocking":false,"queued_at":1789420650257}
+{"event":"queued","id":1,"kind":"check-in","message":"second","source":"check-in","blocking":false,"queued_at":1789420650296}
+{"event":"queued","id":2,"kind":"finding","message":"a finding","source":"proposal","blocking":false,"queued_at":1789420650300}

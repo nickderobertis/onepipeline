@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR};
 use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
@@ -1170,8 +1170,8 @@ fn a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed() {
     );
     let said = String::from_utf8_lossy(&went.stdout);
     assert!(
-        said.contains("no planner reply") && said.contains("timed out"),
-        "the server did not report its own timeout: {said}"
+        said.contains(r#""answer":"timeout""#) && !said.contains("completion"),
+        "the server did not answer its own elapsed wait as one, without a ruling: {said}"
     );
     let why = String::from_utf8_lossy(&went.stderr);
     assert!(
@@ -2588,6 +2588,84 @@ fn a_run_awaiting_an_answer_takes_a_reply_though_its_graph_has_settled() {
 
     drop(stdin);
     ended(serving);
+}
+
+/// A verdict naming no correlation whose message echoes the token an
+/// outstanding ask minted reaches that ask, whichever order the asks were raised
+/// in — ahead of the older ask a live listener is also waiting on.
+///
+/// Two asks outstanding at once is the case the token exists for: a manager
+/// answering the second question must not have the answer handed to the first
+/// because it arrived first. Run twice, with the order the two askers raise their
+/// questions swapped, and each time the ask raised **second** is answered first.
+#[test]
+fn a_verdict_echoing_an_asks_token_reaches_that_ask_whichever_order_they_were_raised_in() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-token-binding");
+    world.script("build.wait", "hold");
+    let run = running(&world, "tokenbound", vec![agent("build", &[])]);
+
+    for (round, order) in [["alpha", "beta"], ["beta", "alpha"]].iter().enumerate() {
+        let mut sessions = std::collections::BTreeMap::new();
+        for (raised, asker) in order.iter().enumerate() {
+            let token = format!("ask-manager-token:{asker}{round}");
+            let mut serving = world
+                .cmd(&["channel", "serve", &run])
+                .env("ONEPIPELINE_CHANNEL_ASKER", format!("asker-{asker}"))
+                .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("the channel server starts");
+            let mut stdin = serving.stdin.take().expect("stdin is piped");
+            let frame = json!({
+                "kind": "planner-question",
+                "message": format!("{asker} asks, round {round}\n{token}"),
+                "blocking": false,
+            });
+            writeln!(stdin, "{frame}").expect("the frame is written");
+            stdin.flush().expect("flushed");
+            let lines = BufReader::new(serving.stdout.take().expect("stdout is piped")).lines();
+            world.until("the ask to be queued", |world| {
+                world.events_of(&run, "planner-surface-queued").len() > 2 * round + raised
+            });
+            sessions.insert(*asker, (serving, stdin, lines, token));
+        }
+
+        // The ask raised second is answered first, by its token alone.
+        for asker in [order[1], order[0]] {
+            let (_, _, lines, token) = sessions.get_mut(asker).expect("a session");
+            let ruling = format!("for {asker} in round {round}, {token}");
+            world
+                .run_with_stdin(
+                    &["reply", &run],
+                    &json!({"completion": false, "message": ruling}).to_string(),
+                )
+                .exited(0);
+            // The first thing this session reads is its own ruling: a verdict on
+            // the other ask, had it been handed over, would be read here first.
+            let read: Value = serde_json::from_str(
+                &lines
+                    .next()
+                    .expect("the session answered")
+                    .expect("the answer reads"),
+            )
+            .expect("the answer is JSON");
+            assert_eq!(
+                read["message"],
+                json!(ruling),
+                "round {round}: {asker}'s ask was handed another verdict: {read}"
+            );
+        }
+
+        for (_, (serving, stdin, _, _)) in sessions {
+            drop(stdin);
+            ended(serving);
+        }
+    }
+    world.release("build.go");
 }
 
 #[test]
@@ -4210,8 +4288,143 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
     ended(serving);
 }
 
+/// A verdict naming its question binds to that question and no other, and one
+/// naming a question nobody is waiting on is refused by that name.
+///
+/// Two questions outstanding at once, the second in the pending slot: a verdict
+/// naming the first answers the first, whatever the slot holds. A correlation
+/// nothing pending carries — one nobody was told, or one already answered — is
+/// refused naming it and appends nothing, and so is the flag on an envelope with
+/// no verdict to bind, which would otherwise be dropped in silence.
 #[test]
-fn the_channel_server_synthesizes_a_continuing_verdict_when_nobody_answers() {
+fn a_verdict_naming_its_question_binds_to_it_and_a_stranger_is_refused_by_name() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-correlation");
+    world.script("build.wait", "hold");
+    let run = running(&world, "named", vec![agent("build", &[])]);
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .env(onepipeline::channel::ASKER_ENV, "dispatch-build")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let mut lines = BufReader::new(serving.stdout.take().expect("stdout is piped")).lines();
+    let mut ask = |message: &str| -> String {
+        writeln!(
+            stdin,
+            r#"{{"kind":"blocker","message":"{message}","node":"build"}}"#
+        )
+        .expect("written");
+        stdin.flush().expect("flushed");
+        let told: Value = serde_json::from_str(
+            &lines
+                .next()
+                .expect("the server wrote a line")
+                .expect("the line reads"),
+        )
+        .expect("the line is JSON");
+        told["correlation"]
+            .as_str()
+            .expect("a correlation")
+            .to_owned()
+    };
+    let first = ask("first question");
+    let second = ask("second question");
+    // The first is read into the pending slot; the second is still waiting.
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("first question");
+
+    let replies = || {
+        std::fs::read_to_string(world.run_file(&run, "channel/replies.jsonl")).unwrap_or_default()
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &second],
+            r#"{"completion":false,"reason":"the second, by name"}"#,
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
+    let bound: Value = serde_json::from_str(replies().lines().last().expect("a reply"))
+        .expect("the reply is JSON");
+    assert_eq!(bound["correlation"], json!(second), "{bound}");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision: blocker — first question");
+
+    // A question already answered is no longer one a verdict can name.
+    let before = replies();
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &second],
+            r#"{"completion":false,"reason":"again"}"#,
+        )
+        .exited(REFUSED)
+        .err_has(&second);
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", "c-nobody-was-told-this"],
+            r#"{"completion":false,"reason":"to nobody"}"#,
+        )
+        .exited(REFUSED)
+        .err_has("c-nobody-was-told-this");
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", "not a correlation"],
+            r#"{"completion":false,"reason":"malformed"}"#,
+        )
+        .exited(USAGE_ERROR)
+        .err_has("not a correlation");
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &first],
+            &json!({"version": 3, "commands": [
+                {"op": "finding", "message": "nothing to answer with"}
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("carries no verdict");
+    assert_eq!(replies(), before, "a refused reply was appended");
+    assert!(
+        world.command_outcomes(&run).is_empty(),
+        "a refused envelope reached the command queue"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run, "--correlation", &first],
+            r#"{"completion":false,"reason":"the first, by name"}"#,
+        )
+        .exited(0);
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    drop(stdin);
+    world.release("build.go");
+    ended(serving);
+}
+
+/// A question nobody answers within the reply window is answered with the wait
+/// that elapsed, and never with a ruling nobody made.
+///
+/// A synthesized continuing verdict used to stand in for the planner here, and a
+/// caller reading only the fields a ruling carries acted on it as the manager's
+/// answer. So the member is told, in the bus's own word for it, that the wait
+/// elapsed and which question still stands, in a line carrying none of
+/// `completion`, `message` and `reason` — and nothing is appended to the reply
+/// log on the planner's behalf.
+#[test]
+fn a_wait_nobody_answers_is_answered_with_the_wait_and_never_with_a_ruling() {
     use std::io::Write;
 
     let world = World::new("channel-serve-timeout");
@@ -4232,11 +4445,272 @@ fn the_channel_server_synthesizes_a_continuing_verdict_when_nobody_answers() {
     drop(stdin);
 
     let output = serving.wait_with_output().expect("the server exits");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Wedging the orchestrator on a planner who is away would be worse than
-    // continuing, so the timeout is answered rather than left open.
-    assert!(stdout.contains("\"completion\":false"), "{stdout}");
-    assert!(stdout.contains("timed out"), "{stdout}");
+    let answered: Value = serde_json::from_str(stdout.lines().next().expect("a line was written"))
+        .expect("the answer is JSON");
+    assert_eq!(answered["answer"], json!("timeout"), "{stdout}");
+    for field in ["completion", "message", "reason"] {
+        assert!(
+            answered.get(field).is_none(),
+            "the elapsed wait was answered with a ruling's `{field}`: {stdout}"
+        );
+    }
+    let correlation = answered["correlation"]
+        .as_str()
+        .expect("the answer names the question that still stands");
+    let surfaces = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    assert!(
+        surfaces.contains(correlation),
+        "the question the answer names is not the one the channel holds: {surfaces}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(world.run_file(&run, "channel/replies.jsonl")).unwrap_or_default(),
+        "",
+        "a reply was appended that nobody sent"
+    );
+    world.release("build.go");
+}
+
+/// A listener re-armed on a question nobody listens for any more is told so, in
+/// the bus's own word, rather than left waiting on an answer nobody will send.
+///
+/// The question's own session raised it with no asker, was told the wait
+/// elapsed, and ended — which marks the question abandoned. A later session
+/// naming its correlation attends nothing, so its answer is `abandoned`, naming
+/// the question, and carries none of a ruling's fields.
+#[test]
+fn a_listener_re_armed_on_an_abandoned_question_is_answered_abandoned() {
+    let world = World::new("channel-serve-abandoned");
+    world.script("build.wait", "hold");
+    let run = running(&world, "abandonedask", vec![agent("build", &[])]);
+    let session = |window: &str| {
+        let mut command = world.cmd(&["channel", "serve", &run]);
+        command
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", window)
+            .env_remove("ONEPIPELINE_CHANNEL_ASKER");
+        command
+    };
+    let first_line = |stdout: &str| -> Value {
+        serde_json::from_str(stdout.lines().next().expect("the server answered"))
+            .expect("the answer is JSON")
+    };
+
+    let asked = world.run_with_stdin_on(
+        session("1"),
+        "{\"kind\":\"blocker\",\"message\":\"left behind\"}\n",
+    );
+    asked.exited(0);
+    let told = first_line(&asked.stdout);
+    assert_eq!(told["answer"], json!("timeout"), "{told}");
+    let correlation = told["correlation"]
+        .as_str()
+        .expect("the question is named")
+        .to_owned();
+    let surfaces = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    assert!(
+        surfaces
+            .lines()
+            .any(|line| line.contains("\"event\":\"abandoned\"") && line.contains(&correlation)),
+        "the session that ended left its question unmarked: {surfaces}"
+    );
+
+    let relistened = world.run_with_stdin_on(
+        session("30"),
+        &format!("{{\"correlation\":\"{correlation}\"}}\n"),
+    );
+    relistened.exited(0);
+    let answered = first_line(&relistened.stdout);
+    assert_eq!(answered["answer"], json!("abandoned"), "{answered}");
+    assert_eq!(answered["correlation"], json!(correlation), "{answered}");
+    for field in ["completion", "message", "reason"] {
+        assert!(
+            answered.get(field).is_none(),
+            "an abandoned question was answered with a ruling's `{field}`: {answered}"
+        );
+    }
+    world.release("build.go");
+}
+
+/// A record on the reply log echoing a question's correlation that is not a
+/// reply this build reads is refused by the listener waiting on that question,
+/// naming the question, and is never relayed to the member as a ruling.
+#[test]
+fn a_reply_record_the_listener_cannot_read_is_refused_rather_than_relayed() {
+    use std::io::Write;
+
+    let world = World::new("channel-serve-unreadable-reply");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unreadablereply", vec![agent("build", &[])]);
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "60");
+    let mut serving = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let question = "is this answer readable?";
+    writeln!(stdin, r#"{{"kind":"blocker","message":"{question}"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+
+    let mut correlation = String::new();
+    world.until("the question to be queued", |world| {
+        correlation = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["message"] == json!(question))
+            .and_then(|record| record["correlation"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        !correlation.is_empty()
+    });
+
+    // Written by hand, as nothing this crate writes would be: a record echoing
+    // the question whose verdict's `completion` is not a boolean.
+    // llmlint: ignore-block[tests_mirror_real_usage] the state under test is a reply log holding a record no `reply` can write — `reply` refuses that envelope before anything is queued — so the only way to put one where a listener reads it is the way another writer of the directory would: appending it. The listener it reaches is still the real `channel serve`, driven over its own stdin and stdout.
+    let mut replies = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(world.run_file(&run, "channel/replies.jsonl"))
+        .expect("the reply log opens");
+    writeln!(
+        replies,
+        "{}",
+        json!({"id": 0, "reply": {"completion": "not a boolean"}, "at": 1, "correlation": correlation})
+    )
+    .expect("the record is appended");
+    drop(replies);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(REFUSED), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains(&correlation),
+        "the refusal does not name the question: {stderr}"
+    );
+    assert!(
+        !stdout.contains("not a boolean"),
+        "the unreadable record was relayed to the member: {stdout}"
+    );
+    world.release("build.go");
+}
+
+/// A ruling the planner sends after the wait elapsed reaches the listener that
+/// re-arms on the question, rather than being lost.
+///
+/// Twice: in the session that was told the wait elapsed, and in a later session
+/// of the same asker, after the first session's stream ended and left the
+/// second question abandoned. Each re-arm raises nothing — the frame names the
+/// correlation it was told — and is handed the ruling that answers that
+/// question.
+#[test]
+fn a_ruling_sent_after_the_wait_reaches_the_listener_that_re_arms() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-serve-rearm");
+    world.script("build.wait", "hold");
+    let run = running(&world, "rearmed", vec![agent("build", &[])]);
+    let serve = || {
+        world
+            .cmd(&["channel", "serve", &run])
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+            .env(onepipeline::channel::ASKER_ENV, "dispatch-build")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts")
+    };
+    let read = |lines: &mut dyn Iterator<Item = std::io::Result<String>>| -> Value {
+        let line = lines
+            .next()
+            .expect("the server wrote a line")
+            .expect("the line reads");
+        serde_json::from_str(&line).expect("the line is JSON")
+    };
+
+    let mut first = serve();
+    let mut stdin = first.stdin.take().expect("stdin is piped");
+    let mut lines = BufReader::new(first.stdout.take().expect("stdout is piped")).lines();
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"go on?","node":"build"}}"#
+    )
+    .expect("written");
+    stdin.flush().expect("flushed");
+    let told = read(&mut lines);
+    assert_eq!(told["answer"], json!("timeout"), "{told}");
+    let asked = told["correlation"]
+        .as_str()
+        .expect("a correlation")
+        .to_owned();
+
+    // The planner reads the question and rules on it after the wait elapsed.
+    world.run(&["next", &run]).exited(0).out_has("go on?");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(0);
+    let replies = std::fs::read_to_string(world.run_file(&run, "channel/replies.jsonl"))
+        .expect("the ruling was queued");
+    assert!(
+        replies.contains(&asked),
+        "the ruling was not bound to the question it answers: {replies}"
+    );
+
+    // Re-armed in the same session: the answer is the ruling.
+    writeln!(stdin, r#"{{"correlation":"{asked}"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+    let ruled = read(&mut lines);
+    assert_eq!(ruled["reason"], json!("carry on"), "{ruled}");
+
+    // A second question goes unanswered, and the session's stream ends.
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"and now?","node":"build"}}"#
+    )
+    .expect("written");
+    stdin.flush().expect("flushed");
+    let second = read(&mut lines);
+    assert_eq!(second["answer"], json!("timeout"), "{second}");
+    let later = second["correlation"]
+        .as_str()
+        .expect("a correlation")
+        .to_owned();
+    drop(stdin);
+    ended(first);
+
+    // Ruled with nobody listening, and handed to the next listener of the asker.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"the second, ruled late"}"#,
+        )
+        .exited(0);
+    let mut next = serve();
+    let mut stdin = next.stdin.take().expect("stdin is piped");
+    let mut lines = BufReader::new(next.stdout.take().expect("stdout is piped")).lines();
+    writeln!(stdin, r#"{{"correlation":"{later}"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+    let late = read(&mut lines);
+    assert_eq!(late["reason"], json!("the second, ruled late"), "{late}");
+    drop(stdin);
+    ended(next);
+
+    assert_eq!(
+        world.events_of(&run, "planner-surface-queued").len(),
+        2,
+        "a re-arm raised a question of its own"
+    );
     world.release("build.go");
 }
 
@@ -5493,31 +5967,32 @@ fn a_reader_of_the_older_receipt_still_reads_every_answer() {
 // routing, which any change under `src/` can move: a project edged narrower than the crate
 // could not honestly run it, and edging one around a single journey would split the
 // channel's behaviour across two projects to no reader's benefit.
-/// A verdict is taken by whichever listener is polling when it lands, and never
-/// by the question it names.
+/// A verdict reaches the question it answers, and never whichever listener is
+/// polling when it lands.
 ///
-/// The journey entry 63 of `docs/contract-divergences.md` rests on, which is
-/// where what it costs and what it is waiting on are stated. Two listeners and
-/// one ruling: the question's own asker is between sessions, so the second
-/// listener is the one polling, and it reads the ruling back while the run
-/// reports the question answered.
+/// The journey entry 63 of `docs/contract-divergences.md` records as resolved.
+/// Two askers' listeners and one ruling: the blocked agent's question is in the
+/// slot with its asker between listeners, and a second asker's scoring session
+/// is the one polling. The ruling is bound to the question it answers, so the
+/// scoring session is told its own wait elapsed, and the agent's next listener —
+/// which re-arms behind a note of its own, as the asking wrapper does — reads the
+/// ruling back without the manager sending it twice.
 ///
 /// It runs on top of entry 62's repair rather than around it: the question below
 /// is in the slot and owed an answer when the ruling lands.
 #[test]
-fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names() {
+fn a_verdict_reaches_the_question_it_answers_rather_than_whichever_listener_polls() {
     use std::io::{BufRead, BufReader, Write};
 
-    let world = World::new("channel-verdict-stolen");
+    let world = World::new("channel-verdict-bound");
     world.script("build.wait", "hold");
-    let run = running(&world, "stolen", vec![agent("build", &[])]);
+    let run = running(&world, "bound", vec![agent("build", &[])]);
     let worker = "the-dispatch-that-is-blocked";
 
     // The blocking question, raised by a listener that then reaches its **own
     // session bound** with the agent's stream still open. That ending withdraws
-    // nothing — the member is still there and still owed an answer — so what it
-    // leaves is the state the manager sees: a question the run is waiting on, an
-    // agent still blocked on it, and no listener of that agent polling.
+    // nothing, so what it leaves is a question the run is waiting on, an agent
+    // still blocked on it, and no listener of that agent polling.
     let mut asking = world
         .cmd(&["channel", "serve", &run])
         .env(onepipeline::channel::ASKER_ENV, worker)
@@ -5540,27 +6015,30 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
     });
     let reached = asking.wait_with_output().expect("the session ends");
     assert!(reached.status.success(), "{reached:?}");
-    assert!(
-        String::from_utf8_lossy(&reached.stderr).contains("ONEPIPELINE_SERVE_SESSION_SECONDS"),
-        "the listener ended some other way than on its bound: {}",
-        String::from_utf8_lossy(&reached.stderr)
-    );
     world.run(&["next", &run]).exited(0).out_has("is this base");
     world
         .run(&["status", &run])
         .exited(0)
         .out_has("waiting for planner decision: blocker — is this base still right?");
+    let surfaces = std::fs::read_to_string(world.run_file(&run, "channel/surfaces.jsonl"))
+        .expect("the run recorded its surfaces");
+    let question: Value = serde_json::from_str(surfaces.lines().next().expect("a record"))
+        .expect("the record is JSON");
+    let asked = question["correlation"]
+        .as_str()
+        .expect("the question was asked under a correlation")
+        .to_owned();
 
-    // And a listener of somebody else entirely — the monitor's own scoring
-    // session, which raised a narration nobody is waiting on and is now in the
-    // wait every frame is followed by.
+    // A listener of somebody else entirely — the monitor's own scoring session,
+    // which raised a narration nobody is waiting on and is now in the wait every
+    // frame is followed by.
     let mut scoring = world
         .cmd(&["channel", "serve", &run])
         .env(
             onepipeline::channel::ASKER_ENV,
             "the-monitors-scoring-session",
         )
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "3")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -5593,30 +6071,35 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
         )
         .exited(0)
         .out_has("\"delivered\"");
-
-    // The scoring session read it. Nothing addressed it there; it was simply the
-    // reader that asked next.
-    let stolen = BufReader::new(scoring.stdout.take().expect("stdout is piped"))
-        .lines()
-        .next()
-        .expect("the scoring session wrote a line")
-        .expect("the line reads");
-    assert!(
-        stolen.contains("yes, that base is still right"),
-        "the scoring session read back something else: {stolen}"
+    let replies = std::fs::read_to_string(world.run_file(&run, "channel/replies.jsonl"))
+        .expect("the ruling was queued");
+    let ruling: Value =
+        serde_json::from_str(replies.lines().next().expect("a reply")).expect("the reply is JSON");
+    assert_eq!(
+        ruling["correlation"],
+        json!(asked),
+        "the ruling was not bound to the question it answers: {replies}"
     );
 
-    // And every manager-visible indicator now says the question was answered:
-    // the slot was cleared by the same call that queued the ruling.
+    // The scoring session is not handed it: it is told its own wait elapsed.
+    let told: Value = serde_json::from_str(
+        &BufReader::new(scoring.stdout.take().expect("stdout is piped"))
+            .lines()
+            .next()
+            .expect("the scoring session wrote a line")
+            .expect("the line reads"),
+    )
+    .expect("the line is JSON");
+    assert_eq!(told["answer"], json!("timeout"), "{told}");
+    assert_ne!(told["correlation"], json!(asked), "{told}");
     world
         .run(&["status", &run])
         .exited(0)
         .out_lacks("waiting for planner decision");
 
-    // The blocked agent re-asks the identical question, and this time it is the
-    // reader holding the wait — so the manager's second, identical copy is the
-    // one that reaches it. That is the whole of the original observation.
-    let mut reasking = world
+    // The blocked agent's next listener re-arms behind a note of its own, and the
+    // ruling it is owed is the first thing it reads — with nothing sent twice.
+    let mut rearmed = world
         .cmd(&["channel", "serve", &run])
         .env(onepipeline::channel::ASKER_ENV, worker)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
@@ -5625,40 +6108,29 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the channel server starts");
-    let mut again = reasking.stdin.take().expect("stdin is piped");
+    let mut again = rearmed.stdin.take().expect("stdin is piped");
     writeln!(
         again,
-        r#"{{"kind":"blocker","message":"is this base still right?","node":"build"}}"#
+        r#"{{"kind":"planner-question","message":"a listener re-armed","blocking":false}}"#
     )
     .expect("the frame is written");
     again.flush().expect("the frame flushes");
-    world.until("the question to be asked a second time", |world| {
-        world
-            .events_of(&run, "planner-surface-queued")
-            .iter()
-            .filter(|event| event["payload"]["message"] == "is this base still right?")
-            .count()
-            >= 2
-    });
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({
-                "completion": false,
-                "message": "yes, that base is still right",
-                "reason": "answered the blocker",
-            })
-            .to_string(),
-        )
-        .exited(0);
-    let answered = BufReader::new(reasking.stdout.take().expect("stdout is piped"))
+    let answered = BufReader::new(rearmed.stdout.take().expect("stdout is piped"))
         .lines()
         .next()
-        .expect("the re-asking session wrote a line")
+        .expect("the re-armed session wrote a line")
         .expect("the line reads");
     assert!(
         answered.contains("yes, that base is still right"),
-        "the resend did not reach the asker either: {answered}"
+        "the ruling did not reach the asker it answers: {answered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(world.run_file(&run, "channel/replies.jsonl"))
+            .expect("the reply log")
+            .lines()
+            .count(),
+        1,
+        "the ruling reached its asker only by being sent twice"
     );
 
     drop(blocked);
@@ -5666,6 +6138,6 @@ fn a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_ques
     drop(again);
     world.release("build.go");
     ended(scoring);
-    ended(reasking);
+    ended(rearmed);
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

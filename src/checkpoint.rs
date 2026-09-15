@@ -832,6 +832,8 @@ mod tests {
             node_sets: Vec::new(),
             adoptions: 0,
             filters: crate::filter::Filters::default(),
+            bus_config: Default::default(),
+            envelope_reviewer_bar: Default::default(),
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");
         paths

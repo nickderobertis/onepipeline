@@ -4154,7 +4154,7 @@ on its public surface at all — the environment variable, and the `asker` a
 surface `next` hands back now carries — or whether the third clearing should be
 stated in the sentence 61 quotes and the mechanism left unspecified.
 
-## 63. A verdict is claimed by whichever reader polls next, and the question it answers has no claim on it — OPEN
+## 63. A verdict is claimed by whichever reader polls next, and the question it answers has no claim on it — RESOLVED
 
 **Proposal (for the planner who owns the contract): state whether a reply is
 addressed. The contract says a reply is routed by the halves it carries, "never
@@ -4184,14 +4184,36 @@ withdrawn question does not explain a *queued* verdict going unread, because
 `claim_reply` consults neither the pending slot nor the asker and hands an
 unclaimed reply to the next poller whatever became of the surface. This is what
 survives, and it survives 62's repair —
-`channel::a_verdict_is_taken_by_whichever_listener_polls_for_it_rather_than_by_the_question_it_names`
-drives it end to end on top of that fix: a blocking question in the slot with its
+the journey that drove it end to end on top of that fix placed: a blocking question in the slot with its
 asker between listeners, a second asker's session polling, one ruling, and the
 scoring session reading it back while `status` reports the question answered.
 
-**Why nothing here resolves it.** Addressing a verdict is a change to the routing
-the contract states, and 62's asker is the identity it would be addressed by — so
-the two entries are one decision, not two. Recorded rather than repaired.
+**Why nothing here resolved it then.** Addressing a verdict is a change to the
+routing the contract states, and 62's asker is the identity it would be addressed
+by — so the two entries are one decision, not two. Recorded rather than repaired.
+
+**Ruling: a reply is addressed.** The planner ruled it for
+`onepipeline-adopt-bus-channel`, and `docs/contract.md`'s channel paragraph states
+it, `--correlation` included. The channel is `onemessagebus`'s now, and a question
+`channel serve` raises is asked through the bus, which stamps it with a
+correlation; a verdict is bound to one question and stamped with that question's
+correlation on `replies.jsonl`. `reply --correlation <c>` binds to the question
+`c` names, and refuses, naming it, a correlation no pending question holds. A
+verdict naming none is bound, in order, to the question whose
+`ask-manager-token:` its `message` echoes, to the question the pending slot holds,
+and to the oldest outstanding question a live listener is waiting on; with none of
+those it is queued with no correlation, as it always was, for the next listener to
+read. A later ruling on the same task dropped a fifth rung, the oldest outstanding
+question at all: a question whose listener had gone may already have been handed a
+verdict bound to nothing, and binding the next verdict to it kept that verdict from
+every listener still reading, which 0.28.2 never did
+(`journal::a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed`). A listener reads its own question's answer, a
+ruling on any other question its asker raised, and a ruling bound to no question —
+never a ruling on another asker's question.
+`channel::a_verdict_reaches_the_question_it_answers_rather_than_whichever_listener_polls`
+drives the case above end to end: the scoring session is told its own wait
+elapsed, and the blocked agent's next listener reads the ruling without a second
+copy being sent.
 
 ## 64. `reply` answers a JSON object the contract never states — OPEN
 
@@ -5728,3 +5750,86 @@ What would close it:
   newest instant without reading the store again, so a relayed burst costs its own
   records rather than the whole run. That is ordering-sensitive work over the merge
   `journal::merge_order` states, and it is for a node of its own.
+
+## 77. The planner channel is the bus's, and the corners where that is not what 0.28.2 did — RESOLVED
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the
+dated record of a ruling, decided against `onemessagebus` 0.4.0 and
+`onemessagebus-agent` 0.4.0, and not a live contract: it says what moved and why, which
+is a restatement by nature. The live shapes it describes are gated elsewhere —
+`tests/contract.rs` holds the monitor's refusals to `docs/contract.md`'s words and both
+reply goldens to the crate's and the profile's schemas, and
+`tests/e2e/recorded_channel.rs` holds this build's answers over channel directories
+0.28.2 wrote to the answers 0.28.2 gave. -->
+**Ruling: the planner channel is `onemessagebus-agent`'s `planner-channel` layout
+over the `onemessagebus` core's local transport, and this crate's channel verbs,
+reply envelope and record bytes stay as they were. Ruled by the planner's task that
+moved the channel onto the bus (`onepipeline-adopt-bus-channel`), and on four
+questions that task's worker asked over the ask seam: a launch's bus configuration
+is recorded at launch-config `schema_version: 7`, which reads 1 to 6; `correlation`
+is normalized, with ids and timestamps, wherever a channel directory is compared
+byte for byte with 0.28.2's; a verdict is bound to one question, as entry 63 now
+records; and the envelope reviewer takes a bar under which its passes are kept,
+while the node validator keeps none.**
+
+What moved. The channel directory's queues, cursors, projection and exclusive
+sections are the bus's `Queue` over `LocalTransport`. A question `channel serve`
+raises is asked with `Bus::ask` under a durable `Asker` and waited on with
+`Pending::wait`. The per-author allowlist is the profile's, and a bus configuration
+may narrow it. The reply envelope is the registered message
+`agent.reply-envelope@3`, read at its version through `Registry::read_at`. The node
+validator and the envelope reviewer are the bus's `CommandValidator`. A note no
+running turn took is also sent to the node's carry store,
+`notes/<node>.carried.jsonl` under the run's directory, and the dispatch composed
+with it drains that store through `Inbox::adopt_carried`; what the dispatch is
+composed with is still the journal's, in the journal's order. `watch` blocks in
+`Transport::wait_for_change` over a fingerprint of everything a pass decides from,
+and reads the run again only when that moved, where it used to read the run once a
+second.
+
+Where that is not what 0.28.2 did:
+
+- **Ask and reply records carry `correlation`.** The correlation the bus mints for
+  a question is written on its ask — the surface record `channel serve` queues on
+  `surfaces.jsonl` — and on the reply record on `replies.jsonl` that answers it.
+  0.28.2 wrote no such field, so the byte comparison with 0.28.2's channel
+  (`recorded_channel::a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes`)
+  normalizes that minted correlation as an id on both record kinds, beside the
+  instants.
+- **A listener reads its own question's answer.** It also reads a verdict on any
+  other question its asker raised, and a verdict bound to no question — and never a
+  verdict on another asker's question. 0.28.2 handed a verdict to whichever reader
+  polled first (entry 63).
+- **An unanswered question is answered with the wait.** A question nobody answers
+  within the reply window is answered on `channel serve`'s stdout with
+  `{"answer": "timeout", "correlation": C}`. That answer carries no completion and
+  appends no reply; the question stays queued, and a frame `{"correlation": C}`
+  waits for its answer again.
+- **A validator's exit is read as the bus reads it.** Exit `0` passes and exit `1`
+  refuses with the command's stderr as the reason. Any other exit, a signal, or a
+  command that cannot be run gives no verdict, and the edit or envelope is refused
+  naming the command as having checked nothing. The document on its stdin is
+  followed by a newline.
+- **The channel directory holds lock files.** The transport takes each queue's
+  exclusive section on `.lock/<queue>.lock` inside the channel directory. A process
+  that writes the directory without taking those locks is not excluded by them.
+- **A bus configuration is refused where this crate would not honour it.** A
+  transport other than `local`, a `transport.dir` or other transport option, a
+  profile other than `planner-channel`, a `queues` block, a codec other than
+  `onejudge`, an `onejudge` codec asking on a queue other than `surfaces`, its
+  `run_env` or `about_env`, and an `authors` block that widens a grant are each
+  refused at the launch, naming the key and its value, before any run exists. The
+  run's channel is its run root's, its queues are the layout's, and `channel serve`
+  takes its run and each question's node from its own argument and frame.
+- **A surface this crate raises itself is not offered to the validators.** The
+  engine's own reports and the `surface` verb append unjudged. A configuration's
+  validators judge the questions `channel serve` raises and the replies `reply`
+  submits.
+- **The envelope reviewer's passes can be kept.** Under a bar named by
+  `--envelope-reviewer-bar`, `ONEPIPELINE_ENVELOPE_REVIEWER_BAR` or
+  `envelope_reviewer_bar`, a pass is kept under `validator-passes/` keyed on the
+  document and on what the bar prints when the pass is looked for. A refusal and a
+  review that gives no verdict keep nothing, and a bar that prints nothing keeps
+  nothing and says so on stderr.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
