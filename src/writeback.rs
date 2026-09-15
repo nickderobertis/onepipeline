@@ -799,8 +799,22 @@ fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
 /// failure is said on this process's standard error and changes nothing about the stop. A
 /// driver that adopts the run claims those nodes again before its first dispatch.
 pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
-    let Ok(store) = crate::taskgraph::Store::resolve() else {
+    // A launch naming no project has nothing on any store to release.
+    if launch.project.parse::<QualifiedId>().is_err() {
         return;
+    }
+    let store = match crate::taskgraph::Store::resolve() {
+        Ok(store) => store,
+        Err(error) => {
+            // Said rather than swallowed: every task the run claimed and never started stays
+            // claimed on the board until something writes it again, and this line is the only
+            // place anybody hears that.
+            eprintln!(
+                "onetaskgraph write-back could not release the nodes this stopped run never \
+                 started: {error}"
+            );
+            return;
+        }
     };
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
@@ -1205,13 +1219,11 @@ fn project(
 /// stderr, never by a sentence assembled out of fields that did not.
 fn failed_deliveries(stdout: &[u8]) -> Option<String> {
     let answer: DeliveredAnswer = serde_json::from_slice(stdout).ok()?;
-    let failed = answer
+    let failed: Vec<String> = answer
         .delivered
         .iter()
-        .filter(|entry| entry.outcome == DeliveredOutcome::Failed)
-        .map(|entry| {
-            let failure = entry.failure.as_ref()?;
-            Some(format!(
+        .filter_map(|entry| match &entry.outcome {
+            DeliveredOutcome::Failed { failure } => Some(format!(
                 "ticket {} (delivered by {}): {}",
                 entry.ticket,
                 entry.deliverer,
@@ -1220,9 +1232,12 @@ fn failed_deliveries(stdout: &[u8]) -> Option<String> {
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
-            ))
+            )),
+            DeliveredOutcome::Written | DeliveredOutcome::Unchanged | DeliveredOutcome::Left => {
+                None
+            }
         })
-        .collect::<Option<Vec<String>>>()?;
+        .collect();
     (!failed.is_empty()).then(|| failed.join("; "))
 }
 
@@ -1486,9 +1501,15 @@ fn classified(code: Option<i32>, stdout: &[u8]) -> Option<Classified> {
                         .ok()?
                         .delivered
                         .into_iter()
-                        .filter(|entry| entry.outcome == DeliveredOutcome::Failed)
-                        .map(|entry| entry.failure.map(|failure| (failure.class, failure.kind)))
-                        .collect::<Option<Vec<_>>>()?,
+                        .filter_map(|entry| match entry.outcome {
+                            DeliveredOutcome::Failed { failure } => {
+                                Some((failure.class, failure.kind))
+                            }
+                            DeliveredOutcome::Written
+                            | DeliveredOutcome::Unchanged
+                            | DeliveredOutcome::Left => None,
+                        })
+                        .collect(),
                 };
             if failures.is_empty() {
                 return None;
@@ -1567,15 +1588,15 @@ struct DeliveredAnswer {
 }
 
 /// One entry of a copy report's `delivered`, validated at the boundary before anything is said
-/// about it: both ids are qualified, the outcome is one this build knows, and a failure names its
-/// class. The record keeps the store's entry verbatim; this is what the worker interprets.
+/// about it: both ids are qualified, and the outcome is one this build knows, carrying the
+/// store's failure exactly when it is `failed`. The record keeps the store's entry verbatim; this
+/// is what the worker interprets.
 #[derive(Deserialize)]
 struct DeliveredEntry {
     ticket: QualifiedId,
     deliverer: QualifiedId,
+    #[serde(flatten)]
     outcome: DeliveredOutcome,
-    #[serde(default)]
-    failure: Option<DeliveredFailure>,
 }
 
 /// The store's failure for one delivered ticket it could not keep in step.
@@ -1590,15 +1611,17 @@ struct DeliveredFailure {
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
-/// What the store did to one delivered ticket. An outcome this build has never heard of leaves
-/// the answer unclassified, and so on the retry schedule.
-#[derive(Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+/// What the store did to one delivered ticket, tagged by its `outcome`. Only a ticket the store
+/// failed to keep in step carries a failure, and it has to: a `failed` entry without one does not
+/// read, and neither does an outcome this build has never heard of — either leaves the answer
+/// unclassified, and so on the retry schedule.
+#[derive(Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
 enum DeliveredOutcome {
     Written,
     Unchanged,
     Left,
-    Failed,
+    Failed { failure: DeliveredFailure },
 }
 
 #[derive(Deserialize)]

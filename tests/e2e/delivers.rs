@@ -294,29 +294,46 @@ fn a_running_then_done_node_moves_its_ticket_to_in_progress_then_done() {
 }
 
 /// A failed node keeps the settlement's own word, which the store reads as a release, so its
-/// ticket returns to `todo` after the run had claimed it.
+/// ticket returns to `todo` after the run had claimed it. The node that failure made unsafe never
+/// started: it is written `skipped`, which the store reads as a release too, so the ticket it
+/// delivers returns to `todo` from the claim the launch put on it.
 #[test]
 fn a_failed_node_reads_failed_and_its_ticket_returns_to_todo() {
     let world = a_world_with_tickets("delivers-failed");
     let delivered = ticket(&world, "fails", "todo");
+    let behind = ticket(&world, "behind", "todo");
     world.script("fails.fail", "1");
     let name = "failed-node";
     let project = world.plan(
         name,
-        &plan_of(name, vec![delivering(agent("fails", &[]), &[&delivered])]),
+        &plan_of(
+            name,
+            vec![
+                delivering(agent("fails", &[]), &[&delivered]),
+                delivering(agent("skipped", &["fails"]), &[&behind]),
+            ],
+        ),
     );
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| settled(world, name));
 
-    world.until_store("the failure and its release to reach the store", |world| {
-        words(world, &project).get("fails").map(String::as_str) == Some("failed")
-            && ticket_reads(world, &delivered) == "todo"
-    });
-    assert!(
-        delivered_to(&world, name, &delivered, "queued"),
-        "the ticket was never claimed, so reading `todo` proves no release: {:?}",
-        records(&world, name)
+    world.until_store(
+        "the failure, the skip and both releases to reach the store",
+        |world| {
+            let board = words(world, &project);
+            board.get("fails").map(String::as_str) == Some("failed")
+                && board.get("skipped").map(String::as_str) == Some("skipped")
+                && ticket_reads(world, &delivered) == "todo"
+                && ticket_reads(world, &behind) == "todo"
+        },
     );
+    for claimed in [&delivered, &behind] {
+        assert!(
+            delivered_to(&world, name, claimed, "queued"),
+            "the ticket {claimed} was never claimed, so reading `todo` proves no release: {:?}",
+            records(&world, name)
+        );
+    }
 }
 
 /// A stop releases what the run claimed and never started: those tasks and their tickets read
@@ -484,6 +501,58 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
         "the planner did not hear the first projection failed"
     );
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
+/// A launch whose first projection the store never answers waits for it only as long as the
+/// store command deadline allows, and then dispatches: nothing is dispatched while the held copy
+/// is inside its deadline, the ready node is dispatched once it has passed, and the planner hears
+/// the copy was killed. The deadline is the store's sixty-second floor, so this journey takes a
+/// minute by construction.
+#[test]
+fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch() {
+    let world = a_world_with_tickets("delivers-first-held");
+    let delivered = ticket(&world, "work", "todo");
+    let name = "first-held";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
+    );
+    let world = through_the_double(world);
+    let copies = world.rendezvous(COPY);
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    let held = copies.arrived();
+    let started = std::time::Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        dispatches(&world, name),
+        0,
+        "the driver dispatched while its claim was still inside the store's deadline"
+    );
+    world.until(
+        "the first dispatch once the claim's deadline passed",
+        |world| dispatches(world, name) == 1,
+    );
+    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    assert!(
+        started.elapsed() + Duration::from_secs(5) >= floor,
+        "the first dispatch came after {:?}, inside the {floor:?} the claim was allowed",
+        started.elapsed()
+    );
+
+    // Later copies are not held: the one copy past its deadline is the evidence.
+    std::fs::remove_file(world.fakes.join(format!("{COPY}.rendezvous")))
+        .expect("the copy rendezvous is taken away");
+    world.until("the planner to hear the claim did not land", |world| {
+        !unprojected_surfaces(world, name).is_empty()
+    });
+    let message = unprojected_surfaces(&world, name).remove(0);
+    assert!(
+        message.contains("project-copy exceeded"),
+        "the surface does not say the copy outlasted its deadline: {message}"
+    );
+    drop(held);
+    world.until("the run to settle", |world| settled(world, name));
 }
 
 /// One ticket, one node: a plan in which two nodes deliver the same ticket is refused where it
@@ -655,6 +724,45 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
                 .last()
                 .is_some_and(|record| record["outcome"] == "failed"),
         "the refused release is not on the projection record: {recorded:?}"
+    );
+}
+
+/// A stop run from a shell that cannot resolve the store still stops the run and answers as a
+/// stop does, and says on its own standard error that what the run claimed and never started was
+/// not released. The ticket stays claimed, because nothing reached the store.
+#[test]
+fn a_stop_that_cannot_reach_the_store_still_stops_and_says_what_it_did_not_release() {
+    let world = a_world_with_tickets("delivers-stop-no-store");
+    let delivered = ticket(&world, "later", "todo");
+    world.script("first.wait", "hold");
+    let name = "stop-no-store";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("first", &[]),
+                delivering(agent("later", &["first"]), &[&delivered]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the run's claim to reach the store", |world| {
+        ticket_reads(world, &delivered) == "queued"
+    });
+
+    let mut stop = world.cmd(&["stop", name]);
+    stop.env(STORE_BINARY_ENV, world.root.join("no-such-onetaskgraph"));
+    world
+        .run_on(stop, "stop")
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .err_has("could not release the nodes this stopped run never started")
+        .err_has("no-such-onetaskgraph");
+    assert_eq!(
+        ticket_reads(&world, &delivered),
+        "queued",
+        "a stop that never reached the store moved the ticket all the same"
     );
 }
 
