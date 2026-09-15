@@ -438,6 +438,14 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
         message.contains(&delivered) && message.contains("cannot write"),
         "the surface does not name the ticket and what the store said of it: {message}"
     );
+    // Classed off the ticket's own failure in the copy report: a source the store could not
+    // write is one a wait can change.
+    assert!(
+        message
+            .lines()
+            .any(|line| line == "class: transient, kind: unavailable"),
+        "the surface does not carry the class and kind of the ticket's failure: {message}"
+    );
     let partial = records(&world, name)
         .into_iter()
         .find(|record| record["outcome"] == "failed")
@@ -806,6 +814,165 @@ fn a_delivered_report_that_does_not_read_is_reported_by_the_copys_own_exit() {
         "the record did not keep the entry as the store wrote it: {failed}"
     );
     world.until("the run to settle", |world| settled(world, name));
+}
+
+/// A `delivers` entry a store answers bare names the task's own source, which is the store's rule
+/// for a bare id. The installed store always answers qualified, so the store double grows a bare
+/// entry into the plan's task list, naming a ticket kept in the plan's own source. The run claims
+/// that ticket, which it could only do had the bare entry been qualified with the task's source
+/// before it reached the board, and the board task carries it qualified.
+#[test]
+fn a_bare_delivers_entry_is_qualified_with_the_tasks_own_source() {
+    let world = a_world_with_tickets("delivers-bare-entry");
+    world.script("work.wait", "hold");
+    let name = "bare-entry";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let source = project
+        .split(':')
+        .next()
+        .expect("a qualified project")
+        .to_owned();
+    // A ticket kept in the plan's own source, in a project of its own.
+    let store = world.store();
+    std::fs::create_dir_all(store.join("tasks").join("local-tickets"))
+        .expect("a tasks directory for the local tickets");
+    std::fs::write(
+        store.join("projects").join("local-tickets.md"),
+        "---\ntitle: \"Local tickets\"\n---\n",
+    )
+    .expect("the local ticket board");
+    std::fs::write(
+        store.join("tasks").join("local-tickets").join("one.md"),
+        "---\ntitle: \"Local ticket\"\nproject: local-tickets\nstatus: todo\n---\n",
+    )
+    .expect("the local ticket");
+    let qualified = format!("{source}:local-tickets/one");
+    assert!(
+        tasks(&world, &project)["work"]["item"]["delivers"].is_null(),
+        "the authored task already delivers something, so growing a bare entry proves nothing"
+    );
+
+    let world = through_the_double(world);
+    world.script(
+        "onetaskgraph.task-list.grow",
+        &json!({"delivers": ["local-tickets/one"]}).to_string(),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    world.until_store(
+        "the run to claim the ticket its bare entry names",
+        |world| ticket_reads(world, &qualified) == "in-progress",
+    );
+    assert_eq!(
+        tasks(&world, &project)["work"]["item"]["delivers"],
+        json!([qualified]),
+        "the board task does not carry the bare entry qualified with its own source"
+    );
+    world.release("work.go");
+    world.until("the run to settle", |world| settled(world, name));
+}
+
+/// Have the store double answer every `project copy` with the partial answer a copy writes when
+/// it could not keep delivered tickets in step — exit 4, and a report whose `delivered` fails each
+/// `(ticket, class, kind)` given — while every other command still reaches the real store.
+fn copies_fail_tickets(world: &World, failures: &[(&str, &str, &str)]) {
+    let delivered: Vec<Value> = failures
+        .iter()
+        .map(|(ticket, class, kind)| {
+            json!({
+                "ticket": ticket, "deliverer": "plan-store:board/work", "outcome": "failed",
+                "from": "queued",
+                "failure": {"class": class, "kind": kind, "source": TICKETS,
+                            "message": format!("the store answered {kind} for this ticket"),
+                            "retry_after_seconds": null}
+            })
+        })
+        .collect();
+    world.script(
+        &format!("{COPY}.refuse.stdout"),
+        &json!({"items": [], "delivered": delivered}).to_string(),
+    );
+    world.script(&format!("{COPY}.refuse.exit"), "4");
+    world.script(
+        &format!("{COPY}.refuse"),
+        "onetaskgraph: a delivered ticket could not be kept in step",
+    );
+}
+
+/// A partial copy is classed off its own `delivered` failures, by the rule a partial read's
+/// `errors` are: where the store refused every ticket it failed, the planner hears the class
+/// `refused` with every kind it named, and that the projection is not attempted again on a timer.
+#[test]
+fn a_partial_copy_whose_every_failed_ticket_was_refused_is_classed_refused() {
+    let world = a_world_with_tickets("delivers-partial-refused");
+    let name = "partial-refused";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let world = through_the_double(world);
+    copies_fail_tickets(
+        &world,
+        &[
+            ("tickets:board/one", "refused", "refused"),
+            ("tickets:board/two", "refused", "conflict"),
+        ],
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| settled(world, name));
+
+    let message = unprojected_surfaces(&world, name)
+        .into_iter()
+        .next()
+        .expect("the planner heard the partial copy");
+    assert!(
+        message
+            .lines()
+            .any(|line| line == "class: refused, kind: refused, conflict"),
+        "the surface does not class a report whose every ticket was refused as refused: {message}"
+    );
+    assert!(
+        message.contains("not attempted again on a timer"),
+        "a refused partial copy was left on the retry timer: {message}"
+    );
+    for ticket in ["tickets:board/one", "tickets:board/two"] {
+        assert!(
+            message.contains(ticket),
+            "the surface does not name {ticket}: {message}"
+        );
+    }
+}
+
+/// A partial copy mixing a refused ticket with one a wait could change is `transient`, exactly as
+/// a partial read mixing the two is: the planner hears that class with both kinds, and the
+/// projection stays on the retry schedule rather than waiting for the graph to change.
+#[test]
+fn a_partial_copy_mixing_refused_and_transient_tickets_is_classed_transient() {
+    let world = a_world_with_tickets("delivers-partial-mixed");
+    let name = "partial-mixed";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let world = through_the_double(world);
+    copies_fail_tickets(
+        &world,
+        &[
+            ("tickets:board/one", "refused", "refused"),
+            ("tickets:board/two", "transient", "unavailable"),
+        ],
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| settled(world, name));
+
+    let message = unprojected_surfaces(&world, name)
+        .into_iter()
+        .next()
+        .expect("the planner heard the partial copy");
+    assert!(
+        message
+            .lines()
+            .any(|line| line == "class: transient, kind: refused, unavailable"),
+        "the surface does not class a mixed report as transient: {message}"
+    );
+    assert!(
+        !message.contains("not attempted again on a timer"),
+        "a mixed partial copy was taken off the retry timer: {message}"
+    );
 }
 
 /// Against a store older than the first release carrying `queued` and `delivers`, unstarted
