@@ -381,19 +381,22 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
 
 /// A ticket the store cannot write is a projection that did not land: the planner hears of it,
 /// naming the ticket and what the store said, and the run settles exactly as it would have.
-#[cfg(unix)]
 #[test]
 fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchanged() {
-    use std::os::unix::fs::PermissionsExt;
-
     let world = a_world_with_tickets("delivers-refused-ticket");
     let delivered = ticket(&world, "work", "todo");
-    let board = tickets_root(&world).join("tasks").join("board");
-    let file = board.join("work.md");
-    for (path, mode) in [(&file, 0o444), (&board, 0o555)] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .expect("the ticket is made unwritable");
-    }
+    // Read-only on every platform: the store replaces a ticket document in place, so a file it
+    // may not write is a ticket it cannot move, with the directory around it left writable.
+    let file = tickets_root(&world)
+        .join("tasks")
+        .join("board")
+        .join("work.md");
+    let writable = std::fs::metadata(&file)
+        .expect("the ticket is on disk")
+        .permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&file, read_only).expect("the ticket is made unwritable");
     world.script("work.wait", "hold");
     let name = "refused-ticket";
     let project = world.plan(
@@ -413,7 +416,9 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
     });
     let message = unprojected_surfaces(&world, name).remove(0);
     assert!(
-        message.contains(&delivered) && message.contains("Permission denied"),
+        // The store's own words, which name the write it could not make on every platform;
+        // what the operating system appends after them is worded differently on each.
+        message.contains(&delivered) && message.contains("cannot write"),
         "the surface does not name the ticket and what the store said of it: {message}"
     );
     let partial = records(&world, name)
@@ -445,10 +450,7 @@ fn a_refused_ticket_write_raises_the_planner_surface_and_settles_the_run_unchang
         "the refusal changed scheduling"
     );
 
-    for (path, mode) in [(&board, 0o755), (&file, 0o644)] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .expect("the ticket is writable again");
-    }
+    std::fs::set_permissions(&file, writable).expect("the ticket is writable again");
 }
 
 /// A launch whose first projection the store refuses still dispatches, and the planner hears
@@ -463,15 +465,7 @@ fn a_failed_first_projection_does_not_hold_back_the_first_dispatch() {
         &plan_of(name, vec![delivering(agent("work", &[]), &[&delivered])]),
     );
     let world = through_the_double(world);
-    world.script(
-        &format!("{COPY}.refuse.stdout"),
-        r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans refused the request","retry_after_seconds":null}}"#,
-    );
-    world.script(&format!("{COPY}.refuse.exit"), "1");
-    world.script(
-        &format!("{COPY}.refuse"),
-        "onetaskgraph: source plans refused the request",
-    );
+    refuse_every_copy(&world);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     world.until("the run to settle", |world| settled(world, name));
@@ -598,6 +592,70 @@ fn edits_carry_delivers_and_refuse_a_duplicate_or_unqualified_ticket() {
             && ticket_reads(world, &added) == "queued"
     });
     world.run(&["stop", name]).exited(0);
+}
+
+/// Have the store double refuse every `project copy` it is handed from now on, the way the store
+/// refuses a source it cannot write, while every other command still reaches the real store.
+fn refuse_every_copy(world: &World) {
+    world.script(
+        &format!("{COPY}.refuse.stdout"),
+        r#"{"failure":{"class":"refused","kind":"refused","source":"plans","message":"source plans refused the request","retry_after_seconds":null}}"#,
+    );
+    world.script(&format!("{COPY}.refuse.exit"), "1");
+    world.script(
+        &format!("{COPY}.refuse"),
+        "onetaskgraph: source plans refused the request",
+    );
+}
+
+/// A stop whose release the store refuses still stops the run and answers as a stop does, and
+/// says on its own standard error that what the run claimed and never started was not released.
+/// The ticket stays claimed, because nothing reached the store, and the refused attempt is on
+/// the run's projection record.
+#[test]
+fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
+    let world = a_world_with_tickets("delivers-stop-release-refused");
+    let delivered = ticket(&world, "later", "todo");
+    world.script("first.wait", "hold");
+    let name = "stop-release-refused";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("first", &[]),
+                delivering(agent("later", &["first"]), &[&delivered]),
+            ],
+        ),
+    );
+    let world = through_the_double(world);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the run's claim to reach the store", |world| {
+        words(world, &project).get("first").map(String::as_str) == Some("in progress")
+            && ticket_reads(world, &delivered) == "queued"
+    });
+
+    refuse_every_copy(&world);
+    let recorded_before = records(&world, name).len();
+    world
+        .run(&["stop", name])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .err_has("could not release the nodes this stopped run never started")
+        .err_has("source plans refused the request");
+    assert_eq!(
+        ticket_reads(&world, &delivered),
+        "queued",
+        "a release the store refused moved the ticket all the same"
+    );
+    let recorded = records(&world, name);
+    assert!(
+        recorded.len() > recorded_before
+            && recorded
+                .last()
+                .is_some_and(|record| record["outcome"] == "failed"),
+        "the refused release is not on the projection record: {recorded:?}"
+    );
 }
 
 /// Against a store older than the first release carrying `queued` and `delivers`, unstarted

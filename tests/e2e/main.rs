@@ -38,6 +38,14 @@ mod checkpoint;
 mod concurrency;
 mod criteria;
 mod crossdag;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys drive the compiled
+// binary over the real store and exercise `writeback`, `engine`, `graph`, `taskgraph` and
+// `driver` together — the claim before a first dispatch, the release at closeout and at a stop,
+// and the delivered-ticket report — so the narrowest edge they can honestly sit behind is the
+// crate itself, which is this target's. A project edged narrower would drop them out of `nx
+// affected` for the very changes they exist to catch. The unrelated dependency the target carries
+// is the shared target's, and `store.rs`, `writeback_projections.rs` and `writeback_budget.rs`
+// already run under it for the same reason; same grounds as `mod checkpoint` above.
 mod delivers;
 mod destination;
 mod dispatch;
