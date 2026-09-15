@@ -2431,7 +2431,9 @@ fn append_record(run_dir: &Path, record: &ProjectionRecord) {
 /// took, and what the store said it spent. Entry 73 of `docs/contract-divergences.md` states
 /// the shape and is the one source for it. The wire form is flat — every key written, `null`
 /// where it says nothing — and this is the shape of it that cannot say a contradiction: a
-/// member copy has no reason to be whole, and a failed attempt has no copy report.
+/// member copy has no reason to be whole, and a failed attempt names neither `actions` nor
+/// `spent`, the halves of a copy report only a landed one has. `delivered` is the half a
+/// partial copy reports as it fails, so it is kept either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "ProjectionWire", into = "ProjectionWire")]
 pub struct ProjectionRecord {
