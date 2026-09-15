@@ -71,12 +71,63 @@ fn copied(from: &Path, into: &Path) {
     }
 }
 
+/// A pid no platform issues: above Linux's `PID_MAX_LIMIT` and macOS's
+/// `PID_MAX`, and not a multiple of four, which every Windows pid is. Still an
+/// `i32`, because a Unix probe answers "may be live" for a pid it cannot pass to
+/// `kill`.
+const NO_PROCESS: u32 = 2_147_483_647;
+
+/// The host the recorded launch record names, which every command in a world
+/// reading it is told is its own.
+fn recording_host() -> String {
+    let launch: Value = serde_json::from_str(
+        &std::fs::read_to_string(recorded(&format!("run-root/{RUN}/launch.json")))
+            .expect("the recorded launch record reads"),
+    )
+    .expect("the recorded launch record is JSON");
+    launch["host"]
+        .as_str()
+        .expect("the recorded launch record names a host")
+        .to_owned()
+}
+
+/// A world that reads the recorded run root as the host that recorded it does.
+///
+/// Whether that run's driver is gone is proved only on the host its launch
+/// record names, and only by asking that host's process table about its pid. So
+/// the world's commands are told they run on the recording host, and the world's
+/// copy of the launch record names a pid no process holds: every host then proves
+/// the driver over by the same answer, and neither the reading host's name nor
+/// what it happens to be running decides a word of what the verbs answer.
+fn recorded_world(name: &str) -> World {
+    World::new(name).with_env("HOSTNAME", &recording_host())
+}
+
 fn seeded(world: &World, fixture: &str) -> PathBuf {
     let root = world.runs.join(RUN);
     copied(&recorded(&format!("run-root/{RUN}")), &root);
+    let launch = root.join("launch.json");
+    let record = std::fs::read_to_string(&launch).expect("the seeded launch record reads");
+    let driver = format!("\"pid\": {},", recorded_driver_pid(&record));
+    assert_eq!(
+        record.matches(&driver).count(),
+        1,
+        "the recorded launch record names its driver once"
+    );
+    std::fs::write(
+        &launch,
+        record.replace(&driver, &format!("\"pid\": {NO_PROCESS},")),
+    )
+    .expect("the seeded launch record is written");
     let channel = root.join("channel");
     copied(&recorded(&format!("channel/{fixture}")), &channel);
     channel
+}
+
+fn recorded_driver_pid(record: &str) -> u64 {
+    serde_json::from_str::<Value>(record).expect("the recorded launch record is JSON")["pid"]
+        .as_u64()
+        .expect("the recorded launch record names a driver pid")
 }
 
 /// `text` with how long each update has been unread taken out: a view counts
@@ -182,7 +233,7 @@ fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
 /// asked twice: the second is a reopen of the same channel, and whatever the
 /// first handed out is not handed out again.
 fn answers_over(fixture: &str, program: &Path) -> Value {
-    let world = World::new("recorded-channel");
+    let world = recorded_world("recorded-channel");
     let channel = seeded(&world, fixture);
     std::fs::remove_file(channel.join("queue.json")).expect("the recorded projection is removed");
 

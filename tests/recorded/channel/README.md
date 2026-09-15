@@ -9,7 +9,12 @@ answers are checked in under `../answers/`, and `scripts/record-channel-answers.
 is how they were captured.
 
 Every file here is byte for byte what was on disk. Nothing was edited or
-redacted. `src/channel.rs` was byte-identical from v0.28.0 through the tree this
+redacted. The journeys edit one thing in their *copy* of the recorded run root,
+and only there: whether that run's driver is gone is proved only on the host its
+launch record names, by asking that host's process table about its pid. So the
+world tells every command it runs on the recording host and gives its copy of
+the launch record a pid no platform issues. The run then reads as finished on
+any host, by the same answer the recording host gave. `src/channel.rs` was byte-identical from v0.28.0 through the tree this
 node started from (its last change, `bbee552`, first shipped in v0.28.0), so each
 directory is exactly what the 0.28.2 release writes.
 
