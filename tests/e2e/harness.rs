@@ -2882,30 +2882,44 @@ fn renamed_within(from: &Path, to: &Path, what: &str, within: std::time::Duratio
 /// is refused by every command, and nothing can create a path beneath a file. A folder a
 /// writer put back before the file was placed is moved aside as well: what it holds is
 /// that writer's last word, not the store.
+///
+/// The file is placed the moment that folder has moved, not one poll later. A writer
+/// still writing recreates the folder within a millisecond of finding it gone, so a
+/// hold that waited out the poll between the two found the name taken again on every
+/// attempt: a Windows leg spent the whole budget that way, refused `Access is denied`
+/// each time for opening the recreated folder as a file.
 pub fn unreachable(store: &Path, aside: &Path, what: &str) {
     renamed(store, aside, what);
     let mut put_back = 0;
     let mut refused = None;
+    let hold = |refused: &mut Option<std::io::Error>| match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(store)
+    {
+        Ok(_) => true,
+        Err(why) => {
+            *refused = Some(why);
+            false
+        }
+    };
     let held = waited_for(
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(20),
-        || match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(store)
-        {
-            Ok(_) => true,
-            Err(why) => {
-                if store.is_dir() {
-                    let mut beside = aside.as_os_str().to_owned();
-                    beside.push(format!("-put-back-{put_back}"));
-                    if std::fs::rename(store, PathBuf::from(beside)).is_ok() {
-                        put_back += 1;
-                    }
-                }
-                refused = Some(why);
-                false
+        || {
+            if hold(&mut refused) {
+                return true;
             }
+            if !store.is_dir() {
+                return false;
+            }
+            let mut beside = aside.as_os_str().to_owned();
+            beside.push(format!("-put-back-{put_back}"));
+            if std::fs::rename(store, PathBuf::from(beside)).is_err() {
+                return false;
+            }
+            put_back += 1;
+            hold(&mut refused)
         },
     );
     assert!(
