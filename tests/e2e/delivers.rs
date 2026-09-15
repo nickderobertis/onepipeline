@@ -658,6 +658,48 @@ fn a_stop_whose_release_the_store_refuses_still_stops_and_says_so() {
     );
 }
 
+/// A copy report whose `delivered` entry does not read as the store's shape is never described
+/// as tickets: the planner hears the copy's own exit and words, and the projection record keeps
+/// the entry exactly as the store wrote it.
+#[test]
+fn a_delivered_report_that_does_not_read_is_reported_by_the_copys_own_exit() {
+    let world = a_world_with_tickets("delivers-unreadable-report");
+    let name = "unreadable-report";
+    let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+    let world = through_the_double(world);
+    // Exit 4, the partial answer a copy writes when a ticket was not kept in step, carrying an
+    // entry whose ticket is not a qualified id.
+    world.script(
+        &format!("{COPY}.refuse.stdout"),
+        r#"{"items":[],"delivered":[{"ticket":"not qualified","deliverer":"plans:p/a","outcome":"failed","from":"queued","failure":{"class":"transient","kind":"unavailable","source":"tickets","message":"cannot write","retry_after_seconds":null}}]}"#,
+    );
+    world.script(&format!("{COPY}.refuse.exit"), "4");
+    world.script(
+        &format!("{COPY}.refuse"),
+        "onetaskgraph: task not qualified could not be kept in step",
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    world.until("the planner to hear the copy did not land", |world| {
+        !unprojected_surfaces(world, name).is_empty()
+    });
+    let message = unprojected_surfaces(&world, name).remove(0);
+    assert!(
+        message.contains("copy exited 4")
+            && !message.contains("could not keep every delivered ticket in step"),
+        "an entry that does not read was described as a ticket: {message}"
+    );
+    let failed = records(&world, name)
+        .into_iter()
+        .find(|record| record["outcome"] == "failed")
+        .expect("the refused copy is on the projection record");
+    assert_eq!(
+        failed["delivered"][0]["ticket"], "not qualified",
+        "the record did not keep the entry as the store wrote it: {failed}"
+    );
+    world.until("the run to settle", |world| settled(world, name));
+}
+
 /// Against a store older than the first release carrying `queued` and `delivers`, unstarted
 /// nodes are written `todo`, no task carries `delivers`, no ticket moves, and the run says why
 /// exactly once however many projections it makes.

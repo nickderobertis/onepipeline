@@ -243,8 +243,9 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
-    /// Whether the store offers `delivers`, so the shadow task carries each node's.
-    delivers: bool,
+    /// What the store's vocabulary offers, which decides whether the shadow task carries
+    /// `delivers`.
+    vocabulary: Vocabulary,
 }
 
 /// What a node the run has not started says about the work it names.
@@ -258,6 +259,37 @@ struct Snapshot {
 enum Claim {
     Held,
     Released,
+}
+
+/// Whether the store a run projects into offers `queued` and `delivers`, decided off the version
+/// its `--version` reported against [`WRITEBACK_DELIVERS_FROM`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vocabulary {
+    /// `queued` is a status, a task carries `delivers`, and the store moves what it delivers.
+    WithDelivers,
+    /// A release before either: an unstarted node is written `todo` and no task carries
+    /// `delivers`.
+    BeforeDelivers,
+}
+
+impl Vocabulary {
+    /// The vocabulary of a store reporting `version`. A version that does not read is taken to
+    /// offer only what every release does.
+    fn of(version: &str) -> Self {
+        if crate::taskgraph::at_least(version, WRITEBACK_DELIVERS_FROM) {
+            Self::WithDelivers
+        } else {
+            Self::BeforeDelivers
+        }
+    }
+
+    /// What an unstarted node is written under while a driver drives the run.
+    fn driving_claim(self) -> Claim {
+        match self {
+            Self::WithDelivers => Claim::Held,
+            Self::BeforeDelivers => Claim::Released,
+        }
+    }
 }
 
 /// One projection that failed, as the planner is told about it.
@@ -447,8 +479,8 @@ impl Pending {
 /// A non-blocking handle owned by the one reconcile loop.
 pub struct Writeback {
     pending: Arc<(Mutex<Pending>, Condvar)>,
-    /// Whether the store offers `queued` and `delivers`, from the version the launch check read.
-    delivers: bool,
+    /// What the store offers, from the version the launch check read.
+    vocabulary: Vocabulary,
     /// The copy's per-item budget, which bounds the launch wait as it bounds the copy.
     per_item: NonZeroU64,
     /// Whether this driver has said why a plan's tickets are not moved by an older store.
@@ -470,7 +502,7 @@ impl Writeback {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
-        let delivers = crate::taskgraph::at_least(version, WRITEBACK_DELIVERS_FROM);
+        let vocabulary = Vocabulary::of(version);
         let version = version.to_owned();
         let launch_dir = if launch.dir.as_os_str().is_empty() {
             PathBuf::from(".")
@@ -499,7 +531,7 @@ impl Writeback {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
             pending,
-            delivers,
+            vocabulary,
             per_item,
             told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
         };
@@ -522,13 +554,14 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        let claim = if self.delivers {
-            Claim::Held
-        } else {
-            Claim::Released
-        };
-        let Some(snapshot) = snapshot_of(paths, launch, state, statuses, claim, self.delivers)
-        else {
+        let Some(snapshot) = snapshot_of(
+            paths,
+            launch,
+            state,
+            statuses,
+            self.vocabulary.driving_claim(),
+            self.vocabulary,
+        ) else {
             return;
         };
         self.say_once_why_tickets_are_not_moved(&snapshot);
@@ -550,7 +583,7 @@ impl Writeback {
             state,
             statuses,
             Claim::Released,
-            self.delivers,
+            self.vocabulary,
         ) {
             self.queue(snapshot);
         }
@@ -599,7 +632,9 @@ impl Writeback {
     /// Against a store that has no `delivers`, a plan whose nodes deliver tickets is told once,
     /// on the driver's standard error, that nothing will move them.
     fn say_once_why_tickets_are_not_moved(&self, snapshot: &Snapshot) {
-        if self.delivers || snapshot.nodes.values().all(|node| node.delivers.is_empty()) {
+        if self.vocabulary == Vocabulary::WithDelivers
+            || snapshot.nodes.values().all(|node| node.delivers.is_empty())
+        {
             return;
         }
         if self
@@ -625,7 +660,7 @@ fn snapshot_of(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     claim: Claim,
-    delivers: bool,
+    vocabulary: Vocabulary,
 ) -> Option<Snapshot> {
     let Ok(project) = launch.project.parse() else {
         return None;
@@ -661,7 +696,7 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
-        delivers,
+        vocabulary,
     })
 }
 
@@ -769,9 +804,15 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     };
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
-    let delivers = crate::taskgraph::at_least(store.reported_version(), WRITEBACK_DELIVERS_FROM);
-    let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released, delivers)
-    else {
+    let vocabulary = Vocabulary::of(store.reported_version());
+    let Some(snapshot) = snapshot_of(
+        paths,
+        launch,
+        &state,
+        &statuses,
+        Claim::Released,
+        vocabulary,
+    ) else {
         return;
     };
     let launch_dir = if launch.dir.as_os_str().is_empty() {
@@ -1138,7 +1179,7 @@ fn project(
         // tickets are behind the run. So it is failed, surfaced and retried whole exactly as
         // any partial projection is, with the tickets and what the store said of each as the
         // reason.
-        let reason = match failed_deliveries(&delivered) {
+        let reason = match failed_deliveries(&output.stdout) {
             Some(tickets) if output.status.code() == Some(WRITEBACK_PARTIAL_EXIT) => format!(
                 "the copy landed, but the store could not keep every delivered ticket in step: \
                  {tickets}"
@@ -1155,35 +1196,33 @@ fn project(
     }
 }
 
-/// Each ticket a copy report says the store failed to keep in step, with its deliverer and the
-/// store's own words about it, or `None` where it failed none.
-fn failed_deliveries(delivered: &[Map<String, Value>]) -> Option<String> {
-    let said = |entry: &Map<String, Value>, key: &str| {
-        entry
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("an unnamed task")
-            .to_owned()
-    };
-    let failed: Vec<String> = delivered
+/// Each ticket a copy report says the store failed to keep in step, named with its deliverer and
+/// the store's own words about it, read through [`DeliveredAnswer`].
+///
+/// `None` where the report failed no ticket, and equally where any failed entry does not read —
+/// an id that is not qualified, an outcome this build has never heard of, a failure with no
+/// class or message. An answer that does not validate is reported by the copy's own exit and
+/// stderr, never by a sentence assembled out of fields that did not.
+fn failed_deliveries(stdout: &[u8]) -> Option<String> {
+    let answer: DeliveredAnswer = serde_json::from_slice(stdout).ok()?;
+    let failed = answer
+        .delivered
         .iter()
-        .filter(|entry| entry.get("outcome").and_then(Value::as_str) == Some("failed"))
+        .filter(|entry| entry.outcome == DeliveredOutcome::Failed)
         .map(|entry| {
-            let failure = entry
-                .get("failure")
-                .and_then(|failure| failure.get("message"))
-                .and_then(Value::as_str)
-                .map_or_else(
-                    || "the store gave no reason".to_owned(),
-                    |message| message.split_whitespace().collect::<Vec<_>>().join(" "),
-                );
-            format!(
-                "ticket {} (delivered by {}): {failure}",
-                said(entry, "ticket"),
-                said(entry, "deliverer")
-            )
+            let failure = entry.failure.as_ref()?;
+            Some(format!(
+                "ticket {} (delivered by {}): {}",
+                entry.ticket,
+                entry.deliverer,
+                failure
+                    .message
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ))
         })
-        .collect();
+        .collect::<Option<Vec<String>>>()?;
     (!failed.is_empty()).then(|| failed.join("; "))
 }
 
@@ -1527,11 +1566,28 @@ struct DeliveredAnswer {
     delivered: Vec<DeliveredEntry>,
 }
 
+/// One entry of a copy report's `delivered`, validated at the boundary before anything is said
+/// about it: both ids are qualified, the outcome is one this build knows, and a failure names its
+/// class. The record keeps the store's entry verbatim; this is what the worker interprets.
 #[derive(Deserialize)]
 struct DeliveredEntry {
+    ticket: QualifiedId,
+    deliverer: QualifiedId,
     outcome: DeliveredOutcome,
     #[serde(default)]
-    failure: Option<StoreFailure>,
+    failure: Option<DeliveredFailure>,
+}
+
+/// The store's failure for one delivered ticket it could not keep in step.
+#[derive(Deserialize)]
+struct DeliveredFailure {
+    class: FailureClass,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the store's `kind` is open by its
+    // own contract, for the reason `Classified::kind` records, and its `message` is its own
+    // words; both are only ever named to a reader, and `class` is the closed half acted on.
+    kind: String,
+    message: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// What the store did to one delivered ticket. An outcome this build has never heard of leaves
@@ -1812,7 +1868,7 @@ fn task_document(
     // nothing writes none, which is the plan saying so. Every entry is already qualified —
     // `graph::check_node` refused any that was not — so the store carries each one through
     // as the ticket it names rather than as an id of the shadow source.
-    if snapshot.delivers && !delivers.is_empty() {
+    if snapshot.vocabulary == Vocabulary::WithDelivers && !delivers.is_empty() {
         front.insert(DELIVERS_FIELD.into(), json!(delivers));
     }
     // A node the plan has just added has no destination item yet, so there is nothing
@@ -2110,6 +2166,12 @@ struct CopyReport {
     spent: Option<Map<String, Value>>,
     /// Verbatim: what the store did to each ticket a carried task delivers, absent from a store
     /// that has no `delivers`.
+    // llmlint: ignore[boundary_inputs_validated] kept as the store wrote it because the
+    // projection record is required to carry each attempt's `delivered` entries verbatim, exactly
+    // as it carries `spent`: a reader of the record is owed what the store said, including an
+    // entry this build could not read. Nothing interprets this copy — every decision and every
+    // sentence about a ticket reads the same answer through `DeliveredAnswer`, whose typed entry
+    // validates both ids, the outcome and the failure at the boundary.
     #[serde(default)]
     delivered: Vec<Map<String, Value>>,
 }
@@ -3010,7 +3072,7 @@ mod tests {
     fn the_close_out_phase_is_lifted_when_the_run_is_driven_again() {
         let writeback = Writeback {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
-            delivers: true,
+            vocabulary: super::Vocabulary::WithDelivers,
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             told_why_not_delivered: std::sync::atomic::AtomicBool::new(false),
         };
@@ -3135,6 +3197,101 @@ mod tests {
             "heartbeat_interval": 1_800,
         }))
         .expect("a launch record")
+    }
+
+    /// The gate over `WRITEBACK_DELIVERS_FROM`, on both sides of the boundary: the release it
+    /// names and every later one offer `queued` and `delivers`, and the release before it, a
+    /// pre-release of it, and a version that does not read offer neither. What each side writes
+    /// follows from it: a driven unstarted node is `queued` and its shadow task carries `delivers`
+    /// on one side, and `todo` with no `delivers` on the other — and no reserved key carries the
+    /// tickets on either.
+    #[test]
+    fn the_store_vocabulary_gate_holds_on_both_sides_of_the_first_release_carrying_delivers() {
+        use super::Vocabulary;
+        let from = crate::cli::WRITEBACK_DELIVERS_FROM;
+        assert_eq!(Vocabulary::of(from), Vocabulary::WithDelivers);
+        assert_eq!(Vocabulary::of("0.3.0"), Vocabulary::WithDelivers);
+        for older in ["0.2.31", "0.2.32-rc.1", "0.1.0", ""] {
+            assert_eq!(Vocabulary::of(older), Vocabulary::BeforeDelivers, "{older}");
+        }
+        for (vocabulary, word, carried) in [
+            (
+                Vocabulary::WithDelivers,
+                "queued",
+                Some(json!(["tickets:t-1"])),
+            ),
+            (Vocabulary::BeforeDelivers, "todo", None),
+        ] {
+            let snapshot = Fixture::new("vocabulary").snapshot_with(|snapshot| {
+                snapshot.claim = vocabulary.driving_claim();
+                snapshot.vocabulary = vocabulary;
+                snapshot
+                    .statuses
+                    .insert("design".to_owned(), NodeStatus::Ready);
+                snapshot
+                    .nodes
+                    .get_mut("design")
+                    .expect("the fixture holds the node")
+                    .delivers = vec!["tickets:t-1".to_owned()];
+            });
+            let (front, _) =
+                super::task_document(&snapshot, "design", &snapshot.nodes["design"], None)
+                    .expect("the shadow task renders");
+            assert_eq!(front["status"], word, "{vocabulary:?}");
+            assert_eq!(front.get("delivers").cloned(), carried, "{vocabulary:?}");
+            assert!(
+                front["metadata"].get("onepipeline.delivers").is_none(),
+                "a reserved key carries the tickets: {front}"
+            );
+        }
+    }
+
+    /// A copy report's failed tickets are described only where every failed entry reads: a
+    /// well-formed one is named with its deliverer and the store's words on one line, a report
+    /// failing no ticket describes none, and an entry that does not validate — an unqualified
+    /// ticket, an unknown outcome, a failure with nothing in it — describes nothing at all.
+    #[test]
+    fn a_delivered_report_is_described_only_where_every_failed_entry_reads() {
+        use super::failed_deliveries;
+        let failure = json!({"class": "transient", "kind": "unavailable", "source": "tickets",
+                             "message": "cannot write\nnext: fix it", "retry_after_seconds": null});
+        let entry = |ticket: &str, outcome: &str, failure: Value| {
+            json!({"ticket": ticket, "deliverer": "plans:p/a", "outcome": outcome,
+                   "from": "queued", "failure": failure})
+        };
+        let report = |entries: Vec<Value>| {
+            json!({"items": [], "delivered": entries})
+                .to_string()
+                .into_bytes()
+        };
+        assert_eq!(
+            failed_deliveries(&report(vec![entry(
+                "tickets:t/one",
+                "failed",
+                failure.clone()
+            )]))
+            .as_deref(),
+            Some("ticket tickets:t/one (delivered by plans:p/a): cannot write next: fix it")
+        );
+        assert_eq!(
+            failed_deliveries(&report(vec![json!({
+                "ticket": "tickets:t/two", "deliverer": "plans:p/a", "outcome": "written",
+                "from": "todo", "to": "queued"
+            })])),
+            None,
+            "a report failing no ticket described one"
+        );
+        for unreadable in [
+            entry("not qualified", "failed", failure.clone()),
+            entry("tickets:t/one", "exploded", failure.clone()),
+            entry("tickets:t/one", "failed", Value::Null),
+        ] {
+            assert_eq!(
+                failed_deliveries(&report(vec![unreadable.clone()])),
+                None,
+                "an entry that does not validate was described: {unreadable}"
+            );
+        }
     }
 
     /// Every word this projection writes, in the one arrangement that states them:
@@ -3408,7 +3565,7 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
-                    delivers: true,
+                    vocabulary: super::Vocabulary::WithDelivers,
                 },
                 // Only `build`. A node the plan has just added has no destination
                 // task at all, and holding both kinds in one fixture is what makes
