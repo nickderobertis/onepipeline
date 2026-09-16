@@ -464,6 +464,7 @@ pub struct Frontier {
     ///
     /// Carried because a `settle` at the outcome a node already holds is a
     /// duplicate only if it also states nothing new about where the work landed.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, StatedLanding>,
 }
 

@@ -166,6 +166,7 @@ pub struct RunState {
     ///
     /// Omitted when empty, which is every run nobody settled from evidence.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
     /// The declared steps each node's attempt finished.
     ///

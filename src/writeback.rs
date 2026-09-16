@@ -245,6 +245,7 @@ struct Snapshot {
     change_urls: BTreeMap<String, String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Where an operator settling a node from evidence stated its work landed.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
     settlements: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,

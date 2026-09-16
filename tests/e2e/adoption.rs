@@ -4286,6 +4286,22 @@ fn settle_broken(world: &World, run: &str, landing: &str, extra: Value) -> crate
     )
 }
 
+/// What `onevcs release status` answers about one reference, whatever it exits.
+///
+/// Not [`onevcs_release`], which holds the command to succeeding: a landing
+/// nobody has released yet is an answer too, and it is the one read here before a
+/// release is recorded.
+fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseStatus> {
+    let output = std::process::Command::new(crate::harness::onevcs_binary())
+        .args(["release", "status", reference, "--json"])
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the onevcs binary runs");
+    serde_json::from_slice(&output.stdout).ok()
+}
+
 /// The release a held node was released by, as the run reported its arrival.
 fn arrived_version(world: &World, run: &str, node: &str) -> Value {
     world
@@ -4471,7 +4487,69 @@ fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_i
         Some("failed".to_owned()),
         "a refused settle moved the record"
     );
+    assert!(
+        !matches!(
+            release_status_of(&world, &url),
+            Some(onevcs::ReleaseStatus::Released { .. })
+        ),
+        "a release refused before anything was recorded was recorded"
+    );
 
+    // Refused **after** an acknowledgement was made, twice over. First within one
+    // envelope: the first settle's release is recorded, and the second's is one
+    // `onevcs` will not record, so the envelope is turned away whole.
+    let stating = |id: &str, version: &str| {
+        json!({
+            "op": "settle", "id": id, "outcome": "done",
+            "evidence": "the change carrying this work merged",
+            "landing": url, "release": {"target": "crate", "version": version},
+        })
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [
+                stating("broken", "0.2.0"), stating("landed", "the-nightly"),
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("node 'landed'")
+        .err_has("`onevcs` would not record it");
+    // Then by the run's own reconciler, which alone knows `hold` has a dispatch in
+    // flight: the reply records the release before the envelope reaches it — here
+    // the one the envelope above already recorded, which records nothing twice.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [
+                stating("hold", "0.2.0"),
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("still has a dispatch in flight");
+    // Neither moved the run's record, and what stands in `onevcs` is the release
+    // the operator stated — true of that landing whether or not a settle applied —
+    // which on its own starts nothing, because the node waiting on it is waiting
+    // on a dependency the run still records failed.
+    assert_eq!(
+        settled_status(&world, &run, "broken"),
+        Some("failed".to_owned())
+    );
+    assert!(!dispatched(&world, &run, "consumer"));
+    match release_status_of(&world, &url) {
+        Some(onevcs::ReleaseStatus::Released {
+            version, source, ..
+        }) => assert_eq!(
+            (version.as_str(), source),
+            ("0.2.0", onevcs::ReleaseSource::Acknowledged)
+        ),
+        other => panic!("the release recorded before the refusal is not what stands: {other:?}"),
+    }
+
+    // The recovery is sending the settle again: the same release records nothing
+    // twice, and the settle applies.
     let settled = settle_broken(
         &world,
         &run,
@@ -4484,16 +4562,6 @@ fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_i
         dispatched(world, &run, "consumer")
     });
     assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.2.0"));
-    let printed = onevcs_release(&world, &["status", &url, "--json"]);
-    match serde_json::from_str::<onevcs::ReleaseStatus>(printed.trim()) {
-        Ok(onevcs::ReleaseStatus::Released {
-            version, source, ..
-        }) => {
-            assert_eq!(version, "0.2.0");
-            assert_eq!(source, onevcs::ReleaseSource::Acknowledged);
-        }
-        other => panic!("the stated release was not recorded as acknowledged: {other:?}"),
-    }
 
     world.release("hold.go");
     world.until("the run to settle", |world| {

@@ -1535,6 +1535,15 @@ fn renderable(value: &str) -> Option<String> {
 /// already recorded. Recording the same version again changes nothing, so an
 /// envelope sent a second time after a refusal elsewhere in it is harmless.
 ///
+/// **An acknowledgement made here stands if the envelope is then refused** — by a
+/// later settle's release `onevcs` will not record, or by the run's reconciler
+/// judging a command against what only it knows, such as a dispatch still in
+/// flight. It is not undone, because it is not this run's to undo: it is the
+/// operator's own statement of which release carries that landing, true whether or
+/// not the settle beside it applied, and exactly what `onevcs release acknowledge`
+/// would have recorded had they typed it. Sending the corrected envelope again
+/// records nothing twice. `tests/e2e/adoption.rs` drives both refusals.
+///
 /// Nothing is inferred here. The version is the operator's, verified against the
 /// release itself; no baseline is derived from when the work was committed or
 /// from what a probe answers now, because neither proves what was public when the
