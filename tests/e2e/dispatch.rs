@@ -3172,7 +3172,6 @@ fn a_claude_login_refusal_is_stepped_past_as_unauthenticated_rather_than_rate_li
          unauthenticated identity: {advanced:?}"
     );
 
-    // And the line a reader is shown under the node's failure.
     let results = world.run(&["results", "unauthed"]);
     results.exited(0).out_has(&format!(
         "fell through 'claude-code' ({})",

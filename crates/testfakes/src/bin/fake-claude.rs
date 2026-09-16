@@ -582,10 +582,14 @@ fn result(outcome: Outcome, prompt: &str, args: &[String], dir: &std::path::Path
 /// agent wrote mid-task. `duration_ms` is the incidental `429` of
 /// nickderobertis/oneharness#1290: a classifier that fell through to its generic
 /// vocabulary read that number as a rate limit.
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the same provider
 // wire shape as `result` above, gated the same way: `tests/e2e/dispatch.rs` drives
 // the real `oneharness_core` classifier over it, so a refusal it stops reading as
 // `auth` fails there rather than reading differently.
+// llmlint: ignore-block[invalid_states_unrepresentable] this is the bytes a provider
+// writes, not a state this program holds: the boundary type that refuses a malformed
+// document is `oneharness_core`'s reader, which consumes it. A struct here would be a
+// second declaration of Claude Code's schema, the drift the rule above guards against.
 fn login_refusal() -> serde_json::Value {
     serde_json::json!({
         "type": "result",
@@ -600,6 +604,8 @@ fn login_refusal() -> serde_json::Value {
         "modelUsage": {},
     })
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The validated answer a structured-output run is asked for.
 ///
