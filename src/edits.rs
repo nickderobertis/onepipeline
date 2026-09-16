@@ -460,6 +460,12 @@ pub struct Frontier {
     /// by a live edit reached a dispatch having been checked by nothing.
     pub node_validator: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Where an operator has already stated each node's work landed.
+    ///
+    /// Carried because a `settle` at the outcome a node already holds is a
+    /// duplicate only if it also states nothing new about where the work landed.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
+    pub stated_landings: BTreeMap<String, StatedLanding>,
 }
 
 /// What one park recorded about itself, as a later edit reads it.
@@ -655,6 +661,11 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
                 // later `cancel` of it in the same envelope is judged against no
                 // park — exactly as the fold reads it. See [`apply`].
                 frontier.parks.remove(node);
+            }
+            Operation::LandingFromEvidence { node, landing } => {
+                if let Some(stated) = StatedLanding::parse(landing) {
+                    frontier.stated_landings.insert(node.clone(), stated);
+                }
             }
             _ => {}
         }
@@ -1193,7 +1204,33 @@ fn compile_into(
             outcome,
             evidence,
             landing,
-        } => compile_settle(graph, frontier, id, *outcome, evidence, landing.as_deref()),
+            release,
+        } => {
+            // The wire carries the two as separate optional fields; judged here into
+            // the three states a settle can mean, each holding only values already
+            // checked, so a release with no landing to carry, a landing nothing can
+            // resolve, and a version that is not one word are refused before they
+            // are anything.
+            let stated = match (landing.as_deref(), release.as_ref()) {
+                (None, None) => StatedAt::Unstated,
+                (Some(landing), None) => StatedAt::Landing(stated_landing(id, landing)?),
+                (Some(landing), Some(release)) => {
+                    let landing = stated_landing(id, landing)?;
+                    one_word_version(id, release)?;
+                    StatedAt::Released(landing)
+                }
+                (None, Some(release)) => {
+                    return Err(refuse(format!(
+                        "settle: node '{id}' states the release {} {} and no landing for it to \
+                         carry; a release is recorded against the landing it carries, so name \
+                         that landing — the commit the change reached its base at, or the \
+                         change request's URL",
+                        release.target, release.version
+                    )))
+                }
+            };
+            compile_settle(graph, frontier, id, *outcome, evidence, &stated)
+        }
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -1690,16 +1727,146 @@ fn landing_is_an_object_name(landing: &str) -> bool {
     OBJECT_NAME_WIDTHS.contains(&landing.len()) && landing.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// One stated landing, where it is one of the two spellings the op takes.
+/// Where an operator stated a node's work landed, read **once**, here, as the one
+/// interpretation every reader of a run takes of it.
 ///
-/// The check both boundaries the value crosses make, so they cannot come to
-/// disagree: the reply envelope, where a person types it, and the journal it is
-/// read back out of — a file another build wrote and a person can edit. What a
-/// value that is neither spelling costs is the same on both sides: a release
-/// question `onevcs` cannot be asked, about work nothing can read.
-pub(crate) fn stated_landing(landing: &str) -> Option<String> {
-    crate::vcs::usable(landing)
-        .filter(|landing| landing_is_a_url(landing) || landing_is_an_object_name(landing))
+/// A `settle` naming a landing is a statement that the node's work reached its
+/// base there. So the run records the node's landing as `landed` — on this tier,
+/// which is what separates it from a landing the run itself watched happen — and
+/// the views, `results`, the listing and the status write-back all present that
+/// statement rather than a fresh read of the branch the dispatch left behind,
+/// which is the very record the settle corrected. Release correlation asks
+/// `onevcs` about [`reference`](Self::reference), so no release is attributed to
+/// work that library says has not landed. `docs/contract-divergences.md` entry 57
+/// records the ruling.
+///
+/// The two variants are the two spellings the op takes, decided from the value
+/// itself: a commit is an object name, and a change request is a URL.
+// llmlint: ignore[invalid_states_unrepresentable] each variant holds the plain `String`
+// every reference in this crate is spelled with, and none can be built unchecked from
+// outside this module: `StatedLanding::parse` is the only constructor, and the serde
+// conversion below goes through it, so a checkpoint another build wrote is held to the
+// same two spellings a reply envelope is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum StatedLanding {
+    /// The commit the change reached its base at.
+    Commit(String),
+    /// The change request a person reads the change in.
+    ChangeRequest(String),
+}
+
+impl StatedLanding {
+    /// One stated landing, where it is one of the two spellings the op takes.
+    ///
+    /// The check every boundary the value crosses makes, so they cannot come to
+    /// disagree: the reply envelope, where a person types it, and the journal and
+    /// checkpoint it is read back out of — files another build wrote and a person
+    /// can edit. What a value that is neither spelling costs is the same
+    /// everywhere: a release question `onevcs` cannot be asked, about work nothing
+    /// can read, printed onto a line it would forge.
+    pub(crate) fn parse(landing: &str) -> Option<Self> {
+        let usable = crate::vcs::usable(landing)?;
+        if landing_is_an_object_name(&usable) {
+            return Some(Self::Commit(usable));
+        }
+        landing_is_a_url(&usable).then_some(Self::ChangeRequest(usable))
+    }
+
+    /// The reference as the operator stated it, which is what `onevcs` is asked
+    /// about.
+    pub fn reference(&self) -> &str {
+        match self {
+            Self::Commit(reference) | Self::ChangeRequest(reference) => reference,
+        }
+    }
+
+    /// The evidence tier a landing resting on this statement is shown under.
+    ///
+    /// Named for what was stated, so a reader can tell a landing an operator
+    /// stated from one the run observed, and a stated commit from a stated change
+    /// request, without opening the journal.
+    pub fn tier(&self) -> &'static str {
+        match self {
+            Self::Commit(_) => "stated-commit",
+            Self::ChangeRequest(_) => "stated-change-request",
+        }
+    }
+}
+
+impl TryFrom<String> for StatedLanding {
+    type Error = String;
+
+    fn try_from(landing: String) -> std::result::Result<Self, Self::Error> {
+        Self::parse(&landing).ok_or_else(|| {
+            format!("{landing:?} is neither a commit's object name nor a change request's URL")
+        })
+    }
+}
+
+impl From<StatedLanding> for String {
+    fn from(landing: StatedLanding) -> Self {
+        match landing {
+            StatedLanding::Commit(reference) | StatedLanding::ChangeRequest(reference) => reference,
+        }
+    }
+}
+
+/// What a `settle` states about where its node's work landed.
+///
+/// The wire's two optional fields admit a release with no landing; this does not,
+/// because a release is recorded against the landing it carries. Nor does it admit
+/// a landing or a version nobody has checked: each variant holds the value its
+/// check produced, so what [`compile_settle`] judges is already one of the states
+/// a settle can record.
+enum StatedAt {
+    /// No landing, and so no release.
+    Unstated,
+    /// A landing, with no release stated for it.
+    Landing(StatedLanding),
+    /// A landing, and a release an operator verified carries it — built only once
+    /// [`one_word_version`] has held that release's version to one word. The
+    /// release itself is the reply's to record, so the settlement keeps only that
+    /// one was stated.
+    Released(StatedLanding),
+}
+
+impl StatedAt {
+    fn landing(&self) -> Option<&StatedLanding> {
+        match self {
+            Self::Unstated => None,
+            Self::Landing(landing) | Self::Released(landing) => Some(landing),
+        }
+    }
+}
+
+/// Hold a stated release's version to **one usable word**.
+///
+/// The version is printed into the acknowledgement and every wait it releases, so
+/// it is held to one word before a settle stating it is anything — whether it is a
+/// *version* is `onevcs`'s to say, when it records it.
+fn one_word_version(id: &str, release: &crate::channel::StatedRelease) -> Result<()> {
+    if crate::vcs::usable(&release.version).as_deref() != Some(release.version.as_str()) {
+        return Err(refuse(format!(
+            "settle: node '{id}' states a release of {} at version {:?}, which is not one \
+             word; state the version the release carries, e.g. 0.2.31",
+            release.target, release.version
+        )));
+    }
+    Ok(())
+}
+
+/// One stated landing, or the refusal naming the two spellings the op takes.
+fn stated_landing(id: &str, named: &str) -> Result<StatedLanding> {
+    StatedLanding::parse(named).ok_or_else(|| {
+        refuse(format!(
+            "settle: node '{id}' would be settled at a landing of {named:?}, which is neither \
+             the commit the change reached its base at — {floor} to {ceiling} hexadecimal \
+             characters — nor the change request's URL; state one of those, or omit the field",
+            floor = OBJECT_NAME_WIDTHS.start(),
+            ceiling = OBJECT_NAME_WIDTHS.end()
+        ))
+    })
 }
 
 /// The status a `settle` puts a node's record at.
@@ -1725,11 +1892,15 @@ pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
 /// whose outcome is recorded is idle by nobody's decision and `requeue`, the only
 /// other op that clears one, sends the node back for a redispatch.
 ///
-/// Five refusals, and each one is a different thing to do next. Blank evidence:
+/// Six refusals, and each one is a different thing to do next. Blank evidence:
 /// the journal would record the reason for a state as nothing. A landing that is
 /// not one word naming a commit or a change request: it is asked of `onevcs` as
 /// the reference a release is measured against and printed into the views, so
-/// there is nothing to be done with one nothing can resolve. A node the graph
+/// there is nothing to be done with one nothing can resolve. A release stated with
+/// no landing beside it, or at a version that is not one word: it is recorded
+/// against the landing it carries and printed into every wait it releases. Whether
+/// `onevcs` will record that release is not judged here — it is the reply's to
+/// ask, once, before anything is queued. A node the graph
 /// does not hold: the settlement would be about no work at all, so the ids it
 /// does hold are named. A node whose record **already says what the settle
 /// states**: it is named as having settled that way, because a settle that
@@ -1751,8 +1922,9 @@ fn compile_settle(
     id: &str,
     outcome: SettleOutcome,
     evidence: &str,
-    landing: Option<&str>,
+    stated: &StatedAt,
 ) -> Result<Vec<Operation>> {
+    let landing = stated.landing();
     if evidence.trim().is_empty() {
         return Err(refuse(format!(
             "settle: node '{id}' would be settled {} on no evidence at all; the evidence is \
@@ -1766,10 +1938,18 @@ fn compile_settle(
             graph.ids().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    if frontier.recorded.get(id).copied() == Some(settled_status(outcome)) {
+    // A settle that states a landing other than the one standing, or a release, is a
+    // correction even at the outcome the record already holds: where the work landed
+    // is part of the record, and a landing `onevcs` cannot resolve is corrected by
+    // stating one it can.
+    let corrects_the_landing = matches!(stated, StatedAt::Released(_))
+        || landing.is_some_and(|named| frontier.stated_landings.get(id) != Some(named));
+    if frontier.recorded.get(id).copied() == Some(settled_status(outcome)) && !corrects_the_landing
+    {
         return Err(refuse(format!(
             "settle: node '{id}' has already settled {0}, so this settles nothing — the \
-             record already says {0}. A settle stating a **different** outcome is accepted: \
+             record already says {0}. A settle stating a **different** outcome is accepted, \
+             and so is one stating a different landing or the release that carries it: \
              correcting a record the world has moved past is what this op is for",
             outcome.as_str()
         )));
@@ -1781,18 +1961,6 @@ fn compile_settle(
             live.named()
         )));
     }
-    let landing = match landing {
-        Some(named) => Some(stated_landing(named).ok_or_else(|| {
-            refuse(format!(
-                "settle: node '{id}' would be settled at a landing of {named:?}, which is neither \
-                 the commit the change reached its base at — {floor} to {ceiling} hexadecimal \
-                 characters — nor the change request's URL; state one of those, or omit the field",
-                floor = OBJECT_NAME_WIDTHS.start(),
-                ceiling = OBJECT_NAME_WIDTHS.end()
-            ))
-        })?),
-        None => None,
-    };
     // The one thing a settlement takes off the definition, here as `cancel` puts
     // it on: a settled node is idle by nobody's decision, so the next command of
     // the same envelope — and replay, through [`apply`] — sees no park.
@@ -1807,7 +1975,7 @@ fn compile_settle(
     if let Some(landing) = landing {
         operations.push(Operation::LandingFromEvidence {
             node: id.to_string(),
-            landing,
+            landing: String::from(landing.clone()),
         });
     }
     Ok(operations)
@@ -2869,6 +3037,7 @@ mod tests {
                 outcome: crate::channel::SettleOutcome::Done,
                 evidence: evidence.into(),
                 landing: None,
+                release: None,
             },
         )
         .expect("a node the graph holds settles from evidence");
@@ -2928,6 +3097,63 @@ mod tests {
         );
     }
 
+    /// A release is only stated beside the landing it carries, at a version that
+    /// is one word, and it compiles to nothing of its own: what records it is
+    /// `onevcs`, asked by the reply before the envelope is queued.
+    #[test]
+    fn a_settle_states_a_release_only_beside_a_landing_and_at_a_usable_version() {
+        let release = |version: &str| crate::channel::StatedRelease {
+            target: target("crate"),
+            version: version.into(),
+        };
+        let settle = |landing: Option<&str>, version: &str| Command::Settle {
+            id: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: "the change merged and 0.2.31 carries it".into(),
+            landing: landing.map(str::to_owned),
+            release: Some(release(version)),
+        };
+        let compiled = |command: &Command| {
+            compile(
+                &mut graph_of(vec![agent("publish", &[])]),
+                &Frontier::default(),
+                command,
+            )
+        };
+        let landing = "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d";
+        assert_eq!(
+            compiled(&settle(Some(landing), "0.2.31")).expect("a stated release compiles"),
+            vec![
+                Operation::SettledFromEvidence {
+                    node: "publish".into(),
+                    outcome: crate::channel::SettleOutcome::Done,
+                    evidence: "the change merged and 0.2.31 carries it".into(),
+                },
+                Operation::LandingFromEvidence {
+                    node: "publish".into(),
+                    landing: landing.into(),
+                },
+            ],
+            "the release moved the record the settle writes"
+        );
+        let refused = compiled(&settle(None, "0.2.31"))
+            .expect_err("a release with no landing is refused")
+            .to_string();
+        assert!(
+            refused.contains("no landing for it to carry") && refused.contains("name that landing"),
+            "{refused}"
+        );
+        for unusable in ["", "0.2.31 or 0.2.32", "0.2.31\n"] {
+            let refused = compiled(&settle(Some(landing), unusable))
+                .expect_err("an unusable version is refused")
+                .to_string();
+            assert!(
+                refused.contains("which is not one word"),
+                "{unusable:?}: {refused}"
+            );
+        }
+    }
+
     /// A settle records where the work landed, in either spelling of a landing —
     /// and records none where the operator named none.
     ///
@@ -2947,6 +3173,7 @@ mod tests {
             outcome: crate::channel::SettleOutcome::Done,
             evidence: evidence.into(),
             landing: landing.map(str::to_owned),
+            release: None,
         };
         let compiled = |landing: Option<&str>| {
             compile(
@@ -3031,6 +3258,7 @@ mod tests {
             outcome: crate::channel::SettleOutcome::Done,
             evidence: evidence.into(),
             landing: None,
+            release: None,
         };
         let mut graph = graph_of(vec![agent("publish", &[])]);
 
@@ -3070,6 +3298,31 @@ mod tests {
                 && message.contains("different"),
             "the refusal does not say that a different outcome is accepted: {message}"
         );
+
+        // At the outcome the record holds, a settle stating where the work landed
+        // is a correction rather than a duplicate — and restating the landing that
+        // already stands is a duplicate again.
+        let url = "https://github.com/owner/engine/pull/12";
+        let restating = |landing: &str| Command::Settle {
+            id: "publish".into(),
+            outcome: crate::channel::SettleOutcome::Done,
+            evidence: "it merged in the change request".into(),
+            landing: Some(landing.into()),
+            release: None,
+        };
+        let mut stated = frontier(&[("publish", NodeStatus::Done)]);
+        stated.stated_landings.insert(
+            "publish".into(),
+            StatedLanding::parse("3f9a1c2e5b7d9081").expect("a commit"),
+        );
+        compile(&mut graph, &stated, &restating(url))
+            .expect("a settle stating a different landing corrects the record");
+        let operations = compile(&mut graph, &stated, &restating(url)).expect("it compiles");
+        advance(&mut stated, &operations);
+        let message = compile(&mut graph, &stated, &restating(url))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("settles nothing"), "{message}");
 
         // A node that settled **something else** is the case this op exists for:
         // a change that merged while the node read `failed`.
@@ -3137,6 +3390,7 @@ mod tests {
                 outcome: SettleOutcome::Done,
                 evidence: "the comment is on the issue".into(),
                 landing: None,
+                release: None,
             },
         )
         .expect("a parked node settles from evidence");

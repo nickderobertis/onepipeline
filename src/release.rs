@@ -1179,7 +1179,7 @@ impl Watch {
     }
 
     /// One node's out-of-repository dependencies, resolved once — and their
-    /// landings re-read for as long as one of them has none.
+    /// landings re-read on every re-read tick for as long as the node is watched.
     ///
     /// **The set is frozen and the landing is not.** Which dependencies land
     /// outside the node's repository, and what those repositories release, is
@@ -1187,7 +1187,11 @@ impl Watch {
     /// this run observed is relayed before the node settles, but one nobody
     /// observed — a change request merged after its node settled, stated by an
     /// operator from evidence — arrives after the fact by definition, and frozen
-    /// at settlement it answers `not-landed` for ever.
+    /// at settlement it answers `not-landed` for ever. Nor is a stated landing
+    /// final once there is one: an operator who stated a squash-merge commit
+    /// `onevcs` cannot resolve corrects it by stating the change request, and a
+    /// landing frozen at the first statement would ask the unanswerable one for
+    /// ever.
     fn resolve(
         &mut self,
         paths: &RunPaths,
@@ -1197,7 +1201,7 @@ impl Watch {
     ) -> Vec<Dependency> {
         if let Some(known) = self.dependencies.get(&node.id) {
             let known = known.clone();
-            if !re_read || known.iter().all(|dependency| dependency.landing.is_some()) {
+            if !re_read {
                 return known;
             }
             let re_read: Vec<Dependency> = known
@@ -1210,11 +1214,7 @@ impl Watch {
             self.dependencies.insert(node.id.clone(), re_read.clone());
             return re_read;
         }
-        let mine = node
-            .repo
-            .as_deref()
-            .and_then(|repo| self.repositories.of(repo))
-            .map(|releases| releases.identity.clone());
+        let mine = identity_of(&mut self.repositories, node);
         let mut resolved: Vec<Dependency> = Vec::new();
         for dep in &node.deps {
             match self.dependency(paths, state, node, dep, mine.as_deref()) {
@@ -1268,22 +1268,10 @@ impl Watch {
                 target,
             );
         }
-        let Some(upstream) = state.graph.get(dep) else {
-            return Resolution::Unreadable;
+        let repo = match across_repositories(&mut self.repositories, state, dep, mine) {
+            Ok(repo) => repo,
+            Err(ended) => return ended.into(),
         };
-        let Some(repo) = upstream.repo.clone() else {
-            // A dependency that lands in no repository releases nothing.
-            return Resolution::NothingToAwait;
-        };
-        let identity = self.repositories.of(&repo).map(|it| it.identity.clone());
-        if identity.is_none() {
-            return Resolution::Unreadable;
-        }
-        if identity.as_deref() == mine {
-            // The lifecycle already prepares the stacked or merged-stacked
-            // branch for this one, exactly as it does today.
-            return Resolution::NothingToAwait;
-        }
         let stated = self.stated_landing(paths, dep);
         self.outside(
             dep,
@@ -1317,52 +1305,120 @@ impl Watch {
         landing: Option<String>,
         named: Option<TargetName>,
     ) -> Resolution {
-        let Some(releases) = self.repositories.of(repo) else {
-            return Resolution::Unreadable;
-        };
-        // A repository that declares **no release targets releases nothing**, so
-        // there is no release to wait for and nothing to pin against instead of
-        // one. That is every repository on a host that has configured none —
-        // which is every host there was before `onevcs` had a release-targets
-        // document at all — and it is what keeps a plan naming neither new field
-        // producing exactly the run it produced then: no row, no hold, and a
-        // rendered task byte-identical to the one it rendered before.
-        if releases.targets.is_empty() {
-            return Resolution::NothingToAwait;
-        }
-        let identity = releases.identity.clone();
-        // A repository declaring no target that answers to this name leaves the
-        // cell empty rather than the row absent: a worker still needs to see the
-        // dependency, and a `published` node still waits — an unanswerable
-        // question is not an answer that the release has happened.
-        let selected = releases.select(named.as_ref()).ok();
-        let (target, style, action, instructions) = match selected {
-            Some(target) => (
-                Some(target.name.clone()),
-                Some(target.style()),
-                target.action().map(str::to_owned),
-                target.adoption_instructions.clone(),
-            ),
-            None => (named, None, None, None),
-        };
-        Resolution::Outside(Dependency {
-            dep: dep.to_owned(),
-            identity,
-            branch,
-            commit,
-            landing,
-            target,
-            style,
-            action,
-            instructions,
-        })
+        outside(
+            &mut self.repositories,
+            dep,
+            repo,
+            (branch, commit, landing),
+            named,
+        )
     }
+}
+
+fn identity_of(repositories: &mut Repositories, node: &Node) -> Option<String> {
+    node.repo
+        .as_deref()
+        .and_then(|repo| repositories.of(repo))
+        .map(|releases| releases.identity.clone())
+}
+
+/// Whether an in-run dependency lands **outside** its consumer's repository, and
+/// in which repository: `Ok` with that repository, or the resolution that ends the
+/// question here. `mine` is the consumer's own identity.
+fn across_repositories(
+    repositories: &mut Repositories,
+    state: &RunState,
+    dep: &str,
+    mine: Option<&str>,
+) -> std::result::Result<String, Ended> {
+    let Some(upstream) = state.graph.get(dep) else {
+        return Err(Ended::Unreadable);
+    };
+    let Some(repo) = upstream.repo.clone() else {
+        // A dependency that lands in no repository releases nothing.
+        return Err(Ended::NothingToAwait);
+    };
+    let identity = repositories.of(&repo).map(|it| it.identity.clone());
+    if identity.is_none() {
+        return Err(Ended::Unreadable);
+    }
+    if identity.as_deref() == mine {
+        // The lifecycle already prepares the stacked or merged-stacked
+        // branch for this one, exactly as it does today.
+        return Err(Ended::NothingToAwait);
+    }
+    Ok(repo)
+}
+
+enum Ended {
+    NothingToAwait,
+    Unreadable,
+}
+
+impl From<Ended> for Resolution {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::NothingToAwait => Resolution::NothingToAwait,
+            Ended::Unreadable => Resolution::Unreadable,
+        }
+    }
+}
+
+/// One out-of-repository dependency, with what its repository releases: its
+/// branch, commit and stated landing as the run recorded them, and the target its
+/// consumer names, if it names one.
+fn outside(
+    repositories: &mut Repositories,
+    dep: &str,
+    repo: &str,
+    (branch, commit, landing): (Option<String>, Option<String>, Option<String>),
+    named: Option<TargetName>,
+) -> Resolution {
+    let Some(releases) = repositories.of(repo) else {
+        return Resolution::Unreadable;
+    };
+    // A repository that declares **no release targets releases nothing**, so
+    // there is no release to wait for and nothing to pin against instead of
+    // one. That is every repository on a host that has configured none —
+    // which is every host there was before `onevcs` had a release-targets
+    // document at all — and it is what keeps a plan naming neither new field
+    // producing exactly the run it produced then: no row, no hold, and a
+    // rendered task byte-identical to the one it rendered before.
+    if releases.targets.is_empty() {
+        return Resolution::NothingToAwait;
+    }
+    let identity = releases.identity.clone();
+    // A repository declaring no target that answers to this name leaves the
+    // cell empty rather than the row absent: a worker still needs to see the
+    // dependency, and a `published` node still waits — an unanswerable
+    // question is not an answer that the release has happened.
+    let selected = releases.select(named.as_ref()).ok();
+    let (target, style, action, instructions) = match selected {
+        Some(target) => (
+            Some(target.name.clone()),
+            Some(target.style()),
+            target.action().map(str::to_owned),
+            target.adoption_instructions.clone(),
+        ),
+        None => (named, None, None, None),
+    };
+    Resolution::Outside(Dependency {
+        dep: dep.to_owned(),
+        identity,
+        branch,
+        commit,
+        landing,
+        target,
+        style,
+        action,
+        instructions,
+    })
 }
 
 /// What one `deps` entry turned out to be.
 ///
 // llmlint: ignore[changed_behavior_has_e2e] [`Unreadable`](Resolution::Unreadable) is not
-// reachable from a run, and the graph is why: this is only ever asked about a node whose
+// reachable from the release watch of a run, and the graph is why: this is only ever asked about a node whose
 // dependencies have all settled `done`, and each of the three ways a dependency can be
 // unreadable stops that happening. A dep that is not in the graph is refused by
 // `graph::validate`; a dep whose repository `onevcs` cannot answer for is a node whose own
@@ -1370,6 +1426,8 @@ impl Watch {
 // cross-DAG dep whose upstream ledger cannot be read is an edge that does not resolve, so
 // its consumer stays blocked too. What the arm does — leave the set unfrozen and ask
 // again next pass — is what keeps a node from launching against a row that is missing.
+// The settle's advice does reach it, from a reply, where what a repository releases cannot
+// be read; `awaited_targets` says so in its own line, and `tests/e2e/adoption.rs` drives it.
 enum Resolution {
     /// There is no release to wait for: it lands in this node's own repository,
     /// in none at all, or in one that declares no release targets.
@@ -1516,6 +1574,228 @@ fn renderable(value: &str) -> Option<String> {
         return None;
     }
     Some(value.to_owned())
+}
+
+/// Record, with `onevcs release acknowledge`'s own semantics, every release an
+/// envelope's `settle`s state beside a landing.
+///
+/// Asked by the reply **before anything of the envelope is queued or applied**,
+/// once, and never by a reconciler or a replay: the acknowledgement is a record in
+/// `onevcs`'s store rather than in this run's, so it is made by the process a
+/// person typed the settle into, and a refusal turns the whole envelope away
+/// naming what `onevcs` said — a landing it cannot resolve, one whose target has an
+/// established baseline its probe answers instead, a target the repository does
+/// not declare, a version that is not a semantic version, or a different version
+/// already recorded. Recording the same version again changes nothing, so an
+/// envelope sent a second time after a refusal elsewhere in it is harmless.
+///
+/// **An acknowledgement made here stands if the envelope is then refused** — by a
+/// later settle's release `onevcs` will not record, or by the run's reconciler
+/// judging a command against what only it knows, such as a dispatch still in
+/// flight. It is not undone, because it is not this run's to undo: it is the
+/// operator's own statement of which release carries that landing, true whether or
+/// not the settle beside it applied, and exactly what `onevcs release acknowledge`
+/// would have recorded had they typed it. Sending the corrected envelope again
+/// records nothing twice. `tests/e2e/adoption.rs` drives both refusals.
+///
+/// Nothing is inferred here. The version is the operator's, verified against the
+/// release itself; no baseline is derived from when the work was committed or
+/// from what a probe answers now, because neither proves what was public when the
+/// work landed.
+pub(crate) fn acknowledge_stated_releases(commands: &[crate::channel::Command]) -> Result<()> {
+    for command in commands {
+        let crate::channel::Command::Settle {
+            id,
+            landing: Some(landing),
+            release: Some(release),
+            ..
+        } = command
+        else {
+            continue;
+        };
+        onevcs::acknowledge_release(landing, &release.target, &release.version, false).map_err(
+            |refused| {
+                crate::Error::Refused(format!(
+                    "settle: node '{id}' states that {target} {version} carries the landing \
+                     {landing}, and `onevcs` would not record it: {refused}; nothing was queued",
+                    target = release.target,
+                    version = release.version,
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// The words `onevcs` states an automated target's landing has no release
+/// baseline in.
+///
+/// Read off its own answer because that library exposes the fact only there: a
+/// landing with no baseline is `ReleaseStatus::NotAnswered`, and so is a probe that
+/// failed just now, and only the reason tells a hold nothing will ever lift apart
+/// from one the next probe may. `tests/e2e/adoption.rs` drives the linked `onevcs`
+/// into exactly that state and holds this crate's message to it, so a sibling
+/// release that rewords it fails there rather than falling silent here.
+const NO_BASELINE: &str = "no baseline was captured";
+
+/// What a person who settled a node at a landing, and stated no release carrying
+/// it, has to be told **now** about releasing that work.
+///
+/// One line per release target a node waiting on this one would wait on — as
+/// [`awaited_targets`] resolves them through the release watch's own resolution —
+/// for which `onevcs` answers one of the two holds nothing in the run will ever
+/// lift:
+///
+/// - the landing has **no release baseline**: nothing recorded what the target had
+///   published when the work landed, so no probe answer can say a release carries
+///   it, and the line carries the exact `onevcs release acknowledge` command with
+///   the reference and the target filled in, for the version a person verifies;
+/// - `onevcs` cannot resolve the stated reference to landed work at all, so no
+///   release will ever be correlated through it.
+///
+/// And one line where what the node's repository releases could not be read, so
+/// the question was not asked at all. Every other answer — released, not released
+/// against a baseline, not landed yet, a human step awaiting its person, a probe
+/// that did not answer this time — says nothing, because none of them is a hold the
+/// next answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
+/// what the release watch asks it.
+pub(crate) fn hold_warnings_for_stated_landings(
+    state: &RunState,
+    commands: &[crate::channel::Command],
+) -> Vec<String> {
+    let mut said = Vec::new();
+    for command in commands {
+        let crate::channel::Command::Settle {
+            id,
+            landing: Some(landing),
+            release: None,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let Some(repo) = state.graph.get(id).and_then(|node| node.repo.clone()) else {
+            continue;
+        };
+        let mut repositories = Repositories::default();
+        let Some(awaited) = awaited_targets(&mut repositories, state, id, &repo) else {
+            said.push(format!(
+                "onepipeline: settle: node '{id}' was settled at {landing}, and what its \
+                 repository {repo} releases could not be read, so whether that landing has a \
+                 release baseline was not asked; `onevcs release targets {repo}` says why"
+            ));
+            continue;
+        };
+        let identity = repositories
+            .of(&repo)
+            .map(|releases| releases.identity.clone())
+            .unwrap_or_else(|| repo.clone());
+        for target in awaited {
+            let named = target.to_string();
+            let reference = shell_word(landing);
+            match onevcs::release_status(landing, Some(&target)) {
+                Ok(ReleaseStatus::NotAnswered { reason }) if reason.contains(NO_BASELINE) => {
+                    said.push(format!(
+                        "onepipeline: settle: node '{id}' was settled at the landing {landing}, \
+                         and that landing has no release baseline for the release target \
+                         '{named}' of {identity}: nothing recorded what that target had \
+                         published when the work landed, so no probe answer can show a release \
+                         carries it, and a node waiting on that release holds until one is \
+                         recorded. Once you have verified the version that first carries it, \
+                         record it:\n  onevcs release acknowledge {reference} --target {named} \
+                         --version <VERSION>",
+                    ));
+                }
+                Err(refused) => said.push(format!(
+                    "onepipeline: settle: node '{id}' was settled at {landing}, which `onevcs` \
+                     cannot resolve to landed work, so no release of the release target \
+                     '{named}' of {identity} will be attributed through it and a node waiting \
+                     on that release holds: {refused}. State a landing `onevcs` can resolve \
+                     by settling the node again at the change request that carried the work, \
+                     with the `release` that carries it once you have verified it; or settle it \
+                     there without one and record the release:\n  onevcs release acknowledge \
+                     '<CHANGE-REQUEST-URL>' --target {named} --version <VERSION>",
+                )),
+                Ok(_) => {}
+            }
+        }
+    }
+    said
+}
+
+/// The release targets a wait on one node's release is asked about, each once — or
+/// `None` where what a repository releases could not be read.
+///
+/// **The release watch's own resolution, not a restatement of it**: each dependent
+/// in this run is resolved through [`across_repositories`] and [`outside`], exactly
+/// as [`Watch`] resolves the dependency it waits on, so a dependent in the node's
+/// own repository awaits nothing and one naming no target awaits the repository's
+/// default. Where no dependent awaits a release — nothing depends on the node yet,
+/// or nothing outside its repository does — the node's own repository is resolved
+/// the same way with no target named, which is its default: what a consumer added
+/// later, or one in another run, waits on unless it says otherwise.
+fn awaited_targets(
+    repositories: &mut Repositories,
+    state: &RunState,
+    node: &str,
+    repo: &str,
+) -> Option<BTreeSet<TargetName>> {
+    let mut resolutions: Vec<Resolution> = Vec::new();
+    for dependent in state
+        .graph
+        .iter()
+        .filter(|dependent| dependent.deps.iter().any(|dep| dep == node))
+    {
+        let mine = identity_of(repositories, dependent);
+        resolutions.push(
+            match across_repositories(repositories, state, node, mine.as_deref()) {
+                Ok(repo) => outside(
+                    repositories,
+                    node,
+                    &repo,
+                    (None, None, None),
+                    dependent.consumes.get(node).cloned(),
+                ),
+                Err(ended) => ended.into(),
+            },
+        );
+    }
+    let mut awaited = asked_about(resolutions)?;
+    if awaited.is_empty() {
+        awaited = asked_about(vec![outside(
+            repositories,
+            node,
+            repo,
+            (None, None, None),
+            None,
+        )])?;
+    }
+    Some(awaited)
+}
+
+/// The targets a set of resolutions puts a question about: every dependency the
+/// watch would ask a target of, and `None` where one could not be described.
+fn asked_about(resolutions: Vec<Resolution>) -> Option<BTreeSet<TargetName>> {
+    let mut asked = BTreeSet::new();
+    for resolution in resolutions {
+        match resolution {
+            Resolution::Unreadable => return None,
+            Resolution::NothingToAwait => {}
+            Resolution::Outside(dependency) => {
+                // A target the repository declares, which is what gives it a style: a
+                // name it does not declare is a question `onevcs` would only refuse.
+                asked.extend(dependency.style.and(dependency.target));
+            }
+        }
+    }
+    Some(asked)
+}
+
+/// One word of a command line a person pastes into a POSIX shell, single-quoted:
+/// a URL may carry `&`, `?` or `#`, and a word quoted every time is one reading of
+/// it rather than two.
+fn shell_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// Why one fast-adoption node's change request is opened as a **draft**, asked of
@@ -1756,50 +2036,23 @@ fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> O
 
 /// Where each node of one run's journal was stated to have landed.
 ///
-/// The operations of every `edit-committed` are read for the one a `settle`
-/// carrying a landing compiles to. A journal is external input and this is a
-/// **read** of one, so a record this build cannot parse whole is passed over
-/// rather than guessed at: what a mis-read costs here is a release question put
-/// about the wrong work, which answers about somebody else's release.
+/// **The projection's fold, and not a reading of its own**: a stated landing has
+/// one interpretation — [`StatedLanding`](crate::edits::StatedLanding) — and the
+/// views, `results` and the status write-back take it from
+/// [`RunState::stated_landings`], so this does too, and what a release is
+/// correlated through cannot come to differ from what those surfaces say landed.
+/// That fold already holds a journal to what a `settle` may state, passes over an
+/// operation list this build cannot read whole, lets the newest statement about a
+/// node win, and lets a later settlement the run recorded itself supersede one.
 ///
-/// The last statement about a node wins. Two settles of one node are a record
-/// corrected twice, and the newest is the correction.
+/// A node id that would forge a line where a wait is rendered is passed over here
+/// as well, because this is where it is rendered from.
 fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String> {
-    let mut stated = BTreeMap::new();
-    for event in events {
-        if journal::PipelineKind::from_wire(&event.kind)
-            != Some(journal::PipelineKind::EditCommitted)
-        {
-            continue;
-        }
-        // llmlint: ignore-block[changed_behavior_has_e2e] an operation list this build
-        // cannot read whole needs a journal a *newer build* wrote, which no invocation a
-        // user can type produces — the same half `src/projection.rs` suppresses on its own
-        // fold of this record, and for the same reason. What a user can reach is driven end
-        // to end by `tests/e2e/adoption.rs`'s settled-landing journeys; this module's own
-        // test drives the record shapes.
-        let operations = event
-            .payload
-            .get("operations")
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
-            })
-            .unwrap_or_default(); // llmlint: ignore-end[changed_behavior_has_e2e]
-        for operation in operations {
-            if let crate::edits::Operation::LandingFromEvidence { node, landing } = operation {
-                // Held to what a `settle` may state, on this side too: the journal is a
-                // file another build wrote and a person can edit, and a value that is
-                // neither spelling is a release question `onevcs` cannot be asked.
-                let (Some(node), Some(landing)) =
-                    (renderable(&node), crate::edits::stated_landing(&landing))
-                else {
-                    continue;
-                };
-                stated.insert(node, landing);
-            }
-        }
-    }
-    stated
+    crate::projection::fold(events)
+        .stated_landings
+        .into_iter()
+        .filter_map(|(node, stated)| Some((renderable(&node)?, String::from(stated))))
+        .collect()
 }
 
 /// How often an automated target's probe is run.

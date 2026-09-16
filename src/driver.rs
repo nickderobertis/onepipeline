@@ -2365,6 +2365,45 @@ fn submit(
         "{}",
         serde_json::to_string(&receipt).map_err(|e| Error::Invalid(format!("receipt: {e}")))?
     );
+    // Beside the receipt rather than in it — the receipt is a transport's answer and
+    // stays exactly what it was — and only once the settle has been applied: a
+    // landing settled with no release stated for it, which no probe answer will ever
+    // release, is said to the person who settled it now rather than discovered later
+    // from a dependent that is still waiting.
+    if matches!(
+        receipt,
+        Receipt::AppliedHere { .. } | Receipt::AppliedByRun { .. }
+    ) && envelope.commands.iter().any(|command| {
+        matches!(
+            command,
+            Command::Settle {
+                landing: Some(_),
+                release: None,
+                ..
+            }
+        )
+    }) {
+        // The settle is applied whatever this read finds, so a run that cannot be
+        // read back now costs the advice and never the exit status the receipt has.
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run whose store cannot be
+        // read in the instant after this process applied an edit to it is not a state an
+        // invocation can put a run into; the read that succeeds is driven end to end by
+        // `tests/e2e/adoption.rs`.
+        match crate::views::RunView::open(paths) {
+            Ok(view) => {
+                for said in crate::release::hold_warnings_for_stated_landings(
+                    &view.state,
+                    &envelope.commands,
+                ) {
+                    eprintln!("{said}");
+                }
+            }
+            Err(unread) => eprintln!(
+                "onepipeline: the settle was applied, and whether its landing has a release \
+                 baseline could not be asked, because the run could not be read back: {unread}"
+            ),
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
     Ok(code)
 }
 
@@ -2796,6 +2835,13 @@ fn submit_envelope(
         (review, _) => review,
     };
     channel.judge_reply(envelope, review)?;
+
+    // The one thing an envelope does outside the run before the run takes it: a
+    // release a `settle` states is recorded in `onevcs`'s store, by the process the
+    // person typed it into, and a release that library will not record turns the
+    // whole envelope away rather than settling the node on evidence half of which
+    // was refused. Last among the checks, because it is the only one that writes.
+    crate::release::acknowledge_stated_releases(&envelope.commands)?;
 
     // Whether a reconciler is running is asked by *taking the run's lock*, which
     // is the same question and the only answer that cannot be raced: with a
