@@ -18,7 +18,8 @@
 // it hashes — is real.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   appendFileSync,
   chmodSync,
@@ -61,6 +62,10 @@ const CACHE_MISS = "judged this diff against base";
 /// or outside the tree reaches the fingerprint the way a real one would.
 const FAKE_LLMLINT = `#!/usr/bin/env bash
 set -euo pipefail
+if [[ \${NX_DAEMON:-} != "false" ]]; then
+  echo "sandbox Nx daemon was not disabled" >&2
+  exit 9
+fi
 if [[ \${1:-} == "--version" ]]; then
   [[ \${FAKE_LLMLINT_VERSION_EXIT:-0} == 0 ]] || exit "$FAKE_LLMLINT_VERSION_EXIT"
   [[ -z \${FAKE_LLMLINT_VERSION_EMPTY:-} ]] || exit 0
@@ -189,6 +194,7 @@ class Workspace {
       HOME: home,
       XDG_CACHE_HOME: join(sandbox, "cache"),
       FAKE_LLMLINT_LOG: this.judgeLog,
+      NX_DAEMON: "false",
     });
 
     this.git("init", "-q");
@@ -337,20 +343,30 @@ class Workspace {
   }
 }
 
-/// Remove a sandbox once, and when that throws, say what it left and what was running.
+const SANDBOX_REMOVAL_ATTEMPTS = 6;
+const SANDBOX_REMOVAL_RETRY_MS = 50;
+
+/// Remove a sandbox, retrying briefly when a late writer races the removal.
 ///
-/// This removal has failed CI with `ENOTEMPTY`, and the cause first recorded for it
-/// — a subprocess still writing into the tree — was reproduced against and ruled
-/// out. So a failure is diagnosed, never retried: a retry would most likely hide
-/// the next occurrence, which is the one thing that can say what is happening. The
-/// removal's own error is rethrown as it was, so the test still fails on it.
+/// Sandbox Nx runs disable their daemon, which prevents the known late writer at
+/// its source. The bounded retry covers a subprocess already finishing when
+/// teardown begins; exhaustion still diagnoses the remaining entries and running
+/// processes, then rethrows the last removal error unchanged.
 function removeSandbox(sandbox, write = (text) => process.stderr.write(text)) {
-  try {
-    rmSync(sandbox, { recursive: true, force: true });
-  } catch (error) {
-    write(removalDiagnosis(sandbox, error));
-    throw error;
+  let lastError;
+  for (let attempt = 1; attempt <= SANDBOX_REMOVAL_ATTEMPTS; attempt += 1) {
+    try {
+      rmSync(sandbox, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < SANDBOX_REMOVAL_ATTEMPTS) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SANDBOX_REMOVAL_RETRY_MS);
+      }
+    }
   }
+  write(removalDiagnosis(sandbox, lastError));
+  throw lastError;
 }
 
 /// Every entry still under `sandbox` — the sandbox itself first, as `.` — each with
@@ -1111,6 +1127,9 @@ describe("the judged tier's toolchain directory", () => {
 });
 
 describe("the journeys' sandbox teardown", () => {
+  const waitSync = (milliseconds) =>
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+
   function populatedSandbox(t) {
     const sandbox = mkdtempSync(join(tmpdir(), "onepipeline-llmlint-teardown-"));
     t.after(() => removeSandbox(sandbox));
@@ -1144,6 +1163,51 @@ describe("the journeys' sandbox teardown", () => {
     assert.deepEqual(written, []);
   });
 
+  it("retries until a late writer releases the populated sandbox", async (t) => {
+    const sandbox = populatedSandbox(t);
+    const ready = join(sandbox, "writer-ready");
+    const writer = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");
+const [sandbox, ready] = process.argv.slice(1);
+if (!sandbox || !ready || !sandbox.startsWith("/") || !ready.startsWith(sandbox + "/")) {
+  throw new Error("expected an absolute sandbox and a ready path inside it");
+}
+const held = sandbox + "/checkout/held";
+fs.mkdirSync(held);
+fs.writeFileSync(held + "/late", "still writing\\n");
+fs.chmodSync(held, 0o000);
+fs.writeFileSync(ready, "ready\\n");
+const deadline = Date.now() + 140;
+let sequence = 0;
+while (Date.now() < deadline) {
+  fs.writeFileSync(sandbox + "/late-" + sequence, "still writing\\n");
+  sequence += 1;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+}
+fs.chmodSync(held, 0o700);`,
+        sandbox,
+        ready,
+      ],
+      { stdio: "inherit" },
+    );
+    const writerExited = once(writer, "exit");
+    while (!existsSync(ready)) {
+      assert.equal(writer.exitCode, null, "the late writer exited before becoming ready");
+      waitSync(10);
+    }
+
+    const written = [];
+    removeSandbox(sandbox, (text) => written.push(text));
+    const [status] = await writerExited;
+
+    assert.equal(status, 0, "the late writer failed");
+    assert.equal(existsSync(sandbox), false, `${sandbox} is still there`);
+    assert.deepEqual(written, []);
+  });
+
   it("prints what a failed removal left and what was running, then rethrows its error", (t) => {
     // No rmdir accepts a path whose last component is `.`, and that holds for root
     // too, where a permission failure would not throw: this is a real removal failing.
@@ -1162,12 +1226,17 @@ describe("the journeys' sandbox teardown", () => {
 
     const written = [];
     let rethrown;
+    const started = Date.now();
     assert.throws(
       () => removeSandbox(`${sandbox}/.`, (text) => written.push(text)),
       (error) => {
         rethrown = error;
         return true;
       },
+    );
+    assert.ok(
+      Date.now() - started >= (SANDBOX_REMOVAL_ATTEMPTS - 1) * SANDBOX_REMOVAL_RETRY_MS,
+      "the permanently populated sandbox was not retried to the bound",
     );
     const diagnosis = written.join("");
 
