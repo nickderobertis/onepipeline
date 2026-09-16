@@ -83,6 +83,78 @@ fn hook(world: &World) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// The two halves of the fixture number an invocation the same way.
+///
+/// One contract in two languages, for the reason
+/// `harness::both_hook_scripts_answer_the_same_verbs` gives: no platform runs both, so a
+/// half that reaches its record directory by a route the other does not is a
+/// journey that passes on one leg and hangs on the other. That is this fixture's
+/// own history rather than a precaution. The Windows half used to work `<n>` out
+/// by counting `invocations` through a spawned command pipeline, behind an
+/// `if exist` only a **second** firing reaches — so no leg ever executed it, this
+/// file having fired at most one hook per run until the epoch journeys arrived,
+/// and the four that fire a second all timed out at the runner's 360-second bound
+/// with nothing in the log naming the hook. Both halves now claim `<n>` with
+/// `mkdir` from the first firing onwards, which starts nothing and runs the same
+/// lines every time; what is held below is that they go on agreeing.
+// llmlint: ignore-block[tests_mirror_real_usage] a drift gate over the suite's own
+// scaffolding rather than a journey, exactly as `harness.rs`'s two are: what it holds is
+// that two files stay in step, no platform executes both, and reading them is the only way
+// to compare them. The fixture itself is driven as the operator's real command by every
+// journey below.
+#[test]
+fn both_run_end_hook_halves_number_an_invocation_the_same_way() {
+    // The bound each half gives up claiming at, read as the value it writes down.
+    let ceiling = |script: &str, source: &str| -> String {
+        source
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.split_once("ceiling=").map(|(_, rest)| rest))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .find(|digits| !digits.is_empty())
+            .unwrap_or_else(|| {
+                panic!("{script} states no ceiling for how many firings one run records")
+            })
+    };
+    assert_eq!(
+        ceiling("run_end_hook.sh", include_str!("run_end_hook.sh")),
+        ceiling("run_end_hook.bat", include_str!("run_end_hook.bat")),
+        "the fixture's halves give up claiming a record directory at different ceilings"
+    );
+    assert_eq!(
+        ceiling("run_end_hook.sh", include_str!("run_end_hook.sh")),
+        "100",
+        "the ceiling moved: it bounds how many firings one run records, and a journey \
+         that fires more hooks than that is one this suite does not have"
+    );
+    // The claim itself, in each half's own words. Read rather than inferred from
+    // behaviour, because no platform executes both — and what has to agree is that
+    // neither half reaches `<n>` by a route its *first* firing skips, which is
+    // exactly what left the Windows half unexercised until a run fired twice.
+    for (script, source, claim) in [
+        (
+            "run_end_hook.sh",
+            include_str!("run_end_hook.sh"),
+            r#"until mkdir "$record/$run/$nth""#,
+        ),
+        (
+            "run_end_hook.bat",
+            include_str!("run_end_hook.bat"),
+            r#"mkdir "%record%\%run%\!nth!" 2>nul || goto number"#,
+        ),
+    ] {
+        assert!(
+            source.contains(claim),
+            "{script} no longer claims its record directory with `{claim}`, so the two \
+             halves number an invocation differently now"
+        );
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The hooks the fixture was run as for one run, in order.
 fn invocations(world: &World, run: &str) -> Vec<String> {
     let path = records(world).join(run).join("invocations");

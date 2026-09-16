@@ -26,13 +26,19 @@ if "!run!"=="." (call :broke "ONEPIPELINE_RUN_ID holds '.', which is not a singl
 if "!run!"==".." (call :broke "ONEPIPELINE_RUN_ID holds '..', which is not a single run id path segment" & exit /b 70)
 if not exist "%record%\%run%\" mkdir "%record%\%run%" || (call :broke "cannot create %record%\%run%" & exit /b 70)
 
-set "count=0"
-if exist "%record%\%run%\invocations" (
-  for /f %%c in ('type "%record%\%run%\invocations" ^| find /c /v ""') do set "count=%%c"
-)
-set /a "nth=count+1"
+rem Which invocation this is, claimed rather than counted. `run_end_hook.sh` is
+rem where why is written down, and this half is why it had to be: cmd has no `wc`,
+rem so counting `invocations` here meant a spawned command pipeline, reached only
+rem once a run had fired before — the one branch in this fixture no leg ran until a
+rem journey fired two hooks for one run. The ceiling below is held against that
+rem half's by `both_run_end_hook_halves_number_an_invocation_the_same_way`.
+set "ceiling=100"
+set "nth=0"
+:number
+set /a "nth+=1"
+if !nth! GTR !ceiling! (call :broke "no record directory could be claimed under %record%\%run%: 1 through !ceiling! are taken or cannot be created" & exit /b 70)
+mkdir "%record%\%run%\!nth!" 2>nul || goto number
 set "here=%record%\%run%\!nth!"
-mkdir "!here!" || (call :broke "cannot create !here!" & exit /b 70)
 (echo %ONEPIPELINE_HOOK%)>>"%record%\%run%\invocations" || (call :broke "cannot append to %record%\%run%\invocations" & exit /b 70)
 
 (echo %CD%)>"!here!\cwd" || (call :broke "cannot write !here!\cwd" & exit /b 70)

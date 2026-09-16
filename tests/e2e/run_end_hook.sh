@@ -54,12 +54,30 @@ case "$run" in
 esac
 mkdir -p "$record/$run" || broke "cannot create $record/$run"
 
-count=0
-if [ -f "$record/$run/invocations" ]; then
-  count=$(wc -l <"$record/$run/invocations") || broke "cannot read $record/$run/invocations"
-fi
-here="$record/$run/$((count + 1))"
-mkdir -p "$here" || broke "cannot create $here"
+# Which invocation this is, **claimed** rather than counted: `<n>` is the first
+# number no earlier firing took, and a `mkdir` that refuses is what says a number
+# is taken. The filesystem arbitrates, so two firings that look at once cannot
+# both take one directory.
+#
+# Counted out of `invocations` instead, the read sits behind "has this run fired
+# before", which a *first* firing skips — so no platform executes it until a run
+# fires a second hook. cmd has no `wc`, so the Windows half paid for the same
+# count with a spawned command pipeline: three more processes, started by a hook
+# whose own stdin is the pipe the engine is still writing its document into and
+# whose driver's stdout and stderr every child inherits, since
+# `sys::disown_standard_handles` is applied on the detached path alone. The first
+# four journeys ever to fire two hooks for one run all timed out on that leg.
+# Claiming runs the same lines on the first firing as on the fifth, and starts
+# nothing.
+ceiling=100
+nth=1
+until mkdir "$record/$run/$nth" 2>/dev/null; do
+  nth=$((nth + 1))
+  if [ "$nth" -gt "$ceiling" ]; then
+    broke "no record directory could be claimed under $record/$run: 1 through $ceiling are taken or cannot be created"
+  fi
+done
+here="$record/$run/$nth"
 printf '%s\n' "${ONEPIPELINE_HOOK-}" >>"$record/$run/invocations" \
   || broke "cannot append to $record/$run/invocations"
 
