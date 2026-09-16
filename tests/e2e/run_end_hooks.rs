@@ -959,6 +959,152 @@ fn an_edit_that_leaves_a_ready_human_action_reopens_the_run_and_the_next_ending_
     assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
 }
 
+/// A fold that has **lost a committed edit** recognises no epoch at all: the graph
+/// beside an `edit-committed` this build cannot parse is not evidence of what that
+/// edit did, so the marker stands and the requeue that would otherwise have
+/// reopened the run fires nothing.
+///
+/// The conservative half of the rule, and the one a reader has to be able to see:
+/// an operator whose run stops firing hooks after such a record is told by
+/// `strict` that the graph they are looking at may be missing an edit.
+#[test]
+fn an_edit_this_build_cannot_fold_leaves_the_marker_standing_through_a_later_requeue() {
+    let world = hooked_world("hooks-unfoldable");
+    let hook = hook(&world);
+    let mut later = agent("later", &["build"]);
+    later["parked"] = json!(true);
+    let run = "unfoldable";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), later],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // An `edit-committed` carrying an operation this build has never read — the
+    // shape a **newer** build's record takes. Copied from a record this run really
+    // wrote so that everything but the payload is exactly what a reader meets.
+    // llmlint: ignore[tests_mirror_real_usage] no verb this build ships writes an
+    // operation it cannot parse — only a newer build does, and there is none to run
+    // here. Appending one line is the narrowest way to put that record in front of the
+    // compiled binary; the run, its journal, the driver that adopts it and the hook
+    // fixture around it are all the real ones.
+    let journal = world.runs.join(run).join("events.jsonl");
+    let mut record = world.events_of(run, "run-hook-fired")[0].clone();
+    record["kind"] = json!("edit-committed");
+    record["payload"] = json!({
+        "author": "planner",
+        "command": {"op": "requeue", "id": "later"},
+        "operations": [{"kind": "an-operation-from-a-later-build", "node": "later"}],
+        "operation_kinds": ["an-operation-from-a-later-build"],
+    });
+    let mut lines = std::fs::read_to_string(&journal).expect("the journal is kept");
+    lines.push_str(&format!("{record}\n"));
+    std::fs::write(&journal, lines).expect("the record is appended");
+
+    // A real requeue after it, which on a readable journal is an epoch.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "requeue", "id": "later"}]}).to_string(),
+        )
+        .exited(0);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    // The run really did reach a new ending — and still fires nothing, because the
+    // fold that would have recognised the epoch is missing a record.
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "a run whose fold lost an edit fired again: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// An edit that arrives on a run **already** carrying live work is not an epoch
+/// either: what is asked is whether the edit *made* the run live, so an edit that
+/// found it that way inherits nothing.
+///
+/// A `stop` is what reaches this state. It fires the failure hook the moment it
+/// has torn the run down, while the node it signalled is still recorded `running`
+/// — so the marker stands beside a graph the fold reads as live, and the next
+/// accepted edit would otherwise retire a marker it had nothing to do with.
+#[test]
+fn an_edit_that_found_the_run_already_live_is_not_an_epoch() {
+    let world = hooked_world("hooks-already-live");
+    let hook = hook(&world);
+    world.script("build.wait", "hold");
+    let run = "torndown";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+            ],
+        )
+        .exited(0);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+
+    world.run(&["stop", run]).exited(0);
+    world.until("the stop's hook to be recorded", |world| {
+        !world.events_of(run, "run-hook-finished").is_empty()
+    });
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["kind"],
+        "stopped"
+    );
+    // The graph the fold reads is live: the node it signalled never settled.
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"][0]["status"],
+        "running",
+        "the stopped node settled, so this journey reaches no already-live run"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "amend", "id": "build", "text": "and say what the teardown left behind"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the amendment to be committed", |world| {
+        world.events_of(run, "edit-committed").iter().any(|event| {
+            event["payload"]["operation_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "task-amended"))
+        })
+    });
+
+    world.run(&["stop", run, "--force"]).exited(0);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "an edit that found the run already live fired a second hook: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+    world.release("build.go");
+}
+
 /// Liveness that **nobody edited** is not an epoch. A consumer blocked on a
 /// cross-DAG upstream that does not exist yet ends the run unfinished and fires
 /// the failure hook; the upstream then arriving makes that consumer runnable and

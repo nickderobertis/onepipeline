@@ -472,9 +472,10 @@ none. A run **paused** on a decision has not ended and fires neither — the dri
 records `run-hook-withheld` and says so on stderr, and the driver that adopts the
 run once the decision is answered fires the hook the run then reaches — and a run
 fires at most once per ending, whichever driver, `adopt` or `stop` looks next. An
-accepted edit that leaves the run with work it can carry out again — judged by what
-the edit left behind, not by which operation it carried — begins a new ending, so a
-run recovered from a failure still fires the hook it then reaches. An edit that
+accepted edit that leaves the run with work it can carry out again, having not found
+it that way — judged by what the edit left behind, not by which operation it carried
+— begins a new ending, so a run recovered from a failure still fires the hook it then
+reaches. An edit that
 frees nothing does not, so no ending fires a hook twice. A hook runs in the launch directory with `ONEPIPELINE_HOOK`, `ONEPIPELINE_RUN_ID`,
 `ONEPIPELINE_RUN_ROOT` and the run owner's `ONEPIPELINE_LAUNCHER` and
 `ONEPIPELINE_LAUNCHER_SESSION` in its environment and one JSON document on its

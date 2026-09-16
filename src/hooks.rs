@@ -447,6 +447,18 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// unrelated report turn liveness that arrived some other way into a second hook
 /// for an ending nobody edited.
 ///
+/// The graph is asked **on both sides** of the edit, because the rule is that the
+/// edit *made* the run live: a run already live when the edit arrived was made so
+/// by something else, and an inert edit landing after it would otherwise inherit an
+/// epoch it had nothing to do with.
+///
+/// A fold that has lost a record — [`RunState::strict`] — retires nothing. An
+/// `edit-committed` whose operations this build cannot parse might have been the
+/// graph mutation that matters, so the graph beside it is not evidence of anything;
+/// the marker standing is the answer that cannot fire a hook twice. `strict` never
+/// comes back, so a run carrying such a record recognises no further epoch and its
+/// operator fires the hook by hand, which is the failure this whole rule prefers.
+///
 /// One fold of what [`RunView::open`] already does, and the statuses are derived
 /// only for an edit arriving while a marker stands, so a run that has never fired
 /// pays for none of it.
@@ -457,11 +469,14 @@ fn fired(paths: &RunPaths) -> bool {
     };
     let mut fired = false;
     for event in &journal::read(&paths.journal()) {
+        let kind = PipelineKind::from_wire(&event.kind);
+        let edit = kind == Some(PipelineKind::EditCommitted);
+        let was_live = edit && fired && live(&state);
         crate::projection::fold_one(&mut state, event);
-        match PipelineKind::from_wire(&event.kind) {
-            Some(PipelineKind::RunHookFired) => fired = true,
-            Some(PipelineKind::EditCommitted) if fired && live(&state) => fired = false,
-            _ => {}
+        if edit && fired && !was_live && state.strict && live(&state) {
+            fired = false;
+        } else if kind == Some(PipelineKind::RunHookFired) {
+            fired = true;
         }
     }
     fired
