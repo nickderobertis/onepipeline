@@ -1315,7 +1315,6 @@ impl Watch {
     }
 }
 
-/// The identity a node's own repository resolves to, where `onevcs` can say.
 fn identity_of(repositories: &mut Repositories, node: &Node) -> Option<String> {
     node.repo
         .as_deref()
@@ -1351,12 +1350,8 @@ fn across_repositories(
     Ok(repo)
 }
 
-/// The two [`Resolution`]s that end an in-run dependency's question before its
-/// repository's releases are read.
 enum Ended {
-    /// [`Resolution::NothingToAwait`].
     NothingToAwait,
-    /// [`Resolution::Unreadable`].
     Unreadable,
 }
 
@@ -1664,7 +1659,7 @@ const NO_BASELINE: &str = "no baseline was captured";
 /// that did not answer this time — says nothing, because none of them is a hold the
 /// next answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
 /// what the release watch asks it.
-pub(crate) fn unattributed_landings(
+pub(crate) fn hold_warnings_for_stated_landings(
     state: &RunState,
     commands: &[crate::channel::Command],
 ) -> Vec<String> {

@@ -951,6 +951,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(outcome) = outcome {
                 state.outcomes.insert(node.clone(), outcome.to_string());
             }
+            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation reaches this after a
+            // stated landing: `settle` is refused while the node has a dispatch in flight, and a
+            // settled node cannot be dispatched again — `cancel` refuses a node that settled and
+            // `requeue` takes only a parked one — so the run records no later settlement of that
+            // node. It is here for a journal another build wrote or a person edited, which a fold
+            // has to read the way the record means; this module's test
+            // `a_stated_landing_is_the_nodes_landing_until_the_run_settles_it_again` holds it.
             // A settlement the run recorded itself is newer than what an operator
             // stated before it, so the statement stops standing — and the `landed`
             // it wrote goes with it, leaving whatever this settlement observes
@@ -960,10 +967,10 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 && state.stated_landings.remove(node).is_some()
             {
                 state.landings.remove(node);
-            }
-            // What the dispatch left behind, which nothing else records: a
-            // later continuation has no other way to find the branch the work
-            // is on.
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+              // What the dispatch left behind, which nothing else records: a
+              // later continuation has no other way to find the branch the work
+              // is on.
             if let Some(branch) = payload.get("branch").and_then(Value::as_str) {
                 state.branches.insert(node.clone(), branch.to_string());
             }

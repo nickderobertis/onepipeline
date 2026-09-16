@@ -1205,14 +1205,26 @@ fn compile_into(
             evidence,
             landing,
             release,
-        } => compile_settle(
-            graph,
-            frontier,
-            id,
-            *outcome,
-            evidence,
-            (landing.as_deref(), release.as_ref()),
-        ),
+        } => {
+            // The wire carries the two as separate optional fields; judged here into
+            // the three states a settle can mean, so a release with no landing to
+            // carry is refused before it is anything.
+            let stated = match (landing.as_deref(), release.as_ref()) {
+                (None, None) => StatedAt::Unstated,
+                (Some(landing), None) => StatedAt::Landing(landing),
+                (Some(landing), Some(release)) => StatedAt::Released { landing, release },
+                (None, Some(release)) => {
+                    return Err(refuse(format!(
+                        "settle: node '{id}' states the release {} {} and no landing for it to \
+                         carry; a release is recorded against the landing it carries, so name \
+                         that landing — the commit the change reached its base at, or the \
+                         change request's URL",
+                        release.target, release.version
+                    )))
+                }
+            };
+            compile_settle(graph, frontier, id, *outcome, evidence, &stated)
+        }
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -1794,6 +1806,31 @@ impl From<StatedLanding> for String {
     }
 }
 
+/// What a `settle` states about where its node's work landed.
+///
+/// The wire's two optional fields admit a release with no landing; this does not,
+/// because a release is recorded against the landing it carries.
+enum StatedAt<'a> {
+    /// No landing, and so no release.
+    Unstated,
+    /// A landing, with no release stated for it.
+    Landing(&'a str),
+    /// A landing, and the release an operator verified carries it.
+    Released {
+        landing: &'a str,
+        release: &'a crate::channel::StatedRelease,
+    },
+}
+
+impl<'a> StatedAt<'a> {
+    fn landing(&self) -> Option<&'a str> {
+        match self {
+            Self::Unstated => None,
+            Self::Landing(landing) | Self::Released { landing, .. } => Some(landing),
+        }
+    }
+}
+
 /// The status a `settle` puts a node's record at.
 ///
 /// Exhaustive over the outcome the wire carries, so a fourth word cannot arrive
@@ -1847,8 +1884,9 @@ fn compile_settle(
     id: &str,
     outcome: SettleOutcome,
     evidence: &str,
-    (landing, release): (Option<&str>, Option<&crate::channel::StatedRelease>),
+    stated: &StatedAt<'_>,
 ) -> Result<Vec<Operation>> {
+    let landing = stated.landing();
     if evidence.trim().is_empty() {
         return Err(refuse(format!(
             "settle: node '{id}' would be settled {} on no evidence at all; the evidence is \
@@ -1866,7 +1904,7 @@ fn compile_settle(
     // correction even at the outcome the record already holds: where the work landed
     // is part of the record, and a landing `onevcs` cannot resolve is corrected by
     // stating one it can.
-    let corrects_the_landing = release.is_some()
+    let corrects_the_landing = matches!(stated, StatedAt::Released { .. })
         || landing.is_some_and(|named| {
             frontier
                 .stated_landings
@@ -1891,19 +1929,10 @@ fn compile_settle(
             live.named()
         )));
     }
-    // A release is recorded against the landing it carries, so one stated with no
-    // landing has nothing to be recorded against; and its version is printed into
-    // the acknowledgement and every wait it releases, so it is held to one usable
-    // word here — whether it is a *version* is `onevcs`'s to say, when it records it.
-    if let Some(release) = release {
-        if landing.is_none() {
-            return Err(refuse(format!(
-                "settle: node '{id}' states the release {} {} and no landing for it to carry; \
-                 a release is recorded against the landing it carries, so name that landing — \
-                 the commit the change reached its base at, or the change request's URL",
-                release.target, release.version
-            )));
-        }
+    // A release's version is printed into the acknowledgement and every wait it
+    // releases, so it is held to one usable word here — whether it is a *version* is
+    // `onevcs`'s to say, when it records it.
+    if let StatedAt::Released { release, .. } = stated {
         if crate::vcs::usable(&release.version).as_deref() != Some(release.version.as_str()) {
             return Err(refuse(format!(
                 "settle: node '{id}' states a release of {} at version {:?}, which is not one \

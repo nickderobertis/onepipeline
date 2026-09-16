@@ -2391,7 +2391,10 @@ fn submit(
         // `tests/e2e/adoption.rs`.
         match crate::views::RunView::open(paths) {
             Ok(view) => {
-                for said in crate::release::unattributed_landings(&view.state, &envelope.commands) {
+                for said in crate::release::hold_warnings_for_stated_landings(
+                    &view.state,
+                    &envelope.commands,
+                ) {
                     eprintln!("{said}");
                 }
             }
