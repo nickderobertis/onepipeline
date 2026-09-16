@@ -2,10 +2,11 @@
 //!
 //! A launch names a success hook and a failure hook; the engine judges the run
 //! when a driver lets go of it, or when `stop` tears it down, and fires at most
-//! one hook, once. Every journey here names a **real** command — the fixture pair
-//! `run_end_hook.sh` / `run_end_hook.bat` — which records its working directory,
-//! its environment and its stdin, so what a hook was handed is read off the
-//! process that ran rather than off anything this crate wrote down about it.
+//! one hook per ending the run reaches. Every journey here names a **real**
+//! command — the fixture pair `run_end_hook.sh` / `run_end_hook.bat` — which
+//! records its working directory, its environment and its stdin, so what a hook
+//! was handed is read off the process that ran rather than off anything this
+//! crate wrote down about it.
 //!
 //! The contract's own run-end hooks block is read rather than restated: the log
 //! path, the environment a hook is given, the stdin document's shape and how many
@@ -899,7 +900,119 @@ fn an_edit_that_frees_blocked_work_reopens_the_run_though_it_adds_no_node() {
     assert_eq!(fired[1]["payload"]["reason"], Value::Null);
 }
 
-/// The other half of the epoch: a retry that fails in its turn is a **new**/// The other half of the epoch: a retry that fails in its turn is a **new**
+/// An edit that leaves a **ready human action** has made the run live again even
+/// though nothing can dispatch: the run is paused on a decision rather than ended,
+/// so the adopting driver withholds a hook it would otherwise have skipped
+/// silently, and the ending reached once the action is attested fires.
+///
+/// The `waiting` arm of the liveness rule, which no other journey here reaches —
+/// a run paused before it ever fired has no marker for an epoch to retire.
+#[test]
+fn an_edit_that_leaves_a_ready_human_action_reopens_the_run_and_the_next_ending_fires() {
+    let world = hooked_world("hooks-human-epoch");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "gated";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(
+        hook_kinds(&world, run),
+        ["run-hook-fired", "run-hook-finished"]
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": human("approve", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+
+    // The run is paused, not ended, so this driver withholds — which it reaches
+    // only because the epoch retired the marker a withheld run is also past.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"")
+        .err_has("paused on a decision");
+    assert_eq!(
+        hook_kinds(&world, run),
+        ["run-hook-fired", "run-hook-finished", "run-hook-withheld"]
+    );
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "failure"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
+}
+
+/// Liveness that **nobody edited** is not an epoch. A consumer blocked on a
+/// cross-DAG upstream that does not exist yet ends the run unfinished and fires
+/// the failure hook; the upstream then arriving makes that consumer runnable and
+/// takes the run to `complete` — and no hook fires for it, because no accepted
+/// edit made the run live again.
+///
+/// The half of the rule the liveness test alone would get wrong, and the only
+/// path in this suite that revives a run without a command.
+#[test]
+fn a_run_made_live_by_something_nobody_edited_leaves_its_marker_standing() {
+    let world = hooked_world("hooks-unedited");
+    let hook = hook(&world);
+    let run = "patient";
+    let mut ship = agent("ship", &[]);
+    ship["deps"] = json!(["run:arrives#build"]);
+    attached(
+        &world,
+        run,
+        vec![ship],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([{"id": "ship", "status": "blocked", "outcome": null}])
+    );
+
+    // The upstream arrives. Nothing is replied to this run.
+    let upstream = world.plan("arrives", &plan_of("arrives", vec![agent("build", &[])]));
+    world
+        .run_from(&world.project, &["start", &upstream, "--attach"])
+        .exited(0)
+        .settled();
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert!(
+        world.events_of(run, "edit-committed").is_empty(),
+        "an edit reached this run, so it proves nothing about liveness without one"
+    );
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "a run nobody edited fired a second hook: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// The other half of the epoch: a retry that fails in its turn is a **new**
 /// attempt, so the failure hook fires a second time — naming the replacement, and
 /// not the superseded node, which has left the graph.
 #[test]

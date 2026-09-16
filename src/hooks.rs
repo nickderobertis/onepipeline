@@ -490,6 +490,13 @@ fn fired(paths: &RunPaths) -> bool {
 /// release that is still coming. Everything else has settled or is held behind
 /// something that has, and will not advance until a further edit moves it.
 ///
+/// `complete-but-draft` is the correct answer and is **unreachable from here**,
+/// which is why no journey drives it: [`judge`] answers `NotEnded` for a graph
+/// holding one, so a run that has ever held such a node has never fired and has no
+/// marker for an epoch to retire. It is written out rather than folded into the
+/// `false` arm because the day that changes — a settlement that leaves a draft node
+/// behind on an ended run — the answer that arm gives would be wrong.
+///
 /// `pending` answers `false` and is not an oversight: a node is `pending` only
 /// while a dependency of it is pending, ready or running, so whatever ancestor
 /// carries the liveness has already answered `true`. A `pending` node with no such
