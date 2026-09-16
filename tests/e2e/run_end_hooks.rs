@@ -2,10 +2,11 @@
 //!
 //! A launch names a success hook and a failure hook; the engine judges the run
 //! when a driver lets go of it, or when `stop` tears it down, and fires at most
-//! one hook, once. Every journey here names a **real** command — the fixture pair
-//! `run_end_hook.sh` / `run_end_hook.bat` — which records its working directory,
-//! its environment and its stdin, so what a hook was handed is read off the
-//! process that ran rather than off anything this crate wrote down about it.
+//! one hook per ending the run reaches. Every journey here names a **real**
+//! command — the fixture pair `run_end_hook.sh` / `run_end_hook.bat` — which
+//! records its working directory, its environment and its stdin, so what a hook
+//! was handed is read off the process that ran rather than off anything this
+//! crate wrote down about it.
 //!
 //! The contract's own run-end hooks block is read rather than restated: the log
 //! path, the environment a hook is given, the stdin document's shape and how many
@@ -81,6 +82,69 @@ fn hook(world: &World) -> String {
     .expect("the hook is written");
     path.to_string_lossy().into_owned()
 }
+
+/// The two halves of the fixture number an invocation the same way.
+///
+/// One contract in two languages, for the reason
+/// `harness::both_hook_scripts_answer_the_same_verbs` gives: no platform runs
+/// both, so a half that reaches its record directory by a route the other does
+/// not is a journey that passes on one leg and hangs on the other.
+// llmlint: ignore-block[tests_mirror_real_usage] a drift gate over the suite's own
+// scaffolding rather than a journey, exactly as `harness.rs`'s two are: what it holds is
+// that two files stay in step, no platform executes both, and reading them is the only way
+// to compare them. The fixture itself is driven as the operator's real command by every
+// journey below.
+#[test]
+fn both_run_end_hook_halves_number_an_invocation_the_same_way() {
+    let ceiling = |script: &str, source: &str| -> String {
+        source
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.split_once("ceiling=").map(|(_, rest)| rest))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .find(|digits| !digits.is_empty())
+            .unwrap_or_else(|| {
+                panic!("{script} states no ceiling for how many firings one run records")
+            })
+    };
+    assert_eq!(
+        ceiling("run_end_hook.sh", include_str!("run_end_hook.sh")),
+        ceiling("run_end_hook.bat", include_str!("run_end_hook.bat")),
+        "the fixture's halves give up claiming a record directory at different ceilings"
+    );
+    assert_eq!(
+        ceiling("run_end_hook.sh", include_str!("run_end_hook.sh")),
+        "100",
+        "the ceiling moved: it bounds how many firings one run records, and a journey \
+         that fires more hooks than that is one this suite does not have"
+    );
+    // The claim itself, in each half's own words. Read rather than inferred from
+    // behaviour, because no platform executes both — and what has to agree is that
+    // neither half reaches `<n>` by a route its *first* firing skips, which is
+    // exactly what left the Windows half unexercised until a run fired twice.
+    for (script, source, claim) in [
+        (
+            "run_end_hook.sh",
+            include_str!("run_end_hook.sh"),
+            r#"until mkdir "$record/$run/$nth""#,
+        ),
+        (
+            "run_end_hook.bat",
+            include_str!("run_end_hook.bat"),
+            r#"mkdir "%record%\%run%\!nth!" 2>nul || goto number"#,
+        ),
+    ] {
+        assert!(
+            source.contains(claim),
+            "{script} no longer claims its record directory with `{claim}`, so the two \
+             halves number an invocation differently now"
+        );
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The hooks the fixture was run as for one run, in order.
 fn invocations(world: &World, run: &str) -> Vec<String> {
@@ -701,6 +765,591 @@ fn a_failed_node_a_retry_supersedes_fires_success_once_its_replacement_settles_d
         .out_has("superseded — retried as build-2");
 }
 
+/// The incident the epoch exists for: a run whose **failure** hook fired, whose
+/// failed node was retried through an accepted edit, and which then completed,
+/// fires its **success** hook — so a run recovered from a failure still runs the
+/// automation only a completion launches.
+#[test]
+fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_complete() {
+    let world = hooked_world("hooks-retry-success");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "recovered";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([{"id": "build", "status": "failed", "outcome": "task-failed"}])
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    assert_eq!(
+        fired[1]["payload"],
+        json!({"hook": "success", "command": hook, "reason": null})
+    );
+    let handed = handed(&world, run, 2);
+    assert_eq!(handed.env["hook"], Some("success".to_string()));
+    assert_eq!(handed.stdin["hook"], "success");
+    assert_eq!(handed.stdin["reason"], Value::Null);
+
+    // Both firings are the run's record, and `results` reads them in order.
+    let results = world.run(&["results", run]);
+    results.exited(0).out_has("failure hook fired");
+    assert!(
+        results
+            .stdout
+            .contains("success hook fired — reason: none; ending: succeeded; exit: 0"),
+        "{}",
+        results.stdout
+    );
+}
+
+/// An accepted edit that leaves the run **unable to advance** is not an epoch,
+/// however much graph it moved: a node added behind the very failure that ended
+/// the run is skipped the moment it joins, so the marker stands and the same
+/// ending fires no second hook.
+///
+/// The case a classification by operation kind gets wrong — this `add` records the
+/// same `node-added` a `retry`'s replacement does, and must not be read the same
+/// way.
+#[test]
+fn an_added_node_the_failure_skips_reopens_nothing_and_leaves_the_marker_standing() {
+    let world = hooked_world("hooks-added-blocked");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "stillblocked";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("extra", &["build"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+
+    // The node really did join the graph, and really cannot run.
+    let result = world.run_json(run, "result.json");
+    let status = |id: &str| {
+        result["nodes"]
+            .as_array()
+            .expect("the result lists nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {result}"))["status"]
+            .clone()
+    };
+    assert_eq!(status("build"), json!("failed"));
+    assert_eq!(
+        status("extra"),
+        json!("skipped"),
+        "the added node can run, so this journey proves nothing"
+    );
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// An accepted edit that **frees work the graph already held** is an epoch even
+/// though it adds no node at all: a `drop` that detaches a blocked node from the
+/// parked node holding it makes that node ready, the run completes, and the
+/// success hook fires for the ending it then reaches.
+///
+/// The other case a classification by operation kind gets wrong — nothing here
+/// records a `node-added` or a `node-requeued`, and the run is live again.
+#[test]
+fn an_edit_that_frees_blocked_work_reopens_the_run_though_it_adds_no_node() {
+    let world = hooked_world("hooks-freed");
+    let hook = hook(&world);
+    let mut gate = agent("gate", &[]);
+    gate["parked"] = json!(true);
+    let run = "freed";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), gate, agent("after", &["gate"])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["kind"],
+        "unfinished"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "drop", "id": "gate", "dependents": "detach"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let kinds = |world: &World| {
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .flat_map(|event| {
+                event["payload"]["operation_kinds"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|kind| kind.as_str().map(str::to_string))
+            .collect::<Vec<String>>()
+    };
+    world.until("the drop to be committed", |world| {
+        kinds(world).iter().any(|kind| kind == "node-dropped")
+    });
+    let committed = kinds(&world);
+    assert!(
+        !committed
+            .iter()
+            .any(|kind| kind == "node-added" || kind == "node-requeued"),
+        "this edit added or requeued a node, so it proves nothing about an edit that does \
+         neither: {committed:?}"
+    );
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    assert_eq!(fired[1]["payload"]["reason"], Value::Null);
+}
+
+/// An edit that leaves a **ready human action** has made the run live again even
+/// though nothing can dispatch: the run is paused on a decision rather than ended,
+/// so the adopting driver withholds a hook it would otherwise have skipped
+/// silently, and the ending reached once the action is attested fires.
+///
+/// The `waiting` arm of the liveness rule, which no other journey here reaches —
+/// a run paused before it ever fired has no marker for an epoch to retire.
+#[test]
+fn an_edit_that_leaves_a_ready_human_action_reopens_the_run_and_the_next_ending_fires() {
+    let world = hooked_world("hooks-human-epoch");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "gated";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(
+        hook_kinds(&world, run),
+        ["run-hook-fired", "run-hook-finished"]
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": human("approve", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+
+    // The run is paused, not ended, so this driver withholds — which it reaches
+    // only because the epoch retired the marker a withheld run is also past.
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"")
+        .err_has("paused on a decision");
+    assert_eq!(
+        hook_kinds(&world, run),
+        ["run-hook-fired", "run-hook-finished", "run-hook-withheld"]
+    );
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "failure"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
+}
+
+/// A fold that has **lost a committed edit** recognises no epoch at all: the graph
+/// beside an `edit-committed` this build cannot parse is not evidence of what that
+/// edit did, so the marker stands and the requeue that would otherwise have
+/// reopened the run fires nothing.
+///
+/// The conservative half of the rule, and the one a reader has to be able to see:
+/// an operator whose run stops firing hooks after such a record is told by
+/// `strict` that the graph they are looking at may be missing an edit.
+#[test]
+fn an_edit_this_build_cannot_fold_leaves_the_marker_standing_through_a_later_requeue() {
+    let world = hooked_world("hooks-unfoldable");
+    let hook = hook(&world);
+    let mut later = agent("later", &["build"]);
+    later["parked"] = json!(true);
+    let run = "unfoldable";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), later],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // An `edit-committed` carrying an operation this build has never read — the
+    // shape a **newer** build's record takes. Copied from a record this run really
+    // wrote so that everything but the payload is exactly what a reader meets.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb this build ships writes an
+    // operation it cannot parse — only a newer build does, and there is none to run here.
+    // Appending one line is the narrowest way to put that record in front of the compiled
+    // binary, and it is the same fault injection this file's unreadable-launch-record and
+    // unopenable-log journeys make for the same reason; the run, its journal, the reply
+    // that follows, the driver that adopts it and the hook fixture around it are all the
+    // real ones, and every claim this journey makes is read back off them.
+    let journal = world.runs.join(run).join("events.jsonl");
+    let mut record = world.events_of(run, "run-hook-fired")[0].clone();
+    record["kind"] = json!("edit-committed");
+    record["payload"] = json!({
+        "author": "planner",
+        "command": {"op": "requeue", "id": "later"},
+        "operations": [{"kind": "an-operation-from-a-later-build", "node": "later"}],
+        "operation_kinds": ["an-operation-from-a-later-build"],
+    });
+    let mut lines = std::fs::read_to_string(&journal).expect("the journal is kept");
+    lines.push_str(&format!("{record}\n"));
+    std::fs::write(&journal, lines).expect("the record is appended");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // A real requeue after it, which on a readable journal is an epoch.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "requeue", "id": "later"}]}).to_string(),
+        )
+        .exited(0);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    // The run really did reach a new ending — and still fires nothing, because the
+    // fold that would have recognised the epoch is missing a record.
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "a run whose fold lost an edit fired again: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// An edit that arrives on a run **already** carrying live work is not an epoch
+/// either: what is asked is whether the edit *made* the run live, so an edit that
+/// found it that way inherits nothing.
+///
+/// A `stop` is what reaches this state. It fires the failure hook the moment it
+/// has torn the run down, while the node it signalled is still recorded `running`
+/// — so the marker stands beside a graph the fold reads as live, and the next
+/// accepted edit would otherwise retire a marker it had nothing to do with.
+#[test]
+fn an_edit_that_found_the_run_already_live_is_not_an_epoch() {
+    let world = hooked_world("hooks-already-live");
+    let hook = hook(&world);
+    world.script("build.wait", "hold");
+    let run = "torndown";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+            ],
+        )
+        .exited(0);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+
+    world.run(&["stop", run]).exited(0);
+    world.until("the stop's hook to be recorded", |world| {
+        !world.events_of(run, "run-hook-finished").is_empty()
+    });
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["kind"],
+        "stopped"
+    );
+    // The graph the fold reads is live: the node it signalled never settled.
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"][0]["status"],
+        "running",
+        "the stopped node settled, so this journey reaches no already-live run"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "amend", "id": "build", "text": "and say what the teardown left behind"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the amendment to be committed", |world| {
+        world.events_of(run, "edit-committed").iter().any(|event| {
+            event["payload"]["operation_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "task-amended"))
+        })
+    });
+
+    world.run(&["stop", run, "--force"]).exited(0);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "an edit that found the run already live fired a second hook: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+    world.release("build.go");
+}
+
+/// Liveness that **nobody edited** is not an epoch. A consumer blocked on a
+/// cross-DAG upstream that does not exist yet ends the run unfinished and fires
+/// the failure hook; the upstream then arriving makes that consumer runnable and
+/// takes the run to `complete` — and no hook fires for it, because no accepted
+/// edit made the run live again.
+///
+/// The half of the rule the liveness test alone would get wrong, and the only
+/// path in this suite that revives a run without a command.
+#[test]
+fn a_run_made_live_by_something_nobody_edited_leaves_its_marker_standing() {
+    let world = hooked_world("hooks-unedited");
+    let hook = hook(&world);
+    let run = "patient";
+    let mut ship = agent("ship", &[]);
+    ship["deps"] = json!(["run:arrives#build"]);
+    attached(
+        &world,
+        run,
+        vec![ship],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([{"id": "ship", "status": "blocked", "outcome": null}])
+    );
+
+    // The upstream arrives. Nothing is replied to this run.
+    let upstream = world.plan("arrives", &plan_of("arrives", vec![agent("build", &[])]));
+    world
+        .run_from(&world.project, &["start", &upstream, "--attach"])
+        .exited(0)
+        .settled();
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert!(
+        world.events_of(run, "edit-committed").is_empty(),
+        "an edit reached this run, so it proves nothing about liveness without one"
+    );
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(
+        invocations(&world, run),
+        ["failure"],
+        "a run nobody edited fired a second hook: {}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// The other half of the epoch: a retry that fails in its turn is a **new**
+/// attempt, so the failure hook fires a second time — naming the replacement, and
+/// not the superseded node, which has left the graph.
+#[test]
+fn a_retry_that_fails_in_its_turn_fires_a_second_failure_hook_for_the_new_attempt() {
+    let world = hooked_world("hooks-retry-failure");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    world.script("build-2.fail", "1");
+    let run = "refailed";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "failure"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    let reasons: Vec<&Value> = fired
+        .iter()
+        .map(|event| &event["payload"]["reason"])
+        .collect();
+    assert_eq!(
+        *reasons[0],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "build", "status": "failed", "outcome": "task-failed"}]})
+    );
+    assert_eq!(
+        *reasons[1],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "build-2", "status": "failed", "outcome": "task-failed"}]}),
+        "the second firing is the new attempt's, not the superseded node's"
+    );
+    let handed = handed(&world, run, 2);
+    assert_eq!(handed.stdin["reason"], *reasons[1]);
+}
+
+/// The property the gate around the marker has always carried, now carried across
+/// an epoch: two drivers that judge one reopened run fire **exactly one** hook
+/// between them.
+///
+/// The second driver arrives while the first one's hook is still running — which
+/// is the window where the run reads as undriven and a second judgement is
+/// genuinely possible — and finds the marker the first appended under this epoch.
+#[test]
+fn two_drivers_judging_one_reopened_run_fire_exactly_one_hook_between_them() {
+    let world = hooked_world("hooks-epoch-race");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "raced";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+
+    // The next hook holds until this journey releases it, so the two drivers
+    // really do overlap rather than following one another.
+    std::fs::write(records(&world).join(format!("{run}.hold")), "").expect("the hold is scripted");
+    let mut first = world
+        .cmd(&["adopt", run])
+        .spawn()
+        .expect("the first driver starts");
+    let started = records(&world).join(run).join("2").join("started");
+    world.until("the reopened run's hook to be running", |_| {
+        started.is_file()
+    });
+
+    // The first driver has let go of the ownership lock to run its hook, so this
+    // one takes the run over, judges the same epoch, and finds the marker.
+    world.run(&["adopt", run]).exited(0);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+
+    std::fs::write(records(&world).join(format!("{run}.go")), "go").expect("the hold is released");
+    assert!(
+        first.wait().expect("the first driver ends").success(),
+        "the first driver did not end cleanly"
+    );
+    world.until("the reopened run's hook to finish", |world| {
+        world.events_of(run, "run-hook-finished").len() == 2
+    });
+
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "two drivers fired twice: {fired:?}");
+    assert_eq!(fired[1]["payload"]["hook"], "success");
+}
+
 /// A driver that lets go of a run paused on a decision fires nothing and says
 /// so; the driver that adopts it after the decision fires the hook it reaches.
 #[test]
@@ -742,10 +1391,16 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
     );
 }
 
-/// Once a run carries a firing, nothing fires again: not a later adoption, and
-/// not an adoption after a requeue that takes the run on to complete.
+/// Once a run carries a firing, only an accepted edit that makes the run **live
+/// again** lets another fire: a later adoption fires nothing, an accepted note and
+/// an accepted finding fire nothing, and the requeue that puts work back into the
+/// graph opens the epoch the completed run's success hook fires under.
+///
+/// The note and the finding are the two shapes an inert command takes in the
+/// record — one `edit-committed`, one `command-accepted` — so between them they
+/// cover both of the ways a command that reopened nothing can reach this.
 #[test]
-fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
+fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
     let world = hooked_world("hooks-once");
     let hook = hook(&world);
     let mut later = agent("later", &["build"]);
@@ -763,6 +1418,50 @@ fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
+    // An accepted command that reopens nothing is not an epoch. The note is
+    // committed — the record says so — and the marker still stands, so the same
+    // ending fires no second hook.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "note", "id": "later", "addressee": "worker",
+                 "text": "read the failure before you pick this up"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the note to be committed", |world| {
+        world.events_of(run, "edit-committed").iter().any(|event| {
+            event["payload"]["operation_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "note-delivered"))
+        })
+    });
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+
+    // A finding commits nothing a reader folds, so it is recorded as
+    // `command-accepted` rather than `edit-committed` and cannot be an epoch either.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "finding", "message": "the parked node is the whole of what is left"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the finding to be accepted", |world| {
+        !world.events_of(run, "command-accepted").is_empty()
+    });
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+
+    // The requeue puts a node back on the desired frontier, which is the epoch:
+    // the ending the adoption then reaches is a new one, and it fires.
     world
         .run_with_stdin(
             &["reply", run],
@@ -774,11 +1473,20 @@ fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
         .exited(0)
         .out_has("\"settlement\":\"complete\"");
 
-    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
     assert_eq!(
         hook_kinds(&world, run),
-        ["run-hook-fired", "run-hook-finished"]
+        [
+            "run-hook-fired",
+            "run-hook-finished",
+            "run-hook-fired",
+            "run-hook-finished"
+        ]
     );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired[0]["payload"]["hook"], "failure");
+    assert_eq!(fired[1]["payload"]["hook"], "success");
+    assert_eq!(fired[1]["payload"]["reason"], Value::Null);
 }
 
 /// A detached driver judges and fires exactly as an attached one does — and while
