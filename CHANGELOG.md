@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0](https://github.com/nickderobertis/onepipeline/compare/v0.32.0...v0.33.0) - 2026-09-16
+
+### Added
+
+- *(writeback)* write a launched run's work queued before dispatch, and carry delivers ([#301](https://github.com/nickderobertis/onepipeline/pull/301))
+
 ## [0.32.0](https://github.com/nickderobertis/onepipeline/compare/v0.31.0...v0.32.0) - 2026-09-15
 
 ### Added
