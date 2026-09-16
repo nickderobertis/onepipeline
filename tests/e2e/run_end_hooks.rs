@@ -986,11 +986,13 @@ fn an_edit_this_build_cannot_fold_leaves_the_marker_standing_through_a_later_req
     // An `edit-committed` carrying an operation this build has never read — the
     // shape a **newer** build's record takes. Copied from a record this run really
     // wrote so that everything but the payload is exactly what a reader meets.
-    // llmlint: ignore[tests_mirror_real_usage] no verb this build ships writes an
-    // operation it cannot parse — only a newer build does, and there is none to run
-    // here. Appending one line is the narrowest way to put that record in front of the
-    // compiled binary; the run, its journal, the driver that adopts it and the hook
-    // fixture around it are all the real ones.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb this build ships writes an
+    // operation it cannot parse — only a newer build does, and there is none to run here.
+    // Appending one line is the narrowest way to put that record in front of the compiled
+    // binary, and it is the same fault injection this file's unreadable-launch-record and
+    // unopenable-log journeys make for the same reason; the run, its journal, the reply
+    // that follows, the driver that adopts it and the hook fixture around it are all the
+    // real ones, and every claim this journey makes is read back off them.
     let journal = world.runs.join(run).join("events.jsonl");
     let mut record = world.events_of(run, "run-hook-fired")[0].clone();
     record["kind"] = json!("edit-committed");
@@ -1003,6 +1005,7 @@ fn an_edit_this_build_cannot_fold_leaves_the_marker_standing_through_a_later_req
     let mut lines = std::fs::read_to_string(&journal).expect("the journal is kept");
     lines.push_str(&format!("{record}\n"));
     std::fs::write(&journal, lines).expect("the record is appended");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // A real requeue after it, which on a readable journal is an epoch.
     world
