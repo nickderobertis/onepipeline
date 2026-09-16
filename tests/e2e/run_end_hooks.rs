@@ -897,7 +897,6 @@ fn two_drivers_judging_one_reopened_run_fire_exactly_one_hook_between_them() {
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
-    // The retry opens the epoch both drivers below judge under.
     world
         .run_with_stdin(
             &["reply", run],
@@ -1006,8 +1005,6 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
-    // Nothing has been edited, so the adoption reaches the same ending the marker
-    // already covers.
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
