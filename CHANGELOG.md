@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0](https://github.com/nickderobertis/onepipeline/compare/v0.33.2...v0.34.0) - 2026-09-16
+
+### Fixed
+
+- *(settle)* give a stated landing one authoritative reading and release evidence ([#318](https://github.com/nickderobertis/onepipeline/pull/318))
+
 ## [0.33.2](https://github.com/nickderobertis/onepipeline/compare/v0.33.1...v0.33.2) - 2026-09-16
 
 ### Fixed
