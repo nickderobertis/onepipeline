@@ -294,6 +294,14 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // made one. Every other journey here is about the dispatch, and a file
     // appearing in a worktree unasked would be a change nobody made.
     let observing = prompt.contains("Observe this run");
+    // `harness.login-refused` is the identity that was never authenticated: the
+    // worker's turn ends before any model is reached, on the terminal document
+    // Claude Code answers with. Never the observer's, whose turn is not the
+    // dispatch a journey is asking about.
+    if !observing && fake::node_script(dir, "harness", "login-refused").is_some() {
+        println!("{}", login_refusal());
+        return ExitCode::from(1);
+    }
     if !observing {
         if let Some(body) = fake::node_script(dir, "harness", "work") {
             let path = cwd.join(WORK_FILE);
@@ -565,6 +573,32 @@ fn result(outcome: Outcome, prompt: &str, args: &[String], dir: &std::path::Path
         document["structured_output"] = structured(prompt, dir);
     }
     println!("{document}");
+}
+
+/// The terminal document an unauthenticated Claude Code headless run ends on.
+///
+/// Nothing billed and an empty `modelUsage`, because no model was reached — which
+/// is what lets the refusal be read as the identity's rather than as a sentence an
+/// agent wrote mid-task. `duration_ms` is the incidental `429` of
+/// nickderobertis/oneharness#1290: a classifier that fell through to its generic
+/// vocabulary read that number as a rate limit.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider
+// wire shape as `result` above, gated the same way: `tests/e2e/dispatch.rs` drives
+// the real `oneharness_core` classifier over it, so a refusal it stops reading as
+// `auth` fails there rather than reading differently.
+fn login_refusal() -> serde_json::Value {
+    serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "duration_ms": 429,
+        "num_turns": 1,
+        "result": "Not logged in · Please run /login",
+        "session_id": "fake-claude-session",
+        "total_cost_usd": 0,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "modelUsage": {},
+    })
 }
 
 /// The validated answer a structured-output run is asked for.

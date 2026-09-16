@@ -3109,6 +3109,84 @@ fn a_candidate_served_under_the_wrong_model_is_stepped_past_and_named_on_the_rec
     );
 }
 
+/// An identity Claude Code answers `Not logged in` for is stepped past as
+/// **unauthenticated**, and a reader is told so — never that it was rate limited.
+///
+/// What puts that reading in front of a dispatch is **this build's lock**, as
+/// with the journey above: a single-sided member's turn is an `oneharness_core`
+/// library call in the process this crate links, so the classifier that reads
+/// the harness's answer is the copy `Cargo.lock` resolves, never the CLI pinned
+/// beside it (nickderobertis/oneharness#1290). Below the release carrying it,
+/// the refusal matched nothing specific, the record's incidental `duration_ms`
+/// of `429` read as a rate limit, and an operator was sent to wait out a limit
+/// that did not exist rather than to authenticate the identity.
+///
+/// Driven through the real graph and the real `oneharness_core`, with the one
+/// stand-in at the paid harness: `fake-claude` answers with the terminal
+/// document an unauthenticated Claude Code run ends on. The reason is read
+/// through oneharness's own type rather than restated here.
+#[test]
+fn a_claude_login_refusal_is_stepped_past_as_unauthenticated_rather_than_rate_limited() {
+    use oneharness_core::domain::fallback::FallThroughReason;
+
+    let world = World::new("real-login-refused");
+    world.write_graphs();
+    world.script("harness.login-refused", "");
+    let path = world.plan("unauthed", &plan_of("unauthed", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--attach"])
+        .settled();
+    world.until("the run to settle on the refused identity", |world| {
+        world.run_file("unauthed", "result.json").is_file()
+    });
+    let node = world.run_json("unauthed", "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["status"], "failed",
+        "a turn no model ever answered settled as work: {node}"
+    );
+
+    // The advance, as the real graph published it and this crate relayed it:
+    // the identity, under oneharness's own reason for stepping past it.
+    let advanced: Vec<Value> = world
+        .journal("unauthed")
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "fallback-advanced"
+                && event["labels"]["onepipeline.node"] == "build"
+        })
+        .collect();
+    assert_eq!(
+        advanced.len(),
+        1,
+        "the refused identity was not stepped past once: {advanced:#?}"
+    );
+    let advanced: oneagentgraph::event::FallbackAdvanced =
+        serde_json::from_value(advanced[0]["payload"].clone())
+            .expect("the relayed advance is the sibling's own payload");
+    assert_eq!(advanced.identity, "claude-code", "{advanced:?}");
+    assert_eq!(
+        advanced.reason,
+        FallThroughReason::Auth.as_str(),
+        "a Claude login refusal was stepped past as something other than an \
+         unauthenticated identity: {advanced:?}"
+    );
+
+    // And the line a reader is shown under the node's failure.
+    let results = world.run(&["results", "unauthed"]);
+    results.exited(0).out_has(&format!(
+        "fell through 'claude-code' ({})",
+        FallThroughReason::Auth.as_str()
+    ));
+    assert!(
+        !results
+            .stdout
+            .contains(FallThroughReason::RateLimit.as_str()),
+        "an unauthenticated identity was reported as rate limited:\n{}",
+        results.stdout
+    );
+}
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///
