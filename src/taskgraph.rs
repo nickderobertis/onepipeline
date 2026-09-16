@@ -98,6 +98,7 @@ pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
 const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
+    ("delivers", "the task's own `delivers`"),
 ];
 
 /// The reserved key a repository identity the store cannot hold is carried
@@ -367,6 +368,21 @@ impl Store {
         }
         if let Some(content) = task.item.content.as_ref().filter(|c| !c.trim().is_empty()) {
             node.insert("task".to_owned(), Value::String(content.clone()));
+        }
+        // The store prints every entry qualified; one that arrives bare names this task's
+        // own source, which is the store's rule for a bare id. Anything still not a
+        // qualified id is refused by the graph's node check, naming the node and the entry.
+        if !task.item.delivers.is_empty() {
+            let qualified = task
+                .item
+                .delivers
+                .iter()
+                .map(|entry| match entry.contains(':') {
+                    true => Value::String(entry.clone()),
+                    false => Value::String(format!("{}:{entry}", task.id.source())),
+                })
+                .collect();
+            node.insert("delivers".to_owned(), Value::Array(qualified));
         }
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
@@ -1024,6 +1040,12 @@ struct TaskItem {
     metadata: Map<String, Value>,
     #[serde(default)]
     repositories: Vec<Repository>,
+    /// The tasks this one delivers, as the store holds the relation.
+    // llmlint: ignore[invalid_states_unrepresentable] each entry is checked as a qualified id
+    // by `graph::check_node`, which names the node and the entry; narrowing it here would
+    // refuse a bare entry the store's own rule reads as naming this task's source.
+    #[serde(default)]
+    delivers: Vec<String>,
 }
 
 /// A repository identity in the normalized form onetaskgraph emits.
@@ -1298,6 +1320,7 @@ mod tests {
             content: None,
             metadata: Map::new(),
             repositories: Vec::new(),
+            delivers: Vec::new(),
         };
         let message = node_id(&bare).unwrap_err();
         assert!(message.contains(ID_KEY), "{message}");

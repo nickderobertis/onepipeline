@@ -185,6 +185,15 @@ fn a_copy_held_past_the_floor_still_lands_when_the_item_count_lifts_its_deadline
         floor + 5,
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     );
+    // And nothing was dispatched: this copy is the launching driver's claim, and the wait before
+    // its first dispatch is bounded by the same lifted deadline the copy runs under — not by the
+    // floor, which this hold has already outlasted.
+    assert_eq!(
+        world.events_of(run, "node-dispatched").len(),
+        0,
+        "the driver dispatched while its claim was still inside a deadline of {items} × \
+         {per_item} seconds"
+    );
 
     // Let the held copy answer. Later copies are not held: the deadline is the
     // subject, and one copy past it is the evidence.
@@ -238,8 +247,11 @@ fn a_copy_held_past_a_tiny_budget_is_killed_and_the_refusal_names_the_arithmetic
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-floor", run, items, &[flag.as_str(), "1"]);
 
-    // The launching driver's first copy is let go at once, so it lands and the run
-    // is quiet: nothing has failed yet, and the driver is one an adoption may end.
+    // The launching driver's copies are let go at once, so they land and the run is
+    // quiet: nothing has failed yet, and the driver is one an adoption may end. There
+    // are two of them — the claim a driver projects before its first dispatch, which
+    // writes the held node `queued`, and the projection of that node running.
+    meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")
@@ -333,8 +345,10 @@ fn a_record_an_older_build_wrote_is_adopted_and_its_copy_runs_under_the_shipped_
     let (world, meeting, project) =
         a_run_whose_copy_is_held("writeback-budget-older-record", run, items, &[]);
 
-    // The launching driver's first copy is let go at once, so the run is quiet and
+    // The launching driver's copies are let go at once — its claim before the first
+    // dispatch, and the projection of the held node running — so the run is quiet and
     // an adoption may end its driver.
+    meeting.arrived().release();
     meeting.arrived().release();
     world.until_store("the launching driver's copy to reach the board", |world| {
         board_status(world, &project, "work").is_some_and(|word| word == "in-progress")

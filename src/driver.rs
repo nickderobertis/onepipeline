@@ -1831,6 +1831,10 @@ fn stop(args: &StopArgs) -> Result<i32> {
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop) => {}
     }
+    // What the run claimed and never started is released now, because the driver the
+    // signal ended took no closeout of its own. Best effort: it changes neither this
+    // verb's answer nor its status.
+    crate::writeback::release_stopped(&paths, &record);
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
     // it is written either way.
     println!(

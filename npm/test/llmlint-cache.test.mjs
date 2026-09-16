@@ -37,6 +37,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -303,8 +304,23 @@ class Workspace {
     return { PATH: `${directory}${delimiter}${this.env.PATH}` };
   }
 
+  /// Every git command this sandbox runs, with nothing left running behind it.
+  ///
+  /// `git commit` ends by running `git gc --auto`, and `gc.autoDetach` — on by
+  /// default — forks that collection into the background, where it outlives the
+  /// call that started it and keeps writing `.git` after the test has ended. That
+  /// is what failed the teardown's removal with `ENOTEMPTY` on CI, over the two
+  /// files `git update-server-info` writes last. A throwaway checkout has nothing
+  /// to gain from a collection, so `gc.auto=0` starts none; `gc.autoDetach=false`
+  /// says that whatever does start one is waited for rather than detached.
   git(...args) {
-    return execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@invalid", ...args], {
+    const settings = [
+      "user.name=e2e",
+      "user.email=e2e@invalid",
+      "gc.auto=0",
+      "gc.autoDetach=false",
+    ];
+    return execFileSync("git", [...settings.flatMap((setting) => ["-c", setting]), ...args], {
       cwd: this.root,
       encoding: "utf8",
     });
@@ -1174,5 +1190,47 @@ describe("the journeys' sandbox teardown", () => {
     const table = diagnosis.split("process table when it failed:\n")[1] ?? "";
     assert.match(table, /^\s*PID\s+PPID\s/, diagnosis);
     assert.match(table, new RegExp(`^\\s*${process.pid}\\s+${process.ppid}\\s`, "m"), diagnosis);
+  });
+
+  /// Every path under a checkout's `.git`, with its mtime and size. Two readings
+  /// that compare equal are a `.git` nothing wrote to in between; an entry that
+  /// vanishes mid-reading is reported in its place, because that is a write too.
+  function gitState(root) {
+    const git = join(root, ".git");
+    return readdirSync(git, { recursive: true })
+      .sort()
+      .map((entry) => {
+        try {
+          const stats = lstatSync(join(git, entry));
+          return `${entry} ${stats.mtimeMs} ${stats.size}`;
+        } catch (unreadable) {
+          return `${entry} disappeared while being read: ${unreadable.message}`;
+        }
+      });
+  }
+
+  it("leaves no collection running in a sandbox whose last git command has returned", async (t) => {
+    const ws = workspace(t);
+    // CI reached this by accident: a copied checkout whose loose objects happened
+    // to pass git's auto-gc estimate, which is taken from one of the 256 object
+    // fan-out directories and so answers differently on every host. The journey
+    // arms the threshold rather than hoping for it — the repository asks for a
+    // collection on its next commit, and the helper is what must not leave one
+    // running.
+    ws.git("config", "gc.auto", "1");
+    writeFileSync(join(ws.root, "collected.txt"), "one more object to collect\n", "utf8");
+
+    ws.commit("a commit whose auto-gc would collect");
+
+    // `git gc` holds this for as long as it runs, so a detached one is still here.
+    const collecting = join(ws.root, ".git", "gc.pid");
+    assert.equal(existsSync(collecting), false, `${collecting} says a collection is running`);
+    const settled = gitState(ws.root);
+    await sleep(2000);
+    assert.deepEqual(
+      gitState(ws.root),
+      settled,
+      "the sandbox's .git was written after its last git command returned",
+    );
   });
 });

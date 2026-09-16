@@ -169,7 +169,8 @@ fn add_reparent_and_note_are_applied_and_reported_applied() {
                 && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
                 && task["item"]["metadata"]["onepipeline.max_turns"] == 2
                 && task["item"]["metadata"]["onepipeline.branch"] == "topic/extra"
-                && task["item"]["status"]["category"] == "todo"
+                // Added while the run is driven, so claimed and not yet started.
+                && task["item"]["status"]["category"] == "queued"
         })
     });
     let extra = world
@@ -250,7 +251,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
                     .find(|task| task["item"]["metadata"]["onepipeline.id"] == id)
             };
             task("cancelled").is_some_and(|task| {
-                task["item"]["status"]["category"] == "todo"
+                task["item"]["status"]["category"] == "queued"
                     && task["item"]["metadata"]["onepipeline.branch"] == "topic/resumed"
             }) && task("dropped")
                 .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
@@ -259,7 +260,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
                 && task("replacement").is_some_and(|task| {
                     matches!(
                         task["item"]["status"]["category"].as_str(),
-                        Some("todo" | "done")
+                        Some("queued" | "done")
                     ) && task["item"]["metadata"]["onepipeline.branch"] == "topic/replacement"
                 })
         },
