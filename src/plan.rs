@@ -858,6 +858,14 @@ pub struct Node {
     /// target only where the default is not what it wants.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumes: BTreeMap<String, TargetName>,
+    /// The tickets this node's work delivers, as qualified onetaskgraph task ids.
+    ///
+    /// Read off the task's own `delivers` field, never off metadata. What moves a ticket is
+    /// the store's relation between the two tasks: the write-back projects this node's status
+    /// and this list, and the store re-evaluates every ticket named here on that write. A
+    /// ticket is delivered by at most one node of a plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<String>,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3

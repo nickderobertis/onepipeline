@@ -2453,6 +2453,18 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
          proves nothing"
     );
 
+    // The adoption clears the dispatch the dead driver made, and the adopting driver
+    // dispatches the node again only once its first projection has claimed the plan on
+    // the store. Until that dispatch is recorded the run has none live, so the view is
+    // read after it.
+    world.until("the adopting driver to dispatch the node again", |world| {
+        world
+            .journal("adopted")
+            .iter()
+            .skip_while(|event| event["kind"] != "driver-adopted")
+            .any(|event| event["kind"] == "node-dispatched")
+    });
+
     let mut read = world.cmd(&["host"]);
     read.env("TZ", WEST);
     let rendered = world.run_on(read, "host, read from the other zone after an adoption");

@@ -2508,15 +2508,16 @@ them is coming back.
 So the code writes the settlement's own word: `done` for a node that is done,
 `failed` for a task failure, `provider-failed` for the provider death entry 49
 introduced, `cancelled` for a cancel, `parked` for a planner's own idle, and
-`skipped` for a node a failed dependency made unsafe. `todo` and `in progress`
-are unchanged.
+`skipped` for a node a failed dependency made unsafe. `in progress` is unchanged,
+and a node the run has not started is written `queued` while a driver drives the
+run and `todo` at closeout — see below.
 
 **What that costs, and why it is the cheaper of the two.** A onetaskgraph status
 is a *name* and a normalised *category*, a `project copy` carries both, and a
 destination refuses a pair it would read differently — so a name outside that
 seven-word vocabulary can only be written where the destination normalises it the
-same way this shadow does. Four of the eight words this projection writes *are* a
-category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected.
+same way this shadow does. Five of the nine words this projection writes *are* a
+category — `todo`, `queued`, `in progress`, `done` and `cancelled` — and are unaffected.
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This open
 divergence is the repository's required record of the dependency behavior that makes
 its projection incomplete. The implementation source is cited at each GitHub Projects
@@ -2555,13 +2556,50 @@ run settled identically either way. A failed projection now also raises a
 non-blocking planner surface naming the project, the items it was carrying and the
 reason. It still changes no ruling, no settlement and no scheduling decision.
 
-What diverges is the projected vocabulary — 8 words where the contract names 4 —
-and the 3 reserved keys beside the settlement. Everything else the sentence
-promises is unchanged.
+**While a driver drives the run, the run holds a claim on its whole plan.** A node
+the run has not started — pending, ready, waiting or blocked — is written `queued`,
+and every driver, whether a launch or an adoption started it, waits before its first
+dispatch for one attempt at its first whole projection, bounded by the store command
+deadline; an attempt that fails or times out raises the unprojected surface, and the
+dispatch goes ahead. Later projections stay off the reconcile loop. At closeout,
+settled or stopped, a node that never started is written `todo`, which releases the
+claim — and because a stop's signal ends a driver where it stands, the `stop` verb
+makes that projection itself. A driver adopting the run writes those nodes `queued`
+again before its own first dispatch. Against a store reporting a version older than
+`WRITEBACK_DELIVERS_FROM`, the first release carrying `queued` and `delivers`,
+unstarted nodes are written `todo` throughout, no task carries `delivers`, and a plan
+whose tasks deliver tickets is told once, on the driver's standard error, why they
+are not moved.
+
+**Beside the status, the one task field the write-back owns: `delivers`.** A node's
+`delivers` is read from its task's own `delivers` field — never from metadata, so a
+task stating `onepipeline.delivers` is refused as not a node field — and written back
+onto the shadow task's top-level `delivers`, every entry qualified. It is plan-declared,
+and a copy is a total replacement, so leaving it out would delete the relation on the
+board. No reserved `onepipeline.` key holds it.
+
+**The tickets are the store's to move.** Every write of a deliverer re-evaluates each
+task it delivers by the store's own table, so this crate writes no ticket: `queued` and
+`in progress` claim a ticket, `done` finishes it, and `todo` releases it — as do
+`failed`, `provider-failed`, `parked` and `skipped`, which the store reads as `unknown`,
+and `cancelled`. A failed node's ticket therefore returns to `todo` with no word here
+changed, unless a deliverer outside this plan still claims or has finished it. A copy
+whose delivered tickets the store could not keep in step exits `4` with `failed` entries
+in its report's `delivered`: that is a projection that did not land, surfaced naming
+each failed ticket and its failure and retried whole on the existing schedule, and it
+never changes a settlement, a scheduling decision or the run's exit. Each attempt's
+line in the projection record carries the report's `delivered` entries verbatim —
+entry 73 states the key.
+
+What diverges is the projected vocabulary — 9 words where the contract names 5 —
+the 3 reserved keys beside the settlement, and the 1 task field the write-back owns.
+Everything else the sentence promises is unchanged.
 
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
-`store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
-`store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.
+`store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`,
+`store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`,
+and the journeys of `tests/e2e/delivers.rs`, which drive the real binary over the real
+store with a second `local-md` source holding the tickets.
 
 ## 51. Fast adoption could launch against a git pin and then merge it — OPEN
 
@@ -5468,7 +5506,18 @@ type is `views::ProjectionRecord`, re-exported beside the other stored shapes a 
 its flat line admits no contradiction: a member copy names no `whole_because`, a failed attempt
 carries no `actions` or `spent`, and `class` and `kind` come together. `spent` is the copy
 report's own object, verbatim, and is `null` wherever the report carried none — which is every
-copy into a destination that meters nothing, a local Markdown one included.
+copy into a destination that meters nothing, a local Markdown one included. `delivered` is the
+copy report's own list of what the store did to each ticket a carried task delivers, verbatim,
+on a landed attempt and on a failed one alike, and it is the one key a line leaves off: absent
+wherever the report named no ticket, so a line that reached none reads as it did before entry 50
+gave tasks a `delivers`.
+
+**The record is versioned.** Every line names its `schema_version`, and `schema.current` is
+`WRITEBACK_PROJECTIONS_SCHEMA_VERSION`: version 2, the version that added `delivered`. A line
+naming no version is version 1, the shape before it, and still reads — it is written back at the
+current version; a version 1 line naming `delivered` — by the key's own name, an empty list
+included — and a version this build has never written, are refused. `example_delivered` is the golden line carrying a report's `delivered` entries, one
+member this build never names included, and it writes back as itself.
 
 `tests/contract.rs` holds this block against the published constants and the record type: the
 two paths, the release, the member reads, every field and its admitted values, and the example
@@ -5489,7 +5538,9 @@ rewritten to carry known `spent` and action counts, recorded exactly.
     "record": "<run dir>/writeback-projections.jsonl",
     "one_line_per": "attempt",
     "rewritten": false,
+    "schema": {"current": 2, "read": [1, 2], "absent_means": 1, "added_at_2": ["delivered"]},
     "fields": {
+      "schema_version": {"type": "integer", "is": "the schema version the line is written at"},
       "at": {"type": "string", "format": "RFC 3339, UTC", "is": "when the attempt started"},
       "project": {"type": "string", "is": "the qualified project id"},
       "scope": {"type": "string", "values": ["whole", "members"]},
@@ -5501,7 +5552,8 @@ rewritten to carry known `spent` and action counts, recorded exactly.
       "reason": {"type": ["string", "null"], "null_when": "outcome is projected"},
       "duration_ms": {"type": "integer", "is": "wall-clock time of the whole attempt, reads included"},
       "actions": {"type": ["object", "null"], "members": ["created", "updated", "unchanged", "orphaned"], "null_when": "no copy report was read"},
-      "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"}
+      "spent": {"type": ["object", "null"], "is": "the copy report's spent object, verbatim", "null_when": "the report carried none"},
+      "delivered": {"type": "array", "of": "object", "is": "the copy report's delivered entries, verbatim, on a landed or a failed attempt", "omitted_when": "the report named no delivered ticket"}
     },
     "whole_because": {
       "store-lacks-members": "the store reported a version older than detection.members_from",
@@ -5509,12 +5561,21 @@ rewritten to carry known `spent` and action counts, recorded exactly.
       "first": "nothing has landed in this driver yet, including a driver an adopt started"
     },
     "whole_because_precedence": ["store-lacks-members", "after-failure", "first"],
-    "example": {"at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
+    "example": {"schema_version": 2, "at": "2026-09-13T12:00:00Z", "project": "plans:writeback-quota-plan",
                 "scope": "members", "whole_because": null, "items": ["op-refusal-not-retried"],
                 "outcome": "projected", "class": null, "kind": null, "reason": null,
                 "duration_ms": 1830,
                 "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
-                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}}
+                "spent": {"requests": 7, "budgets": [{"budget": "graphql", "unit": "points", "amount": 12, "lower_bound": false}]}},
+    "example_delivered": {"schema_version": 2, "at": "2026-09-15T12:00:00Z", "project": "plans:delivers-plan",
+                          "scope": "whole", "whole_because": "first", "items": ["build"],
+                          "outcome": "projected", "class": null, "kind": null, "reason": null,
+                          "duration_ms": 412,
+                          "actions": {"created": 0, "updated": 1, "unchanged": 1, "orphaned": 0},
+                          "spent": null,
+                          "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
+                                         "outcome": "written", "from": "todo", "to": "queued",
+                                         "pruned": ["plans:delivers-plan/gone"]}]}
   },
   "detection": {
     "command": "onetaskgraph --version",

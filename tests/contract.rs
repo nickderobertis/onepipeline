@@ -1091,6 +1091,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         adoption: Some(Adoption::Published),
         amendment: Some("changed requirements".into()),
         consumes: std::collections::BTreeMap::new(),
+        delivers: vec!["tickets:t-1".into()],
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -3153,22 +3154,62 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             },
             ..record.clone()
         },
+        // A partial copy: the deliverer's own write landed and a ticket it delivers did not.
+        ProjectionRecord {
+            scope: ProjectionScope::Whole(WholeBecause::First),
+            ended: ProjectionEnded::Failed {
+                classified: Some(ProjectionFailure {
+                    class: FailureClass::Transient,
+                    kind: "unavailable".to_owned(),
+                }),
+                reason: "the copy landed, but the store could not keep every delivered ticket \
+                         in step"
+                    .to_owned(),
+            },
+            delivered: vec![json!({
+                "ticket": "tickets:t/one", "deliverer": "plans:p/a", "outcome": "failed",
+                "from": "queued",
+                "failure": {"class": "transient", "kind": "unavailable", "source": "tickets",
+                            "message": "cannot write", "retry_after_seconds": null}
+            })
+            .as_object()
+            .cloned()
+            .expect("a delivered entry is an object")],
+            ..record.clone()
+        },
     ];
     let fields = projection["fields"]
         .as_object()
         .expect("entry 73 names the record's fields");
+    // A field the entry says a line leaves off under a condition is the one kind of key a line
+    // may lack; every other key is on every line.
+    let always: BTreeSet<&String> = fields
+        .iter()
+        .filter(|(_, field)| field["omitted_when"].is_null())
+        .map(|(name, _)| name)
+        .collect();
+    let mut written_keys: BTreeSet<String> = BTreeSet::new();
     let mut written_words: std::collections::BTreeMap<String, BTreeSet<String>> =
         std::collections::BTreeMap::new();
     for line in &lines {
         let written = serde_json::to_value(line).expect("a record serializes");
         let written = written.as_object().expect("a record is one object");
-        assert_eq!(
-            written.keys().collect::<BTreeSet<_>>(),
-            fields.keys().collect::<BTreeSet<_>>(),
-            "the record writes other keys than entry 73 names"
+        let keys: BTreeSet<&String> = written.keys().collect();
+        assert!(
+            always.is_subset(&keys) && keys.iter().all(|key| fields.contains_key(*key)),
+            "the record writes other keys than entry 73 names: {keys:?}"
         );
+        written_keys.extend(written.keys().cloned());
+        if line.delivered.is_empty() {
+            assert!(
+                !written.contains_key("delivered"),
+                "a line that reached no ticket wrote `delivered`: {written:?}"
+            );
+        }
         for (name, field) in fields {
-            let value = &written[name];
+            let Some(value) = written.get(name) else {
+                continue;
+            };
             let types: Vec<&str> = match &field["type"] {
                 Value::String(one) => vec![one.as_str()],
                 Value::Array(several) => several.iter().filter_map(Value::as_str).collect(),
@@ -3202,6 +3243,11 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
             }
         }
     }
+    assert_eq!(
+        written_keys.iter().collect::<BTreeSet<_>>(),
+        fields.keys().collect::<BTreeSet<_>>(),
+        "a key entry 73 names is written on no shape of line"
+    );
     // And every word entry 73 admits for the scope, the outcome and the reasons is one the
     // record writes — asked of the serializer rather than restated.
     for name in ["scope", "outcome"] {
@@ -3298,6 +3344,99 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
         assert!(
             serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
             "{contradiction} was read as a record: {line}"
+        );
+    }
+
+    // The record's schema version: the constant the worker writes is the one the entry names,
+    // and both golden lines are written at it.
+    let schema = &projection["schema"];
+    let current = onepipeline::cli::WRITEBACK_PROJECTIONS_SCHEMA_VERSION;
+    assert_eq!(
+        schema["current"].as_u64(),
+        Some(u64::from(current)),
+        "entry 73 names a different current schema version than the worker writes"
+    );
+    assert_eq!(schema["read"], json!([1, current]));
+    assert_eq!(schema["absent_means"], json!(1));
+    assert_eq!(schema["added_at_2"], json!(["delivered"]));
+    let delivered_example = &projection["example_delivered"];
+    for golden in [example, delivered_example] {
+        assert_eq!(
+            golden["schema_version"].as_u64(),
+            Some(u64::from(current)),
+            "a golden line of entry 73 is not at the current schema version: {golden}"
+        );
+    }
+
+    // `delivered` round-trips verbatim — every member the store wrote, one this build never
+    // names included — and a line that reached no ticket writes no `delivered` key at all.
+    assert!(
+        delivered_example["delivered"][0].get("pruned").is_some(),
+        "the golden entry carries no member this build never names, so verbatim proves nothing"
+    );
+    let with_tickets: ProjectionRecord = serde_json::from_value(delivered_example.clone())
+        .unwrap_or_else(|error| panic!("entry 73's delivered example is not a record: {error}"));
+    assert_eq!(
+        json!(with_tickets.delivered),
+        delivered_example["delivered"],
+        "the delivered entries were not kept verbatim"
+    );
+    assert_eq!(
+        serde_json::to_value(&with_tickets).expect("a record serializes"),
+        *delivered_example,
+        "entry 73's delivered example does not write back as itself"
+    );
+    assert!(
+        record.delivered.is_empty() && example.get("delivered").is_none(),
+        "the plain golden line was meant to name no ticket"
+    );
+    assert!(
+        serde_json::to_value(&record)
+            .expect("a record serializes")
+            .get("delivered")
+            .is_none(),
+        "a line that reached no ticket wrote a `delivered` key"
+    );
+
+    // A line an earlier build wrote names no version and no `delivered`: it still reads, as
+    // version 1, and is written back at the current version.
+    let mut unversioned = example.clone();
+    unversioned
+        .as_object_mut()
+        .expect("a line is an object")
+        .remove("schema_version");
+    let older: ProjectionRecord = serde_json::from_value(unversioned)
+        .unwrap_or_else(|error| panic!("a version 1 line did not read: {error}"));
+    assert_eq!(
+        serde_json::to_value(&older).expect("a record serializes"),
+        *example,
+        "a version 1 line was not written back at the current version"
+    );
+    for (refused, patch) in [
+        (
+            "a version 1 line naming `delivered`",
+            json!({"schema_version": 1, "delivered": delivered_example["delivered"]}),
+        ),
+        // Refused by the key's own name rather than by what it holds: a line that names it
+        // empty is still a version 1 line naming a key version 2 added, and reading it as
+        // one that left the key off would let that shape through the boundary unremarked.
+        (
+            "a version 1 line naming an empty `delivered`",
+            json!({"schema_version": 1, "delivered": []}),
+        ),
+        (
+            "a version this build has never written",
+            json!({"schema_version": current + 1}),
+        ),
+        ("version 0", json!({"schema_version": 0})),
+    ] {
+        let mut line = example.clone();
+        for (key, value) in patch.as_object().expect("a patch") {
+            line[key] = value.clone();
+        }
+        assert!(
+            serde_json::from_value::<ProjectionRecord>(line.clone()).is_err(),
+            "{refused} was read as a record: {line}"
         );
     }
 }

@@ -78,6 +78,13 @@ pub const WRITEBACK_PARTIAL_EXIT: i32 = 4;
 /// [`ProjectionRecord`](crate::views::ProjectionRecord).
 pub const WRITEBACK_PROJECTIONS_FILE: &str = "writeback-projections.jsonl";
 
+/// The schema version every line of [`WRITEBACK_PROJECTIONS_FILE`] is written at.
+///
+/// Version 2 added `delivered`. A line naming no version is version 1, the shape before it,
+/// and still reads; a version 1 line naming `delivered`, and any version this build has never
+/// written, are refused.
+pub const WRITEBACK_PROJECTIONS_SCHEMA_VERSION: u32 = 2;
+
 /// The file, in a run's directory, holding whether the store offers a member copy — decided
 /// once per run, before its first projection, and read by every later driver of the run.
 pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
@@ -85,6 +92,14 @@ pub const WRITEBACK_STORE_FILE: &str = "writeback-store.json";
 /// The first `onetaskgraph` release whose `project copy` takes `--member` and whose copy
 /// report carries `spent`. A store reporting an older version is projected whole.
 pub const WRITEBACK_MEMBERS_FROM: &str = "0.2.30";
+
+/// The first `onetaskgraph` release whose status vocabulary carries `queued` and whose tasks
+/// carry `delivers`, re-evaluating each delivered task on every write of its deliverer.
+///
+/// Against a store reporting an older version, a node the run has not started is written
+/// `todo`, the shadow task carries no `delivers`, and a plan whose tasks deliver tickets is
+/// told once why they are not moved.
+pub const WRITEBACK_DELIVERS_FROM: &str = "0.2.32";
 
 /// The store command a member projection reads one named member's destination item with,
 /// by the name its capture files and refusals carry. It stands in for
