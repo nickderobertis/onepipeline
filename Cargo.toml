@@ -529,7 +529,15 @@ onejudge = "0.12.0"
 # onejudge's pin moves and this one does not, `tests/e2e/turns.rs` fails on a
 # report shape onejudge cannot read — which names the drift rather than hiding
 # it. Nothing this crate publishes links it.
-oneharness-core = "0.13.1"
+#
+# The floor is at the patch that classifies a Claude `Not logged in` result as an
+# authentication failure rather than a rate limit
+# (nickderobertis/oneharness#1290), because the classifier a dispatched node runs
+# is the one **this lock** resolves and not the CLI pins beside it: widening this
+# requirement without moving `Cargo.lock` changes what the build permits and
+# nothing about what it links. `just engines-current` is what holds the two
+# together.
+oneharness-core = "0.13.2"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
