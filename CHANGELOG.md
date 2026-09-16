@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.1](https://github.com/nickderobertis/onepipeline/compare/v0.33.0...v0.33.1) - 2026-09-16
+
+### Fixed
+
+- *(tests)* declare the scripts the crate's tests drive and serve local-md in process ([#310](https://github.com/nickderobertis/onepipeline/pull/310))
+
 ## [0.33.0](https://github.com/nickderobertis/onepipeline/compare/v0.32.0...v0.33.0) - 2026-09-16
 
 ### Added
