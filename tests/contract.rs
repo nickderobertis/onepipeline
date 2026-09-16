@@ -2961,12 +2961,34 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
     for promise in [
         "six hundred seconds when unnamed, zero refused",
         "has not ended and fires neither",
-        "a run fires at most one hook, once",
         "a hook never changes how the run settled",
     ] {
         assert!(
             prose.contains(promise),
             "the README no longer states that {promise}"
+        );
+    }
+
+    // The **epoch** half of that copy is held to the contract as well as stated,
+    // because it is the half a reader acts on — which endings fire a hook — and a
+    // README that drifted from it would tell an operator to expect a hook the
+    // engine never fires. Each phrase is one sentence both documents carry word for
+    // word, so rewording the rule fails here until both move together. The three
+    // promises above are older paraphrases the two documents never shared; widening
+    // this to them would be a rewrite of the contract's prose rather than a gate.
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    for promise in [
+        "at most once per ending",
+        "judged by what the edit left behind, not by which operation it carried",
+        "a run recovered from a failure still fires the hook it then reaches",
+    ] {
+        assert!(
+            contract.contains(promise),
+            "the contract no longer states that {promise}"
+        );
+        assert!(
+            prose.contains(promise),
+            "the README states the epoch rule differently from the contract: {promise}"
         );
     }
 }

@@ -4,9 +4,13 @@
 //! `docs/contract.md`'s run-end hooks paragraph is the whole rule. What this file
 //! adds is where each half of it lives: [`judge`] is the rule over a folded run,
 //! [`at_let_go`] and [`at_stop`] are the only two moments it is asked, and `fire`
-//! is the once-per-run marker, the spawn, the wait and the record of how the hook
-//! ended. Nothing here writes a node status, a result or a settlement, which is
-//! what keeps a hook from changing any of them.
+//! is the once-per-ending marker, the spawn, the wait and the record of how the
+//! hook ended. Nothing here writes a node status, a result or a settlement, which
+//! is what keeps a hook from changing any of them.
+//!
+//! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
+//! the marker against it, and [`live`] is the predicate the rule's "live again" is
+//! measured by.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -359,7 +363,7 @@ fn withhold(paths: &RunPaths) {
     }
 }
 
-/// Fire one hook, once per run: mark it, run it, and record how it ended.
+/// Fire one hook, once per ending: mark it, run it, and record how it ended.
 fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) {
     let hook = firing.hook();
     // An ending whose hook the record does not name fires nothing, and marks
@@ -398,11 +402,14 @@ fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) 
     }
 }
 
-/// Journal `run-hook-fired`, unless the run already carries one.
+/// Journal `run-hook-fired`, unless the run already carries one for this ending.
 ///
 /// The check and the append are one section, under the gate a driver lets go of
 /// the run under: a `stop` and a driver that let go on another host are two
-/// processes that may both judge the run, and exactly one of them fires.
+/// processes that may both judge the run, and exactly one of them fires. Both
+/// read the journal inside that section, so both read the same epoch and the same
+/// marker, which is what makes "exactly one" hold across the edit that reopened
+/// the run as well as across the ending itself.
 fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
     let handover = ledger::Handover::hold(paths)?;
     let marked = if fired(paths) {
@@ -424,11 +431,88 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
     marked
 }
 
-/// Whether the run's journal carries the marker a firing leaves.
+/// Whether the run's journal carries the marker a firing leaves, **for the ending
+/// the run is now at** — the contract's epoch rule, answered.
+///
+/// Answered by **folding** the journal through the same projection every other
+/// reader uses, rather than by searching the record: the rule turns on the graph
+/// an edit left behind, and no field of an `edit-committed` says what that graph
+/// was. That is also why no list of operation kinds appears here — one could only
+/// approximate the graph, and would get both of the contract's own examples
+/// backwards.
+///
+/// `command-accepted` is deliberately not asked. It is the record for a command that
+/// committed **nothing a reader folds** — a finding, a completion request — so it
+/// cannot have made the run live; reading it as an epoch would only let an
+/// unrelated report turn liveness that arrived some other way into a second hook
+/// for an ending nobody edited.
+///
+/// The graph is asked **on both sides** of the edit, because the rule is that the
+/// edit *made* the run live: a run already live when the edit arrived was made so
+/// by something else, and an inert edit landing after it would otherwise inherit an
+/// epoch it had nothing to do with.
+///
+/// A fold that has lost a record — [`RunState::strict`] — retires nothing. An
+/// `edit-committed` whose operations this build cannot parse might have been the
+/// graph mutation that matters, so the graph beside it is not evidence of anything;
+/// the marker standing is the answer that cannot fire a hook twice. `strict` never
+/// comes back, so a run carrying such a record recognises no further epoch and its
+/// operator fires the hook by hand, which is the failure this whole rule prefers.
+///
+/// One fold of what [`RunView::open`] already does, and the statuses are derived
+/// only for an edit arriving while a marker stands, so a run that has never fired
+/// pays for none of it.
 fn fired(paths: &RunPaths) -> bool {
-    journal::read(&paths.journal())
-        .iter()
-        .any(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::RunHookFired))
+    let mut state = RunState {
+        strict: true,
+        ..RunState::default()
+    };
+    let mut fired = false;
+    for event in &journal::read(&paths.journal()) {
+        let kind = PipelineKind::from_wire(&event.kind);
+        let edit = kind == Some(PipelineKind::EditCommitted);
+        let was_live = edit && fired && live(&state);
+        crate::projection::fold_one(&mut state, event);
+        if edit && fired && !was_live && state.strict && live(&state) {
+            fired = false;
+        } else if kind == Some(PipelineKind::RunHookFired) {
+            fired = true;
+        }
+    }
+    fired
+}
+
+/// Whether the run has work it can still carry out, on the graph as it stands.
+///
+/// The contract's "live again", as a question about one graph. Two of the answers
+/// below cannot be checked against it by reading the match:
+///
+/// * `pending` answers `false` and is not an oversight. A node is `pending` only
+///   while a dependency of it is pending, ready or running, so whatever ancestor
+///   carries the liveness has already answered `true`; a dependency that is
+///   parked, waiting or failed makes its dependents `blocked` or `skipped`
+///   instead, so a `pending` node with no such ancestor cannot be derived.
+/// * `complete-but-draft` is **unreachable from here**, which is why no journey
+///   drives it: [`judge`] answers `NotEnded` for a graph holding one, so a run
+///   that has ever held such a node has never fired and has no marker to retire.
+///   It is answered rather than swept into the `false` arm because the day a
+///   settlement can leave a draft node on an *ended* run, that arm would be wrong.
+///
+/// Exhaustive on purpose: a status added later has to decide this rather than
+/// inherit `false`, which would silently stop a run that reaches it from ever
+/// firing again.
+fn live(state: &RunState) -> bool {
+    state.statuses().values().any(|status| match status {
+        NodeStatus::Ready | NodeStatus::Running => true,
+        NodeStatus::Waiting | NodeStatus::CompleteDraft => true,
+        NodeStatus::Pending
+        | NodeStatus::Blocked
+        | NodeStatus::Parked
+        | NodeStatus::Cancelled
+        | NodeStatus::Done
+        | NodeStatus::Failed
+        | NodeStatus::Skipped => false,
+    })
 }
 
 /// Where a hook's output is kept: `hooks/<hook>.log` under the run's own

@@ -740,7 +740,8 @@ pub(crate) struct HookReason {
     pub(crate) nodes: Vec<UnsettledNode>,
 }
 
-/// `run-hook-fired`: a run-end hook marked as fired, once per run.
+/// `run-hook-fired`: a run-end hook marked as fired, once per ending the run
+/// reaches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct RunHookFired {
     /// Which hook.

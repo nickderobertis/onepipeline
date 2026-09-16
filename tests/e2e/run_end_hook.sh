@@ -54,12 +54,24 @@ case "$run" in
 esac
 mkdir -p "$record/$run" || broke "cannot create $record/$run"
 
-count=0
-if [ -f "$record/$run/invocations" ]; then
-  count=$(wc -l <"$record/$run/invocations") || broke "cannot read $record/$run/invocations"
-fi
-here="$record/$run/$((count + 1))"
-mkdir -p "$here" || broke "cannot create $here"
+# Which invocation this is, **claimed** rather than counted: `<n>` is the first
+# number `mkdir` does not refuse, so two firings that look at once cannot both
+# take one directory. Claiming also runs these lines on a first firing exactly as
+# on a fifth, where a count of `invocations` is a read only a second firing
+# reaches — and on cmd, which has no `wc`, one that starts a pipeline whose
+# children inherit this hook's stdin and its driver's streams.
+ceiling=100
+nth=1
+until mkdir "$record/$run/$nth" 2>/dev/null; do
+  nth=$((nth + 1))
+  if [ "$nth" -gt "$ceiling" ]; then
+    if [ -d "$record/$run/$ceiling" ]; then
+      broke "this run has already recorded $ceiling firings under $record/$run, which is this fixture's ceiling; a journey that needs more raises it in both halves, which both_run_end_hook_halves_number_an_invocation_the_same_way holds in step"
+    fi
+    broke "no record directory could be created under $record/$run, so nothing there is claimable"
+  fi
+done
+here="$record/$run/$nth"
 printf '%s\n' "${ONEPIPELINE_HOOK-}" >>"$record/$run/invocations" \
   || broke "cannot append to $record/$run/invocations"
 
