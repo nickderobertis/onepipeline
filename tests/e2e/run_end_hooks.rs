@@ -701,6 +701,199 @@ fn a_failed_node_a_retry_supersedes_fires_success_once_its_replacement_settles_d
         .out_has("superseded — retried as build-2");
 }
 
+/// The incident the epoch exists for: a run whose **failure** hook fired, whose
+/// failed node was retried through an accepted edit, and which then completed,
+/// fires its **success** hook — so a run recovered from a failure still runs the
+/// automation only a completion launches.
+#[test]
+fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_complete() {
+    let world = hooked_world("hooks-retry-success");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "recovered";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["nodes"],
+        json!([{"id": "build", "status": "failed", "outcome": "task-failed"}])
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    assert_eq!(
+        fired[1]["payload"],
+        json!({"hook": "success", "command": hook, "reason": null})
+    );
+    let handed = handed(&world, run, 2);
+    assert_eq!(handed.env["hook"], Some("success".to_string()));
+    assert_eq!(handed.stdin["hook"], "success");
+    assert_eq!(handed.stdin["reason"], Value::Null);
+
+    // Both firings are the run's record, and `results` reads them in order.
+    let results = world.run(&["results", run]);
+    results.exited(0).out_has("failure hook fired");
+    assert!(
+        results
+            .stdout
+            .contains("success hook fired — reason: none; ending: succeeded; exit: 0"),
+        "{}",
+        results.stdout
+    );
+}
+
+/// The other half of the epoch: a retry that fails in its turn is a **new**
+/// attempt, so the failure hook fires a second time — naming the replacement, and
+/// not the superseded node, which has left the graph.
+#[test]
+fn a_retry_that_fails_in_its_turn_fires_a_second_failure_hook_for_the_new_attempt() {
+    let world = hooked_world("hooks-retry-failure");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    world.script("build-2.fail", "1");
+    let run = "refailed";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "failure"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    let reasons: Vec<&Value> = fired
+        .iter()
+        .map(|event| &event["payload"]["reason"])
+        .collect();
+    assert_eq!(
+        *reasons[0],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "build", "status": "failed", "outcome": "task-failed"}]})
+    );
+    assert_eq!(
+        *reasons[1],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "build-2", "status": "failed", "outcome": "task-failed"}]}),
+        "the second firing is the new attempt's, not the superseded node's"
+    );
+    let handed = handed(&world, run, 2);
+    assert_eq!(handed.stdin["reason"], *reasons[1]);
+}
+
+/// The property the gate around the marker has always carried, now carried across
+/// an epoch: two drivers that judge one reopened run fire **exactly one** hook
+/// between them.
+///
+/// The second driver arrives while the first one's hook is still running — which
+/// is the window where the run reads as undriven and a second judgement is
+/// genuinely possible — and finds the marker the first appended under this epoch.
+#[test]
+fn two_drivers_judging_one_reopened_run_fire_exactly_one_hook_between_them() {
+    let world = hooked_world("hooks-epoch-race");
+    let hook = hook(&world);
+    world.script("build.fail", "1");
+    let run = "raced";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+
+    // The retry opens the epoch both drivers below judge under.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "build", "node": agent("build-2", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+
+    // The next hook holds until this journey releases it, so the two drivers
+    // really do overlap rather than following one another.
+    std::fs::write(records(&world).join(format!("{run}.hold")), "").expect("the hold is scripted");
+    let mut first = world
+        .cmd(&["adopt", run])
+        .spawn()
+        .expect("the first driver starts");
+    let started = records(&world).join(run).join("2").join("started");
+    world.until("the reopened run's hook to be running", |_| {
+        started.is_file()
+    });
+
+    // The first driver has let go of the ownership lock to run its hook, so this
+    // one takes the run over, judges the same epoch, and finds the marker.
+    world.run(&["adopt", run]).exited(0);
+    assert_eq!(
+        invocations(&world, run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+
+    std::fs::write(records(&world).join(format!("{run}.go")), "go").expect("the hold is released");
+    assert!(
+        first.wait().expect("the first driver ends").success(),
+        "the first driver did not end cleanly"
+    );
+    world.until("the reopened run's hook to finish", |world| {
+        world.events_of(run, "run-hook-finished").len() == 2
+    });
+
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "two drivers fired twice: {fired:?}");
+    assert_eq!(fired[1]["payload"]["hook"], "success");
+}
+
 /// A driver that lets go of a run paused on a decision fires nothing and says
 /// so; the driver that adopts it after the decision fires the hook it reaches.
 #[test]
@@ -742,10 +935,12 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
     );
 }
 
-/// Once a run carries a firing, nothing fires again: not a later adoption, and
-/// not an adoption after a requeue that takes the run on to complete.
+/// Once a run carries a firing, only an accepted edit that makes the run **live
+/// again** lets another fire: a later adoption fires nothing, an accepted note
+/// fires nothing, and the requeue that puts work back into the graph opens the
+/// epoch the completed run's success hook fires under.
 #[test]
-fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
+fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
     let world = hooked_world("hooks-once");
     let hook = hook(&world);
     let mut later = agent("later", &["build"]);
@@ -760,9 +955,37 @@ fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
     .exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
+    // Nothing has been edited, so the adoption reaches the same ending the marker
+    // already covers.
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"]);
 
+    // An accepted command that reopens nothing is not an epoch. The note is
+    // committed — the record says so — and the marker still stands, so the same
+    // ending fires no second hook.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "note", "id": "later", "addressee": "worker",
+                 "text": "read the failure before you pick this up"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the note to be committed", |world| {
+        world.events_of(run, "edit-committed").iter().any(|event| {
+            event["payload"]["operation_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "note-delivered"))
+        })
+    });
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+
+    // The requeue puts a node back on the desired frontier, which is the epoch:
+    // the ending the adoption then reaches is a new one, and it fires.
     world
         .run_with_stdin(
             &["reply", run],
@@ -774,11 +997,20 @@ fn once_a_hook_has_fired_no_later_adoption_fires_either_hook_again() {
         .exited(0)
         .out_has("\"settlement\":\"complete\"");
 
-    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(invocations(&world, run), ["failure", "success"]);
     assert_eq!(
         hook_kinds(&world, run),
-        ["run-hook-fired", "run-hook-finished"]
+        [
+            "run-hook-fired",
+            "run-hook-finished",
+            "run-hook-fired",
+            "run-hook-finished"
+        ]
     );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired[0]["payload"]["hook"], "failure");
+    assert_eq!(fired[1]["payload"]["hook"], "success");
+    assert_eq!(fired[1]["payload"]["reason"], Value::Null);
 }
 
 /// A detached driver judges and fires exactly as an attached one does — and while

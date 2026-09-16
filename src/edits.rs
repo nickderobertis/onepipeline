@@ -362,6 +362,56 @@ impl Operation {
     }
 }
 
+/// Whether committing an operation of this kind makes the run **live again** —
+/// puts work back into the graph that the run has still to execute.
+///
+/// The question a run-end hook's **idempotency epoch** is keyed to, which is why
+/// it is asked of the kind rather than of the operation: what `hooks` reads is an
+/// `edit-committed` record's `operation_kinds`, and a record written by a build
+/// that carries a variant this one does not is still a list of words.
+///
+/// The three that answer `true` are the three that introduce something
+/// dispatchable: a node joining the graph — a `retry`'s replacement among them,
+/// which is also its own `retry-requested` — and a parked node returned to the
+/// desired frontier. Everything else re-shapes, records or annotates what the
+/// ending already counted: a `reparent` and an edge moved change which nodes wait
+/// on which, a park, a settlement from evidence and an amendment move a node's
+/// recorded state or its bar, and a note and a finding touch neither — so none of
+/// them is a run that has started again, and treating one as an epoch would fire a
+/// second hook for the ending that already fired.
+///
+/// Every kind is deliberately one or the other, held by
+/// `every_operation_kind_decides_whether_it_reopens_the_run`.
+pub(crate) fn kind_reopens_the_run(kind: &str) -> bool {
+    REOPENING_OPERATION_KINDS.contains(&kind)
+}
+
+/// The kinds [`kind_reopens_the_run`] answers `true` for.
+const REOPENING_OPERATION_KINDS: &[&str] = &["node-added", "retry-requested", "node-requeued"];
+
+/// The kinds it answers `false` for, named rather than inferred.
+///
+/// Beside the list above so that the two together are every kind the enum carries:
+/// a variant added without a line in one of them fails the test that reconciles
+/// both against [`every_operation_kind`], which is what makes a new operation
+/// **decide** whether it reopens a run rather than inherit `false` in silence.
+#[cfg(test)]
+const KINDS_THAT_DO_NOT_REOPEN_THE_RUN: &[&str] = &[
+    "finding-raised",
+    "completion-requested",
+    "edge-added",
+    "edge-removed",
+    "node-dropped",
+    "reparent",
+    "node-parked",
+    "human-attested",
+    "settled-from-evidence",
+    "landing-from-evidence",
+    "task-amended",
+    "context-added",
+    "note-delivered",
+];
+
 /// Every kind [`Operation`] can be recorded under, in declaration order.
 ///
 /// The list entry 65 of `docs/contract-divergences.md` names, so a variant added
@@ -2151,6 +2201,49 @@ mod tests {
             assert!(
                 variant_of(source, kind),
                 "no variant of `Operation` serializes to '{kind}'"
+            );
+        }
+    }
+
+    /// Every kind is classified by [`kind_reopens_the_run`], and each way once.
+    ///
+    /// The two lists beside that function are its whole answer, so this holds them
+    /// to the enum: a variant added — which
+    /// [`every_operation_kind_is_one_the_enum_carries`] already forces into
+    /// [`every_operation_kind`] — fails here until it is named in one list or the
+    /// other. Without it a new operation would answer "does not reopen the run" by
+    /// default, and a run recovered by that operation would never fire the hook for
+    /// the ending it then reached, which is the defect the epoch exists to fix.
+    #[test]
+    fn every_operation_kind_decides_whether_it_reopens_the_run() {
+        let reopening: BTreeSet<&str> = REOPENING_OPERATION_KINDS.iter().copied().collect();
+        let steady: BTreeSet<&str> = KINDS_THAT_DO_NOT_REOPEN_THE_RUN.iter().copied().collect();
+        assert_eq!(reopening.len(), REOPENING_OPERATION_KINDS.len());
+        assert_eq!(steady.len(), KINDS_THAT_DO_NOT_REOPEN_THE_RUN.len());
+        let classified: BTreeSet<&str> = reopening.union(&steady).copied().collect();
+        assert_eq!(
+            classified.len(),
+            reopening.len() + steady.len(),
+            "a kind is named as both reopening and not: {:?}",
+            reopening.intersection(&steady).collect::<Vec<_>>()
+        );
+
+        let every: BTreeSet<String> = every_operation_kind().into_iter().collect();
+        assert_eq!(
+            classified
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect::<BTreeSet<String>>(),
+            every,
+            "every operation kind decides whether committing it reopens the run"
+        );
+        for kind in &reopening {
+            assert!(kind_reopens_the_run(kind), "{kind} reopens the run");
+        }
+        for kind in &steady {
+            assert!(
+                !kind_reopens_the_run(kind),
+                "{kind} does not reopen the run"
             );
         }
     }

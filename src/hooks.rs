@@ -4,9 +4,14 @@
 //! `docs/contract.md`'s run-end hooks paragraph is the whole rule. What this file
 //! adds is where each half of it lives: [`judge`] is the rule over a folded run,
 //! [`at_let_go`] and [`at_stop`] are the only two moments it is asked, and `fire`
-//! is the once-per-run marker, the spawn, the wait and the record of how the hook
-//! ended. Nothing here writes a node status, a result or a settlement, which is
-//! what keeps a hook from changing any of them.
+//! is the once-per-ending marker, the spawn, the wait and the record of how the
+//! hook ended. Nothing here writes a node status, a result or a settlement, which
+//! is what keeps a hook from changing any of them.
+//!
+//! "Once" is per **ending** rather than per run: an accepted graph edit that makes
+//! the run live again retires the marker, so a run recovered from a failure still
+//! fires the hook for the ending it then reaches. [`fired`] is where that epoch
+//! lives.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -359,7 +364,7 @@ fn withhold(paths: &RunPaths) {
     }
 }
 
-/// Fire one hook, once per run: mark it, run it, and record how it ended.
+/// Fire one hook, once per ending: mark it, run it, and record how it ended.
 fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) {
     let hook = firing.hook();
     // An ending whose hook the record does not name fires nothing, and marks
@@ -398,11 +403,14 @@ fn fire(paths: &RunPaths, record: &LaunchRecord, firing: &Firing, relay: Relay) 
     }
 }
 
-/// Journal `run-hook-fired`, unless the run already carries one.
+/// Journal `run-hook-fired`, unless the run already carries one for this ending.
 ///
 /// The check and the append are one section, under the gate a driver lets go of
 /// the run under: a `stop` and a driver that let go on another host are two
-/// processes that may both judge the run, and exactly one of them fires.
+/// processes that may both judge the run, and exactly one of them fires. Both
+/// read the journal inside that section, so both read the same epoch and the same
+/// marker, which is what makes "exactly one" hold across the edit that reopened
+/// the run as well as across the ending itself.
 fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
     let handover = ledger::Handover::hold(paths)?;
     let marked = if fired(paths) {
@@ -424,11 +432,51 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
     marked
 }
 
-/// Whether the run's journal carries the marker a firing leaves.
+/// Whether the run's journal carries the marker a firing leaves, **for the ending
+/// the run is now at**.
+///
+/// A firing is idempotent within one **epoch**: the run's launch begins the first,
+/// and every accepted graph edit that makes the run live again begins another, so
+/// a marker is answered against the most recent such edit rather than against the
+/// whole journal. That is what lets a run whose failure hook fired be retried and
+/// then fire the hook for the ending its replacement reaches — success, or failure
+/// a second time for the new attempt — while an accepted command that reopened
+/// nothing leaves the marker standing and fires no second hook for one ending.
+///
+/// Read as a fold over the journal in the order it was written rather than as two
+/// searches: what decides the answer is whether the last of the two records came
+/// after the last reopening edit, and a run may be reopened, fire, and be reopened
+/// again any number of times.
 fn fired(paths: &RunPaths) -> bool {
-    journal::read(&paths.journal())
-        .iter()
-        .any(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::RunHookFired))
+    journal::read(&paths.journal()).iter().fold(
+        false,
+        |fired, event| match PipelineKind::from_wire(&event.kind) {
+            Some(PipelineKind::RunHookFired) => true,
+            Some(PipelineKind::EditCommitted) if reopened_the_run(event) => false,
+            _ => fired,
+        },
+    )
+}
+
+/// Whether one accepted edit made the run live again, and so began a new epoch.
+///
+/// Answered off the record's own `operation_kinds` — the list `edit-committed`
+/// carries for exactly this kind of question — so an edit recorded by a build
+/// whose operations this one cannot construct is still read by the words it wrote.
+/// A record carrying no such list reopened nothing this build can establish, and
+/// the marker stands: a hook fired twice for one ending is a worse answer than a
+/// hook a reader has to fire by hand.
+fn reopened_the_run(event: &crate::event::Envelope) -> bool {
+    event
+        .payload
+        .get("operation_kinds")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| {
+            kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(crate::edits::kind_reopens_the_run)
+        })
 }
 
 /// Where a hook's output is kept: `hooks/<hook>.log` under the run's own
