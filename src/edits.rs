@@ -370,10 +370,12 @@ impl Operation {
 /// `edit-committed` record's `operation_kinds`, and a record written by a build
 /// that carries a variant this one does not is still a list of words.
 ///
-/// The three that answer `true` are the three that introduce something
-/// dispatchable: a node joining the graph — a `retry`'s replacement among them,
-/// which is also its own `retry-requested` — and a parked node returned to the
-/// desired frontier. Everything else re-shapes, records or annotates what the
+/// The two that answer `true` are the two that introduce something dispatchable:
+/// a node joining the graph — a `retry`'s replacement among them — and a parked
+/// node returned to the desired frontier. A `retry`'s own `retry-requested` is
+/// **not** one of them: it records that a node was superseded, and the
+/// replacement's `node-added` beside it in the same commit is what the run has
+/// left to execute. Everything else re-shapes, records or annotates what the
 /// ending already counted: a `reparent` and an edge moved change which nodes wait
 /// on which, a park, a settlement from evidence and an amendment move a node's
 /// recorded state or its bar, and a note and a finding touch neither — so none of
@@ -386,8 +388,15 @@ pub(crate) fn kind_reopens_the_run(kind: &str) -> bool {
     REOPENING_OPERATION_KINDS.contains(&kind)
 }
 
-/// The kinds [`kind_reopens_the_run`] answers `true` for.
-const REOPENING_OPERATION_KINDS: &[&str] = &["node-added", "retry-requested", "node-requeued"];
+/// The kinds the contract's own run-end hooks block names as reopening a run.
+///
+/// Words rather than a match over [`Operation`], because the caller has words:
+/// `hooks` reads them off an `edit-committed` record. That makes this a second
+/// copy of the set `docs/contract.md` states, so it is reconciled against that
+/// document by `the_contracts_reopening_kinds_are_the_ones_this_build_reopens_on`
+/// — the epoch is a promise to whoever wires a hook, and a promise kept in two
+/// places is one that rots in one of them.
+const REOPENING_OPERATION_KINDS: &[&str] = &["node-added", "node-requeued"];
 
 /// The kinds it answers `false` for, named rather than inferred.
 ///
@@ -399,6 +408,7 @@ const REOPENING_OPERATION_KINDS: &[&str] = &["node-added", "retry-requested", "n
 const KINDS_THAT_DO_NOT_REOPEN_THE_RUN: &[&str] = &[
     "finding-raised",
     "completion-requested",
+    "retry-requested",
     "edge-added",
     "edge-removed",
     "node-dropped",
@@ -2244,6 +2254,46 @@ mod tests {
             assert!(
                 !kind_reopens_the_run(kind),
                 "{kind} does not reopen the run"
+            );
+        }
+    }
+
+    /// The contract's own reopening set is this build's, word for word.
+    ///
+    /// The drift gate over the second copy [`REOPENING_OPERATION_KINDS`] is. The
+    /// epoch is a promise to whoever wires a run-end hook — which endings fire one
+    /// — so a contract naming a kind this build does not reopen on would promise a
+    /// hook that never fires, and a build reopening on a kind the contract does not
+    /// name would fire one nobody was told to expect. Read out of the run-end hooks
+    /// block, which is where `tests/contract.rs` and `tests/e2e/run_end_hooks.rs`
+    /// read the rest of that surface.
+    #[test]
+    fn the_contracts_reopening_kinds_are_the_ones_this_build_reopens_on() {
+        let contract = include_str!("../docs/contract.md");
+        let block = contract
+            .split("```json")
+            .skip(1)
+            .filter_map(|rest| rest.split("```").next())
+            .find(|block| block.contains("\"run_end_hooks\""))
+            .expect("the contract carries the run-end hooks block");
+        let stated: Vec<String> = serde_json::from_value(
+            serde_json::from_str::<Value>(block).expect("the block is JSON")["run_end_hooks"]
+                ["reopening_operation_kinds"]
+                .clone(),
+        )
+        .expect("the block names the operation kinds that reopen a run");
+        assert_eq!(
+            stated,
+            REOPENING_OPERATION_KINDS
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect::<Vec<String>>(),
+            "the contract's reopening operation kinds are not the ones this build reopens on"
+        );
+        for kind in &stated {
+            assert!(
+                every_operation_kind().contains(kind),
+                "the contract names `{kind}`, which no operation of this build records"
             );
         }
     }

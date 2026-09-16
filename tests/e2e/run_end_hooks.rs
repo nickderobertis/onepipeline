@@ -767,6 +767,57 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_comp
     );
 }
 
+/// An ordinary `add` is an epoch in its own right, without a retry anywhere: a run
+/// that completed and fired its success hook has work again the moment a node
+/// joins its graph, and the ending that node takes it to fires the hook for that
+/// ending.
+///
+/// Its own journey because a `retry` records a `node-added` **and** a
+/// `retry-requested` in one commit, so no retry can say which of the two the epoch
+/// turned on. Here there is only the one.
+#[test]
+fn a_node_added_to_a_run_that_already_fired_reopens_it_and_the_next_ending_fires() {
+    let world = hooked_world("hooks-added");
+    let hook = hook(&world);
+    let run = "extended";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"complete\"");
+    assert_eq!(invocations(&world, run), ["success"]);
+
+    // A node the planner adds after the run completed. Nothing about it is a
+    // retry: the graph keeps `build` exactly as it settled.
+    world.script("extra.fail", "1");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("extra", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+
+    assert_eq!(
+        invocations(&world, run),
+        ["success", "failure"],
+        "{}",
+        world.dump()
+    );
+    let fired = world.events_of(run, "run-hook-fired");
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    assert_eq!(
+        fired[1]["payload"]["reason"],
+        json!({"kind": "nodes",
+               "nodes": [{"id": "extra", "status": "failed", "outcome": "task-failed"}]}),
+        "the added node is what the second ending is about"
+    );
+}
+
 /// The other half of the epoch: a retry that fails in its turn is a **new**
 /// attempt, so the failure hook fires a second time — naming the replacement, and
 /// not the superseded node, which has left the graph.

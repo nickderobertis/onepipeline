@@ -2960,7 +2960,9 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
     for promise in [
         "six hundred seconds when unnamed, zero refused",
         "has not ended and fires neither",
-        "a run fires at most one hook, once",
+        "a run fires at most one hook per ending",
+        "begins a new ending, so a run recovered from a failure still fires the hook it then \
+         reaches",
         "a hook never changes how the run settled",
     ] {
         assert!(

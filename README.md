@@ -471,8 +471,10 @@ things as `success_hook` and `failure_hook`, and the flag wins; a blank value na
 none. A run **paused** on a decision has not ended and fires neither — the driver
 records `run-hook-withheld` and says so on stderr, and the driver that adopts the
 run once the decision is answered fires the hook the run then reaches — and a run
-fires at most one hook, once, whichever driver, `adopt` or `stop` looks next. A
-hook runs in the launch directory with `ONEPIPELINE_HOOK`, `ONEPIPELINE_RUN_ID`,
+fires at most one hook per ending, whichever driver, `adopt` or `stop` looks next.
+An accepted edit that makes the run live again — a `retry` or a `requeue`, and no
+other kind of command — begins a new ending, so a run recovered from a failure
+still fires the hook it then reaches. A hook runs in the launch directory with `ONEPIPELINE_HOOK`, `ONEPIPELINE_RUN_ID`,
 `ONEPIPELINE_RUN_ROOT` and the run owner's `ONEPIPELINE_LAUNCHER` and
 `ONEPIPELINE_LAUNCHER_SESSION` in its environment and one JSON document on its
 stdin; it is awaited for up to `--hook-timeout SECONDS` (or `hook_timeout`, six
