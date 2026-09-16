@@ -1145,6 +1145,8 @@ impl std::fmt::Display for ItemKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn version(printed: &str) -> Option<Version> {
@@ -1308,6 +1310,104 @@ mod tests {
             assert!(
                 !install.contains("--git") && !install.contains("--rev"),
                 "`_ensure-onetaskgraph` installs an unreleased onetaskgraph: {install}"
+            );
+        }
+    }
+
+    /// Every `onetaskgraph` package a lock carries, as the name and version each
+    /// one resolved at.
+    ///
+    /// A set of pairs rather than a map from name to version, because a lock may
+    /// carry one crate twice and that is the state worth catching: keyed by name
+    /// alone, the second copy would overwrite the first and the split would read as
+    /// a single clean resolution.
+    fn onetaskgraph_packages(lock: &toml::Value) -> BTreeSet<(&str, &str)> {
+        lock["package"]
+            .as_array()
+            .expect("a lock is a list of packages")
+            .iter()
+            .filter_map(|package| {
+                let name = package.get("name")?.as_str()?;
+                name.starts_with("onetaskgraph-")
+                    .then(|| Some((name, package.get("version")?.as_str()?)))?
+            })
+            .collect()
+    }
+
+    /// A lock carrying one of these crates twice reports both copies, so the
+    /// version check above sees the one that is wrong instead of only the one that
+    /// happened to be listed last.
+    #[test]
+    fn a_lock_that_resolved_one_onetaskgraph_crate_twice_reports_both_copies() {
+        let lock: toml::Value = toml::from_str(
+            "[[package]]\nname = \"onetaskgraph-core\"\nversion = \"0.2.30\"\n\n\
+             [[package]]\nname = \"onetaskgraph-core\"\nversion = \"0.2.32\"\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("the fixture lock is TOML");
+        assert_eq!(
+            onetaskgraph_packages(&lock),
+            BTreeSet::from([
+                ("onetaskgraph-core", "0.2.30"),
+                ("onetaskgraph-core", "0.2.32"),
+            ]),
+            "a crate resolved twice was collapsed, or a crate of another family was taken"
+        );
+    }
+
+    /// Every `onetaskgraph` crate this build **links** resolves to the release the
+    /// checks **install**, so the plugin `label-strict-source` hosts in process and
+    /// the binary every plan is read through are one store rather than two.
+    ///
+    /// The lock rather than the manifest, because four of the six are transitive:
+    /// `[workspace.dependencies]` binds `onetaskgraph-core` and
+    /// `onetaskgraph-local-md` alone, and the family is lock-step across patch
+    /// releases despite the carets in its own manifests — 0.2.30's `local-md` does
+    /// not compile against 0.2.32's plugin API, so a lock that split the family
+    /// would not build and one that moved it whole would build against a release
+    /// nothing here installs.
+    ///
+    /// The two direct crates are asserted present as well as pinned: a link quietly
+    /// dropped would leave this test passing over an empty set, which is the one
+    /// answer it must not give.
+    #[test]
+    fn every_onetaskgraph_crate_in_the_lock_is_the_release_the_checks_install() {
+        let justfile = include_str!("../justfile");
+        let declared = justfile
+            .lines()
+            .find_map(|line| line.strip_prefix("onetaskgraph-version := \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the justfile names the onetaskgraph release its checks install");
+
+        let lock: toml::Value =
+            toml::from_str(include_str!("../Cargo.lock")).expect("the lock is TOML");
+        let linked = onetaskgraph_packages(&lock);
+
+        for crate_name in ["onetaskgraph-core", "onetaskgraph-local-md"] {
+            assert!(
+                linked.iter().any(|(name, _)| *name == crate_name),
+                "the lock no longer carries {crate_name}, which `crates/testfakes` links \
+                 to host the real local-md plugin in process"
+            );
+        }
+        let elsewhere: BTreeSet<(&str, &str)> = linked
+            .iter()
+            .copied()
+            .filter(|(_, version)| *version != declared)
+            .collect();
+        assert!(
+            elsewhere.is_empty(),
+            "the checks install onetaskgraph {declared} and the lock links {elsewhere:?}"
+        );
+
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../Cargo.toml")).expect("this manifest is TOML");
+        let required = &manifest["workspace"]["dependencies"];
+        for crate_name in ["onetaskgraph-core", "onetaskgraph-local-md"] {
+            assert_eq!(
+                required[crate_name].as_str(),
+                Some(format!("={declared}").as_str()),
+                "{crate_name} is not required at exactly the release the checks install"
             );
         }
     }
