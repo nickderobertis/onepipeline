@@ -8,10 +8,10 @@
 //! hook ended. Nothing here writes a node status, a result or a settlement, which
 //! is what keeps a hook from changing any of them.
 //!
-//! "Once" is per **ending** rather than per run: an accepted graph edit that makes
-//! the run live again retires the marker, so a run recovered from a failure still
-//! fires the hook for the ending it then reaches. [`fired`] is where that epoch
-//! lives.
+//! "Once" is per **ending** rather than per run: an accepted edit that leaves the
+//! run able to carry work out again retires the marker, so a run recovered from a
+//! failure still fires the hook for the ending it then reaches. [`fired`] is where
+//! that epoch lives, and [`live`] is what "again" is measured by.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -436,47 +436,81 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// the run is now at**.
 ///
 /// A firing is idempotent within one **epoch**: the run's launch begins the first,
-/// and every accepted graph edit that makes the run live again begins another, so
-/// a marker is answered against the most recent such edit rather than against the
+/// and every accepted edit that makes the run **live again** begins another, so a
+/// marker is answered against the most recent such edit rather than against the
 /// whole journal. That is what lets a run whose failure hook fired be retried and
 /// then fire the hook for the ending its replacement reaches — success, or failure
-/// a second time for the new attempt — while an accepted command that reopened
-/// nothing leaves the marker standing and fires no second hook for one ending.
+/// a second time for the new attempt.
+///
+/// **An edit is judged by what it did, never by which operation it carried.** The
+/// question is asked of the graph the edit leaves behind, folded here exactly as
+/// every other reader folds it: an `add` whose node is skipped behind the very
+/// failure that ended the run has reopened nothing and must not let a second hook
+/// fire for that one ending, while a `reparent` or a `drop` that detaches a
+/// blocked node from what was holding it carries no node at all and *has*. A
+/// classification by operation kind gets both of those backwards, which is why
+/// there is no list of kinds here to get out of step with the graph.
+///
+/// The edit is still required: liveness alone would make an epoch of a cross-DAG
+/// upstream arriving, which nobody edited and which the rule this implements does
+/// not reach.
 ///
 /// Read as a fold over the journal in the order it was written rather than as two
-/// searches: what decides the answer is whether the last of the two records came
-/// after the last reopening edit, and a run may be reopened, fire, and be reopened
-/// again any number of times.
+/// searches: what decides the answer is whether the marker came after the last
+/// edit that left the run live, and a run may be reopened, fire, and be reopened
+/// again any number of times. The fold is the cost of asking the graph rather than
+/// the record — one pass of what [`RunView::open`] does — and the graph is only
+/// derived for an edit that could retire a marker there is.
 fn fired(paths: &RunPaths) -> bool {
-    journal::read(&paths.journal()).iter().fold(
-        false,
-        |fired, event| match PipelineKind::from_wire(&event.kind) {
-            Some(PipelineKind::RunHookFired) => true,
-            Some(PipelineKind::EditCommitted) if reopened_the_run(event) => false,
-            _ => fired,
-        },
-    )
+    let mut state = RunState {
+        strict: true,
+        ..RunState::default()
+    };
+    let mut fired = false;
+    for event in &journal::read(&paths.journal()) {
+        crate::projection::fold_one(&mut state, event);
+        match PipelineKind::from_wire(&event.kind) {
+            Some(PipelineKind::RunHookFired) => fired = true,
+            Some(PipelineKind::EditCommitted | PipelineKind::CommandAccepted)
+                if fired && live(&state) =>
+            {
+                fired = false;
+            }
+            _ => {}
+        }
+    }
+    fired
 }
 
-/// Whether one accepted edit made the run live again, and so began a new epoch.
+/// Whether the run has work it can still carry out, on the graph as it stands.
 ///
-/// Answered off the record's own `operation_kinds` — the list `edit-committed`
-/// carries for exactly this kind of question — so an edit recorded by a build
-/// whose operations this one cannot construct is still read by the words it wrote.
-/// A record carrying no such list reopened nothing this build can establish, and
-/// the marker stands: a hook fired twice for one ending is a worse answer than a
-/// hook a reader has to fire by hand.
-fn reopened_the_run(event: &crate::event::Envelope) -> bool {
-    event
-        .payload
-        .get("operation_kinds")
-        .and_then(Value::as_array)
-        .is_some_and(|kinds| {
-            kinds
-                .iter()
-                .filter_map(Value::as_str)
-                .any(crate::edits::kind_reopens_the_run)
-        })
+/// "Live again" made exact. The first two are work that can move without anybody
+/// deciding anything; the second two are a run that has not **ended** — a ready
+/// human action pauses the run, and a `complete-but-draft` node is waiting on a
+/// release that is still coming. Everything else has settled or is held behind
+/// something that has, and will not advance until a further edit moves it.
+///
+/// `pending` answers `false` and is not an oversight: a node is `pending` only
+/// while a dependency of it is pending, ready or running, so whatever ancestor
+/// carries the liveness has already answered `true`. A `pending` node with no such
+/// ancestor cannot be derived — a dependency that is parked, waiting or failed
+/// makes its dependents `blocked` or `skipped` instead.
+///
+/// Exhaustive on purpose: a status added later has to decide this rather than
+/// inherit an answer, because inheriting `false` would silently stop a run that
+/// reaches it from ever firing again.
+fn live(state: &RunState) -> bool {
+    state.statuses().values().any(|status| match status {
+        NodeStatus::Ready | NodeStatus::Running => true,
+        NodeStatus::Waiting | NodeStatus::CompleteDraft => true,
+        NodeStatus::Pending
+        | NodeStatus::Blocked
+        | NodeStatus::Parked
+        | NodeStatus::Cancelled
+        | NodeStatus::Done
+        | NodeStatus::Failed
+        | NodeStatus::Skipped => false,
+    })
 }
 
 /// Where a hook's output is kept: `hooks/<hook>.log` under the run's own

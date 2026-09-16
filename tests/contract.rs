@@ -2963,6 +2963,7 @@ fn the_run_end_hooks_surface_is_what_the_contract_names() {
         "a run fires at most one hook per ending",
         "begins a new ending, so a run recovered from a failure still fires the hook it then \
          reaches",
+        "judged by the graph the edit leaves, not by which command was sent",
         "a hook never changes how the run settled",
     ] {
         assert!(

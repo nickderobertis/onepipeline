@@ -767,58 +767,139 @@ fn a_run_whose_failure_hook_fired_fires_success_once_a_retry_takes_it_on_to_comp
     );
 }
 
-/// An ordinary `add` is an epoch in its own right, without a retry anywhere: a run
-/// that completed and fired its success hook has work again the moment a node
-/// joins its graph, and the ending that node takes it to fires the hook for that
-/// ending.
+/// An accepted edit that leaves the run **unable to advance** is not an epoch,
+/// however much graph it moved: a node added behind the very failure that ended
+/// the run is skipped the moment it joins, so the marker stands and the same
+/// ending fires no second hook.
 ///
-/// Its own journey because a `retry` records a `node-added` **and** a
-/// `retry-requested` in one commit, so no retry can say which of the two the epoch
-/// turned on. Here there is only the one.
+/// The case a classification by operation kind gets wrong — this `add` records the
+/// same `node-added` a `retry`'s replacement does, and must not be read the same
+/// way.
 #[test]
-fn a_node_added_to_a_run_that_already_fired_reopens_it_and_the_next_ending_fires() {
-    let world = hooked_world("hooks-added");
+fn an_added_node_the_failure_skips_reopens_nothing_and_leaves_the_marker_standing() {
+    let world = hooked_world("hooks-added-blocked");
     let hook = hook(&world);
-    let run = "extended";
+    world.script("build.fail", "1");
+    let run = "stillblocked";
     attached(
         &world,
         run,
         vec![agent("build", &[])],
         &["--success-hook", &hook, "--failure-hook", &hook],
     )
-    .exited(0)
-    .out_has("\"settlement\":\"complete\"");
-    assert_eq!(invocations(&world, run), ["success"]);
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
 
-    // A node the planner adds after the run completed. Nothing about it is a
-    // retry: the graph keeps `build` exactly as it settled.
-    world.script("extra.fail", "1");
     world
         .run_with_stdin(
             &["reply", run],
-            &json!({"version": 2, "commands": [{"op": "add", "node": agent("extra", &[])}]})
-                .to_string(),
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("extra", &["build"])}
+            ]})
+            .to_string(),
         )
         .exited(0);
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
 
+    // The node really did join the graph, and really cannot run.
+    let result = world.run_json(run, "result.json");
+    let status = |id: &str| {
+        result["nodes"]
+            .as_array()
+            .expect("the result lists nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {result}"))["status"]
+            .clone()
+    };
+    assert_eq!(status("build"), json!("failed"));
+    assert_eq!(
+        status("extra"),
+        json!("skipped"),
+        "the added node can run, so this journey proves nothing"
+    );
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+}
+
+/// An accepted edit that **frees work the graph already held** is an epoch even
+/// though it adds no node at all: a `drop` that detaches a blocked node from the
+/// parked node holding it makes that node ready, the run completes, and the
+/// success hook fires for the ending it then reaches.
+///
+/// The other case a classification by operation kind gets wrong — nothing here
+/// records a `node-added` or a `node-requeued`, and the run is live again.
+#[test]
+fn an_edit_that_frees_blocked_work_reopens_the_run_though_it_adds_no_node() {
+    let world = hooked_world("hooks-freed");
+    let hook = hook(&world);
+    let mut gate = agent("gate", &[]);
+    gate["parked"] = json!(true);
+    let run = "freed";
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[]), gate, agent("after", &["gate"])],
+        &["--success-hook", &hook, "--failure-hook", &hook],
+    )
+    .exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"]);
+    assert_eq!(
+        world.events_of(run, "run-hook-fired")[0]["payload"]["reason"]["kind"],
+        "unfinished"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "drop", "id": "gate", "dependents": "detach"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let kinds = |world: &World| {
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .flat_map(|event| {
+                event["payload"]["operation_kinds"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|kind| kind.as_str().map(str::to_string))
+            .collect::<Vec<String>>()
+    };
+    world.until("the drop to be committed", |world| {
+        kinds(world).iter().any(|kind| kind == "node-dropped")
+    });
+    let committed = kinds(&world);
+    assert!(
+        !committed
+            .iter()
+            .any(|kind| kind == "node-added" || kind == "node-requeued"),
+        "this edit added or requeued a node, so it proves nothing about an edit that does \
+         neither: {committed:?}"
+    );
+
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
     assert_eq!(
         invocations(&world, run),
-        ["success", "failure"],
+        ["failure", "success"],
         "{}",
         world.dump()
     );
     let fired = world.events_of(run, "run-hook-fired");
     assert_eq!(fired.len(), 2, "{fired:?}");
-    assert_eq!(
-        fired[1]["payload"]["reason"],
-        json!({"kind": "nodes",
-               "nodes": [{"id": "extra", "status": "failed", "outcome": "task-failed"}]}),
-        "the added node is what the second ending is about"
-    );
+    assert_eq!(fired[1]["payload"]["reason"], Value::Null);
 }
 
-/// The other half of the epoch: a retry that fails in its turn is a **new**
+/// The other half of the epoch: a retry that fails in its turn is a **new**/// The other half of the epoch: a retry that fails in its turn is a **new**
 /// attempt, so the failure hook fires a second time — naming the replacement, and
 /// not the superseded node, which has left the graph.
 #[test]
