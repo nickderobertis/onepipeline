@@ -1180,9 +1180,13 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
 }
 
 /// Once a run carries a firing, only an accepted edit that makes the run **live
-/// again** lets another fire: a later adoption fires nothing, an accepted note
-/// fires nothing, and the requeue that puts work back into the graph opens the
-/// epoch the completed run's success hook fires under.
+/// again** lets another fire: a later adoption fires nothing, an accepted note and
+/// an accepted finding fire nothing, and the requeue that puts work back into the
+/// graph opens the epoch the completed run's success hook fires under.
+///
+/// The note and the finding are the two shapes an inert command takes in the
+/// record — one `edit-committed`, one `command-accepted` — so between them they
+/// cover both of the ways a command that reopened nothing can reach this.
 #[test]
 fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
     let world = hooked_world("hooks-once");
@@ -1221,6 +1225,24 @@ fn once_a_hook_has_fired_only_an_edit_that_reopens_the_run_lets_another_fire() {
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind == "note-delivered"))
         })
+    });
+    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 1);
+
+    // A finding commits nothing a reader folds, so it is recorded as
+    // `command-accepted` rather than `edit-committed` and cannot be an epoch either.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "finding", "message": "the parked node is the whole of what is left"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the finding to be accepted", |world| {
+        !world.events_of(run, "command-accepted").is_empty()
     });
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());

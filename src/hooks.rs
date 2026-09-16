@@ -441,6 +441,12 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 /// approximate the graph, and would get both of the contract's own examples
 /// backwards.
 ///
+/// `command-accepted` is deliberately not asked. It is the record for a command that
+/// committed **nothing a reader folds** — a finding, a completion request — so it
+/// cannot have made the run live; reading it as an epoch would only let an
+/// unrelated report turn liveness that arrived some other way into a second hook
+/// for an ending nobody edited.
+///
 /// One fold of what [`RunView::open`] already does, and the statuses are derived
 /// only for an edit arriving while a marker stands, so a run that has never fired
 /// pays for none of it.
@@ -454,11 +460,7 @@ fn fired(paths: &RunPaths) -> bool {
         crate::projection::fold_one(&mut state, event);
         match PipelineKind::from_wire(&event.kind) {
             Some(PipelineKind::RunHookFired) => fired = true,
-            Some(PipelineKind::EditCommitted | PipelineKind::CommandAccepted)
-                if fired && live(&state) =>
-            {
-                fired = false;
-            }
+            Some(PipelineKind::EditCommitted) if fired && live(&state) => fired = false,
             _ => {}
         }
     }
