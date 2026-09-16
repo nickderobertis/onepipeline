@@ -774,9 +774,11 @@ fn a_store_answer_carrying_a_field_at_the_wrong_type_is_still_refused_by_name() 
 ///
 /// Nothing offline can reach GitHub, so the destination here is a **real** `onetaskgraph`
 /// source carrying that rule: `label-strict-source` speaks the product's own stdio plugin
-/// protocol, serves every read and write out of the real `local-md` plugin hosted in the
-/// shipped `onetaskgraph-source`, and adds the refusal. The run drives it as its plan's
-/// own project, so the projection this build produces is the one that destination judges.
+/// protocol, serves every read and write out of the real `local-md` plugin — hosted in its
+/// own process, by the `onetaskgraph-core` reference host it links — and adds the refusal.
+/// The run drives it as its plan's own project, so the projection this build produces is
+/// the one that destination judges — and the only executable this chain resolves is the
+/// one cargo built for this suite.
 #[test]
 fn a_label_strict_destination_accepts_the_settlement_projection() {
     let world = World::new("store-writeback-label-strict");
@@ -789,10 +791,6 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
         .with_env(
             "ONETASKGRAPH_SOURCES__STRICT__CONFIG__COMMAND",
             &double("label-strict-source").to_string_lossy(),
-        )
-        .with_env(
-            "ONETASKGRAPH_SOURCES__STRICT__CONFIG__SETTINGS__HOST",
-            &crate::harness::onetaskgraph_source_binary().to_string_lossy(),
         )
         .with_env(
             "ONETASKGRAPH_SOURCES__STRICT__CONFIG__SETTINGS__ROOT",

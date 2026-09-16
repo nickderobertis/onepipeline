@@ -118,6 +118,22 @@ jobs:
   # the ratio 20 and 30 held back when the step was 8m00s and the job 12m38s.
   # macOS is unmoved by them and far inside: 9m24s-12m06s step, 11m54s-15m48s job.
   #
+  # And that is where 45 now is, so it is re-sized here by that same rule rather
+  # than raised to clear one branch. On 2026-09-16 the `main` leg at 4c9ea07 (run
+  # 35049239328) was green in 43m33s of its 45m step — 2m47s building, 40m46s
+  # running 1538 tests — which is 97% of the bound; the day before it was 35m00s
+  # at 65797ad and 36m56s at 2b328bb. A bound a green `main` sits 1m27s under is
+  # bounding the work again rather than the hang, and the e2e suite still runs
+  # four at a time on four cores, so the next handful of tests breaches it with
+  # nothing wrong — run 35050500006 was cut at test 1394 of 1541, still passing,
+  # having spent 1m50s more than `main` on a build that links one engine more.
+  #
+  # 90 and 105 are over twice the worst of those green legs — 43m33s step, 49m12s
+  # job — which is the ratio 45 and 60 were themselves taken at, and they hold the
+  # same 15-minute gap between step and job. The step still bounds a hang at a
+  # quarter of GitHub's 360-minute default. macOS is unmoved by these too and far
+  # inside: over the same three runs 25m24s-31m04s step, 28m45s-34m06s job.
+  #
   # Splitting the suite across more jobs is the only thing that would make the leg
   # itself shorter, and it is not available: branch protection requires `cross
   # (macos-latest)` and `cross (windows-latest)` by rendered name, so a shard axis
@@ -131,7 +147,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 105
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -149,7 +165,7 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: just check-cross
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no

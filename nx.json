@@ -30,6 +30,9 @@
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/scripts/record-channel-answers.sh",
+      "{workspaceRoot}/scripts/linked-engines.sh",
+      "{workspaceRoot}/scripts/smoke-published.sh",
       "sharedGlobals"
     ],
     "noteJourneySource": [
