@@ -4136,18 +4136,33 @@ fn a_stated_landing_reads_landed_in_every_surface(name: &str, spelling: Spelling
             change_url_of(&world, &run, "landed")
         }
     };
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
-                "op": "settle", "id": "broken", "outcome": "done",
-                "evidence": "the change carrying this work merged; the dispatch died first",
-                "landing": landing,
-            }]})
-            .to_string(),
-        )
-        .exited(0)
-        .out_has("\"applied\"");
+    // For the change request, what this host's release document says is made
+    // unreadable first: the settle still applies, and says the release question
+    // could not be asked rather than falling silent.
+    let unreadable = matches!(spelling, Spelling::ChangeRequest);
+    if unreadable {
+        world.releases("version: 1\nrepositories: [this is not a document\n");
+    }
+    let settled = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
+            "op": "settle", "id": "broken", "outcome": "done",
+            "evidence": "the change carrying this work merged; the dispatch died first",
+            "landing": landing,
+        }]})
+        .to_string(),
+    );
+    settled.exited(0).out_has("\"applied\"");
+    if unreadable {
+        settled.err_has(&format!(
+            "node 'broken' was settled at {landing}, and what its repository"
+        ));
+        settled.err_has(
+            "could not be read, so whether that landing has a release baseline was not asked",
+        );
+    } else {
+        settled.err_lacks("release baseline");
+    }
 
     // `results`: landed, on the stated tier, at the stated reference — and no
     // verdict read off the superseded branch beside it.
@@ -4302,6 +4317,29 @@ fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseSt
     serde_json::from_slice(&output.stdout).ok()
 }
 
+/// Run one pasted `onevcs …` line through `sh`, the way a person pasting it does,
+/// with this world's `onevcs` standing in for the one on their `PATH`.
+fn paste_into_a_shell(world: &World, line: &str) {
+    let rest = line
+        .strip_prefix("onevcs ")
+        .unwrap_or_else(|| panic!("not an onevcs command: {line}"));
+    let binary = crate::harness::onevcs_binary();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("'{}' {rest}", binary.display()))
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("sh runs");
+    assert!(
+        output.status.success(),
+        "the pasted `{line}` failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// The release a held node was released by, as the run reported its arrival.
 fn arrived_version(world: &World, run: &str, node: &str) -> Value {
     world
@@ -4335,6 +4373,28 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
             url.clone()
         }
     };
+    // A node nothing outside its own repository waits on is still told about the
+    // repository's default target: `landed`'s only dependent is `broken`, in the
+    // same repository, so no wait in this run names a target — and a consumer added
+    // later, or in another run, waits on that default unless it says otherwise.
+    if let Spelling::ChangeRequest = spelling {
+        let command = json!({
+            "op": "settle", "id": "landed", "outcome": "done",
+            "evidence": "its change request merged", "landing": url,
+        });
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+                        "commands": [command]})
+                .to_string(),
+            )
+            .exited(0)
+            .err_has(&format!(
+                "node 'landed' was settled at the landing {url}, and that landing has no \
+                 release baseline for the release target 'crate'"
+            ));
+    }
 
     let settled = settle_broken(&world, &run, &landing, json!({}));
     settled.exited(0).out_has("\"applied\"");
@@ -4366,9 +4426,11 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
         .find(|line| line.starts_with("onevcs release acknowledge "))
         .unwrap_or_else(|| panic!("the reply printed no command to paste:\n{}", settled.stderr));
     let expected = match placeholder {
-        None => format!("onevcs release acknowledge {landing} --target crate --version <VERSION>"),
+        None => {
+            format!("onevcs release acknowledge '{landing}' --target crate --version <VERSION>")
+        }
         Some(placeholder) => {
-            format!("onevcs release acknowledge {placeholder} --target crate --version <VERSION>")
+            format!("onevcs release acknowledge '{placeholder}' --target crate --version <VERSION>")
         }
     };
     assert_eq!(
@@ -4407,15 +4469,12 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
     };
     assert_eq!(
         pasted,
-        format!("onevcs release acknowledge {url} --target crate --version <VERSION>")
+        format!("onevcs release acknowledge '{url}' --target crate --version <VERSION>")
     );
 
-    // A person verifies the version and pastes the command, filling in only what
-    // the line left for them.
-    let command = pasted.replace("<VERSION>", "0.2.0");
-    let words: Vec<&str> = command.split_whitespace().collect();
-    assert_eq!(&words[..2], ["onevcs", "release"]);
-    onevcs_release(&world, &words[2..]);
+    // A person verifies the version and pastes the command into a shell, filling
+    // in only what the line left for them — so the quoting is the shell's to read.
+    paste_into_a_shell(&world, &pasted.replace("<VERSION>", "0.2.0"));
     world.until("the acknowledgement to start the held node", |world| {
         dispatched(world, &run, "consumer")
     });

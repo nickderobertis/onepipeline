@@ -3413,14 +3413,21 @@ acknowledgement.
 
 And a settle naming a landing with **no** release is answered in the same reply —
 on standard error, beside a receipt that stays byte for byte what it was — once
-the settle has applied. For every automated target a node waiting on this one
-would wait on (each dependent's `consumes` entry for it, or the repository's
-default), `onevcs` is asked what the release watch asks it. Where it answers that
-the landing has no release baseline, the line says so, and carries the command a
-person pastes once they have verified the version — the reference and the target
-filled in from what the engine knows:
+the settle has applied. The targets asked about are the release watch's own
+resolution rather than a second one: each dependent in the run is resolved the way
+the watch resolves the dependency it waits on — its `consumes` entry, or the
+repository's default, and nothing for a dependent in the same repository — and
+where no dependent awaits a release, the node's repository is resolved with no
+target named, which is its default. For each, `onevcs` is asked what the release
+watch asks it. Where it answers that the landing has no release baseline, the line
+says so, and carries the command a person pastes once they have verified the
+version — the reference, single-quoted for the shell, and the target filled in
+from what the engine knows:
 
-    onevcs release acknowledge <landing> --target <target> --version <VERSION>
+    onevcs release acknowledge '<landing>' --target <target> --version <VERSION>
+
+Where what the repository releases cannot be read at all, the line says the
+question was not asked, and names `onevcs release targets` as what says why.
 
 Where `onevcs` cannot resolve the stated reference to landed work at all — a
 squash-merge commit that no branch carries is one — the line says that no release

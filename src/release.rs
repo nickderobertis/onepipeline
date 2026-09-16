@@ -1214,11 +1214,7 @@ impl Watch {
             self.dependencies.insert(node.id.clone(), re_read.clone());
             return re_read;
         }
-        let mine = node
-            .repo
-            .as_deref()
-            .and_then(|repo| self.repositories.of(repo))
-            .map(|releases| releases.identity.clone());
+        let mine = identity_of(&mut self.repositories, node);
         let mut resolved: Vec<Dependency> = Vec::new();
         for dep in &node.deps {
             match self.dependency(paths, state, node, dep, mine.as_deref()) {
@@ -1272,22 +1268,10 @@ impl Watch {
                 target,
             );
         }
-        let Some(upstream) = state.graph.get(dep) else {
-            return Resolution::Unreadable;
+        let repo = match across_repositories(&mut self.repositories, state, dep, mine) {
+            Ok(repo) => repo,
+            Err(ended) => return ended.into(),
         };
-        let Some(repo) = upstream.repo.clone() else {
-            // A dependency that lands in no repository releases nothing.
-            return Resolution::NothingToAwait;
-        };
-        let identity = self.repositories.of(&repo).map(|it| it.identity.clone());
-        if identity.is_none() {
-            return Resolution::Unreadable;
-        }
-        if identity.as_deref() == mine {
-            // The lifecycle already prepares the stacked or merged-stacked
-            // branch for this one, exactly as it does today.
-            return Resolution::NothingToAwait;
-        }
         let stated = self.stated_landing(paths, dep);
         self.outside(
             dep,
@@ -1321,52 +1305,125 @@ impl Watch {
         landing: Option<String>,
         named: Option<TargetName>,
     ) -> Resolution {
-        let Some(releases) = self.repositories.of(repo) else {
-            return Resolution::Unreadable;
-        };
-        // A repository that declares **no release targets releases nothing**, so
-        // there is no release to wait for and nothing to pin against instead of
-        // one. That is every repository on a host that has configured none —
-        // which is every host there was before `onevcs` had a release-targets
-        // document at all — and it is what keeps a plan naming neither new field
-        // producing exactly the run it produced then: no row, no hold, and a
-        // rendered task byte-identical to the one it rendered before.
-        if releases.targets.is_empty() {
-            return Resolution::NothingToAwait;
-        }
-        let identity = releases.identity.clone();
-        // A repository declaring no target that answers to this name leaves the
-        // cell empty rather than the row absent: a worker still needs to see the
-        // dependency, and a `published` node still waits — an unanswerable
-        // question is not an answer that the release has happened.
-        let selected = releases.select(named.as_ref()).ok();
-        let (target, style, action, instructions) = match selected {
-            Some(target) => (
-                Some(target.name.clone()),
-                Some(target.style()),
-                target.action().map(str::to_owned),
-                target.adoption_instructions.clone(),
-            ),
-            None => (named, None, None, None),
-        };
-        Resolution::Outside(Dependency {
-            dep: dep.to_owned(),
-            identity,
-            branch,
-            commit,
-            landing,
-            target,
-            style,
-            action,
-            instructions,
-        })
+        outside(
+            &mut self.repositories,
+            dep,
+            repo,
+            (branch, commit, landing),
+            named,
+        )
     }
+}
+
+/// The identity a node's own repository resolves to, where `onevcs` can say.
+fn identity_of(repositories: &mut Repositories, node: &Node) -> Option<String> {
+    node.repo
+        .as_deref()
+        .and_then(|repo| repositories.of(repo))
+        .map(|releases| releases.identity.clone())
+}
+
+/// Whether an in-run dependency lands **outside** its consumer's repository, and
+/// in which repository: `Ok` with that repository, or the resolution that ends the
+/// question here. `mine` is the consumer's own identity.
+fn across_repositories(
+    repositories: &mut Repositories,
+    state: &RunState,
+    dep: &str,
+    mine: Option<&str>,
+) -> std::result::Result<String, Ended> {
+    let Some(upstream) = state.graph.get(dep) else {
+        return Err(Ended::Unreadable);
+    };
+    let Some(repo) = upstream.repo.clone() else {
+        // A dependency that lands in no repository releases nothing.
+        return Err(Ended::NothingToAwait);
+    };
+    let identity = repositories.of(&repo).map(|it| it.identity.clone());
+    if identity.is_none() {
+        return Err(Ended::Unreadable);
+    }
+    if identity.as_deref() == mine {
+        // The lifecycle already prepares the stacked or merged-stacked
+        // branch for this one, exactly as it does today.
+        return Err(Ended::NothingToAwait);
+    }
+    Ok(repo)
+}
+
+/// The two [`Resolution`]s that end an in-run dependency's question before its
+/// repository's releases are read.
+enum Ended {
+    /// [`Resolution::NothingToAwait`].
+    NothingToAwait,
+    /// [`Resolution::Unreadable`].
+    Unreadable,
+}
+
+impl From<Ended> for Resolution {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::NothingToAwait => Resolution::NothingToAwait,
+            Ended::Unreadable => Resolution::Unreadable,
+        }
+    }
+}
+
+/// One out-of-repository dependency, with what its repository releases: its
+/// branch, commit and stated landing as the run recorded them, and the target its
+/// consumer names, if it names one.
+fn outside(
+    repositories: &mut Repositories,
+    dep: &str,
+    repo: &str,
+    (branch, commit, landing): (Option<String>, Option<String>, Option<String>),
+    named: Option<TargetName>,
+) -> Resolution {
+    let Some(releases) = repositories.of(repo) else {
+        return Resolution::Unreadable;
+    };
+    // A repository that declares **no release targets releases nothing**, so
+    // there is no release to wait for and nothing to pin against instead of
+    // one. That is every repository on a host that has configured none —
+    // which is every host there was before `onevcs` had a release-targets
+    // document at all — and it is what keeps a plan naming neither new field
+    // producing exactly the run it produced then: no row, no hold, and a
+    // rendered task byte-identical to the one it rendered before.
+    if releases.targets.is_empty() {
+        return Resolution::NothingToAwait;
+    }
+    let identity = releases.identity.clone();
+    // A repository declaring no target that answers to this name leaves the
+    // cell empty rather than the row absent: a worker still needs to see the
+    // dependency, and a `published` node still waits — an unanswerable
+    // question is not an answer that the release has happened.
+    let selected = releases.select(named.as_ref()).ok();
+    let (target, style, action, instructions) = match selected {
+        Some(target) => (
+            Some(target.name.clone()),
+            Some(target.style()),
+            target.action().map(str::to_owned),
+            target.adoption_instructions.clone(),
+        ),
+        None => (named, None, None, None),
+    };
+    Resolution::Outside(Dependency {
+        dep: dep.to_owned(),
+        identity,
+        branch,
+        commit,
+        landing,
+        target,
+        style,
+        action,
+        instructions,
+    })
 }
 
 /// What one `deps` entry turned out to be.
 ///
 // llmlint: ignore[changed_behavior_has_e2e] [`Unreadable`](Resolution::Unreadable) is not
-// reachable from a run, and the graph is why: this is only ever asked about a node whose
+// reachable from the release watch of a run, and the graph is why: this is only ever asked about a node whose
 // dependencies have all settled `done`, and each of the three ways a dependency can be
 // unreadable stops that happening. A dep that is not in the graph is refused by
 // `graph::validate`; a dep whose repository `onevcs` cannot answer for is a node whose own
@@ -1374,6 +1431,8 @@ impl Watch {
 // cross-DAG dep whose upstream ledger cannot be read is an edge that does not resolve, so
 // its consumer stays blocked too. What the arm does — leave the set unfrozen and ask
 // again next pass — is what keeps a node from launching against a row that is missing.
+// The settle's advice does reach it, from a reply, where what a repository releases cannot
+// be read; `awaited_targets` says so in its own line, and `tests/e2e/adoption.rs` drives it.
 enum Resolution {
     /// There is no release to wait for: it lands in this node's own repository,
     /// in none at all, or in one that declares no release targets.
@@ -1587,10 +1646,10 @@ const NO_BASELINE: &str = "no baseline was captured";
 /// What a person who settled a node at a landing, and stated no release carrying
 /// it, has to be told **now** about releasing that work.
 ///
-/// One line per release target a node waiting on this one would wait on — the
-/// target each dependent consumes this node at, or the repository's default where a
-/// dependent names none or there is no dependent yet — for which `onevcs` answers
-/// one of the two holds nothing in the run will ever lift:
+/// One line per release target a node waiting on this one would wait on — as
+/// [`awaited_targets`] resolves them through the release watch's own resolution —
+/// for which `onevcs` answers one of the two holds nothing in the run will ever
+/// lift:
 ///
 /// - the landing has **no release baseline**: nothing recorded what the target had
 ///   published when the work landed, so no probe answer can say a release carries
@@ -1599,11 +1658,11 @@ const NO_BASELINE: &str = "no baseline was captured";
 /// - `onevcs` cannot resolve the stated reference to landed work at all, so no
 ///   release will ever be correlated through it.
 ///
-/// Only automated targets are asked: a human-step target's release is recorded by a
-/// person in the ordinary course, and its wait already says so. Every other answer
-/// — released, not released against a baseline, not landed yet, a probe that did
-/// not answer this time — says nothing, because none of them is a hold the next
-/// answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
+/// And one line where what the node's repository releases could not be read, so
+/// the question was not asked at all. Every other answer — released, not released
+/// against a baseline, not landed yet, a human step awaiting its person, a probe
+/// that did not answer this time — says nothing, because none of them is a hold the
+/// next answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
 /// what the release watch asks it.
 pub(crate) fn unattributed_landings(
     state: &RunState,
@@ -1620,13 +1679,23 @@ pub(crate) fn unattributed_landings(
         else {
             continue;
         };
-        let Some(repo) = state.graph.get(id).and_then(|node| node.repo.as_deref()) else {
+        let Some(repo) = state.graph.get(id).and_then(|node| node.repo.clone()) else {
             continue;
         };
-        let Ok(releases) = onevcs::release_targets(repo) else {
+        let mut repositories = Repositories::default();
+        let Some(awaited) = awaited_targets(&mut repositories, state, id, &repo) else {
+            said.push(format!(
+                "onepipeline: settle: node '{id}' was settled at {landing}, and what its \
+                 repository {repo} releases could not be read, so whether that landing has a \
+                 release baseline was not asked; `onevcs release targets {repo}` says why"
+            ));
             continue;
         };
-        for target in consumed_targets(state, id, &releases) {
+        let identity = repositories
+            .of(&repo)
+            .map(|releases| releases.identity.clone())
+            .unwrap_or_else(|| repo.clone());
+        for target in awaited {
             let named = target.to_string();
             let reference = shell_word(landing);
             match onevcs::release_status(landing, Some(&target)) {
@@ -1640,7 +1709,6 @@ pub(crate) fn unattributed_landings(
                          recorded. Once you have verified the version that first carries it, \
                          record it:\n  onevcs release acknowledge {reference} --target {named} \
                          --version <VERSION>",
-                        identity = releases.identity,
                     ));
                 }
                 Err(refused) => said.push(format!(
@@ -1651,8 +1719,7 @@ pub(crate) fn unattributed_landings(
                      by settling the node again at the change request that carried the work, \
                      with the `release` that carries it once you have verified it; or settle it \
                      there without one and record the release:\n  onevcs release acknowledge \
-                     <CHANGE-REQUEST-URL> --target {named} --version <VERSION>",
-                    identity = releases.identity,
+                     '<CHANGE-REQUEST-URL>' --target {named} --version <VERSION>",
                 )),
                 Ok(_) => {}
             }
@@ -1661,49 +1728,79 @@ pub(crate) fn unattributed_landings(
     said
 }
 
-/// The automated release targets a wait on one node's release would be asked
-/// about, each once.
+/// The release targets a wait on one node's release is asked about, each once — or
+/// `None` where what a repository releases could not be read.
 ///
-/// What [`Watch`] asks: each dependent's own `consumes` entry for the node, and the
-/// repository's default for one that names none — and the default alone where
-/// nothing depends on the node yet, since that is what a dependent added later
-/// waits on unless it says otherwise.
-fn consumed_targets(
+/// **The release watch's own resolution, not a restatement of it**: each dependent
+/// in this run is resolved through [`across_repositories`] and [`outside`], exactly
+/// as [`Watch`] resolves the dependency it waits on, so a dependent in the node's
+/// own repository awaits nothing and one naming no target awaits the repository's
+/// default. Where no dependent awaits a release — nothing depends on the node yet,
+/// or nothing outside its repository does — the node's own repository is resolved
+/// the same way with no target named, which is its default: what a consumer added
+/// later, or one in another run, waits on unless it says otherwise.
+fn awaited_targets(
+    repositories: &mut Repositories,
     state: &RunState,
     node: &str,
-    releases: &RepositoryReleases,
-) -> Vec<TargetName> {
-    let mut named: Vec<Option<&TargetName>> = state
+    repo: &str,
+) -> Option<BTreeSet<TargetName>> {
+    let mut resolutions: Vec<Resolution> = Vec::new();
+    for dependent in state
         .graph
         .iter()
         .filter(|dependent| dependent.deps.iter().any(|dep| dep == node))
-        .map(|dependent| dependent.consumes.get(node))
-        .collect();
-    if named.is_empty() {
-        named.push(None);
+    {
+        let mine = identity_of(repositories, dependent);
+        resolutions.push(
+            match across_repositories(repositories, state, node, mine.as_deref()) {
+                Ok(repo) => outside(
+                    repositories,
+                    node,
+                    &repo,
+                    (None, None, None),
+                    dependent.consumes.get(node).cloned(),
+                ),
+                Err(ended) => ended.into(),
+            },
+        );
     }
-    let mut targets: Vec<TargetName> = Vec::new();
-    for name in named {
-        let Ok(target) = releases.select(name) else {
-            continue;
-        };
-        if target.style() == ReleaseStyle::Automated && !targets.contains(&target.name) {
-            targets.push(target.name.clone());
-        }
+    let mut awaited = asked_about(resolutions)?;
+    if awaited.is_empty() {
+        awaited = asked_about(vec![outside(
+            repositories,
+            node,
+            repo,
+            (None, None, None),
+            None,
+        )])?;
     }
-    targets
+    Some(awaited)
 }
 
-/// One word of a command line a person pastes into a POSIX shell: as it is where
-/// no character in it means anything to one, and single-quoted where one does.
-fn shell_word(word: &str) -> String {
-    let plain = word
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/:._-@+=,%".contains(c));
-    match plain {
-        true => word.to_owned(),
-        false => format!("'{}'", word.replace('\'', "'\\''")),
+/// The targets a set of resolutions puts a question about: every dependency the
+/// watch would ask a target of, and `None` where one could not be described.
+fn asked_about(resolutions: Vec<Resolution>) -> Option<BTreeSet<TargetName>> {
+    let mut asked = BTreeSet::new();
+    for resolution in resolutions {
+        match resolution {
+            Resolution::Unreadable => return None,
+            Resolution::NothingToAwait => {}
+            Resolution::Outside(dependency) => {
+                // A target the repository declares, which is what gives it a style: a
+                // name it does not declare is a question `onevcs` would only refuse.
+                asked.extend(dependency.style.and(dependency.target));
+            }
+        }
     }
+    Some(asked)
+}
+
+/// One word of a command line a person pastes into a POSIX shell, single-quoted:
+/// a URL may carry `&`, `?` or `#`, and a word quoted every time is one reading of
+/// it rather than two.
+fn shell_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// Why one fast-adoption node's change request is opened as a **draft**, asked of
