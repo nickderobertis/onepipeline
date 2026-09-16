@@ -154,6 +154,19 @@ pub struct RunState {
     /// about, which is precisely when a planner starts deciding there is nothing
     /// left to do.
     pub landings: BTreeMap<String, Landing>,
+    /// Where an operator settling each node from evidence stated its work landed.
+    ///
+    /// The tier the `landed` in [`landings`](Self::landings) rests on for these
+    /// nodes, and the reference it was stated at: folded from a `settle`'s
+    /// `landing-from-evidence`, which writes both, so every reader presents the
+    /// statement rather than re-reading the branch the dispatch left behind — see
+    /// [`StatedLanding`](crate::edits::StatedLanding). The newest statement about a
+    /// node wins, and a later settlement **the run itself** records supersedes it,
+    /// because that is a newer observation of the same node's work.
+    ///
+    /// Omitted when empty, which is every run nobody settled from evidence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
     /// The declared steps each node's attempt finished.
     ///
     /// What a continuation may skip, and the only record of it: a step is not a
@@ -645,6 +658,7 @@ impl RunState {
             in_flight: BTreeMap::new(),
             // The launch's, and only a caller holding the launch record has it.
             node_validator: None,
+            stated_landings: self.stated_landings.clone(),
         }
     }
 
@@ -932,8 +946,19 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                     end_the_park(state, node);
                 }
             }
-            if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
+            let outcome = payload.get("outcome").and_then(Value::as_str);
+            if let Some(outcome) = outcome {
                 state.outcomes.insert(node.clone(), outcome.to_string());
+            }
+            // A settlement the run recorded itself is newer than what an operator
+            // stated before it, so the statement stops standing — and the `landed`
+            // it wrote goes with it, leaving whatever this settlement observes
+            // below. A settle's own `node-settled` is the statement's, and moves
+            // nothing.
+            if outcome != Some(journal::SETTLED_FROM_EVIDENCE)
+                && state.stated_landings.remove(node).is_some()
+            {
+                state.landings.remove(node);
             }
             // What the dispatch left behind, which nothing else records: a
             // later continuation has no other way to find the branch the work
@@ -1487,6 +1512,16 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 // Both outcomes a settle can name end the park; the graph's own
                 // flag went with `edits::apply` above.
                 end_the_park(state, node);
+            }
+            // The one interpretation of a stated landing: the node's work landed
+            // there, on the tier the statement names. Held to the two spellings
+            // here too, because a journal is a file another build wrote and a
+            // person can edit; a value that is neither is folded as no statement.
+            Operation::LandingFromEvidence { node, landing } => {
+                if let Some(stated) = edits::StatedLanding::parse(landing) {
+                    state.landings.insert(node.clone(), Landing::Landed);
+                    state.stated_landings.insert(node.clone(), stated);
+                }
             }
             // Only a note that is still owed to a dispatch. One the
             // running turn already took has been read, and holding it
@@ -3522,6 +3557,89 @@ mod tests {
             NodeStatus::Done,
             "the derived status still reads the park ahead of the settlement"
         );
+    }
+
+    /// A stated landing is folded as the node's landing, on its own tier; the
+    /// newest statement wins; one that is neither spelling is no statement; and a
+    /// later settlement the run records itself supersedes it, taking the `landed`
+    /// the statement wrote with it.
+    #[test]
+    fn a_stated_landing_is_the_nodes_landing_until_the_run_settles_it_again() {
+        let stated = |seq: u64, landing: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::LandingFromEvidence {
+                        node: "publish".into(),
+                        landing: landing.into(),
+                    }]),
+                )],
+            )
+        };
+        let settled = |seq: u64, fields: &[(&str, Value)]| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some("publish"),
+                fields,
+            )
+        };
+        let url = "https://example.invalid/owner/engine/pull/12";
+
+        let state = fold(&[stated(1, "3f9a1c2ab"), stated(2, url)]);
+        assert_eq!(state.landings.get("publish"), Some(&Landing::Landed));
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::ChangeRequest(url.into())),
+            "the newest statement is not the one that stands"
+        );
+        assert_eq!(
+            state.stated_landings["publish"].tier(),
+            "stated-change-request"
+        );
+
+        // The settle's own `node-settled` is the statement's, and moves nothing.
+        let own = settled(
+            3,
+            &[
+                ("status", json!("done")),
+                ("outcome", json!(journal::SETTLED_FROM_EVIDENCE)),
+            ],
+        );
+        let state = fold(&[stated(1, "3f9a1c2ab"), own]);
+        assert_eq!(
+            state.stated_landings.get("publish"),
+            Some(&edits::StatedLanding::Commit("3f9a1c2ab".into()))
+        );
+        assert_eq!(state.landings.get("publish"), Some(&Landing::Landed));
+
+        // A later settlement the run recorded itself supersedes it: with no landing
+        // of its own it leaves none, and with one it leaves that one.
+        let state = fold(&[
+            stated(1, "3f9a1c2ab"),
+            settled(3, &[("status", json!("failed"))]),
+        ]);
+        assert!(state.stated_landings.is_empty());
+        assert_eq!(state.landings.get("publish"), None);
+        let state = fold(&[
+            stated(1, "3f9a1c2ab"),
+            settled(
+                3,
+                &[("status", json!("done")), ("landing", json!("unlanded"))],
+            ),
+        ]);
+        assert!(state.stated_landings.is_empty());
+        assert_eq!(state.landings.get("publish"), Some(&Landing::Unlanded));
+
+        // Neither spelling is no statement at all.
+        for unusable in ["the-change-that-merged", "3f9a1c", "3f9a1c2 and more", ""] {
+            let state = fold(&[stated(1, unusable)]);
+            assert!(state.stated_landings.is_empty(), "{unusable:?} was folded");
+            assert_eq!(state.landings.get("publish"), None, "{unusable:?} landed");
+        }
     }
 
     #[test]

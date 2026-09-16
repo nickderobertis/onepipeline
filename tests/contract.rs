@@ -1984,6 +1984,46 @@ fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
         carried, landings,
         "the golden envelope does not carry the landings entry 57 names"
     );
+    // The release a settle may state beside its landing: the entry's value is one
+    // this build reads, a settle carrying it round-trips unchanged, the golden
+    // carries exactly it beside a landing, and the envelope before it carries none.
+    let release = block["settle_release"].clone();
+    let stated: onepipeline::channel::StatedRelease =
+        serde_json::from_value(release.clone()).expect("entry 57 names a release a settle takes");
+    assert_eq!(
+        serde_json::to_value(&stated).expect("serializes"),
+        release,
+        "the stated release does not round-trip"
+    );
+    let mut releasing = settling.clone();
+    releasing["release"] = release.clone();
+    let settle: Edit =
+        serde_json::from_value(releasing.clone()).expect("a settle stating a release parses");
+    assert_eq!(
+        serde_json::to_value(&settle).expect("serializes"),
+        releasing,
+        "a settle stating a release does not round-trip"
+    );
+    let released: Vec<&Value> = golden["commands"]
+        .as_array()
+        .expect("the golden carries commands")
+        .iter()
+        .filter(|command| command.get("release").is_some())
+        .collect();
+    assert!(
+        released.len() == 1
+            && released[0]["release"] == release
+            && released[0].get("landing").is_some(),
+        "the golden envelope does not carry the release entry 57 names beside a landing: {golden}"
+    );
+    assert!(
+        older["commands"]
+            .as_array()
+            .expect("the older golden carries commands")
+            .iter()
+            .all(|command| command.get("release").is_none()),
+        "the golden for the version before the release existed names one: {older}"
+    );
     assert!(
         golden["commands"]
             .as_array()
@@ -4890,6 +4930,7 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             outcome: SettleOutcome::Done,
             evidence: "it merged".into(),
             landing: Some("https://github.com/owner/engine/pull/12".into()),
+            release: None,
         },
     ];
     assert_eq!(

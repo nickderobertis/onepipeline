@@ -1179,7 +1179,7 @@ impl Watch {
     }
 
     /// One node's out-of-repository dependencies, resolved once — and their
-    /// landings re-read for as long as one of them has none.
+    /// landings re-read on every re-read tick for as long as the node is watched.
     ///
     /// **The set is frozen and the landing is not.** Which dependencies land
     /// outside the node's repository, and what those repositories release, is
@@ -1187,7 +1187,11 @@ impl Watch {
     /// this run observed is relayed before the node settles, but one nobody
     /// observed — a change request merged after its node settled, stated by an
     /// operator from evidence — arrives after the fact by definition, and frozen
-    /// at settlement it answers `not-landed` for ever.
+    /// at settlement it answers `not-landed` for ever. Nor is a stated landing
+    /// final once there is one: an operator who stated a squash-merge commit
+    /// `onevcs` cannot resolve corrects it by stating the change request, and a
+    /// landing frozen at the first statement would ask the unanswerable one for
+    /// ever.
     fn resolve(
         &mut self,
         paths: &RunPaths,
@@ -1197,7 +1201,7 @@ impl Watch {
     ) -> Vec<Dependency> {
         if let Some(known) = self.dependencies.get(&node.id) {
             let known = known.clone();
-            if !re_read || known.iter().all(|dependency| dependency.landing.is_some()) {
+            if !re_read {
                 return known;
             }
             let re_read: Vec<Dependency> = known
@@ -1518,6 +1522,181 @@ fn renderable(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// Record, with `onevcs release acknowledge`'s own semantics, every release an
+/// envelope's `settle`s state beside a landing.
+///
+/// Asked by the reply **before anything of the envelope is queued or applied**,
+/// once, and never by a reconciler or a replay: the acknowledgement is a record in
+/// `onevcs`'s store rather than in this run's, so it is made by the process a
+/// person typed the settle into, and a refusal turns the whole envelope away
+/// naming what `onevcs` said — a landing it cannot resolve, one whose target has an
+/// established baseline its probe answers instead, a target the repository does
+/// not declare, a version that is not a semantic version, or a different version
+/// already recorded. Recording the same version again changes nothing, so an
+/// envelope sent a second time after a refusal elsewhere in it is harmless.
+///
+/// Nothing is inferred here. The version is the operator's, verified against the
+/// release itself; no baseline is derived from when the work was committed or
+/// from what a probe answers now, because neither proves what was public when the
+/// work landed.
+pub(crate) fn acknowledge_stated_releases(commands: &[crate::channel::Command]) -> Result<()> {
+    for command in commands {
+        let crate::channel::Command::Settle {
+            id,
+            landing: Some(landing),
+            release: Some(release),
+            ..
+        } = command
+        else {
+            continue;
+        };
+        onevcs::acknowledge_release(landing, &release.target, &release.version, false).map_err(
+            |refused| {
+                crate::Error::Refused(format!(
+                    "settle: node '{id}' states that {target} {version} carries the landing \
+                     {landing}, and `onevcs` would not record it: {refused}; nothing was queued",
+                    target = release.target,
+                    version = release.version,
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// The words `onevcs` states an automated target's landing has no release
+/// baseline in.
+///
+/// Read off its own answer because that library exposes the fact only there: a
+/// landing with no baseline is `ReleaseStatus::NotAnswered`, and so is a probe that
+/// failed just now, and only the reason tells a hold nothing will ever lift apart
+/// from one the next probe may. `tests/e2e/adoption.rs` drives the linked `onevcs`
+/// into exactly that state and holds this crate's message to it, so a sibling
+/// release that rewords it fails there rather than falling silent here.
+const NO_BASELINE: &str = "no baseline was captured";
+
+/// What a person who settled a node at a landing, and stated no release carrying
+/// it, has to be told **now** about releasing that work.
+///
+/// One line per release target a node waiting on this one would wait on — the
+/// target each dependent consumes this node at, or the repository's default where a
+/// dependent names none or there is no dependent yet — for which `onevcs` answers
+/// one of the two holds nothing in the run will ever lift:
+///
+/// - the landing has **no release baseline**: nothing recorded what the target had
+///   published when the work landed, so no probe answer can say a release carries
+///   it, and the line carries the exact `onevcs release acknowledge` command with
+///   the reference and the target filled in, for the version a person verifies;
+/// - `onevcs` cannot resolve the stated reference to landed work at all, so no
+///   release will ever be correlated through it.
+///
+/// Only automated targets are asked: a human-step target's release is recorded by a
+/// person in the ordinary course, and its wait already says so. Every other answer
+/// — released, not released against a baseline, not landed yet, a probe that did
+/// not answer this time — says nothing, because none of them is a hold the next
+/// answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
+/// what the release watch asks it.
+pub(crate) fn unattributed_landings(
+    state: &RunState,
+    commands: &[crate::channel::Command],
+) -> Vec<String> {
+    let mut said = Vec::new();
+    for command in commands {
+        let crate::channel::Command::Settle {
+            id,
+            landing: Some(landing),
+            release: None,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let Some(repo) = state.graph.get(id).and_then(|node| node.repo.as_deref()) else {
+            continue;
+        };
+        let Ok(releases) = onevcs::release_targets(repo) else {
+            continue;
+        };
+        for target in consumed_targets(state, id, &releases) {
+            let named = target.to_string();
+            let reference = shell_word(landing);
+            match onevcs::release_status(landing, Some(&target)) {
+                Ok(ReleaseStatus::NotAnswered { reason }) if reason.contains(NO_BASELINE) => {
+                    said.push(format!(
+                        "onepipeline: settle: node '{id}' was settled at the landing {landing}, \
+                         and that landing has no release baseline for the release target \
+                         '{named}' of {identity}: nothing recorded what that target had \
+                         published when the work landed, so no probe answer can show a release \
+                         carries it, and a node waiting on that release holds until one is \
+                         recorded. Once you have verified the version that first carries it, \
+                         record it:\n  onevcs release acknowledge {reference} --target {named} \
+                         --version <VERSION>",
+                        identity = releases.identity,
+                    ));
+                }
+                Err(refused) => said.push(format!(
+                    "onepipeline: settle: node '{id}' was settled at {landing}, which `onevcs` \
+                     cannot resolve to landed work, so no release of the release target \
+                     '{named}' of {identity} will be attributed through it and a node waiting \
+                     on that release holds: {refused}. State a landing `onevcs` can resolve \
+                     by settling the node again at the change request that carried the work, \
+                     with the `release` that carries it once you have verified it; or settle it \
+                     there without one and record the release:\n  onevcs release acknowledge \
+                     <CHANGE-REQUEST-URL> --target {named} --version <VERSION>",
+                    identity = releases.identity,
+                )),
+                Ok(_) => {}
+            }
+        }
+    }
+    said
+}
+
+/// The automated release targets a wait on one node's release would be asked
+/// about, each once.
+///
+/// What [`Watch`] asks: each dependent's own `consumes` entry for the node, and the
+/// repository's default for one that names none — and the default alone where
+/// nothing depends on the node yet, since that is what a dependent added later
+/// waits on unless it says otherwise.
+fn consumed_targets(
+    state: &RunState,
+    node: &str,
+    releases: &RepositoryReleases,
+) -> Vec<TargetName> {
+    let mut named: Vec<Option<&TargetName>> = state
+        .graph
+        .iter()
+        .filter(|dependent| dependent.deps.iter().any(|dep| dep == node))
+        .map(|dependent| dependent.consumes.get(node))
+        .collect();
+    if named.is_empty() {
+        named.push(None);
+    }
+    let mut targets: Vec<TargetName> = Vec::new();
+    for name in named {
+        let Ok(target) = releases.select(name) else {
+            continue;
+        };
+        if target.style() == ReleaseStyle::Automated && !targets.contains(&target.name) {
+            targets.push(target.name.clone());
+        }
+    }
+    targets
+}
+
+/// One word of a command line a person pastes into a POSIX shell: as it is where
+/// no character in it means anything to one, and single-quoted where one does.
+fn shell_word(word: &str) -> String {
+    let plain = word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/:._-@+=,%".contains(c));
+    match plain {
+        true => word.to_owned(),
+        false => format!("'{}'", word.replace('\'', "'\\''")),
+    }
+}
+
 /// Why one fast-adoption node's change request is opened as a **draft**, asked of
 /// `onevcs` at the moment the publication is composed.
 ///
@@ -1756,50 +1935,23 @@ fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> O
 
 /// Where each node of one run's journal was stated to have landed.
 ///
-/// The operations of every `edit-committed` are read for the one a `settle`
-/// carrying a landing compiles to. A journal is external input and this is a
-/// **read** of one, so a record this build cannot parse whole is passed over
-/// rather than guessed at: what a mis-read costs here is a release question put
-/// about the wrong work, which answers about somebody else's release.
+/// **The projection's fold, and not a reading of its own**: a stated landing has
+/// one interpretation — [`StatedLanding`](crate::edits::StatedLanding) — and the
+/// views, `results` and the status write-back take it from
+/// [`RunState::stated_landings`], so this does too, and what a release is
+/// correlated through cannot come to differ from what those surfaces say landed.
+/// That fold already holds a journal to what a `settle` may state, passes over an
+/// operation list this build cannot read whole, lets the newest statement about a
+/// node win, and lets a later settlement the run recorded itself supersede one.
 ///
-/// The last statement about a node wins. Two settles of one node are a record
-/// corrected twice, and the newest is the correction.
+/// A node id that would forge a line where a wait is rendered is passed over here
+/// as well, because this is where it is rendered from.
 fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, String> {
-    let mut stated = BTreeMap::new();
-    for event in events {
-        if journal::PipelineKind::from_wire(&event.kind)
-            != Some(journal::PipelineKind::EditCommitted)
-        {
-            continue;
-        }
-        // llmlint: ignore-block[changed_behavior_has_e2e] an operation list this build
-        // cannot read whole needs a journal a *newer build* wrote, which no invocation a
-        // user can type produces — the same half `src/projection.rs` suppresses on its own
-        // fold of this record, and for the same reason. What a user can reach is driven end
-        // to end by `tests/e2e/adoption.rs`'s settled-landing journeys; this module's own
-        // test drives the record shapes.
-        let operations = event
-            .payload
-            .get("operations")
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::edits::Operation>>(value.clone()).ok()
-            })
-            .unwrap_or_default(); // llmlint: ignore-end[changed_behavior_has_e2e]
-        for operation in operations {
-            if let crate::edits::Operation::LandingFromEvidence { node, landing } = operation {
-                // Held to what a `settle` may state, on this side too: the journal is a
-                // file another build wrote and a person can edit, and a value that is
-                // neither spelling is a release question `onevcs` cannot be asked.
-                let (Some(node), Some(landing)) =
-                    (renderable(&node), crate::edits::stated_landing(&landing))
-                else {
-                    continue;
-                };
-                stated.insert(node, landing);
-            }
-        }
-    }
-    stated
+    crate::projection::fold(events)
+        .stated_landings
+        .into_iter()
+        .filter_map(|(node, stated)| Some((renderable(&node)?, String::from(stated))))
+        .collect()
 }
 
 /// How often an automated target's probe is run.

@@ -4011,6 +4011,449 @@ fn a_node_settled_from_evidence_is_correlated_through_the_change_request_it_name
     );
 }
 
+/// Take one branch onto its base the way a host's squash merge does: every commit
+/// of it collapsed into one new commit on the base, which no branch of the work
+/// carries — the commit an operator reads off the merge and states.
+fn squash_land(world: &World, checkout: &Path, branch: &str) -> String {
+    bring_the_branch_here(world, checkout, branch);
+    crate::harness::git(world, checkout, &["merge", "--squash", branch]);
+    crate::harness::git(
+        world,
+        checkout,
+        &["commit", "-m", &format!("feat: land {branch} (#1)")],
+    );
+    crate::harness::git(world, checkout, &["push", "origin", "main"]);
+    crate::harness::git(world, checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// The line one view prints about one node.
+fn line_about<'a>(printed: &'a str, node: &str) -> &'a str {
+    printed
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(node))
+        .unwrap_or_else(|| panic!("the view printed no line about {node}:\n{printed}"))
+}
+
+/// The tier a stated landing in one spelling is shown under.
+fn tier_of(spelling: Spelling) -> &'static str {
+    match spelling {
+        Spelling::Commit => "stated-commit",
+        Spelling::ChangeRequest => "stated-change-request",
+    }
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own views, its own write-back into a real store, and a real `onevcs` publication — so a narrower project would declare the same dependency and skip nothing.
+/// A node settled from evidence at the landing that carried its work reads as
+/// **landed** in every surface a manager reads — `results`, `status` and the
+/// board the write-back keeps — on the tier that answer rests on, and never off a
+/// read of the branch its failed dispatch left behind.
+///
+/// The incident this is for: a change squash-merged, the manager settled its node
+/// at the merge, and `results` went on printing `NOT landed` by re-reading the
+/// superseded dispatch branch while the run record said the work had landed. The
+/// before is read here too, so the journey shows the read it replaces.
+fn a_stated_landing_reads_landed_in_every_surface(name: &str, spelling: Spelling) {
+    let world = watching(name);
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+
+    // `landed` opens the change request that carries the work, and `broken` is the
+    // node whose record goes wrong: its dispatch fails, leaving a branch that never
+    // reached a base. `hold` keeps the run driven while the settle is read back.
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut broken = engine();
+    broken["id"] = json!("broken");
+    broken["deps"] = json!(["landed"]);
+    world.script("broken.fail", "1");
+    world.script("hold.wait", "hold");
+    let run = start(&world, name, vec![landed, broken, agent("hold", &[])]);
+    world.until("the broken node to settle", |world| {
+        settled_status(world, &run, "broken") == Some("failed".to_owned())
+    });
+    let before = world.run(&["results", &run]);
+    before.exited(0);
+    assert!(
+        !line_about(&before.stdout, "broken").contains("landed on its base"),
+        "a node whose dispatch failed read as landed before anybody stated a landing:\n{}",
+        before.stdout
+    );
+
+    // A person merges the work, and the manager states where it landed.
+    let branch = branch_of(&world, &run, "landed");
+    let landing = match spelling {
+        Spelling::Commit => squash_land(&world, &engine_repo.checkout, &branch),
+        Spelling::ChangeRequest => {
+            land(&world, &engine_repo.checkout, &branch);
+            change_url_of(&world, &run, "landed")
+        }
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
+                "op": "settle", "id": "broken", "outcome": "done",
+                "evidence": "the change carrying this work merged; the dispatch died first",
+                "landing": landing,
+            }]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    // `results`: landed, on the stated tier, at the stated reference — and no
+    // verdict read off the superseded branch beside it.
+    let stated = format!(
+        "landed on its base — {}: stated from evidence at {landing}",
+        tier_of(spelling)
+    );
+    world.until("results to read the stated landing", |world| {
+        let results = world.run(&["results", &run]);
+        line_about(&results.stdout, "broken").contains(&stated)
+    });
+    let results = world.run(&["results", &run]);
+    let line = line_about(&results.stdout, "broken");
+    for contradiction in ["NOT landed", "UNDECIDED", "the run observed"] {
+        assert!(
+            !line.contains(contradiction),
+            "the stated landing was contradicted by `{contradiction}`: {line}"
+        );
+    }
+
+    // `status`: not counted as work that has not landed, nor as undecided.
+    let status = world.run(&["status", &run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.lines().any(|line| {
+            (line.contains("have not landed") || line.contains("could not decide"))
+                && line.contains("broken")
+        }),
+        "status counts a node settled at its landing as outstanding:\n{}",
+        status.stdout
+    );
+
+    // The board: the same interpretation, with the tier and the reference.
+    let key = match spelling {
+        Spelling::Commit => "onepipeline.landing_commit",
+        Spelling::ChangeRequest => "onepipeline.change_url",
+    };
+    let project = format!("plans:{}", project_id(name));
+    world.until_store("the stated landing to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "broken")
+            .is_some_and(|task| {
+                let metadata = &task["item"]["metadata"];
+                metadata["onepipeline.landing"] == "landed"
+                    && metadata["onepipeline.landing_evidence"] == tier_of(spelling)
+                    && metadata[key] == json!(landing)
+            })
+    });
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // And the run's own result, written as it closed, says the same.
+    let result = world.run_json(&run, "result.json");
+    let settled = result["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "broken"))
+        .unwrap_or_else(|| panic!("the result names no broken node: {result}"));
+    assert_eq!(settled["landing"], json!("landed"), "{settled}");
+}
+
+/// A node settled at a **squash-merge commit** reads as landed everywhere.
+#[test]
+fn a_node_settled_at_a_squash_merge_commit_reads_landed_in_every_surface() {
+    a_stated_landing_reads_landed_in_every_surface("adoption-stated-squash", Spelling::Commit);
+}
+
+/// A node settled at a **change request's URL** reads as landed everywhere.
+#[test]
+fn a_node_settled_at_a_change_request_reads_landed_in_every_surface() {
+    a_stated_landing_reads_landed_in_every_surface(
+        "adoption-stated-change",
+        Spelling::ChangeRequest,
+    );
+}
+
+/// The world both release-evidence journeys run in: a node whose dispatch failed
+/// after the change carrying its work was opened, a `published` node waiting on
+/// that node's release, and a release **already out** before anything asks.
+///
+/// Already out is the point. The first answer any question about that landing
+/// gets is a version, so no baseline is ever captured for it — neither by a
+/// publication, because the merge is a person's, nor by a first answer of *no
+/// release* — which is exactly the landing `onevcs` can never release by probing.
+fn a_released_landing_nobody_published(name: &str) -> (World, String, Repository, String) {
+    let world = watching(name);
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    the_engine_publishes_by_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.2.0");
+
+    let mut landed = engine();
+    landed["id"] = json!("landed");
+    let mut broken = engine();
+    broken["id"] = json!("broken");
+    broken["deps"] = json!(["landed"]);
+    let mut consumer = consumer(Some("published"));
+    consumer["deps"] = json!(["broken"]);
+    world.script("broken.fail", "1");
+    world.script("hold.wait", "hold");
+    let run = start(
+        &world,
+        name,
+        vec![landed, broken, consumer, agent("hold", &[])],
+    );
+    world.until("the broken node to settle", |world| {
+        settled_status(world, &run, "broken") == Some("failed".to_owned())
+    });
+    let branch = branch_of(&world, &run, "landed");
+    (world, run, engine_repo, branch)
+}
+
+/// Settle `broken` done at `landing`, with whatever else the command states.
+fn settle_broken(world: &World, run: &str, landing: &str, extra: Value) -> crate::harness::Run {
+    let mut command = json!({
+        "op": "settle", "id": "broken", "outcome": "done",
+        "evidence": "the change carrying this work merged; the dispatch died first",
+        "landing": landing,
+    });
+    if let Value::Object(fields) = extra {
+        command
+            .as_object_mut()
+            .expect("the command is an object")
+            .extend(fields);
+    }
+    world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [command]})
+            .to_string(),
+    )
+}
+
+/// The release a held node was released by, as the run reported its arrival.
+fn arrived_version(world: &World, run: &str, node: &str) -> Value {
+    world
+        .events_of(run, "release-arrived")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == node)
+        .map(|event| event["payload"]["version"].clone())
+        .unwrap_or_else(|| panic!("no release was reported arriving for {node}"))
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own reply, its own release watch, a real `onevcs` store and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
+/// Settling a node at a landing no release will ever be attributed to by probing
+/// **says so in the same reply**, with the acknowledgement command ready to paste
+/// — and pasting it is what releases the node waiting on that work.
+///
+/// The incident: a manager settled a node at a merge after the fact, nothing
+/// captured a release baseline for it, and the dependent held `not-answered` with
+/// nothing saying why until somebody verified the release by hand and found the
+/// command. Driven in both spellings, because they are answered differently: a
+/// change request's URL resolves to the landed work and has no baseline, and a
+/// squash-merge commit no branch carries does not resolve at all — so its line
+/// says to state the change request instead, and settling again there is
+/// accepted as the correction it is and answered with the command.
+fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
+    let (world, run, engine_repo, branch) = a_released_landing_nobody_published(name);
+    let url = change_url_of(&world, &run, "landed");
+    let landing = match spelling {
+        Spelling::Commit => squash_land(&world, &engine_repo.checkout, &branch),
+        Spelling::ChangeRequest => {
+            land(&world, &engine_repo.checkout, &branch);
+            url.clone()
+        }
+    };
+
+    let settled = settle_broken(&world, &run, &landing, json!({}));
+    settled.exited(0).out_has("\"applied\"");
+    // The receipt is the receipt, and nothing more: the advice is on stderr.
+    assert_eq!(
+        settled.stdout.trim().lines().count(),
+        1,
+        "the receipt grew: {}",
+        settled.stdout
+    );
+    let (said, placeholder) = match spelling {
+        Spelling::ChangeRequest => (
+            format!(
+                "was settled at the landing {landing}, and that landing has no release baseline \
+                 for the release target 'crate'"
+            ),
+            None,
+        ),
+        Spelling::Commit => (
+            format!("was settled at {landing}, which `onevcs` cannot resolve to landed work"),
+            Some("<CHANGE-REQUEST-URL>"),
+        ),
+    };
+    settled.err_has(&said);
+    let pasted = settled
+        .stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("onevcs release acknowledge "))
+        .unwrap_or_else(|| panic!("the reply printed no command to paste:\n{}", settled.stderr));
+    let expected = match placeholder {
+        None => format!("onevcs release acknowledge {landing} --target crate --version <VERSION>"),
+        Some(placeholder) => {
+            format!("onevcs release acknowledge {placeholder} --target crate --version <VERSION>")
+        }
+    };
+    assert_eq!(
+        pasted, expected,
+        "the command does not name what the engine knows"
+    );
+
+    // And the hold it warned about is real: the waiting node is not started, and
+    // its wait answers `not-answered` rather than anything a probe could lift.
+    world.until("the wait to answer about the stated landing", |world| {
+        answered(world, &run, "consumer") == Some("not-answered".to_owned())
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // A squash-merge commit is corrected first, the way its line says: the node is
+    // settled again at the change request, which is a correction of where the
+    // work landed rather than a duplicate — and that settle is answered in turn,
+    // now with the landing's missing baseline and the reference filled in.
+    let pasted = match placeholder {
+        None => pasted.to_owned(),
+        Some(_) => {
+            let restated = settle_broken(&world, &run, &url, json!({}));
+            restated.exited(0).out_has("\"applied\"");
+            restated.err_has(&format!(
+                "was settled at the landing {url}, and that landing has no release baseline \
+                 for the release target 'crate'"
+            ));
+            restated
+                .stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("onevcs release acknowledge "))
+                .unwrap_or_else(|| panic!("no command to paste:\n{}", restated.stderr))
+                .to_owned()
+        }
+    };
+    assert_eq!(
+        pasted,
+        format!("onevcs release acknowledge {url} --target crate --version <VERSION>")
+    );
+
+    // A person verifies the version and pastes the command, filling in only what
+    // the line left for them.
+    let command = pasted.replace("<VERSION>", "0.2.0");
+    let words: Vec<&str> = command.split_whitespace().collect();
+    assert_eq!(&words[..2], ["onevcs", "release"]);
+    onevcs_release(&world, &words[2..]);
+    world.until("the acknowledgement to start the held node", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.2.0"));
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
+/// A change request's URL with no release baseline: said, with the command.
+#[test]
+fn a_change_request_settled_with_no_release_baseline_is_answered_with_the_command_to_record_it() {
+    a_landing_with_no_release_baseline_is_answered_at_the_settle(
+        "adoption-nobaseline-change",
+        Spelling::ChangeRequest,
+    );
+}
+
+/// A squash-merge commit `onevcs` cannot resolve: said, naming what to record.
+#[test]
+fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the_settle() {
+    a_landing_with_no_release_baseline_is_answered_at_the_settle(
+        "adoption-nobaseline-squash",
+        Spelling::Commit,
+    );
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own reply, its own release watch, a real `onevcs` store and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
+/// A settle can state the release that carries its landing, and that is recorded
+/// with `onevcs release acknowledge`'s own semantics — so the node waiting on the
+/// release starts on it, with nothing else done by hand.
+///
+/// Its refusals are driven first, each leaving the record exactly as it was: a
+/// release with no landing to carry, and one `onevcs` will not record.
+#[test]
+fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_it() {
+    let (world, run, engine_repo, branch) =
+        a_released_landing_nobody_published("adoption-settle-release");
+    land(&world, &engine_repo.checkout, &branch);
+    let url = change_url_of(&world, &run, "landed");
+
+    let unlanded = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": [{
+            "op": "settle", "id": "broken", "outcome": "done",
+            "evidence": "0.2.0 carries it",
+            "release": {"target": "crate", "version": "0.2.0"},
+        }]})
+        .to_string(),
+    );
+    unlanded
+        .exited(REFUSED)
+        .err_has("no landing for it to carry");
+    settle_broken(
+        &world,
+        &run,
+        &url,
+        json!({"release": {"target": "crate", "version": "the-nightly"}}),
+    )
+    .exited(REFUSED)
+    .err_has("`onevcs` would not record it")
+    .err_has("is not a semantic version")
+    .err_has("nothing was queued");
+    assert_eq!(
+        settled_status(&world, &run, "broken"),
+        Some("failed".to_owned()),
+        "a refused settle moved the record"
+    );
+
+    let settled = settle_broken(
+        &world,
+        &run,
+        &url,
+        json!({"release": {"target": "crate", "version": "0.2.0"}}),
+    );
+    settled.exited(0).out_has("\"applied\"");
+    settled.err_lacks("release baseline");
+    world.until("the stated release to start the held node", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    assert_eq!(arrived_version(&world, &run, "consumer"), json!("0.2.0"));
+    let printed = onevcs_release(&world, &["status", &url, "--json"]);
+    match serde_json::from_str::<onevcs::ReleaseStatus>(printed.trim()) {
+        Ok(onevcs::ReleaseStatus::Released {
+            version, source, ..
+        }) => {
+            assert_eq!(version, "0.2.0");
+            assert_eq!(source, onevcs::ReleaseSource::Acknowledged);
+        }
+        other => panic!("the stated release was not recorded as acknowledged: {other:?}"),
+    }
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
 /// Say that the probe can no longer answer, whole or not at all.
 ///
 /// An answer file that is there and holds nothing is what a probe caught

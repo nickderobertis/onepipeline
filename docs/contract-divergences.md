@@ -2544,8 +2544,12 @@ payload, nested, under one key. Nothing on the item named the change. So a settl
 node now also carries `onepipeline.landing` (`landed` or `unlanded`),
 `onepipeline.landing_commit` (the commit the change reached its base at) and
 `onepipeline.change_url` (where a person reads it) — each written **only where the
-run observed one**, so a node with no change of its own carries none of the three
-rather than an empty value a reader would have to interpret.
+run observed one**, so a node with no change of its own carries none of them
+rather than an empty value a reader would have to interpret. The fourth,
+`onepipeline.landing_evidence`, is written only where the landing rests on
+something other than the run's own observation: a landing an operator stated on
+`settle`, named by its tier, with the stated reference in the commit or URL key —
+entry 57 records the interpretation.
 
 **And a projection that fails now says so to somebody.** The contract's "write-back
 is best effort and retried off the reconcile loop: a slow or unavailable store is
@@ -2592,7 +2596,7 @@ line in the projection record carries the report's `delivered` entries verbatim 
 entry 73 states the key.
 
 What diverges is the projected vocabulary — 9 words where the contract names 5 —
-the 3 reserved keys beside the settlement, and the 1 task field the write-back owns.
+the 4 reserved keys beside the settlement, and the 1 task field the write-back owns.
 Everything else the sentence promises is unchanged.
 
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
@@ -3154,7 +3158,10 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   merged after its node settled is not work nobody landed, and reading it the
   other way sent a supervisor to re-dispatch nodes whose work was already on their
   base. A node whose settlement recorded `landed` is the one that is never asked
-  again.
+  again — and so is one an operator settled at a stated landing, which the fold
+  records as `landed` (entry 57). The document moved to version 4 for that: its
+  shape is version 3's, but a version-3 document over a journal holding a stated
+  landing carries the answer of a build that did not read one.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3171,7 +3178,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "fields": [
     "schema_version",
     "run_id",
@@ -3342,27 +3349,108 @@ correlation exactly as a run-produced settlement's landing is — and correlatio
 because a change request open at the moment its node settled is merged
 afterwards.
 
-**What reads it today is release correlation, and that is the whole of it.** The
-reference is recorded as its own operation — `settle_landing_operation` in the
+**A stated landing has one interpretation, and every reader of a run takes it.**
+The reference is recorded as its own operation — `settle_landing_operation` in the
 block below, which is where this document and the type are reconciled — on the
-`edit-committed` the settle compiles to, and the release watch reads it from
-there — so the machinery the missing landing was breaking is served, and the
-views, `results` and the status write-back are not: none of them learns a stated
-landing, and a `settle` still leaves them exactly as they were. **Proposal:
-surface it where a run-produced settlement's landing is surfaced** — a
-change request's URL beside `change_urls` and a commit beside `landing_commits`,
-so a manager can trace a release decision back to the change that justified it in
-the views they already read. That is a fold and a result field rather than an op,
-so it belongs to whoever owns `src/projection.rs` and `src/engine.rs`; this entry
-records the gap so it is not lost.
+`edit-committed` the settle compiles to, and the run's fold reads it **once**, as
+`StatedLanding` in `src/edits.rs`: the node's work landed there, on an evidence
+tier named for what was stated — `stated-commit` for a commit's object name,
+`stated-change-request` for a change request's URL. So the fold records the node's
+landing as `landed` and keeps the statement beside it, and every surface presents
+that rather than a fresh read of the branch the dispatch left behind, which is the
+very record the settle corrected:
 
-What is **not** proposed is writing the `landing` *word* from a settle. `Landed`
-is defined as a landing this run saw happen and `Unlanded` as a change of this
-node's that has not reached its base; a settle saw neither, and an operator who
-names an open change request as where the work is would have the run report it
-`landed` at a moment when the correlation reading the same reference answers
-`not-landed`. The word stays the run's own observation, and the reference stays
-the operator's.
+- `results` and `status` print `landed on its base — stated-commit: stated from
+  evidence at <commit>` (or `stated-change-request` and the URL), and never count
+  the node as work that has not landed;
+- the listing's count reads the same `landed` word off the summary document;
+- the status write-back writes `onepipeline.landing` `landed`, the tier as
+  `onepipeline.landing_evidence`, and the stated reference as
+  `onepipeline.landing_commit` or `onepipeline.change_url` — in place of the ones
+  the run recorded for the dispatch the statement superseded;
+- release correlation reads the same fold, and asks `onevcs` about the stated
+  reference.
+
+The newest statement about a node wins, and a later settlement **the run itself**
+records supersedes it, because that is a newer observation of the same node's
+work. The checkpoint and the summary document moved to version 4 for it: each is a
+cache of that fold, and one written before the fold read a statement would go on
+serving the node as unlanded.
+
+**This replaces the rule this entry used to state**, that a settle never writes
+the `landing` word because `landed` was only what the run saw happen — the manager
+who owns this workstream ruled on it (onepipeline issue #296). Under that rule a
+node settled from evidence at the merge that carried its work went on rendering
+`NOT landed` in `results`, off a read of the superseded branch, while release
+correlation read the statement: two of this crate's own surfaces answering one
+question two ways. What keeps the new rule honest is the tier beside the word and
+the split of the two questions: *whether the view reports it landed* rests on the
+operator's statement and says so, and *whether a release carries it* is still
+`onevcs`'s answer about the stated reference — so nothing attributes a release to
+a change request that library says has not merged, however it was stated.
+
+**A settle can also state the release that carries its landing, and one that
+states none is told at once where nothing else ever would release it.** A landing
+`onevcs` published captures a *release baseline* — what each automated release
+target had published at that instant — and a later probe answer is compared
+against it. A landing an operator states was never published by `onevcs`, so it
+usually has none, and `onevcs` then answers *not answered* for good: the release
+carrying the work may already be inside whatever the probe says now. A node held
+on that release has no timeout, so it held with nothing saying why, while the
+person who could close it had just settled the node.
+
+So `settle` takes an optional `release` — `{"target": …, "version": …}`, the
+`settle_release` in the block below, accepted only beside a `landing` — and the
+reply records it with `onevcs::acknowledge_release`'s own semantics before any of
+the envelope is queued or applied. That library's refusals are the envelope's: a
+reference it cannot resolve to landed work, a target with an established baseline
+its probe answers instead, a target the repository does not declare, a version
+that is not a semantic version, or a different version already recorded (which
+`onevcs release acknowledge --supersede` corrects). Recording the same version
+again changes nothing. The attribution is then `onevcs`'s record, and a node
+waiting on that release is released by it exactly as by a person's own
+acknowledgement.
+
+And a settle naming a landing with **no** release is answered in the same reply —
+on standard error, beside a receipt that stays byte for byte what it was — once
+the settle has applied. For every automated target a node waiting on this one
+would wait on (each dependent's `consumes` entry for it, or the repository's
+default), `onevcs` is asked what the release watch asks it. Where it answers that
+the landing has no release baseline, the line says so, and carries the command a
+person pastes once they have verified the version — the reference and the target
+filled in from what the engine knows:
+
+    onevcs release acknowledge <landing> --target <target> --version <VERSION>
+
+Where `onevcs` cannot resolve the stated reference to landed work at all — a
+squash-merge commit that no branch carries is one — the line says that no release
+will ever be attributed through it, and says to settle the node again at the change
+request that carried the work. That second settle is **accepted** although the
+node already holds its outcome: the duplicate guard above refuses a settle that
+changes nothing, and one stating a different landing, or a release, changes where
+the record says the work landed. The release watch re-reads a waiting node's stated
+landings on every relay tick for the same reason, rather than only until the first
+statement arrives. Every other answer is a hold the next answer can lift, and says
+nothing.
+
+**Nothing infers a baseline.** Neither a commit's date nor what a probe answers now
+proves what was public when the work landed, and a generic target need not expose
+its publication history or tie a version to a commit — so the version is always a
+person's. A target-specific recovery, for targets that do expose publication
+history tied to versions, would be a change to `onevcs`'s probe contract and is
+deliberately not attempted here.
+
+**The field rides envelope version 3, and that is a ruling rather than an
+oversight.** By the precedent below an added optional field moves the version, but
+the number is not this crate's: `REPLY_ENVELOPE_VERSION` is read from
+`onemessagebus-agent`'s registry, so moving it needs that repository to register a
+fourth schema — a release and a relink of a fifth repository for one optional
+field. The manager who owns this workstream ruled that it rides 3 (onepipeline issue
+#296). It is omitted when absent, so every envelope written before it is exactly the
+envelope it was; version 2 still reads unchanged; the v3 golden carries a settle
+stating one; and the profile's v3 document already admits it, because its `Command`
+leaves an op's own fields open. Describing it in that document is a follow-up
+recorded for `onemessagebus-agent`.
 
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
@@ -3402,6 +3490,7 @@ accepts.
     "https://github.com/owner/engine/pull/12",
     "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"
   ],
+  "settle_release": {"target": "crate", "version": "0.2.31"},
   "monitor_may_issue": [],
   "cancel": {
     "op": "cancel",
@@ -3440,14 +3529,16 @@ read set is what it promises to go on reading.
 
 The versions are **checked in** rather than described:
 `tests/golden/reply-envelope-v3.json` is the envelope this build writes, carrying
-a settle at each value the landing takes — both spellings and the absence — and
+a settle at each value the landing takes — both spellings and the absence — with
+the `settle_release` above beside one of them, and
 `tests/golden/reply-envelope-v2.json` is an envelope at the version before it,
 carrying none. `src/channel.rs` pins the shape against the first, round-trips it,
 holds that a settle naming no landing writes no key, and holds that the second
 still reads — at the version this build reads it at, with no landing on either
 settle. `tests/contract.rs` holds both goldens, the constant and the read set
-against the `envelope_version`, `envelope_versions_read` and `settle_landings`
-this entry names, so the document, the goldens and the types cannot drift apart.
+against the `envelope_version`, `envelope_versions_read`, `settle_landings` and
+`settle_release` this entry names, so the document, the goldens and the types cannot
+drift apart.
 
 `reason` is optional on `cancel` and a `cancel` stating none still parks, so
 every park written before this field existed is exactly the park it was; present

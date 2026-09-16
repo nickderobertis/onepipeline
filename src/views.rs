@@ -528,6 +528,11 @@ enum Reported {
     /// base does not stop carrying work it has taken, so the one read that could
     /// move this could only agree with it, at a cost.
     TheRunObserved,
+    /// An operator settling the node from evidence stated where its work landed.
+    /// **Never re-read** either, and above all not by reading the branch the
+    /// dispatch left behind: that branch is the record the settle corrected, so a
+    /// read of it could only contradict the statement it was superseded by.
+    Stated(crate::edits::StatedLanding),
     /// A read taken while this view rendered, over what the settlement recorded.
     ReadNow {
         settled: Settled,
@@ -543,7 +548,7 @@ enum Reported {
 impl Reported {
     fn stands(&self) -> Stands {
         match self {
-            Reported::TheRunObserved => Stands::Landed,
+            Reported::TheRunObserved | Reported::Stated(_) => Stands::Landed,
             Reported::ReadNow { read, .. } => match read.as_ref() {
                 LandingRead::Answered(landed) => match landed {
                     // A landing the branch has since gone past is not this
@@ -576,6 +581,7 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
         render,
         node,
         view.state.landings.get(node).copied(),
+        view.state.stated_landings.get(node),
         view.state.branches.get(node).map(String::as_str),
         view.state
             .graph
@@ -584,7 +590,7 @@ fn reported_landing(view: &RunView, render: &Rendering, node: &str) -> Reported 
     )
 }
 
-/// The same report, over the three things a record says about one node's change.
+/// The same report, over the four things a record says about one node's change.
 ///
 /// Taken apart from the fold for the reason [`watching`] and [`driver_liveness`]
 /// are: a bounded listing reads the settlement's own landing, the branch it
@@ -596,10 +602,16 @@ fn reported_landing_of(
     render: &Rendering,
     node: &str,
     settled: Option<Landing>,
+    stated: Option<&crate::edits::StatedLanding>,
     branch: Option<&str>,
     repo: Option<&str>,
 ) -> Reported {
     render.reported(node);
+    // Ahead of everything else, because the statement is what the record now
+    // says: it is the correction of the very branch a read would be taken of.
+    if let Some(stated) = stated {
+        return Reported::Stated(stated.clone());
+    }
     if settled == Some(Landing::Landed) {
         return Reported::TheRunObserved;
     }
@@ -1591,6 +1603,10 @@ impl<'a> Row<'a> {
                 render,
                 node,
                 Landing::parse(&landing.landing),
+                // A stated landing reaches a summary as the `landed` word the
+                // fold wrote for it, which is all a count reads: it is never
+                // re-read here either.
+                None,
                 landing.branch.as_deref(),
                 landing.repo.as_deref(),
             );
@@ -2867,6 +2883,14 @@ fn landed_phrase(reported: &Reported, settled_at: Option<u64>) -> Option<String>
         Reported::TheRunObserved => {
             Some("landed on its base — the run observed the change reach it".to_string())
         }
+        // The operator's statement, on the tier it rests on and at the reference
+        // it names, so a reader can tell it from an observation and go and read
+        // the same evidence.
+        Reported::Stated(stated) => Some(format!(
+            "landed on its base — {tier}: stated from evidence at {reference}",
+            tier = stated.tier(),
+            reference = stated.reference()
+        )),
         Reported::ReadNow { settled, read } => Some(match read.as_ref() {
             LandingRead::Answered(landed) => match landed {
                 onevcs::Landed::Yes { .. } => {

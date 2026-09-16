@@ -104,6 +104,10 @@ const LANDING_KEY: &str = "onepipeline.landing";
 const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
 /// The reserved key naming where a person reads the change a node published.
 const CHANGE_URL_KEY: &str = "onepipeline.change_url";
+/// The reserved key naming the evidence tier a landing rests on, where that is not
+/// the run's own observation: an operator's statement, settled from evidence —
+/// see [`StatedLanding::tier`](crate::edits::StatedLanding::tier).
+const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
 /// The shadow task's own top-level field carrying the tickets a node delivers, held against
 /// the same document as the words and keys above.
 const DELIVERS_FIELD: &str = "delivers";
@@ -240,6 +244,8 @@ struct Snapshot {
     /// Where a person reads the change a node published.
     change_urls: BTreeMap<String, String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Where an operator settling a node from evidence stated its work landed.
+    stated_landings: BTreeMap<String, crate::edits::StatedLanding>,
     settlements: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
@@ -670,6 +676,7 @@ fn snapshot_of(
         landings: state.landings.clone(),
         landing_commits: state.landing_commits.clone(),
         change_urls: state.change_urls.clone(),
+        stated_landings: state.stated_landings.clone(),
         settlements: settlements(paths),
         project_metadata: state
             .plan
@@ -1864,11 +1871,27 @@ fn task_document(
     if let Some(landing) = snapshot.landings.get(id) {
         metadata.insert(LANDING_KEY.into(), json!(landing.as_str()));
     }
-    if let Some(commit) = snapshot.landing_commits.get(id) {
-        metadata.insert(LANDING_COMMIT_KEY.into(), json!(commit));
-    }
-    if let Some(url) = snapshot.change_urls.get(id) {
-        metadata.insert(CHANGE_URL_KEY.into(), json!(url));
+    // A landing an operator stated is the node's landing, and the reference it was
+    // stated at is the one written: the commit or the change request the run
+    // recorded for the dispatch it corrected is exactly what the statement
+    // superseded, so an item carrying both would say two things about one landing.
+    match snapshot.stated_landings.get(id) {
+        Some(stated) => {
+            metadata.insert(LANDING_EVIDENCE_KEY.into(), json!(stated.tier()));
+            let key = match stated {
+                crate::edits::StatedLanding::Commit(_) => LANDING_COMMIT_KEY,
+                crate::edits::StatedLanding::ChangeRequest(_) => CHANGE_URL_KEY,
+            };
+            metadata.insert(key.into(), json!(stated.reference()));
+        }
+        None => {
+            if let Some(commit) = snapshot.landing_commits.get(id) {
+                metadata.insert(LANDING_COMMIT_KEY.into(), json!(commit));
+            }
+            if let Some(url) = snapshot.change_urls.get(id) {
+                metadata.insert(CHANGE_URL_KEY.into(), json!(url));
+            }
+        }
     }
     // Each edge names the far shadow task the way that shadow store names its
     // own — `<project>/<task>` — and not by its file alone. What a copy does with
@@ -2751,7 +2774,7 @@ mod tests {
         classified, per_item_budget, projected, write_shadow, Claim, Classified, Deadline,
         DestinationLabel, DestinationProjectItem, FailureClass, Landing, Origin, Pending,
         ProjectedStatus, Snapshot, WorkerState, Writeback, CHANGE_URL_KEY, COMMAND_FLOOR,
-        DELIVERS_FIELD, LANDING_COMMIT_KEY, LANDING_KEY,
+        DELIVERS_FIELD, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY, LANDING_KEY,
     };
     use crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS;
     use crate::graph::NodeStatus;
@@ -3430,7 +3453,7 @@ mod tests {
     }
 
     /// The projection writes a vocabulary wider than the approved contract fixes,
-    /// and three reserved keys beside the settlement it already carried. Both are
+    /// and four reserved keys beside the settlement it already carried. Both are
     /// recorded as a divergence, and this is the gate that keeps the record and
     /// the code from parting: a word or a key the document does not name is one
     /// nobody proposed.
@@ -3444,7 +3467,12 @@ mod tests {
                 "docs/contract-divergences.md does not name the projected status `{word}`"
             );
         }
-        let keys = [LANDING_KEY, LANDING_COMMIT_KEY, CHANGE_URL_KEY];
+        let keys = [
+            LANDING_KEY,
+            LANDING_COMMIT_KEY,
+            CHANGE_URL_KEY,
+            LANDING_EVIDENCE_KEY,
+        ];
         for key in keys {
             assert!(
                 divergence.contains(&format!("`{key}`")),
@@ -3663,6 +3691,7 @@ mod tests {
                     landings: BTreeMap::new(),
                     landing_commits: BTreeMap::new(),
                     change_urls: BTreeMap::new(),
+                    stated_landings: BTreeMap::new(),
                     settlements: BTreeMap::new(),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
@@ -4033,6 +4062,9 @@ mod tests {
             build["metadata"]["onepipeline.change_url"],
             "https://example.invalid/pull/7"
         );
+        // A landing the run observed names no tier beside it: the key is for a
+        // landing resting on something else, and its absence is the observation.
+        assert_eq!(build["metadata"].get(LANDING_EVIDENCE_KEY), None);
 
         // A node with no change of its own claims none, rather than claiming one
         // with an empty value a reader would have to interpret.
@@ -4041,6 +4073,7 @@ mod tests {
             "onepipeline.landing",
             "onepipeline.landing_commit",
             "onepipeline.change_url",
+            LANDING_EVIDENCE_KEY,
         ] {
             assert_eq!(
                 design["metadata"].get(absent),

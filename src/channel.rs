@@ -641,7 +641,41 @@ pub enum Command {
         /// as a reference and rendered into views beside it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         landing: Option<String>,
+        /// The release that carries that landing, as the operator verified it:
+        /// a release target and the version of it the work first shipped in.
+        ///
+        /// Recorded with `onevcs release acknowledge`'s own semantics before the
+        /// envelope is queued, which is what a landing with **no release
+        /// baseline** needs — nothing recorded what that target had published
+        /// when the work landed, so no probe answer can say a release carries it,
+        /// and a node waiting on that release holds until a person says which one
+        /// does. Only beside a `landing`, because that is what it is recorded
+        /// against. Optional: omitted, nothing is attributed, and a settle naming
+        /// no release is exactly the settle it was. See
+        /// `docs/contract-divergences.md` entry 57.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release: Option<StatedRelease>,
     },
+}
+
+/// The release a `settle` states carries the landing it names.
+///
+/// Both halves are what `onevcs release acknowledge` records, and neither is
+/// guessed at: a target this build cannot name is refused where the envelope is
+/// read, and a version is recorded only if `onevcs` accepts it as one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatedRelease {
+    /// The release target that carries the work, as the landing's repository
+    /// declares it.
+    #[schemars(with = "String")]
+    pub target: onevcs::releases::TargetName,
+    // llmlint: ignore[invalid_states_unrepresentable] a version is `onevcs`'s to judge —
+    // it compares releases by semantic-version ordering and refuses one that is not a
+    // semantic version by name — and this crate links no parser of its own for it. What
+    // this side can hold it to, one usable word, is checked where the settle compiles.
+    /// The version of that target the work first shipped in.
+    pub version: String,
 }
 
 /// What a `settle` states a node actually reached.
@@ -2041,6 +2075,12 @@ mod tests {
                 outcome,
                 evidence: evidence.to_owned(),
                 landing: landing.map(str::to_owned),
+                // The one settle here that is a merge somebody verified the release
+                // of, so the golden pins the release beside its landing too.
+                release: (id == "release").then(|| StatedRelease {
+                    target: "crate".parse().expect("a target name"),
+                    version: "0.2.31".to_owned(),
+                }),
             }
         };
         Reply {
@@ -2158,13 +2198,20 @@ mod tests {
             "the older envelope's commands did not survive: {before:?}"
         );
         for command in &before.commands {
-            let Command::Settle { landing, .. } = command else {
+            let Command::Settle {
+                landing, release, ..
+            } = command
+            else {
                 panic!("the older envelope carries something other than a settle: {command:?}");
             };
             assert_eq!(
                 landing.as_deref(),
                 None,
                 "a settle written before the landing existed came back carrying one"
+            );
+            assert_eq!(
+                release, &None,
+                "a settle written before it gained a release"
             );
         }
 

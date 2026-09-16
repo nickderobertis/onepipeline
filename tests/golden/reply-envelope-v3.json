@@ -13,7 +13,11 @@
       "id": "release",
       "outcome": "done",
       "evidence": "the operator read the merge on the base branch",
-      "landing": "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d"
+      "landing": "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d",
+      "release": {
+        "target": "crate",
+        "version": "0.2.31"
+      }
     },
     {
       "op": "settle",
