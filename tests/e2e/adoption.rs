@@ -1998,7 +1998,24 @@ fn a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again() {
     world.until("the run to settle", |world| {
         world.events_of(&run, "node-settled").len() == 2
     });
-    assert!(redirected(&world, &run, "consumer").contains("crate 0.2.0"));
+    // Said with what the run recorded about the consumer's turns and the note, so
+    // a failure names which half went missing — the redirection the turn read, or
+    // the turn's own report of it reaching the store — rather than only that the
+    // text was not there.
+    let note = redirected(&world, &run, "consumer");
+    assert!(
+        note.contains("crate 0.2.0"),
+        "the running turn did not report the note it was redirected with: {note:?}\n\
+         the consumer's turn activity: {:?}\nthe note's record: {adopted:?}",
+        world
+            .journal(&run)
+            .into_iter()
+            .filter(
+                |event| event["labels"]["node"] == "consumer" && event["kind"] == "turn-activity"
+            )
+            .map(|event| event["payload"]["redirected"].clone())
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// The note a running turn could not take **rides the node's next dispatch**, and
