@@ -8,10 +8,9 @@
 //! hook ended. Nothing here writes a node status, a result or a settlement, which
 //! is what keeps a hook from changing any of them.
 //!
-//! "Once" is per **ending** rather than per run: an accepted edit that leaves the
-//! run able to carry work out again retires the marker, so a run recovered from a
-//! failure still fires the hook for the ending it then reaches. [`fired`] is where
-//! that epoch lives, and [`live`] is what "again" is measured by.
+//! The paragraph's idempotency **epoch** is two of those halves: [`fired`] holds
+//! the marker against it, and [`live`] is the predicate the rule's "live again" is
+//! measured by.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -433,34 +432,18 @@ fn mark(paths: &RunPaths, firing: &Firing, command: &str) -> Result<bool> {
 }
 
 /// Whether the run's journal carries the marker a firing leaves, **for the ending
-/// the run is now at**.
+/// the run is now at** — the contract's epoch rule, answered.
 ///
-/// A firing is idempotent within one **epoch**: the run's launch begins the first,
-/// and every accepted edit that makes the run **live again** begins another, so a
-/// marker is answered against the most recent such edit rather than against the
-/// whole journal. That is what lets a run whose failure hook fired be retried and
-/// then fire the hook for the ending its replacement reaches — success, or failure
-/// a second time for the new attempt.
+/// Answered by **folding** the journal through the same projection every other
+/// reader uses, rather than by searching the record: the rule turns on the graph
+/// an edit left behind, and no field of an `edit-committed` says what that graph
+/// was. That is also why no list of operation kinds appears here — one could only
+/// approximate the graph, and would get both of the contract's own examples
+/// backwards.
 ///
-/// **An edit is judged by what it did, never by which operation it carried.** The
-/// question is asked of the graph the edit leaves behind, folded here exactly as
-/// every other reader folds it: an `add` whose node is skipped behind the very
-/// failure that ended the run has reopened nothing and must not let a second hook
-/// fire for that one ending, while a `reparent` or a `drop` that detaches a
-/// blocked node from what was holding it carries no node at all and *has*. A
-/// classification by operation kind gets both of those backwards, which is why
-/// there is no list of kinds here to get out of step with the graph.
-///
-/// The edit is still required: liveness alone would make an epoch of a cross-DAG
-/// upstream arriving, which nobody edited and which the rule this implements does
-/// not reach.
-///
-/// Read as a fold over the journal in the order it was written rather than as two
-/// searches: what decides the answer is whether the marker came after the last
-/// edit that left the run live, and a run may be reopened, fire, and be reopened
-/// again any number of times. The fold is the cost of asking the graph rather than
-/// the record — one pass of what [`RunView::open`] does — and the graph is only
-/// derived for an edit that could retire a marker there is.
+/// One fold of what [`RunView::open`] already does, and the statuses are derived
+/// only for an edit arriving while a marker stands, so a run that has never fired
+/// pays for none of it.
 fn fired(paths: &RunPaths) -> bool {
     let mut state = RunState {
         strict: true,
@@ -484,28 +467,23 @@ fn fired(paths: &RunPaths) -> bool {
 
 /// Whether the run has work it can still carry out, on the graph as it stands.
 ///
-/// "Live again" made exact. The first two are work that can move without anybody
-/// deciding anything; the second two are a run that has not **ended** — a ready
-/// human action pauses the run, and a `complete-but-draft` node is waiting on a
-/// release that is still coming. Everything else has settled or is held behind
-/// something that has, and will not advance until a further edit moves it.
+/// The contract's "live again", as a question about one graph. Two of the answers
+/// below cannot be checked against it by reading the match:
 ///
-/// `complete-but-draft` is the correct answer and is **unreachable from here**,
-/// which is why no journey drives it: [`judge`] answers `NotEnded` for a graph
-/// holding one, so a run that has ever held such a node has never fired and has no
-/// marker for an epoch to retire. It is written out rather than folded into the
-/// `false` arm because the day that changes — a settlement that leaves a draft node
-/// behind on an ended run — the answer that arm gives would be wrong.
-///
-/// `pending` answers `false` and is not an oversight: a node is `pending` only
-/// while a dependency of it is pending, ready or running, so whatever ancestor
-/// carries the liveness has already answered `true`. A `pending` node with no such
-/// ancestor cannot be derived — a dependency that is parked, waiting or failed
-/// makes its dependents `blocked` or `skipped` instead.
+/// * `pending` answers `false` and is not an oversight. A node is `pending` only
+///   while a dependency of it is pending, ready or running, so whatever ancestor
+///   carries the liveness has already answered `true`; a dependency that is
+///   parked, waiting or failed makes its dependents `blocked` or `skipped`
+///   instead, so a `pending` node with no such ancestor cannot be derived.
+/// * `complete-but-draft` is **unreachable from here**, which is why no journey
+///   drives it: [`judge`] answers `NotEnded` for a graph holding one, so a run
+///   that has ever held such a node has never fired and has no marker to retire.
+///   It is answered rather than swept into the `false` arm because the day a
+///   settlement can leave a draft node on an *ended* run, that arm would be wrong.
 ///
 /// Exhaustive on purpose: a status added later has to decide this rather than
-/// inherit an answer, because inheriting `false` would silently stop a run that
-/// reaches it from ever firing again.
+/// inherit `false`, which would silently stop a run that reaches it from ever
+/// firing again.
 fn live(state: &RunState) -> bool {
     state.statuses().values().any(|status| match status {
         NodeStatus::Ready | NodeStatus::Running => true,
