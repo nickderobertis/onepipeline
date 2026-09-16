@@ -55,26 +55,20 @@ esac
 mkdir -p "$record/$run" || broke "cannot create $record/$run"
 
 # Which invocation this is, **claimed** rather than counted: `<n>` is the first
-# number no earlier firing took, and a `mkdir` that refuses is what says a number
-# is taken. The filesystem arbitrates, so two firings that look at once cannot
-# both take one directory.
-#
-# Counted out of `invocations` instead, the read sits behind "has this run fired
-# before", which a *first* firing skips — so no platform executes it until a run
-# fires a second hook. cmd has no `wc`, so the Windows half paid for the same
-# count with a spawned command pipeline: three more processes, started by a hook
-# whose own stdin is the pipe the engine is still writing its document into and
-# whose driver's stdout and stderr every child inherits, since
-# `sys::disown_standard_handles` is applied on the detached path alone. The first
-# four journeys ever to fire two hooks for one run all timed out on that leg.
-# Claiming runs the same lines on the first firing as on the fifth, and starts
-# nothing.
+# number `mkdir` does not refuse, so two firings that look at once cannot both
+# take one directory. Claiming also runs these lines on a first firing exactly as
+# on a fifth, where a count of `invocations` is a read only a second firing
+# reaches — and on cmd, which has no `wc`, one that starts a pipeline whose
+# children inherit this hook's stdin and its driver's streams.
 ceiling=100
 nth=1
 until mkdir "$record/$run/$nth" 2>/dev/null; do
   nth=$((nth + 1))
   if [ "$nth" -gt "$ceiling" ]; then
-    broke "no record directory could be claimed under $record/$run: 1 through $ceiling are taken or cannot be created"
+    if [ -d "$record/$run/$ceiling" ]; then
+      broke "this run has already recorded $ceiling firings under $record/$run, which is this fixture's ceiling; a journey that needs more raises it in both halves, which both_run_end_hook_halves_number_an_invocation_the_same_way holds in step"
+    fi
+    broke "no record directory could be created under $record/$run, so nothing there is claimable"
   fi
 done
 here="$record/$run/$nth"

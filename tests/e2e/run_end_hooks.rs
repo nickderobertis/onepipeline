@@ -86,17 +86,9 @@ fn hook(world: &World) -> String {
 /// The two halves of the fixture number an invocation the same way.
 ///
 /// One contract in two languages, for the reason
-/// `harness::both_hook_scripts_answer_the_same_verbs` gives: no platform runs both, so a
-/// half that reaches its record directory by a route the other does not is a
-/// journey that passes on one leg and hangs on the other. That is this fixture's
-/// own history rather than a precaution. The Windows half used to work `<n>` out
-/// by counting `invocations` through a spawned command pipeline, behind an
-/// `if exist` only a **second** firing reaches — so no leg ever executed it, this
-/// file having fired at most one hook per run until the epoch journeys arrived,
-/// and the four that fire a second all timed out at the runner's 360-second bound
-/// with nothing in the log naming the hook. Both halves now claim `<n>` with
-/// `mkdir` from the first firing onwards, which starts nothing and runs the same
-/// lines every time; what is held below is that they go on agreeing.
+/// `harness::both_hook_scripts_answer_the_same_verbs` gives: no platform runs
+/// both, so a half that reaches its record directory by a route the other does
+/// not is a journey that passes on one leg and hangs on the other.
 // llmlint: ignore-block[tests_mirror_real_usage] a drift gate over the suite's own
 // scaffolding rather than a journey, exactly as `harness.rs`'s two are: what it holds is
 // that two files stay in step, no platform executes both, and reading them is the only way
@@ -104,7 +96,6 @@ fn hook(world: &World) -> String {
 // journey below.
 #[test]
 fn both_run_end_hook_halves_number_an_invocation_the_same_way() {
-    // The bound each half gives up claiming at, read as the value it writes down.
     let ceiling = |script: &str, source: &str| -> String {
         source
             .lines()

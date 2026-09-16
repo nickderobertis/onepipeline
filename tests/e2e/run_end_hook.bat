@@ -26,17 +26,14 @@ if "!run!"=="." (call :broke "ONEPIPELINE_RUN_ID holds '.', which is not a singl
 if "!run!"==".." (call :broke "ONEPIPELINE_RUN_ID holds '..', which is not a single run id path segment" & exit /b 70)
 if not exist "%record%\%run%\" mkdir "%record%\%run%" || (call :broke "cannot create %record%\%run%" & exit /b 70)
 
-rem Which invocation this is, claimed rather than counted. `run_end_hook.sh` is
-rem where why is written down, and this half is why it had to be: cmd has no `wc`,
-rem so counting `invocations` here meant a spawned command pipeline, reached only
-rem once a run had fired before — the one branch in this fixture no leg ran until a
-rem journey fired two hooks for one run. The ceiling below is held against that
+rem Which invocation this is, claimed rather than counted; `run_end_hook.sh` says
+rem why, and cmd is the half that made it matter. The ceiling is held against that
 rem half's by `both_run_end_hook_halves_number_an_invocation_the_same_way`.
 set "ceiling=100"
 set "nth=0"
 :number
 set /a "nth+=1"
-if !nth! GTR !ceiling! (call :broke "no record directory could be claimed under %record%\%run%: 1 through !ceiling! are taken or cannot be created" & exit /b 70)
+if !nth! GTR !ceiling! goto exhausted
 mkdir "%record%\%run%\!nth!" 2>nul || goto number
 set "here=%record%\%run%\!nth!"
 (echo %ONEPIPELINE_HOOK%)>>"%record%\%run%\invocations" || (call :broke "cannot append to %record%\%run%\invocations" & exit /b 70)
@@ -81,6 +78,17 @@ echo !status!|findstr /r "^[0-9][0-9]*$" >nul || (call :broke "%record%\%run%.ex
 if not "!status:~3!"=="" (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status from 0 to 255" & exit /b 70)
 if !status! GTR 255 (call :broke "%record%\%run%.exit holds '!status!', which is not an exit status from 0 to 255" & exit /b 70)
 exit /b %status%
+
+rem Nothing under %record%\%run% could be claimed, told apart by whether the last
+rem number is there: present is a run past the ceiling, absent is a `mkdir` that was
+rem refused for some other reason.
+:exhausted
+if exist "%record%\%run%\!ceiling!\" (
+  call :broke "this run has already recorded !ceiling! firings under %record%\%run%, which is this fixture's ceiling; a journey that needs more raises it in both halves, which both_run_end_hook_halves_number_an_invocation_the_same_way holds in step"
+  exit /b 70
+)
+call :broke "no record directory could be created under %record%\%run%, so nothing there is claimable"
+exit /b 70
 
 rem A record this fixture could not write, or a scripted value it could not use.
 :broke
