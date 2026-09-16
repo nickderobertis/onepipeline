@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.2](https://github.com/nickderobertis/onepipeline/compare/v0.33.1...v0.33.2) - 2026-09-16
+
+### Fixed
+
+- *(deps)* relink oneharness-core for the Claude login-refusal classifier ([#314](https://github.com/nickderobertis/onepipeline/pull/314))
+- *(hooks)* give run-end hook idempotency a retry epoch ([#311](https://github.com/nickderobertis/onepipeline/pull/311))
+
 ## [0.33.1](https://github.com/nickderobertis/onepipeline/compare/v0.33.0...v0.33.1) - 2026-09-16
 
 ### Fixed
