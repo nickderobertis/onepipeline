@@ -451,8 +451,14 @@ resolver = "2"
 # Only moving the pin lifts it, and that is a host-wide move another plan owns.
 # One MSRV floor for both members, so the test-support crate cannot declare a
 # different one. `just msrv`, CI's `msrv` job, and `clippy.toml` read this line.
+#
+# **1.97 is consumer-visible and it is set by onetaskgraph**, which declares it and
+# which `crates/testfakes` — a dev-dependency of this crate — links. Every other
+# engine here declares 1.89 or lower, but a declared minimum is a promise about what
+# builds, and `just msrv` checks `--all-targets`, so this is the floor rather than
+# something to narrow the check around.
 [workspace.package]
-rust-version = "1.89"
+rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.4.2"
@@ -535,6 +541,19 @@ oneharness-core = "0.13.1"
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
 onevcs-testing = "0.6.2"
+# **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
+# still reads every plan by *driving* the `onetaskgraph` binary. These host the real
+# `local-md` plugin inside `label-strict-source`; that fake says why.
+#
+# **Exact**, because the family is lock-step across patch releases despite the carets
+# in its own manifests — `-local-md` 0.2.30 does not compile against `-plugin-api`
+# 0.2.32 — and because the plugin served in process and the binary `bootstrap`
+# installs must be one release. Four of the six are transitive, which no requirement
+# here can pin, so
+# `taskgraph::tests::every_onetaskgraph_crate_in_the_lock_is_the_release_the_checks_install`
+# holds the lock's whole family to `justfile`'s `onetaskgraph-version`.
+onetaskgraph-core = "=0.2.30"
+onetaskgraph-local-md = "=0.2.30"
 
 [package]
 name = "onepipeline"

@@ -3861,36 +3861,6 @@ pub fn onetaskgraph_binary() -> PathBuf {
         .clone()
 }
 
-/// The **real** `onetaskgraph-source` program: the shipped host that serves any plugin of
-/// that build over the stdio plugin protocol.
-///
-/// Installed beside `onetaskgraph` by the same `cargo install` that `just bootstrap` runs,
-/// so it is resolved beside the binary this suite already found rather than provisioned a
-/// second time. A host without one **fails**, naming what to run, for the same reason
-/// [`onetaskgraph_binary`] does: it reads a folder of Markdown, with no network and no
-/// account, and a skip would be a pass nobody earned.
-pub fn onetaskgraph_source_binary() -> PathBuf {
-    static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            let store = onetaskgraph_binary();
-            let beside = store.parent().and_then(|directory| {
-                ["onetaskgraph-source", "onetaskgraph-source.exe"]
-                    .into_iter()
-                    .map(|file| directory.join(file))
-                    .find(|candidate| candidate.is_file())
-            });
-            let named = beside.or_else(|| on_path("onetaskgraph-source"));
-            named.unwrap_or_else(|| {
-                panic!(
-                    "a label-strict destination is served by the real onetaskgraph-source,                      which is installed beside {} — run `just bootstrap`",
-                    store.display()
-                )
-            })
-        })
-        .clone()
-}
-
 /// The released `onevcs` executable whose holders verb the launcher consumes.
 pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();

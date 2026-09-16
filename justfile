@@ -39,6 +39,10 @@ set positional-arguments := true
 # it, and `taskgraph::tests::the_release_the_checks_install_meets_the_floor_and_is_named_once`
 # fails if it falls below that floor, is named twice, or stops being what the
 # recipe installs.
+#
+# The crate under test still drives the binary rather than linking it. What does
+# link onetaskgraph is `crates/testfakes` — see `[workspace.dependencies]`, which
+# requires the same release this line names and is why `rust-version` is 1.97.
 onetaskgraph-version := "0.2.30"
 
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
