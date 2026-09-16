@@ -49,6 +49,15 @@ oneharness-core = { workspace = true }
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
 serde_norway = "0.9"
+# The reference plugin host and the plugin it hosts, so `label-strict-source`
+# serves a real store without a second executable. That fake's own module doc says
+# why it hosts rather than spawns.
+onetaskgraph-core = { workspace = true }
+onetaskgraph-local-md = { workspace = true }
+# The plugin API is async, so hosting one needs a runtime to block on. Nothing
+# under `local-md` is a socket or a timer, so the current-thread runtime is all of
+# it — and onetaskgraph's own network plugins already put tokio in the lock.
+tokio = { version = "1", features = ["rt"] }
 
 # So a double can act out the one dispatch behaviour a rendezvous cannot: a
 # worker that keeps working through the polite ask to stop. The crate under test
@@ -95,8 +104,8 @@ path = "src/bin/fake-onetaskgraph.rs"
 
 # Not a double at all either: a **real** `onetaskgraph` source. It speaks that
 # product's own stdio plugin protocol and serves every read and write out of the
-# real `local-md` plugin, hosted in the shipped `onetaskgraph-source` program —
-# what it adds is one destination's *rule*, the label strictness `github-projects`
+# real `local-md` plugin, hosted in this process by the two crates below — what it
+# adds is one destination's *rule*, the label strictness `github-projects`
 # enforces and no local store does, so a projection that dropped a label fails a
 # journey here instead of silently stopping at a board nobody can reach offline.
 [[bin]]

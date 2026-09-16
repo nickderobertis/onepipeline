@@ -11,17 +11,22 @@
 //!
 //! It is a source rather than a stand-in for one. It speaks `onetaskgraph`'s own stdio
 //! plugin protocol on the wire the engine spawns it on, and every read and every write it
-//! serves is served by the real `local-md` plugin, hosted in the shipped
-//! `onetaskgraph-source` program that this process proxies. The only thing it adds is the
-//! refusal: a `write_task` or `write_project` onto an item this store already holds is
-//! refused, without reaching the store, when the labels being written are not the labels
-//! that item carries.
+//! serves is served by the real `local-md` plugin — the one `onetaskgraph-local-md`
+//! publishes — hosted **in this process** by `onetaskgraph_core::subprocess::serve`, which
+//! is the same reference host the `onetaskgraph-source` program runs. The only thing it
+//! adds is the refusal: a `write_task` or `write_project` onto an item this store already
+//! holds is refused, without reaching the store, when the labels being written are not the
+//! labels that item carries.
+//!
+//! **Hosted rather than spawned**, because `onetaskgraph-source` is a reference host no
+//! release installs, and a test that hunts an uninstalled executable resolves whatever is
+//! lying around. The crates behind the plugin ship at every release, so the host lives
+//! here and this program is the only executable the journey resolves.
 //!
 //! Its `config:` block — which a `subprocess` source hands over verbatim as `settings:` —
-//! names both halves:
+//! names the one thing left to name:
 //!
-//! * `host` — the `onetaskgraph-source` executable that hosts the real `local-md` plugin.
-//! * `root` — the folder of Markdown that plugin serves.
+//! * `root` — the folder of Markdown the hosted `local-md` plugin serves.
 //!
 //! **What is typed here and what is not** is the protocol's own division. The handshake,
 //! the write, and the read a write is judged against are what this program *interprets*,
@@ -37,17 +42,21 @@
 //! protocol has the engine report *that* as `unavailable`, quoting whatever the plugin
 //! wrote to standard error, so there is nothing to restate and nothing to drift.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
+use std::sync::mpsc::{self, Receiver, Sender};
 
+use onetaskgraph_core::subprocess::serve;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] The rule below belongs
-// to `onetaskgraph`'s `github-projects` destination, which is another repository's crate,
-// is not linked here, and can only be reached through a credentialled GitHub board — so
-// there is no shared type to generate from and no gate this offline tier could run. What
+// to `onetaskgraph`'s `github-projects` destination, which can only be reached through a
+// credentialled GitHub board. That crate is now in this binary's graph — `onetaskgraph-core`
+// registers every plugin — and it still publishes no constant for this sentence: the
+// refusal is a literal inside its own write path, so there is nothing to generate from and
+// no gate this offline tier could run against it. What
 // is restated is one sentence of *behaviour*, quoted verbatim in the module doc above, and
 // the journey that drives this program asserts the refusal's own wording rather than
 // trusting it. The alternative is not a gate; it is having no destination that refuses.
@@ -78,10 +87,13 @@ struct HandshakeParams {
     config: Settings,
 }
 
-/// This source's own `config:` block: what to host, and what it serves.
+/// This source's own `config:` block: the folder the hosted plugin serves.
+///
+/// What hosts that plugin is no longer a setting, because it is no longer a program: the
+/// `local-md` plugin runs in this process, so the only thing left for an operator's
+/// configuration to decide is the store.
 #[derive(Deserialize)]
 struct Settings {
-    host: PathBuf,
     root: PathBuf,
 }
 
@@ -181,13 +193,113 @@ impl std::fmt::Display for Label {
     }
 }
 
+/// The writing half of an in-process pipe.
+///
+/// What a spawned host's `ChildStdin` was, without the host: bytes handed to the thread
+/// serving the `local-md` plugin. A closed reading half is the same [`BrokenPipe`] a
+/// stopped child gave this program, so the one place that reports a stopped plugin does
+/// not have to learn a second way of being told.
+///
+/// [`BrokenPipe`]: std::io::ErrorKind::BrokenPipe
+struct Writing(Sender<Vec<u8>>);
+
+impl Write for Writing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.send(bytes.to_vec()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "nothing is reading")
+        })?;
+        Ok(bytes.len())
+    }
+
+    /// Nothing is buffered on this side: every write is already with the reader.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The reading half, which is where the framing the protocol needs comes from.
+///
+/// A `Read` rather than a channel of lines, because both sides of this pipe are handed to
+/// code that does its own framing — [`serve`] on one end and [`Host::ask`] on the other —
+/// and a reader that delivered whole messages would be a second framing for them to
+/// disagree with.
+struct Reading {
+    arriving: Receiver<Vec<u8>>,
+    held: Vec<u8>,
+    taken: usize,
+}
+
+impl Reading {
+    fn new(arriving: Receiver<Vec<u8>>) -> Self {
+        Self {
+            arriving,
+            held: Vec::new(),
+            taken: 0,
+        }
+    }
+}
+
+impl Read for Reading {
+    fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        // A write of no bytes is not the end of anything, so an empty one is waited past
+        // rather than reported as the closed stream `Ok(0)` means.
+        while self.taken == self.held.len() {
+            let Ok(more) = self.arriving.recv() else {
+                return Ok(0);
+            };
+            self.held = more;
+            self.taken = 0;
+        }
+        let taking = (self.held.len() - self.taken).min(into.len());
+        into[..taking].copy_from_slice(&self.held[self.taken..self.taken + taking]);
+        self.taken += taking;
+        Ok(taking)
+    }
+}
+
 struct Host {
-    input: std::process::ChildStdin,
-    output: BufReader<std::process::ChildStdout>,
-    child: std::process::Child,
+    input: Writing,
+    output: BufReader<Reading>,
+    served: std::thread::JoinHandle<std::io::Result<()>>,
 }
 
 impl Host {
+    /// Start the real `local-md` plugin **in this process**, behind the protocol.
+    ///
+    /// [`serve`] is `onetaskgraph`'s own reference host — the one the `onetaskgraph-source`
+    /// program runs — so what answers here is the same code a spawned host would have run,
+    /// over the same wire, reached through a pipe that never leaves this process.
+    ///
+    /// On a thread of its own because the protocol is a conversation: this side writes a
+    /// request and then blocks reading its response, and a host sharing the thread would
+    /// never get to answer. The plugin's own futures are runtime-agnostic — nothing under
+    /// `local-md` is a socket or a timer — so a current-thread runtime is the whole of what
+    /// hosting one costs.
+    ///
+    /// A host that cannot be started is reported rather than panicked on, for the same
+    /// reason a host that could not be spawned was: it is a plugin that never came up, and
+    /// §1 has the engine tell its caller that.
+    fn start() -> Result<Self, String> {
+        let (asking, asked) = mpsc::channel();
+        let (answering, answered) = mpsc::channel();
+        let served = std::thread::Builder::new()
+            .name("local-md".to_owned())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()?
+                    .block_on(serve(
+                        BufReader::new(Reading::new(asked)),
+                        Writing(answering),
+                    ))
+            })
+            .map_err(|error| format!("cannot start the hosted local-md plugin: {error}"))?;
+        Ok(Self {
+            input: Writing(asking),
+            output: BufReader::new(Reading::new(answered)),
+            served,
+        })
+    }
+
     /// One request out and its response back, checked against §2's envelope: an object, on
     /// the id that was asked, carrying exactly one of `result` and `error`.
     ///
@@ -260,28 +372,16 @@ fn main() -> ExitCode {
         ));
     }
 
-    let spawned = Command::new(&handshake.params.config.host)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            return stop(&format!(
-                "cannot run {}: {error}",
-                handshake.params.config.host.display()
-            ))
-        }
-    };
-    let mut host = Host {
-        input: child.stdin.take().expect("a piped standard input"),
-        output: BufReader::new(child.stdout.take().expect("a piped standard output")),
-        child,
+    let mut host = match Host::start() {
+        Ok(host) => host,
+        Err(why) => return stop(&why),
     };
 
     // The hosted plugin's own handshake, in the version the engine asked for and under the
     // name the engine gave this source, so what it reports is the real `local-md` source's
-    // capabilities rather than a second opinion about them.
+    // capabilities rather than a second opinion about them. The kind is that plugin's own
+    // `KIND` rather than a string spelled here: a registry name copied into a fixture is
+    // one that goes on naming a plugin after the release renamed it.
     let hosted = json!({
         "id": "strict-initialize",
         "method": "initialize",
@@ -290,7 +390,7 @@ fn main() -> ExitCode {
             "engine": handshake.params.engine,
             "source_name": handshake.params.source_name,
             "config": {
-                "kind": "local-md",
+                "kind": onetaskgraph_local_md::KIND,
                 "config": {"root": handshake.params.config.root},
             },
             "secrets": {},
@@ -307,13 +407,13 @@ fn main() -> ExitCode {
     drop(host.input);
     // The hosted plugin is where every read and write actually happened, so its own ending
     // is this source's: a host that died reporting something must not be reported as a
-    // clean close by the process that carried its answers.
-    let ending = ending.and_then(|()| match host.child.wait() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("the hosted local-md plugin exited {status}")),
-        Err(error) => Err(format!(
-            "cannot wait for the hosted local-md plugin: {error}"
-        )),
+    // clean close by the code that carried its answers. Closing the writing half above is
+    // what ends it — the plugin reads until its input does, exactly as it would behind a
+    // pipe to another process.
+    let ending = ending.and_then(|()| match host.served.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(stopped(&error)),
+        Err(_) => Err("the hosted local-md plugin panicked".to_owned()),
     });
     match ending {
         Ok(()) => ExitCode::SUCCESS,
