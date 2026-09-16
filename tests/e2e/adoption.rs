@@ -4011,6 +4011,51 @@ fn a_node_settled_from_evidence_is_correlated_through_the_change_request_it_name
     );
 }
 
+/// Say that the probe can no longer answer, whole or not at all.
+///
+/// An answer file that is there and holds nothing is what a probe caught
+/// mid-write looks like, and the shipped probe reports it as a probe that could
+/// not answer — non-zero, which `onevcs` reads as `not-answered` and never as a
+/// release that has not happened. Which is the case this exists for: it is the
+/// answer that must never follow a version.
+fn stops_answering(answer: &Path) {
+    let whole = answer.with_extension("unanswerable");
+    std::fs::write(&whole, "").expect("the unanswerable probe answer is written");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match std::fs::rename(&whole, answer) {
+            Ok(()) => return,
+            Err(failure) if std::time::Instant::now() >= deadline => panic!(
+                "the probe's answer {} could not be replaced: {failure}",
+                answer.display()
+            ),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
+/// The wait surfaces one node's hold has raised, in the order they were raised.
+fn wait_surfaces_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == node
+        })
+        .collect()
+}
+
+/// The waits one node has been told about, in the order they were raised.
+fn waits_of(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "release-wait")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// Take one branch onto its base the way a host's squash merge does: every commit
 /// of it collapsed into one new commit on the base, which no branch of the work
 /// carries — the commit an operator reads off the merge and states.
@@ -4181,6 +4226,7 @@ fn a_node_settled_at_a_change_request_reads_landed_in_every_surface() {
         Spelling::ChangeRequest,
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The world both release-evidence journeys run in: a node whose dispatch failed
 /// after the change carrying its work was opened, a `published` node waiting on
@@ -4382,6 +4428,7 @@ fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the
         Spelling::Commit,
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own reply, its own release watch, a real `onevcs` store and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
 /// A settle can state the release that carries its landing, and that is recorded
@@ -4453,50 +4500,6 @@ fn a_release_stated_on_the_settle_is_recorded_and_releases_the_node_waiting_on_i
         world.run_file(&run, "result.json").is_file()
     });
 }
-
-/// Say that the probe can no longer answer, whole or not at all.
-///
-/// An answer file that is there and holds nothing is what a probe caught
-/// mid-write looks like, and the shipped probe reports it as a probe that could
-/// not answer — non-zero, which `onevcs` reads as `not-answered` and never as a
-/// release that has not happened. Which is the case this exists for: it is the
-/// answer that must never follow a version.
-fn stops_answering(answer: &Path) {
-    let whole = answer.with_extension("unanswerable");
-    std::fs::write(&whole, "").expect("the unanswerable probe answer is written");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        match std::fs::rename(&whole, answer) {
-            Ok(()) => return,
-            Err(failure) if std::time::Instant::now() >= deadline => panic!(
-                "the probe's answer {} could not be replaced: {failure}",
-                answer.display()
-            ),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
-        }
-    }
-}
-
-/// The wait surfaces one node's hold has raised, in the order they were raised.
-fn wait_surfaces_of(world: &World, run: &str, node: &str) -> Vec<Value> {
-    world
-        .events_of(run, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| {
-            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == node
-        })
-        .collect()
-}
-
-/// The waits one node has been told about, in the order they were raised.
-fn waits_of(world: &World, run: &str, node: &str) -> Vec<Value> {
-    world
-        .events_of(run, "release-wait")
-        .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .collect()
-}
-
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
