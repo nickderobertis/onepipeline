@@ -87,6 +87,13 @@ path = "src/bin/fake-gh.rs"
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"
 
+# Codex's buffered JSON-lines surface, at the same paid-turn seam. Kept apart
+# from fake-claude because the two providers' terminal documents are different
+# contracts and the linked classifier must consume Codex's own spelling.
+[[bin]]
+name = "fake-codex"
+path = "src/bin/fake-codex.rs"
+
 # `oneharness` itself, at the seam the library conversion left behind: the
 # executable a two-party member's composed provider block names, and the one an
 # in-flight redirection is delivered by. No single-sided turn comes through it.

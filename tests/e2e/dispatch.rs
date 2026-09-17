@@ -3186,6 +3186,52 @@ fn a_claude_login_refusal_is_stepped_past_as_unauthenticated_rather_than_rate_li
     );
 }
 
+/// A Codex server-overload refusal is retried on its candidate, then reaches a
+/// node settlement in the linked classifier's own spelling.
+#[test]
+fn codex_server_overload_exhaustion_settles_with_the_producers_classification() {
+    use oneharness_core::domain::signals::FailureKind;
+
+    let world = World::new("real-server-overloaded");
+    world.write_graphs();
+    std::fs::write(
+        world.graphs().join("overloaded.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 1\n",
+    )
+    .expect("the overloaded candidate's config is written");
+    let path = world.plan(
+        "overloaded",
+        &plan_of("overloaded", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            "members.worker.oneharness_config=./overloaded.toml",
+        ])
+        .settled();
+    world.until("the overloaded node to settle", |world| {
+        world.run_file("overloaded", "result.json").is_file()
+    });
+
+    let node = world.run_json("overloaded", "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(
+        node["cause"],
+        FailureKind::ServerOverloaded.as_str(),
+        "the linked classifier's failure kind did not reach settlement: {node}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(world.root.join("codex-overloaded.calls"))
+            .expect("the Codex double counted each attempt")
+            .trim(),
+        "2",
+        "one configured retry means two attempts on the same candidate"
+    );
+}
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///

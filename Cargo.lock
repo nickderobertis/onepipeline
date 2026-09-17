@@ -1278,16 +1278,16 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0c798e17807ce8d224422c840d17d61017f50e26de183bc42b49752c20770ed"
+checksum = "255a1800b68091ac1e1f3a97448789a6e3ed725cd0dab26c20ebf0c1f45b2477"
 dependencies = [
  "clap",
  "libc",
- "oneharness-core",
+ "oneharness-core 0.13.2",
  "onejudge",
- "onemessagebus",
- "onemessagebus-agent",
+ "onemessagebus 0.7.0",
+ "onemessagebus-agent 0.7.0",
  "schemars",
  "serde",
  "serde_json",
@@ -1321,15 +1321,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "onejudge"
-version = "0.12.0"
+name = "oneharness-core"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9aa2cb3cc3c281e338ccbcb7b09a5f52c2b0dbcdf5cf76bad796c493f21ad96"
+checksum = "ff097b5e1da736141988f30dcc8194cd69bb340cbcd75687c18612f5e5c7b7a7"
+dependencies = [
+ "fs2",
+ "jsonschema 0.33.0",
+ "libc",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "toml",
+ "uuid",
+ "wait-timeout",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "onejudge"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8aa5c3b955eedb5d7541f71d74fe9a7dba5a0f2225b2881b049e6f395591c4f5"
 dependencies = [
  "clap",
- "oneharness-core",
- "onemessagebus",
- "onemessagebus-agent",
+ "oneharness-core 0.14.0",
+ "onemessagebus 0.7.0",
+ "onemessagebus-agent 0.7.0",
  "rustix",
  "serde",
  "serde_json",
@@ -1355,12 +1376,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "onemessagebus"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef4084c23bbfbb9b5765e3fe91862cba826b8ecf6e1f98dbe9a8e080d4501a32"
+dependencies = [
+ "getrandom 0.3.4",
+ "jsonschema 0.56.0",
+ "rustls",
+ "rustls-native-certs",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "thiserror 2.0.20",
+ "time",
+ "ureq",
+]
+
+[[package]]
 name = "onemessagebus-agent"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad99ed32fab0e37d111b6555ef741f9e65d1628e3263470742cb3c3ec2f73dd6"
 dependencies = [
- "onemessagebus",
+ "onemessagebus 0.4.0",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "onemessagebus-agent"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80344b1afbb5054e33b01a12318487fd8753a0c03e82429840d2b2115e65360f"
+dependencies = [
+ "onemessagebus 0.7.0",
  "schemars",
  "serde",
  "serde_json",
@@ -1376,10 +1430,10 @@ dependencies = [
  "libc",
  "minijinja",
  "oneagentgraph",
- "oneharness-core",
+ "oneharness-core 0.14.0",
  "onejudge",
- "onemessagebus",
- "onemessagebus-agent",
+ "onemessagebus 0.4.0",
+ "onemessagebus-agent 0.4.0",
  "onepipeline-testfakes",
  "onevcs",
  "onevcs-testing",
@@ -1400,7 +1454,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
- "oneharness-core",
+ "oneharness-core 0.14.0",
  "onejudge",
  "onetaskgraph-core",
  "onetaskgraph-local-md",
@@ -1513,9 +1567,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.24.0"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b8a8b68c5038bf6160d2b43fa8d60eeb015f33fd5771c4ec9c403e9c1d22a9b"
+checksum = "1cb5524521befad4e6da4585a5e6fce496da28e93dd3bf4ee8ed4b822d71c284"
 dependencies = [
  "clap",
  "dunce",
@@ -1524,8 +1578,8 @@ dependencies = [
  "icu_properties",
  "libc",
  "minijinja",
- "onemessagebus",
- "onemessagebus-agent",
+ "onemessagebus 0.7.0",
+ "onemessagebus-agent 0.7.0",
  "semver",
  "serde",
  "serde_json",
@@ -1541,11 +1595,11 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.6.3"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd267a3e337d1e847d110c191b8ab17a4b89bb78ff20906f01a47d3462a72ce7"
+checksum = "f7331e69ace24fd7a484ec975b8a8687be8c1ab90a5d09e1462b554118bb6146"
 dependencies = [
- "onemessagebus-agent",
+ "onemessagebus-agent 0.7.0",
  "onevcs",
  "serde",
  "serde_json",

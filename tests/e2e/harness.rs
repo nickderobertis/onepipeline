@@ -983,7 +983,7 @@ impl World {
             // failed on a premise the test could not see was false. It also
             // stopped that host from spending a *real* codex turn, which is what
             // the `env_remove`s below guard the same launch against.
-            .env("ONEHARNESS_BIN_CODEX", self.uninstalled_harness())
+            .env("ONEHARNESS_BIN_CODEX", double("fake-codex"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(
                 "ONEPIPELINE_NODE_GRAPH",
@@ -1017,10 +1017,6 @@ impl World {
     /// does not resolve is what oneharness reads as a candidate it cannot run,
     /// and one scoped to this world cannot be brought into existence by
     /// something an operator has on their host.
-    fn uninstalled_harness(&self) -> PathBuf {
-        self.root.join("harnesses-not-installed").join("codex")
-    }
-
     /// Run a command against the real `oneagentgraph`.
     pub fn run_on_agentgraph(&self, args: &[&str]) -> Run {
         Run::of(
