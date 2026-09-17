@@ -467,9 +467,8 @@ onevcs = "0.24.2"
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
 # and `src/filter.rs` re-export them rather than keeping a copy. One copy or
-# none: `oneagentgraph` 0.4.2, `onevcs` 0.24.0 and `onejudge` 0.12.0 each require
-# exactly these, so a lock carrying a second one would make a relayed envelope
-# two different types.
+# none: the sibling requirements must resolve these packages once, because a
+# lock carrying a second copy would make a relayed envelope two different types.
 onemessagebus = "0.7.0"
 onemessagebus-agent = "0.7.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or

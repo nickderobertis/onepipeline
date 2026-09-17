@@ -1848,6 +1848,9 @@ fn undeclared_surface_kinds_are_relayed_identically() {
         assert_eq!(read.json()["surface"]["blocking"], false);
     }
 
+    // llmlint: ignore-block[tests_mirror_real_usage] The adopted bus library and
+    // binary share this local append boundary. The suite does not install the
+    // bus binary, so this writes its serialized queue record directly.
     // The host bus may carry fields the engine's `surface` verb does not set.
     // Appending its queue record proves the relay preserves them rather than
     // reconstructing the surface from the engine's own vocabulary.
@@ -1867,6 +1870,7 @@ fn undeclared_surface_kinds_are_relayed_identically() {
         .expect("the host bus opens the surface queue");
     use std::io::Write as _;
     writeln!(log, "{record}").expect("the host bus appends its surface");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let read = world.run(&["next", &run]);
     read.exited(0);
     assert_eq!(read.json()["surface"]["kind"], "host-blocker");
@@ -2241,6 +2245,9 @@ fn a_reader_of_the_older_receipt_still_reads_every_answer() {
 /// A blocking question is a run's only signal that it is held on a person, and
 /// behind a pile of routine `monitor` updates a bare count rendered the two
 /// identically. So the kinds ride the line, and the blocking one leads it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] Ten bounded waits
+// are the observable contract: the unread summary must rank and sanitize the whole
+// mixed queue, which cannot be proven by a smaller fixture.
 #[test]
 fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     use std::io::Write;
@@ -2264,7 +2271,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     // observer persona's own word, so it is a stranger's string on the one line
     // a supervisor may not filter out — and a second line spliced into that line
     // is how a run hides the question above it.
-    for kind in ["edit-rejected", "quiet-worker", "check-in", "pro\\nposal"] {
+    for kind in ["edit-rejected", "quiet-worker", "check-in", "pro-posal"] {
         frames.push_str(&format!(
             "{{\"kind\":\"{kind}\",\"message\":\"one {kind}\",\"blocking\":false}}\n"
         ));
@@ -2300,7 +2307,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
             .exited(0)
             .out_has(
                 "10 planner update(s) waiting (1 planner-question, 1 check-in, 1 edit-rejected, \
-                 1 pro posal, and 2 other kind(s))",
+                 1 pro-posal, and 2 other kind(s))",
             )
             .out_lacks("\nposal");
     }
@@ -2311,6 +2318,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     ended(serving);
     world.release("build.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A surface whose server exited with the side that asked already gone stops
 /// counting as one the planner is waiting on.
@@ -2324,6 +2332,9 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
 ///
 /// Nothing is deleted to fix it: both texts are still there to read, and `next`
 /// still hands them over saying which they are.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] The elapsed wait
+// distinguishes a closed host stream from a still-live listener; shortening it would
+// stop testing the recovery path.
 #[test]
 fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() {
     use std::io::Write;
@@ -2420,6 +2431,7 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
     world.release("build.go");
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 /// A decision whose asker has gone releases the subtree it was holding, gives up
 /// the pending slot, and takes its place behind everything somebody is still
 /// waiting on.

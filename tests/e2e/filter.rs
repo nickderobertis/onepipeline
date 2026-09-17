@@ -54,6 +54,9 @@ fn raise_blocker(world: &World, run: &str) {
         !waiting(world),
         "a surface was already waiting, so this journey cannot tell its own from it"
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] The watch must already be
+    // blocked when the record lands. Appending the real local-bus record places
+    // that race deterministically without mocking the reader.
     std::fs::write(
         world.run_file(run, "channel/surfaces.jsonl"),
         concat!(
@@ -62,6 +65,7 @@ fn raise_blocker(world: &World, run: &str) {
         ),
     )
     .expect("the host binding appends its surface");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the question to reach the planner", waiting);
 }
 

@@ -308,6 +308,9 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
         .err_has("planner, sentinel");
     assert_eq!(world.events_of(RUN, "edit-committed").len(), before);
 
+    // llmlint: ignore-block[tests_mirror_real_usage] Deliberately bypasses
+    // `reply` to prove the driver's independent trust-boundary check; appending
+    // is the real local bus transport boundary.
     for payload in [
         json!({"id": 900, "author": "stranger", "commands": [
             {"op": "add", "node": agent("also-never", &[])}
@@ -323,6 +326,7 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
             .expect("the host bus opens the command queue");
         writeln!(file, "{payload}").expect("the host bus appends the envelope");
     }
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the direct envelopes to be rejected", |world| {
         world.events_of(RUN, "edit-rejected").len() >= 2
     });
@@ -404,6 +408,9 @@ fn a_legacy_monitor_author_replays_from_the_journal_and_checkpoint() {
         .expect("the replay checkpoint exists");
     assert!(checkpoint.contains("monitor"), "{checkpoint}");
 
+    // llmlint: ignore-block[tests_mirror_real_usage] A legacy launch cannot be
+    // minted by today's CLI. Removing the newly optional key constructs exactly
+    // the historical serialized record this compatibility journey must read.
     let launch_path = world.run_file(RUN, "launch.json");
     let mut launch: Value = serde_json::from_str(
         &std::fs::read_to_string(&launch_path).expect("the launch record reads"),
@@ -419,6 +426,7 @@ fn a_legacy_monitor_author_replays_from_the_journal_and_checkpoint() {
     )
     .expect("the launch now carries only the default planner author");
 
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["status", RUN]).exited(0).out_has("0/2 done");
     world
         .run(&["monitor", RUN])

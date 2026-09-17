@@ -786,7 +786,7 @@ pub struct SurfaceKind(String);
 impl SurfaceKind {
     /// The word a queued surface names this kind with.
     ///
-    /// The wire spelling is this enum's rather than a string beside it, so the
+    /// The wire spelling belongs to this validated type rather than a string beside it, so the
     /// kind a queue holds and the kind a command line accepts cannot drift.
     pub const CHECK_IN: &'static str = "check-in";
     /// Something a watcher decided the planner should know.

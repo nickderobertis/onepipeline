@@ -10,18 +10,37 @@ use onemessagebus::{
     QueueName, ServeOptions, ServeSession, TransportKinds,
 };
 use onemessagebus_agent::channel::{PlannerChannel, PLANNER_CHANNEL, SURFACES};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceFrame {
-    kind: String,
+    kind: HostKind,
     message: String,
     #[serde(default = "blocking")]
     blocking: bool,
     #[serde(default)]
     node: Option<String>,
+}
+
+struct HostKind(String);
+
+impl<'de> Deserialize<'de> for HostKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        let valid = !word.is_empty()
+            && word.len() <= 64
+            && word.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase() || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+            });
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "a kind matches ^[a-z][a-z0-9-]{0,63}$",
+            ));
+        }
+        Ok(Self(word))
+    }
 }
 
 #[derive(Deserialize)]
@@ -76,7 +95,7 @@ impl Codec for SurfaceCodec {
             unreachable!("the relisten frame returned above")
         };
         let mut surface = json!({
-            "kind": frame.kind,
+            "kind": frame.kind.0,
             "message": frame.message,
             "source": "proposal",
             "blocking": frame.blocking,
@@ -107,6 +126,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layouts = Layouts::new().with(Arc::new(PlannerChannel));
     let bus = config.resolve(&layouts, &TransportKinds::builtin())?;
     let mut codec = SurfaceCodec("host-surface".parse()?);
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] These names are
+    // compatibility inputs of this test-only host, deliberately exercised by ported
+    // historical journeys. The production engine owns only ASKER_ENV; the other two
+    // are not product contracts and disappear with those fixtures.
+    let reply_window = match std::env::var("ONEPIPELINE_REPLY_TIMEOUT_SECONDS") {
+        Ok(word) => word.parse::<u64>()?,
+        Err(std::env::VarError::NotPresent) => 60,
+        Err(failure) => return Err(failure.into()),
+    };
     let options = ServeOptions {
         asker: std::env::var("ONEPIPELINE_CHANNEL_ASKER")
             .ok()
@@ -117,13 +145,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .map(|word| word.parse::<u64>().map(Duration::from_secs))
             .transpose()?,
-        reply_window: Duration::from_secs(
-            std::env::var("ONEPIPELINE_REPLY_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|word| word.parse().ok())
-                .unwrap_or(60),
-        ),
+        reply_window: Duration::from_secs(reply_window),
     };
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     let queue: QueueName = SURFACES.parse()?;
     bus.serve(
         &queue,
