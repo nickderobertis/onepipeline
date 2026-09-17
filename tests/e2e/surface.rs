@@ -43,17 +43,25 @@ const COMMANDS: &[(&str, &[&str])] = &[
     ("telemetry", &["telemetry"]),
 ];
 
+/// `channel` stays a verb with a help of its own so that a host reading the
+/// surface finds where serving went, and it offers nothing to run: its one
+/// parser sentinel is hidden from help and refused by name when spelled out.
 #[test]
 fn channel_help_does_not_offer_the_retired_server_and_serve_is_unknown() {
     let world = World::new("surface-no-channel-serve");
     world
         .run(&["channel", "--help"])
         .exited(0)
-        .out_lacks("serve");
+        .out_lacks("serve")
+        .out_lacks("__no-engine-verb");
     world
         .run(&["channel", "serve", "run-1"])
         .exited(USAGE_ERROR)
         .err_has("unrecognized subcommand 'serve'");
+    world
+        .run(&["channel", "__no-engine-verb"])
+        .exited(REFUSED)
+        .err_has("the channel exposes no engine-owned verb");
 }
 
 fn onepipeline() -> Command {

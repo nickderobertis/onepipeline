@@ -117,10 +117,11 @@ where
 
 /// Who wrote a reply, and therefore which ops it may carry.
 ///
-/// A channel with two authors needs to say which one is speaking: the planner
-/// owns the graph and the monitor only watches it, and the difference has to be
-/// enforced rather than trusted. Omitted, an envelope is the planner's — every
-/// reply written before this field existed was.
+/// An open word: the planner, or any author the launch's bus configuration
+/// declares — what each may issue is that configuration's allowlist, enforced
+/// where an envelope is offered and where the driver applies it rather than
+/// trusted. Omitted, an envelope is the planner's — every reply written before
+/// this field existed was.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 pub struct Author(String);
@@ -855,8 +856,6 @@ pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 /// crate refused them with, named by where the value came from.
 pub(crate) use onemessagebus::Asker;
 
-/// The asker one environment value names, or a refusal saying why it names none —
-/// naming `from`, the variable it was read from.
 /// Read the asker a queue recorded, reading a name that names nobody as none.
 ///
 /// The one lenient boundary in this file, and the leniency is the point. A
