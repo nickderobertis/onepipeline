@@ -3338,52 +3338,127 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The Codex double refuses an argument `codex exec` does not take, a
-/// `--version` that is not the probe on its own, and an option where
-/// `--model`'s value should be.
+/// The Codex double answers every `codex exec` form oneharness builds with its
+/// one line, and refuses every line the real `codex exec` would refuse.
 ///
 /// The half no passing journey can show, as for `fake-claude` above: the
-/// overload journey proves the real `oneharness` drives this binary on the
-/// argv it builds, and this proves an argv it does not build is refused rather
-/// than answered — including the probe's flag sent inside a turn, which the
-/// real CLI exits on and which a looser double would answer as a probe.
+/// overload journey proves the real `oneharness` drives this binary on the one
+/// argv it built there, and this proves each other form it may build is
+/// answered — a resumed thread, a sandbox, a model, a prompt on stdin — and that
+/// an argv it does not build is refused rather than answered: a verb other
+/// than `exec`, a `resume` with no thread, an option with no value or an
+/// unknown one, a flag Codex does not take, two prompts, none, and the probe's
+/// flag sent inside a turn, which the real CLI exits on and which a looser
+/// double would answer as a probe.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*, driven at the
 // process boundary the real `oneharness` reaches it on and with the argv that sibling sends
 // plus one flag. Going through `onepipeline` would prove the opposite of the point: this
 // crate never composes a harness argv, so there is no journey that can make the sibling send
 // an undeclared flag on purpose.
 #[test]
-fn the_codex_double_refuses_an_argument_the_real_codex_does_not_take() {
+fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not() {
     let world = World::new("codex-argv");
-    let sent = |extra: &[&str]| {
-        let mut args = vec!["exec", "--json"];
-        args.extend_from_slice(extra);
-        args.push("Do build.");
+    let sent = |argv: &[&str]| {
         std::process::Command::new(crate::harness::double("fake-codex"))
-            .args(&args)
+            .args(argv)
             .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .stdin(std::process::Stdio::null())
             .output()
             .expect("the double runs")
     };
 
-    for (extra, named) in [
+    for argv in [
+        &["exec", "--json", "Do build."][..],
+        &[
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            "Do build.",
+        ][..],
+        &["exec", "--sandbox", "read-only", "--json", "Do build."][..],
+        &[
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--model",
+            "gpt-5-codex",
+            "--json",
+            "-",
+        ][..],
+        &["exec", "resume", "thread-1", "--json", "Do build."][..],
+    ] {
+        let answered = sent(argv);
+        let said = String::from_utf8_lossy(&answered.stdout).to_string();
+        assert!(
+            answered.status.success(),
+            "a line oneharness builds was refused rather than answered {argv:?}: {said} {}",
+            String::from_utf8_lossy(&answered.stderr)
+        );
+        assert_eq!(
+            said.trim(),
+            onepipeline_testfakes::CODEX_SERVER_OVERLOADED,
+            "the double answered {argv:?} with something other than the one line it is named for"
+        );
+    }
+
+    for (argv, named) in [
+        (&["chat", "--json", "Do build."][..], "`codex exec`"),
+        (&["exec", "resume", "--json", "Do build."][..], "thread id"),
         (
-            &["--dangerously-skip-permissions"][..],
+            &["exec", "--sandbox", "--json", "Do build."][..],
+            "no sandbox \"--json\"",
+        ),
+        (
+            &["exec", "--json", "Do build.", "--sandbox"][..],
+            "--sandbox takes a value",
+        ),
+        (
+            &[
+                "exec",
+                "--sandbox",
+                "danger-full-access",
+                "--json",
+                "Do build.",
+            ][..],
+            "no sandbox \"danger-full-access\"",
+        ),
+        (
+            &["exec", "--json", "Do build.", "--model"][..],
+            "--model takes a value",
+        ),
+        (
+            &["exec", "--model", "--json", "Do build."][..],
+            "\"--json\" is an option",
+        ),
+        (
+            &[
+                "exec",
+                "--dangerously-skip-permissions",
+                "--json",
+                "Do build.",
+            ][..],
             "--dangerously-skip-permissions",
         ),
-        (&["--version"][..], "--version"),
-        (&["--model", "--json"][..], "--json"),
+        (
+            &["exec", "--version", "--json", "Do build."][..],
+            "--version",
+        ),
+        (
+            &["exec", "--json", "Do build.", "Do it again."][..],
+            "two were sent",
+        ),
+        (&["exec", "--json"][..], "no prompt"),
     ] {
-        let refused = sent(extra);
+        let refused = sent(argv);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();
         assert_eq!(
             refused.status.code(),
             Some(i32::from(onepipeline_testfakes::USAGE)),
-            "an argv the real codex exits on ran a turn instead of refusing {extra:?}: {said}"
+            "an argv the real codex exits on ran a turn instead of refusing {argv:?}: {said}"
         );
         assert!(
             said.contains(named),
-            "the refusal does not name what it refused: {said}"
+            "the refusal of {argv:?} does not name what it refused: {said}"
         );
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]

@@ -55,6 +55,12 @@ const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 ///
 /// The verb first, then its options in any order, then exactly one prompt —
 /// the positional, or `-` for one piped on stdin — and nothing after it.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the grammar of a
+// *provider's* CLI, which no crate in this dependency graph declares as data, and
+// gated the way `SANDBOXES` above is: the real `oneharness_core` builds the argv
+// `tests/e2e/dispatch.rs` drives this binary on, so a line it starts sending that
+// this does not speak is a refusal that journey reads, and the double's own tests
+// there hold each form it accepts and each it refuses.
 fn declared(args: &[String]) -> Result<(), String> {
     let mut rest = args.iter().map(String::as_str).peekable();
     if rest.next() != Some("exec") {

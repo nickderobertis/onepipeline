@@ -442,15 +442,12 @@ resolver = "2"
 # node for ever. A **requirement**, because `^0.21` admits no 0.23.x; and
 # `onevcs-testing` 0.6.2 requires exactly this `onevcs`, so the two move together.
 #
-# `onevcs` 0.24.1 carries the reference a release-status read resolved and uses
-# that resolvable spelling in its `release acknowledge` recovery command
-# (onevcs #150, fixed by #153), where its predecessor printed the landing commit
-# the reference resolved *to* — which no clone of the base can resolve, so the
-# command a held `published` node showed refused its own argument.
-# `tests/onevcs_seam.rs` drives that surface against the linked release. 0.24.2
-# is the same fix relinked onto `onemessagebus` 0.7 (#156), and it is the one
-# the pins below share; `onevcs-testing` 0.6.5 was cut beside it and requires
-# exactly that release, so the two requirements and the lock move together.
+# `onevcs` 0.24.2 is the floor because its release status names the reference
+# it resolved in the `release acknowledge` recovery command (onevcs #150) —
+# below it a held `published` node showed a command that refused its own
+# argument. `tests/onevcs_seam.rs` drives that surface against the linked
+# release, and `onevcs-testing` 0.6.5 requires exactly this `onevcs`, so the
+# two requirements and the lock move together.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -523,15 +520,11 @@ onemessagebus-agent = "0.7.0"
 # this crate resolve the one `onemessagebus` and `onemessagebus-agent` the pins
 # above name, so the four move together or a relayed envelope is two types.
 #
-# 0.13.0 is the release beside the 0.7.0 bus, whose authors are the launch's
-# configuration rather than a built-in pair, and it is a requirement for the same
-# pre-1.0 reason as every entry above: `^0.12` admits no 0.13.x.
-#
-# 0.13.1 relinks the `server_overloaded` failure kind and `server-overloaded`
-# fallback reason from oneharness-core 0.14.0 (onejudge #94). `oneagentgraph`
-# 0.4.4 requires exactly this release (oneagentgraph #124), so these three
-# requirements move as one engine — 0.4.3 beside it still required a 0.13 core,
-# and a lock holding both resolved the classifier twice.
+# 0.13.1 is the floor: it links oneharness-core 0.14.0's `server_overloaded`
+# failure kind (onejudge #94), and `oneagentgraph` 0.4.4 requires exactly it
+# (oneagentgraph #124), so the three requirements move as one engine or the lock
+# resolves the classifier twice. A requirement for the same pre-1.0 reason as
+# every entry above: `^0.12` admits no 0.13.x.
 onejudge = "0.13.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
