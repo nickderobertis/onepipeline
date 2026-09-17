@@ -101,9 +101,15 @@ impl From<crate::graph::Landing> for LandingWord {
 }
 
 /// Who submitted a command or a reply.
+// llmlint: ignore-block[invalid_states_unrepresentable] the word of an `Author` this
+// crate already validated when it accepted the envelope, and nothing else builds one.
+// It reads back as a bare word on purpose: a recorded run is never refused for its
+// author (Contract A), so a payload naming a word no configuration declares any more
+// still folds and renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub(crate) struct AuthorWord(String);
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl From<crate::channel::Author> for AuthorWord {
     fn from(author: crate::channel::Author) -> Self {

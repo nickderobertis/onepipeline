@@ -29,10 +29,15 @@ struct SurfaceFrame {
     /// queues is relayed as written; so this double writes the word the test
     /// chose, as `onemessagebus send` would, and a second spelling of the
     /// grammar here would be one more copy to drift.
-    // llmlint: ignore[boundary_inputs_validated] the kind is deliberately unchecked:
-    // Contract K relays a queued kind as written, and the journeys that hand this
-    // double a kind are the ones proving that relay, malformed words included.
+    // llmlint: ignore-block[boundary_inputs_validated] the kind is deliberately
+    // unchecked: Contract K relays a queued kind as written, and the journeys that
+    // hand this double a kind are the ones proving that relay, malformed words included.
+    // llmlint: ignore-block[invalid_states_unrepresentable] and for the same reason it
+    // is a bare word rather than the engine's `SurfaceKind`: a double that could only
+    // hold a well-formed kind could not hand the engine an ill-formed one to relay.
     kind: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-end[boundary_inputs_validated]
     message: String,
     #[serde(default = "blocking")]
     blocking: bool,

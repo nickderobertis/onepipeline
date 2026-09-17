@@ -2727,9 +2727,9 @@ fn commit_command(
         ]),
     )?;
     record_operation_facts(paths, journal, author.clone(), operations)?;
-    // An edit the monitor made is the planner's to review: it was applied on the
-    // monitor's own judgement, so the planner learns of it without being asked to
-    // approve it first.
+    // An edit any author but the planner made is the planner's to review: it was
+    // applied on that author's own judgement, so the planner learns of it without
+    // being asked to approve it first.
     if !author.is_planner() {
         if let Some(surface) = non_planner_edit(&author, command) {
             raise(paths, journal, surface)?;
@@ -5191,7 +5191,8 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     )
 }
 
-/// The surface that tells the planner what the monitor did on its own judgement.
+/// The surface that tells the planner what an author other than it did on that
+/// author's own judgement.
 ///
 /// Non-blocking: the edit was applied, so holding anything back to report it
 /// would pause the run over a decision that has already been made. Raised by
@@ -5200,7 +5201,7 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
 ///
 /// `None` for a `finding`, which is the one op that has *already* said its piece
 /// to the planner: it compiles to the surface the planner reads, so reporting it
-/// a second time as an edit the monitor made would put two entries on the queue
+/// a second time as an edit that author made would put two entries on the queue
 /// for one thing said once — the multiplication this op exists to end.
 pub(crate) fn non_planner_edit(
     author: &crate::channel::Author,
@@ -5211,6 +5212,9 @@ pub(crate) fn non_planner_edit(
     }
     Some(Surface {
         id: 0,
+        // llmlint: ignore[names_match_behavior] the kind keeps its word although any
+        // author but the planner raises it now: renaming it is the next node's
+        // (`onepipeline-no-member-names`), and this node was told to leave it spelled so.
         kind: "monitor-edit".into(),
         message: format!(
             "{} applied an edit: {}",

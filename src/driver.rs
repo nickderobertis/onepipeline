@@ -2948,8 +2948,8 @@ fn submit_envelope(
                     envelope.author.clone(),
                     operations,
                 )?;
-                // The planner is told what the monitor did here as well as in
-                // the loop: which of the two applied an edit is an accident of
+                // The planner is told what any other author did here as well as
+                // in the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the
                 // graph either way.
                 if !envelope.author.is_planner() {

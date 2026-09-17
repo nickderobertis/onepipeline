@@ -194,7 +194,7 @@ fn a_bus_config_declares_an_open_author() {
     let file = configuration(
         &world,
         "onemessagebus.yaml",
-        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel: {capabilities: [retry, drop]}\n",
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel: {capabilities: []}\n",
     );
     let path = plan(&world, "busauthor");
     launched(&world, &path, "busauthor", &["--bus-config", &file]);
