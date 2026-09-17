@@ -60,6 +60,45 @@ fn launched(world: &World, path: &str, run: &str, extra: &[&str]) {
     });
 }
 
+/// Every surface waiting for the planner, read the way a planner reads them:
+/// `next` until it answers with none. What is asserted about a surface is
+/// asserted on what `next` handed over.
+fn surfaces_read(world: &World, run: &str) -> Vec<Value> {
+    let mut read = Vec::new();
+    loop {
+        let next = world.run(&["next", run]);
+        next.exited(0);
+        let answer = next.json();
+        if answer["surface"].is_null() {
+            return read;
+        }
+        read.push(answer["surface"].clone());
+    }
+}
+
+/// The one `edit-applied` surface among `surfaces`, held to what the contract
+/// says of it: non-blocking, sourced from `author`, and naming that author and
+/// the `add` it reports.
+fn the_edit_applied(surfaces: &[Value], author: &str) -> Value {
+    let edits: Vec<&Value> = surfaces
+        .iter()
+        .filter(|surface| surface["kind"] == "edit-applied")
+        .collect();
+    let [edit] = &edits[..] else {
+        panic!("one applied edit is one `edit-applied` surface, and a finding none: {surfaces:?}");
+    };
+    assert_eq!(edit["source"], author, "{edit}");
+    assert_eq!(edit["blocking"], json!(false), "{edit}");
+    assert!(
+        edit["message"].as_str().is_some_and(|message| {
+            message.starts_with(&format!("{author} applied an edit: "))
+                && message.contains("\"add\"")
+        }),
+        "the surface does not name the author and the edit: {edit}"
+    );
+    (*edit).clone()
+}
+
 fn channel_file(world: &World, run: &str, file: &str) -> String {
     std::fs::read_to_string(world.run_file(run, &format!("channel/{file}"))).unwrap_or_default()
 }
@@ -274,23 +313,15 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
     // The applied edit is reported once, as what it is: a non-blocking
     // `edit-applied` from the author that applied it, naming that author — a
     // word nothing built in knows — and the edit. The finding beside it raised
-    // no second surface: it has already said its piece.
-    let edit_surfaces: Vec<Value> = world
-        .events_of(RUN, "planner-surface-queued")
-        .into_iter()
-        .filter(|event| event["payload"]["kind"] == "edit-applied")
-        .collect();
-    let [edit_surface] = &edit_surfaces[..] else {
-        panic!("one applied edit is one `edit-applied` surface: {edit_surfaces:?}");
-    };
-    assert_eq!(edit_surface["payload"]["source"], AUTHOR);
-    assert_eq!(edit_surface["payload"]["blocking"], json!(false));
-    let message = edit_surface["payload"]["message"]
-        .as_str()
-        .expect("the surface carries a message");
+    // no second surface: it has already said its piece. Read as the planner
+    // reads them.
+    let surfaces = surfaces_read(&world, RUN);
+    the_edit_applied(&surfaces, AUTHOR);
     assert!(
-        message.starts_with(&format!("{AUTHOR} applied an edit: ")) && message.contains("\"add\""),
-        "the surface does not name the author and the edit: {message}"
+        surfaces
+            .iter()
+            .any(|surface| surface["kind"] == "finding" && surface["source"] == AUTHOR),
+        "the finding itself was not handed over under its author: {surfaces:?}"
     );
 
     for (command, refusal) in [
@@ -441,50 +472,25 @@ fn an_edit_applied_with_nothing_driving_is_surfaced_as_edit_applied_by_its_autho
     applied.exited(0);
     assert_eq!(applied.json()["commands"], "applied", "{}", applied.stdout);
 
-    let queued: Vec<Value> = world.events_of(RUN, "planner-surface-queued");
-    let edits: Vec<&Value> = queued
+    // The planner reads exactly two surfaces — the finding and the report of
+    // the applied `add` — both under the author's own word.
+    let surfaces = surfaces_read(&world, RUN);
+    the_edit_applied(&surfaces, AUTHOR);
+    let mut kinds: Vec<&str> = surfaces
         .iter()
-        .filter(|event| event["payload"]["kind"] == "edit-applied")
+        .map(|surface| surface["kind"].as_str().unwrap_or_default())
         .collect();
-    let [edit] = &edits[..] else {
-        panic!("the add is one `edit-applied` surface and the finding none: {queued:?}");
-    };
-    assert_eq!(edit["payload"]["source"], AUTHOR);
-    assert_eq!(edit["payload"]["blocking"], json!(false));
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["edit-applied", "finding"], "{surfaces:?}");
     assert!(
-        edit["payload"]["message"]
-            .as_str()
-            .is_some_and(
-                |message| message.starts_with(&format!("{AUTHOR} applied an edit: "))
-                    && message.contains("\"add\"")
-            ),
-        "the surface does not name the author and the edit: {edit}"
+        surfaces.iter().all(|surface| surface["source"] == AUTHOR),
+        "{surfaces:?}"
     );
-    assert!(
-        queued.iter().any(|event| {
-            event["payload"]["kind"] == "finding" && event["payload"]["source"] == AUTHOR
-        }),
-        "the finding itself was not queued under its author: {queued:?}"
-    );
-
-    // The planner reads both, and the edit report is the applied `add`.
-    let mut kinds = Vec::new();
-    for _ in 0..2 {
-        let read = world.run(&["next", RUN]);
-        read.exited(0);
-        let surface = read.json()["surface"].clone();
-        assert_eq!(surface["source"], AUTHOR, "{}", read.stdout);
-        kinds.push(surface["kind"].as_str().unwrap_or_default().to_string());
-    }
-    kinds.sort();
-    assert_eq!(kinds, ["edit-applied", "finding"]);
-    let handed = world.events_of(RUN, "planner-surfaced");
-    assert!(
-        handed
-            .iter()
-            .any(|event| event["payload"]["kind"] == "edit-applied"),
-        "the consumed edit report was not journalled: {handed:?}"
-    );
+    // And the stream a supervisor watches shows the report handed over.
+    world
+        .run(&["monitor", RUN])
+        .exited(0)
+        .out_has("planner-surfaced kind=\"edit-applied\"");
 }
 
 /// Recorded identity is data, not fresh authority: removing the launch grant

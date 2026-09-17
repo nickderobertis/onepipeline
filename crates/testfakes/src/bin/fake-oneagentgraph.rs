@@ -195,10 +195,14 @@ fn graph_runs(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// One line of that file: a run this double started, and the document it ran.
+///
+/// The run is the sibling's own id type, parsed as the line is read, so a
+/// persisted id that is not one the sibling mints never becomes a run to
+/// answer for.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchedRun {
-    run: String,
+    run: oneagentgraph::run::RunId,
     graph: String,
 }
 
@@ -240,20 +244,27 @@ fn history(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(run) => run,
         Err(refusal) => return refusal,
     };
-    let Some(graph) = launched_runs(dir)
-        .into_iter()
-        .find(|launched| launched.run == run)
-        .map(|launched| launched.graph)
-    else {
-        eprintln!("oneagentgraph: no run {run:?} under this double's state");
-        return invalid_config();
-    };
+    if args.len() > 3 {
+        return fake::refuse(&format!(
+            "`history show RUN` takes one run and nothing after it: {:?}",
+            &args[3..]
+        ));
+    }
+    // The sibling's own rule: an id it would not have minted names no run.
     let run_id = match oneagentgraph::run::RunId::parse(&run) {
         Ok(run_id) => run_id,
         Err(error) => {
             eprintln!("oneagentgraph: {error}");
             return invalid_config();
         }
+    };
+    let Some(graph) = launched_runs(dir)
+        .into_iter()
+        .find(|launched| launched.run == run_id)
+        .map(|launched| launched.graph)
+    else {
+        eprintln!("oneagentgraph: no run {run:?} under this double's state");
+        return invalid_config();
     };
     let declared = fake::declared_members(&graph).unwrap_or_else(|why| fake::fail(&why));
     let record = oneagentgraph::run::Record {
@@ -272,10 +283,9 @@ fn history(args: &[String], dir: &std::path::Path) -> ExitCode {
         refs: Vec::new(),
         events_path: String::new(),
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&record).unwrap_or_default()
-    );
+    let rendered = serde_json::to_string_pretty(&record)
+        .unwrap_or_else(|error| fake::fail(&format!("the run record serialises: {error}")));
+    println!("{rendered}");
     ExitCode::SUCCESS
 }
 
@@ -474,7 +484,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     fake::append(
         &graph_runs(dir),
         &serde_json::to_string(&LaunchedRun {
-            run: graph_run(),
+            run: oneagentgraph::run::RunId::parse(&graph_run())
+                .unwrap_or_else(|error| fake::fail(&format!("this double's run id: {error}"))),
             graph: graph.clone(),
         })
         .unwrap_or_else(|error| fake::fail(&format!("a launched run serialises: {error}"))),

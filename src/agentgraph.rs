@@ -3683,6 +3683,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A member whose reset cannot be written does not stop the others, and
+    /// every refusal is reported together, each naming its member.
+    ///
+    /// The fault is the filesystem's: a directory standing where the sibling
+    /// writes a member's signal file makes that one write fail and no other,
+    /// which is what an aggregate has to be held against — a reset that stopped
+    /// at the first refusal would leave the member after it un-restarted and the
+    /// report naming one member where two could not be reached.
+    #[test]
+    fn a_reset_one_member_refuses_still_reaches_the_others_and_names_every_refusal() {
+        let _env = env_lock();
+        let root = state_dir_holding(
+            "dag-scope-1786304152340-25",
+            &["pulse", "second-pulse", "watcher"],
+        );
+        let signals = root
+            .join("dag-scope-1786304152340-25")
+            .join(oneagentgraph::run::SIGNAL_DIR);
+        for blocked in ["pulse", "second-pulse"] {
+            std::fs::create_dir_all(signals.join(format!("{blocked}.reset")))
+                .expect("a directory standing where the signal file goes");
+        }
+        let graph_run = recorded_graph_run("dag-scope-1786304152340-25", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_resettable(&graph_run)
+            .expect_err("two members could not be signalled")
+            .to_string();
+        for blocked in ["pulse", "second-pulse"] {
+            assert!(
+                refused.contains(&format!("{blocked}.reset")),
+                "{refused} does not name {blocked}, whose signal could not be written"
+            );
+        }
+        assert!(
+            signals.join("watcher.reset").is_file(),
+            "the member after the refused ones was not signalled"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A run that declares no member at all is a run with nothing to restart,
     /// and that is not a failure.
     #[test]
