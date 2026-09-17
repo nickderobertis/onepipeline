@@ -3336,7 +3336,7 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
         FailureKind::ServerOverloaded,
         "the linked core reads the double's answer as some other failure: {read:?}"
     );
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The Codex double refuses an argument `codex exec` does not take, and a
 /// `--version` that is not the probe on its own.
@@ -3378,7 +3378,7 @@ fn the_codex_double_refuses_an_argument_the_real_codex_does_not_take() {
             "the refusal does not name what it refused: {said}"
         );
     }
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
