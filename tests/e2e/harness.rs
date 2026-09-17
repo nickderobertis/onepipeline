@@ -1929,6 +1929,15 @@ impl World {
     // words read here — the projection's `accounted` and the log's `queued` event
     // — are the bus's persisted spelling, and every journey polling this is the
     // gate: a moved spelling reads as no surface ever arriving, which fails them.
+    // llmlint: ignore-block[tests_mirror_real_usage] read off the channel's files
+    // rather than a view because no view shows a surface a host's server raised
+    // as the bus wrote it — the views summarize, and what these journeys assert
+    // is the record's own words; the files are the bus's real transport, written
+    // by the real server, and nothing here is placed.
+    // llmlint: ignore-block[boundary_inputs_validated] a readiness probe, polled
+    // under `until`: a projection or log not there yet, or a line the bus is
+    // halfway through writing, is "not yet" and not a refusal, and the caller's
+    // deadline is what turns a state that never arrives into a failure.
     pub fn queued_surfaces(&self, run: &str) -> Vec<Value> {
         let log = self.run_file(run, "channel/surfaces.jsonl");
         let projection = std::fs::read_to_string(self.run_file(run, "channel/queue.json"))
@@ -1950,6 +1959,8 @@ impl World {
             .filter(|record| record["event"] == "queued")
             .collect()
     }
+    // llmlint: ignore-end[boundary_inputs_validated]
+    // llmlint: ignore-end[tests_mirror_real_usage]
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
     /// Run a command with an envelope on stdin.

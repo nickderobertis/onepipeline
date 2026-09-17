@@ -61,14 +61,18 @@ fn raise_blocker(world: &World, run: &str) {
     // is spelled by hand because no verb of this crate writes it, and the gate on
     // its spelling is the read-back below: the engine reads it through the bus's
     // registered `agent.planner-surface@1`, so a moved schema fails this journey.
-    std::fs::write(
-        world.run_file(run, "channel/surfaces.jsonl"),
-        concat!(
-            r#"{"event":"queued","id":0,"kind":"blocker","message":"the plan looks wrong; what now?","source":"host-watch","blocking":true,"queued_at":0,"asker":"host-watch"}"#,
-            "\n"
-        ),
-    )
-    .expect("the host binding appends its surface");
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(world.run_file(run, "channel/surfaces.jsonl"))
+        .and_then(|mut log| {
+            log.write_all(concat!(
+                r#"{"event":"queued","id":0,"kind":"blocker","message":"the plan looks wrong; what now?","source":"host-watch","blocking":true,"queued_at":0,"asker":"host-watch"}"#,
+                "\n"
+            ).as_bytes())
+        })
+        .expect("the host binding appends its surface");
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the question to reach the planner", waiting);
