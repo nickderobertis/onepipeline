@@ -2297,6 +2297,11 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
 /// length is a wait nobody meant. The double is the thing every host journey
 /// here trusts to raise what it was told, which is why its own boundary is held
 /// to the same bar as the engine's.
+///
+/// Unix only: the unreadable asker is a byte string no `OsStr` on Windows can
+/// hold, and the platform's own non-Unicode environment is a wide string with a
+/// different shape — this journey proves the refusal where the bytes exist.
+#[cfg(unix)]
 #[test]
 fn the_host_double_refuses_environment_it_cannot_act_on() {
     use std::os::unix::ffi::OsStrExt;
