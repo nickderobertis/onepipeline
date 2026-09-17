@@ -982,7 +982,8 @@ impl World {
             // resolved it, the chain stepped past nothing, and the journey
             // failed on a premise the test could not see was false. It also
             // stopped that host from spending a *real* codex turn, which is what
-            // the `env_remove`s below guard the same launch against.
+            // the `env_remove`s below guard the same launch against. A journey
+            // that wants Codex *answering* names `fake-codex` on its own launch.
             .env("ONEHARNESS_BIN_CODEX", self.uninstalled_harness())
             .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(

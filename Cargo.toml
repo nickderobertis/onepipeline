@@ -442,6 +442,16 @@ resolver = "2"
 # node for ever. A **requirement**, because `^0.21` admits no 0.23.x; and
 # `onevcs-testing` 0.6.2 requires exactly this `onevcs`, so the two move together.
 #
+# `onevcs` 0.24.1 carries the reference a release-status read resolved and uses
+# that resolvable spelling in its `release acknowledge` recovery command
+# (onevcs #150, fixed by #153), where its predecessor printed the landing commit
+# the reference resolved *to* — which no clone of the base can resolve, so the
+# command a held `published` node showed refused its own argument.
+# `tests/onevcs_seam.rs` drives that surface against the linked release. 0.24.2
+# is the same fix relinked onto `onemessagebus` 0.7 (#156), and it is the one
+# the pins below share; `onevcs-testing` 0.6.5 was cut beside it and requires
+# exactly that release, so the two requirements and the lock move together.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -461,7 +471,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.4.3"
+oneagentgraph = "0.4.4"
 onevcs = "0.24.2"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
@@ -514,10 +524,15 @@ onemessagebus-agent = "0.7.0"
 # above name, so the four move together or a relayed envelope is two types.
 #
 # 0.13.0 is the release beside the 0.7.0 bus, whose authors are the launch's
-# configuration rather than a built-in pair. `oneagentgraph` 0.4.3 requires
-# exactly it, so the two move together, and it is a requirement for the same
+# configuration rather than a built-in pair, and it is a requirement for the same
 # pre-1.0 reason as every entry above: `^0.12` admits no 0.13.x.
-onejudge = "0.13.0"
+#
+# 0.13.1 relinks the `server_overloaded` failure kind and `server-overloaded`
+# fallback reason from oneharness-core 0.14.0 (onejudge #94). `oneagentgraph`
+# 0.4.4 requires exactly this release (oneagentgraph #124), so these three
+# requirements move as one engine — 0.4.3 beside it still required a 0.13 core,
+# and a lock holding both resolved the classifier twice.
+onejudge = "0.13.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -533,14 +548,14 @@ onejudge = "0.13.0"
 # report shape onejudge cannot read — which names the drift rather than hiding
 # it. Nothing this crate publishes links it.
 #
-# The floor is at the patch that classifies a Claude `Not logged in` result as an
-# authentication failure rather than a rate limit
-# (nickderobertis/oneharness#1290), because the classifier a dispatched node runs
-# is the one **this lock** resolves and not the CLI pins beside it: widening this
-# requirement without moving `Cargo.lock` changes what the build permits and
-# nothing about what it links. `just engines-current` is what holds the two
-# together.
-oneharness-core = "0.13.2"
+# The floor is 0.14.0, which classifies Codex's `server_overloaded` refusal,
+# retries it on the same candidate under the configured budget, and then falls
+# through with reason `server-overloaded` (nickderobertis/oneharness#1295).
+# The classifier a dispatched node runs is the one **this lock** resolves and
+# not the CLI pins beside it: widening this requirement without moving
+# `Cargo.lock` changes what the build permits and nothing about what it links.
+# `just engines-current` is what holds the two together.
+oneharness-core = "0.14.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -551,7 +566,7 @@ oneharness-core = "0.13.2"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.4"
+onevcs-testing = "0.6.5"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

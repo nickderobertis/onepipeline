@@ -3186,6 +3186,208 @@ fn a_claude_login_refusal_is_stepped_past_as_unauthenticated_rather_than_rate_li
     );
 }
 
+/// A Codex `server_overloaded` refusal is retried on its candidate and, once
+/// the budget is spent, stepped past as **server-overloaded** — oneharness's own
+/// reason — and the node settles on the provider rather than on its task.
+///
+/// What puts that reading in front of a dispatch is **this build's lock**, as
+/// with the two journeys above: the classifier that reads Codex's terminal
+/// `turn.failed` is the `oneharness_core` this crate links
+/// (nickderobertis/oneharness#1295). Below the release carrying it the refusal
+/// matched nothing, the candidate was neither retried nor stepped past, and
+/// the node failed on a sentence rather than a classification.
+///
+/// Driven through the real graph and the real `oneharness_core`, with the one
+/// stand-in at the paid harness: `fake-codex`, named on this launch alone —
+/// the suite's launches otherwise leave Codex uninstalled — answers every
+/// attempt with the overload event Codex ends on. The chain is the one
+/// candidate, so the retry the linked core makes is observable as a second
+/// attempt on the same double, and the chain has nothing left to reach.
+#[test]
+fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_overloaded() {
+    use oneharness_core::domain::fallback::FallThroughReason;
+
+    let world = World::new("real-server-overloaded");
+    world.write_graphs();
+    std::fs::write(
+        world.graphs().join("overloaded.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 1\n",
+    )
+    .expect("the overloaded candidate's config is written");
+    let path = world.plan(
+        "overloaded",
+        &plan_of("overloaded", vec![agent("build", &[])]),
+    );
+    let mut launch = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--node-set",
+        "members.worker.oneharness_config=./overloaded.toml",
+    ]);
+    launch.env("ONEHARNESS_BIN_CODEX", crate::harness::double("fake-codex"));
+    world.run_on(launch, "start --attach").settled();
+    world.until("the overloaded node to settle", |world| {
+        world.run_file("overloaded", "result.json").is_file()
+    });
+
+    // The linked core's own retry: one configured retry is two attempts on the
+    // same candidate before the chain gives it up.
+    let attempts: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "codex")
+        .collect();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one configured retry means two attempts on the same candidate: {attempts:#?}"
+    );
+
+    // The advance, as the real graph published it and this crate relayed it:
+    // the identity, under oneharness's own reason for stepping past it.
+    let advanced: Vec<Value> = world
+        .journal("overloaded")
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "fallback-advanced"
+                && event["labels"]["onepipeline.node"] == "build"
+        })
+        .collect();
+    assert_eq!(
+        advanced.len(),
+        1,
+        "the overloaded candidate was not stepped past once: {advanced:#?}"
+    );
+    let advanced: oneagentgraph::event::FallbackAdvanced =
+        serde_json::from_value(advanced[0]["payload"].clone())
+            .expect("the relayed advance is the sibling's own payload");
+    assert_eq!(advanced.identity, "codex", "{advanced:?}");
+    assert_eq!(
+        advanced.reason,
+        FallThroughReason::ServerOverloaded.as_str(),
+        "a Codex overload was stepped past as something other than a server overload: \
+         {advanced:?}"
+    );
+
+    // The settlement: the provider's failure, not the task's. Its `cause` reads
+    // `unclassified` rather than the kind above, because `oneagentgraph` 0.4.4
+    // publishes `unclassified` for every single-sided oneharness failure —
+    // oneharness's `FailureKind`s have no spelling in that crate's closed
+    // `cause` set, and widening it is a proposal its `docs/oneharness-library.md`
+    // records — and this crate carries a published death's word as it was
+    // published rather than re-deriving it from the advance above.
+    let node = world.run_json("overloaded", "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["status"], "failed",
+        "a turn no server ever accepted settled as work: {node}"
+    );
+    assert_eq!(
+        node["outcome"], "provider-failed",
+        "a chain that reached no server settled on something other than the provider: {node}"
+    );
+}
+
+/// The line `fake-codex` answers with is one the **linked** classifier reads as
+/// a server overload.
+///
+/// The drift gate for that double's copy of Codex's wire: no crate here declares
+/// that shape as data, and its one reader in this build is `oneharness_core`'s
+/// Codex dialect. A release of that core that stopped reading this line as
+/// `server_overloaded` — or a Codex whose spelling moved and took the classifier
+/// with it — fails here by name rather than as a journey that stepped past
+/// nothing. Beside the journey above rather than instead of it: this holds the
+/// bytes, and that holds what the graph does with them.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*'s wire, driven at
+// the process boundary the real `oneharness` reaches it on and with the `codex exec` line that
+// sibling sends, and read by the one reader those bytes have in this build — the linked
+// classifier, which no `onepipeline` command exposes on its own. The usage a person makes of
+// it is the journey above, through the real graph; what that journey cannot do is name the
+// bytes when they drift, which is this test's one job.
+#[test]
+fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
+    use oneharness_core::domain::signals::{
+        detect_harness_provider_failure, FailureDialect, FailureKind,
+    };
+
+    let world = World::new("codex-wire");
+    let answered = std::process::Command::new(crate::harness::double("fake-codex"))
+        .args(["exec", "--json", "Do build."])
+        .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+        .output()
+        .expect("the double runs");
+    let said = String::from_utf8_lossy(&answered.stdout).to_string();
+    assert!(
+        answered.status.success(),
+        "the double did not end the turn cleanly on its overload event: {said} {}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    assert_eq!(
+        said.trim(),
+        onepipeline_testfakes::CODEX_SERVER_OVERLOADED,
+        "the double answered with something other than the one line it is named for"
+    );
+
+    let read = detect_harness_provider_failure(FailureDialect::Codex, &said)
+        .expect("the linked classifier reads the double's terminal event as a failure");
+    assert_eq!(
+        read.kind,
+        FailureKind::ServerOverloaded,
+        "the linked core reads the double's answer as some other failure: {read:?}"
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The Codex double refuses an argument `codex exec` does not take, a
+/// `--version` that is not the probe on its own, and an option where
+/// `--model`'s value should be.
+///
+/// The half no passing journey can show, as for `fake-claude` above: the
+/// overload journey proves the real `oneharness` drives this binary on the
+/// argv it builds, and this proves an argv it does not build is refused rather
+/// than answered — including the probe's flag sent inside a turn, which the
+/// real CLI exits on and which a looser double would answer as a probe.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*, driven at the
+// process boundary the real `oneharness` reaches it on and with the argv that sibling sends
+// plus one flag. Going through `onepipeline` would prove the opposite of the point: this
+// crate never composes a harness argv, so there is no journey that can make the sibling send
+// an undeclared flag on purpose.
+#[test]
+fn the_codex_double_refuses_an_argument_the_real_codex_does_not_take() {
+    let world = World::new("codex-argv");
+    let sent = |extra: &[&str]| {
+        let mut args = vec!["exec", "--json"];
+        args.extend_from_slice(extra);
+        args.push("Do build.");
+        std::process::Command::new(crate::harness::double("fake-codex"))
+            .args(&args)
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .output()
+            .expect("the double runs")
+    };
+
+    for (extra, named) in [
+        (
+            &["--dangerously-skip-permissions"][..],
+            "--dangerously-skip-permissions",
+        ),
+        (&["--version"][..], "--version"),
+        (&["--model", "--json"][..], "--json"),
+    ] {
+        let refused = sent(extra);
+        let said = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert_eq!(
+            refused.status.code(),
+            Some(i32::from(onepipeline_testfakes::USAGE)),
+            "an argv the real codex exits on ran a turn instead of refusing {extra:?}: {said}"
+        );
+        assert!(
+            said.contains(named),
+            "the refusal does not name what it refused: {said}"
+        );
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///

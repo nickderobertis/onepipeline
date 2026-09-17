@@ -377,7 +377,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1279,9 +1279,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "255a1800b68091ac1e1f3a97448789a6e3ed725cd0dab26c20ebf0c1f45b2477"
+checksum = "a4d315bbe31bb399e0e6736d7a7f782edc83484efc2e186e2c21e2978f09d6ed"
 dependencies = [
  "clap",
  "libc",
@@ -1302,9 +1302,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.13.2"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be7da96c308201de958dd4bb245014b8215a3841a6252486ada9c510dc3cff5e"
+checksum = "e748717be6e19d0966a65f91f4d3fd9346c0bd6381c500fba87feb4ad0d5dd9f"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1323,9 +1323,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47c882c1e5e4c64fa65a7edd670ff4034fa3e9a359e88d16674a0382e86452fb"
+checksum = "8aa5c3b955eedb5d7541f71d74fe9a7dba5a0f2225b2881b049e6f395591c4f5"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1880,7 +1880,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1937,7 +1937,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2322,7 +2322,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2870,7 +2870,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
