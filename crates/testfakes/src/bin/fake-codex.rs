@@ -23,8 +23,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Before the script directory is required, for the reason `fake-claude`
     // gives: the `--version` probe decides whether the identity is installed,
-    // and is not a turn.
-    if args.iter().any(|arg| arg == "--version") {
+    // and is not a turn. Exactly the argv oneharness probes with — `--version`
+    // and nothing else — so a `--version` reaching an `exec` line is refused
+    // below as an argument Codex does not take, rather than answering a probe.
+    if args == ["--version"] {
         println!("codex-cli 1.0.0 (fake-codex)");
         return ExitCode::SUCCESS;
     }

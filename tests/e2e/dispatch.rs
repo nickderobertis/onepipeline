@@ -3299,22 +3299,85 @@ fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_o
 /// with it — fails here by name rather than as a journey that stepped past
 /// nothing. Beside the journey above rather than instead of it: this holds the
 /// bytes, and that holds what the graph does with them.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*'s wire, driven at
+// the process boundary the real `oneharness` reaches it on and with the `codex exec` line that
+// sibling sends, and read by the one reader those bytes have in this build — the linked
+// classifier, which no `onepipeline` command exposes on its own. The usage a person makes of
+// it is the journey above, through the real graph; what that journey cannot do is name the
+// bytes when they drift, which is this test's one job.
 #[test]
 fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
     use oneharness_core::domain::signals::{
         detect_harness_provider_failure, FailureDialect, FailureKind,
     };
 
-    let read = detect_harness_provider_failure(
-        FailureDialect::Codex,
+    let world = World::new("codex-wire");
+    let answered = std::process::Command::new(crate::harness::double("fake-codex"))
+        .args(["exec", "--json", "Do build."])
+        .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+        .output()
+        .expect("the double runs");
+    let said = String::from_utf8_lossy(&answered.stdout).to_string();
+    assert!(
+        answered.status.success(),
+        "the double did not end the turn cleanly on its overload event: {said} {}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    assert_eq!(
+        said.trim(),
         onepipeline_testfakes::CODEX_SERVER_OVERLOADED,
-    )
-    .expect("the linked classifier reads the double's terminal event as a failure");
+        "the double answered with something other than the one line it is named for"
+    );
+
+    let read = detect_harness_provider_failure(FailureDialect::Codex, &said)
+        .expect("the linked classifier reads the double's terminal event as a failure");
     assert_eq!(
         read.kind,
         FailureKind::ServerOverloaded,
         "the linked core reads the double's answer as some other failure: {read:?}"
     );
+}
+
+/// The Codex double refuses an argument `codex exec` does not take, and a
+/// `--version` that is not the probe on its own.
+///
+/// The half no passing journey can show, as for `fake-claude` above: the
+/// overload journey proves the real `oneharness` drives this binary on the
+/// argv it builds, and this proves an argv it does not build is refused rather
+/// than answered — including the probe's flag sent inside a turn, which the
+/// real CLI exits on and which a looser double would answer as a probe.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*, driven at the
+// process boundary the real `oneharness` reaches it on and with the argv that sibling sends
+// plus one flag. Going through `onepipeline` would prove the opposite of the point: this
+// crate never composes a harness argv, so there is no journey that can make the sibling send
+// an undeclared flag on purpose.
+#[test]
+fn the_codex_double_refuses_an_argument_the_real_codex_does_not_take() {
+    let world = World::new("codex-argv");
+    let sent = |extra: &[&str]| {
+        let mut args = vec!["exec", "--json"];
+        args.extend_from_slice(extra);
+        args.push("Do build.");
+        std::process::Command::new(crate::harness::double("fake-codex"))
+            .args(&args)
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .output()
+            .expect("the double runs")
+    };
+
+    for flag in ["--dangerously-skip-permissions", "--version"] {
+        let refused = sent(&[flag]);
+        let said = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert_eq!(
+            refused.status.code(),
+            Some(i32::from(onepipeline_testfakes::USAGE)),
+            "an argv the real codex exits on ran a turn instead of refusing {flag}: {said}"
+        );
+        assert!(
+            said.contains(flag),
+            "the refusal does not name what it refused: {said}"
+        );
+    }
 }
 
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
