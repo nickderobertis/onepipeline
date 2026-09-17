@@ -619,6 +619,11 @@ const BEFORE_EDIT_APPLIED_RENDERED: &str =
 fn this_build_reads_a_journal_carrying_a_monitor_edit_surface_as_the_build_that_wrote_it_did() {
     let world = World::new("compat-before-edit-applied");
     let root = world.fakes.join("before-edit-applied-root");
+    // llmlint: ignore[tests_mirror_real_usage] the journal is the committed recording of
+    // the build **before** the rename, and no invocation of this build writes a
+    // `monitor-edit` surface — which is the whole of what this journey proves. `run_of`
+    // carries the argument for laying it down; everything asserted below is the compiled
+    // binary reading that store.
     run_of(&root, "before-edit-applied", BEFORE_EDIT_APPLIED);
     assert!(
         BEFORE_EDIT_APPLIED.contains("\"kind\":\"monitor-edit\""),

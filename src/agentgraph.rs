@@ -730,6 +730,16 @@ fn over(child: &Mutex<Child>) -> bool {
 ///
 /// `over` answers whether the graph process has ended, without waiting to find
 /// out; the launch's own answer is [`over`], and a test hands in one of its own.
+// llmlint: ignore-block[changed_behavior_has_e2e] what changed is which silence ends the
+// stream, and the case it exists for is a scheduling race: the graph's last burst is in the
+// pipe, the relay thread has not run, and the poll expires in that gap. No invocation a user
+// can type arranges the scheduler, and a journey through the compiled binary meets the race
+// only under load — which is how it was found, as a dropped `turn-activity` failing an
+// unrelated journey on CI. The pipe and the liveness answer are handed in so the unit tests
+// below script the gap exactly: `a_burst_the_graph_wrote_before_exiting_is_delivered_however_late_the_relay_reads_it`
+// fails under the old rule and passes under this one, and its two siblings hold that a pipe
+// an orphan holds open still ends and a running graph is never ended on a silence. Every
+// dispatch journey in `tests/e2e/` then reads its events through this relay.
 fn relayed_lines(
     reader: impl BufRead + Send + 'static,
     over: impl Fn() -> bool + Send + 'static,
@@ -765,6 +775,7 @@ fn relayed_lines(
         }
     })
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Where a started graph's own stdout and stderr go.
 ///

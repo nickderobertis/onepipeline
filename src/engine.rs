@@ -561,7 +561,8 @@ pub(crate) struct Settled {
 pub(crate) struct EndedDispatches(std::cell::RefCell<Vec<Box<dyn DispatchHandle>>>);
 
 impl EndedDispatches {
-    /// Nothing ended yet.
+    /// One per dispatch thread, made before its first dispatch: the holder
+    /// belongs to the thread that will end the dispatches, not to any of them.
     pub(crate) fn none() -> Self {
         Self(std::cell::RefCell::new(Vec::new()))
     }
