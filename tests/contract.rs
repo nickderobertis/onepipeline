@@ -1464,22 +1464,6 @@ fn contract_ops_this_build_accepts() -> Vec<&'static str> {
         .collect()
 }
 
-/// The per-author allowlist the contract fixes, both directions.
-///
-/// A monitor is an observer: it may correct and re-run work, and it may not
-/// decide that the run is finished, that a person acted, or that work leaves the
-/// graph. Held against every op the protocol has, so an op added later is
-/// refused for the monitor until somebody decides otherwise rather than granted
-/// by omission.
-
-/// Every op the planner channel refuses the monitor is refused in the words
-/// `docs/contract.md` states for it, and the contract states no refusal the
-/// build does not make.
-///
-/// The refusals are the `planner-channel` profile's; the block is what a
-/// monitor reading the contract is told it will meet, so each entry is driven
-/// through this crate's own `allows` and `allows_completion` and compared whole.
-
 /// The contract's op list, less the one entry 60 removed, is exactly what this
 /// crate accepts of it.
 ///
@@ -1539,15 +1523,6 @@ fn divergence_block(number: &str) -> Value {
         .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"));
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
 }
-
-/// The ops and surface kinds this build carries **beyond** the contract's own
-/// lists are exactly the ones the divergence record proposes.
-///
-/// The contract is committed as approved and names neither, so the entry that
-/// proposes them is the only place they are written down — and a divergence
-/// nothing gates quietly stops being true. Both directions: a build that grows
-/// an op or a kind the entry does not name fails here as loudly as one that
-/// drops one it does.
 
 /// The release-adoption surface this build carries **beyond** the contract is
 /// exactly what the divergence record proposes.
@@ -5091,16 +5066,6 @@ fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
         );
     }
 }
-
-/// The `name: Type` pairs a struct in `src/executor.rs` declares.
-///
-/// Read out of the source rather than reflected off the type, because a
-/// `#[non_exhaustive]` struct cannot be built field-by-field from outside the
-/// crate — which is exactly the property that would otherwise catch the drift.
-
-/// The divergences document restates two things that live in the code. Each copy
-/// is gated here, so a change to the code fails this suite instead of leaving
-/// the document quietly wrong.
 
 #[test]
 fn the_readmes_interface_claims_match_the_code_they_describe() {
