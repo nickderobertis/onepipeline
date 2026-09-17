@@ -3253,10 +3253,12 @@ fn reply_timeout_seconds() -> u64 {
         .unwrap_or(crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS)
 }
 
-/// When this serving session stops of its own accord, or `None` for a session
-/// that runs until its member's stream ends.
-///
-/// Absent is the default and is what
+// llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer these
+// views were asked for, not a failure of the command, so it goes to stdout and the exit
+// code stays 0: failing `runs` because one stray directory sits beside the runs would break
+// every wrapper over it. A caller that named *one* run and could not have it is a different
+// case, and `resolve` and `RunView::open` still refuse it outright.
+/// `onepipeline runs`.
 fn runs(args: &RunsArgs) -> Result<i32> {
     print!(
         "{}",
@@ -3300,6 +3302,8 @@ fn report(args: &OptionalRunArgs, render: fn(&views::Survey) -> String) -> Resul
     print!("{}", render(&survey));
     Ok(EXIT_SUCCESS)
 }
+// llmlint: ignore-end[cli_output_contract]
+
 /// `onepipeline transcript`.
 ///
 /// A node this run never dispatched is refused rather than answered with an
