@@ -311,6 +311,11 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
     // llmlint: ignore-block[tests_mirror_real_usage] Deliberately bypasses
     // `reply` to prove the driver's independent trust-boundary check; appending
     // is the real local bus transport boundary.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the
+    // envelopes are spelled by hand because bypassing `reply` is the point, and
+    // the gate on their spelling is the driver reading them back below: it
+    // records each as rejected by *author*, which a record it could not read
+    // would never reach.
     for payload in [
         json!({"id": 900, "author": "stranger", "commands": [
             {"op": "add", "node": agent("also-never", &[])}
@@ -326,6 +331,7 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
             .expect("the host bus opens the command queue");
         writeln!(file, "{payload}").expect("the host bus appends the envelope");
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the direct envelopes to be rejected", |world| {
         world.events_of(RUN, "edit-rejected").len() >= 2

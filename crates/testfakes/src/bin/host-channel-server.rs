@@ -23,9 +23,15 @@ use serde_json::{json, Value};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceFrame {
-    /// The word as the test wrote it. The kind grammar is the engine's
-    /// (`SurfaceKind`, Contract K) and is enforced where the engine reads the
-    /// queue; a host that also spelled it would be a second copy to drift.
+    /// The word as the test wrote it, and nothing checked about it here. The
+    /// kind grammar is the engine's (`SurfaceKind`, Contract K), enforced where
+    /// an operator raises a kind — `surface --kind` — while whatever any writer
+    /// queues is relayed as written; so this double writes the word the test
+    /// chose, as `onemessagebus send` would, and a second spelling of the
+    /// grammar here would be one more copy to drift.
+    // llmlint: ignore[boundary_inputs_validated] the kind is deliberately unchecked:
+    // Contract K relays a queued kind as written, and the journeys that hand this
+    // double a kind are the ones proving that relay, malformed words included.
     kind: String,
     message: String,
     #[serde(default = "blocking")]

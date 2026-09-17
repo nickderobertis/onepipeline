@@ -1925,6 +1925,10 @@ impl World {
     /// raises reaches the planner without the engine writing a record of it: the
     /// engine journals `planner-surface-queued` for what it raises itself, and
     /// relays what any other writer queues as the queue says it.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two
+    // words read here — the projection's `accounted` and the log's `queued` event
+    // — are the bus's persisted spelling, and every journey polling this is the
+    // gate: a moved spelling reads as no surface ever arriving, which fails them.
     pub fn queued_surfaces(&self, run: &str) -> Vec<Value> {
         let log = self.run_file(run, "channel/surfaces.jsonl");
         let projection = std::fs::read_to_string(self.run_file(run, "channel/queue.json"))
@@ -1946,6 +1950,7 @@ impl World {
             .filter(|record| record["event"] == "queued")
             .collect()
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
     /// Run a command with an envelope on stdin.
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {

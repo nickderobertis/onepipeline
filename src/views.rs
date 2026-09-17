@@ -2109,7 +2109,7 @@ fn cancelling_for(state: &RunState, id: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Fallthrough {
     /// Another identity went on to run that side's invocation on that turn.
-    ServiceRecord(String),
+    PassedTo(String),
     /// Nothing served it: the chain had no successful candidate.
     Refused,
     /// This run's records do not say. A single-sided member attributes nothing
@@ -2145,7 +2145,7 @@ impl ChainRecord<'_> {
     fn lead_in(&self) -> &'static str {
         match self.became {
             Fallthrough::Refused => "failed",
-            Fallthrough::ServiceRecord(_) | Fallthrough::Unrecorded => "fallback",
+            Fallthrough::PassedTo(_) | Fallthrough::Unrecorded => "fallback",
         }
     }
 }
@@ -2194,7 +2194,7 @@ fn became_of(state: &RunState, node: &str, refusal: &Refusal) -> Fallthrough {
         return Fallthrough::Unrecorded;
     };
     match served_in(state, node, &refusal.member, role, turn) {
-        Some(served) => Fallthrough::ServiceRecord(served.session.identity.clone()),
+        Some(served) => Fallthrough::PassedTo(served.session.identity.clone()),
         None => Fallthrough::Refused,
     }
 }
@@ -2284,7 +2284,7 @@ fn chain_phrase(record: &ChainRecord) -> String {
     let identity = &refusal.advanced.identity;
     one_line(&match &record.became {
         Fallthrough::Refused => format!("{side}: identity '{identity}' refused {reason}{again}"),
-        Fallthrough::ServiceRecord(who) => {
+        Fallthrough::PassedTo(who) => {
             format!("{side} fell through '{identity}' {reason} → served by '{who}'{again}")
         }
         Fallthrough::Unrecorded => format!(
@@ -4916,7 +4916,7 @@ mod tests {
         };
         let phrase = chain_phrase(&ChainRecord {
             refusal: &refusal,
-            became: Fallthrough::ServiceRecord("codex\r\nprovider: forged".into()),
+            became: Fallthrough::PassedTo("codex\r\nprovider: forged".into()),
             records: std::num::NonZeroU64::MIN,
         });
         assert!(!phrase.contains('\n') && !phrase.contains('\r'), "{phrase}");

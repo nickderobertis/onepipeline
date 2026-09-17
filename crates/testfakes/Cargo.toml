@@ -139,6 +139,12 @@ path = "src/bin/envelope-reviewer.rs"
 name = "bus-validator"
 path = "src/bin/bus-validator.rs"
 
+# A host's own channel server, for the journeys that need a surface raised by
+# something other than this crate: a codec over the bus's library server whose
+# stdin frame names the kind. One more fake in this project rather than a project
+# of its own, because it ships nowhere and is tested by nothing but the journeys.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a test double of the
+# e2e suite, like the ten beside it; it is not a command this repository publishes.
 [[bin]]
 name = "host-channel-server"
 path = "src/bin/host-channel-server.rs"

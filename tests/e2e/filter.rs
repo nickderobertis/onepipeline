@@ -57,6 +57,10 @@ fn raise_blocker(world: &World, run: &str) {
     // llmlint: ignore-block[tests_mirror_real_usage] The watch must already be
     // blocked when the record lands. Appending the real local-bus record places
     // that race deterministically without mocking the reader.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the record
+    // is spelled by hand because no verb of this crate writes it, and the gate on
+    // its spelling is the read-back below: the engine reads it through the bus's
+    // registered `agent.planner-surface@1`, so a moved schema fails this journey.
     std::fs::write(
         world.run_file(run, "channel/surfaces.jsonl"),
         concat!(
@@ -65,6 +69,7 @@ fn raise_blocker(world: &World, run: &str) {
         ),
     )
     .expect("the host binding appends its surface");
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the question to reach the planner", waiting);
 }

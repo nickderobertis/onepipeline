@@ -766,6 +766,10 @@ fn a_log_line_carrying_an_id_nothing_can_follow_does_not_make_a_later_surface_ta
     // below, so a line carrying it is a corrupt or hostile one, and what is
     // under test is that such a line cannot turn the allocator into one that
     // collides. Everything else is driven through the CLI.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the line is
+    // spelled by hand because no writer allocates its id, and the gate on its
+    // spelling is the read-back below: the engine reads it through the bus's
+    // registered `agent.planner-surface@1`, so a moved schema fails this journey.
     let log = world.run_file(&run, "channel/surfaces.jsonl");
     let line_under = |id: u64| {
         format!(
@@ -776,6 +780,7 @@ fn a_log_line_carrying_an_id_nothing_can_follow_does_not_make_a_later_surface_ta
     placed.push_str(&line_under(u64::MAX));
     placed.push('\n');
     std::fs::write(&log, &placed).expect("the line is placed");
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     // Two surfaces queued afterwards take two distinct ids, neither of which
@@ -884,6 +889,11 @@ fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces
     // empty queue this journey exists to prove it is not.
     let queue = world.run_file(&run, "channel/queue.json");
     let staged = queue.with_extension("staged");
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the
+    // projection is spelled by hand because a run that already holds a question
+    // is the state under test, and the gate on its spelling is the read-back
+    // below: the engine loads it through its own `ChannelState`, so a moved
+    // projection fails this journey.
     std::fs::write(
         &staged,
         concat!(
@@ -894,6 +904,7 @@ fn a_queue_recording_a_name_that_identifies_nobody_still_hands_over_its_surfaces
     )
     .expect("the record is staged");
     std::fs::rename(&staged, &queue).expect("the record is placed");
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The run answers for it exactly as it does for any question nobody has read.
@@ -1805,6 +1816,11 @@ fn undeclared_surface_kinds_are_relayed_identically() {
     // The host bus may carry fields the engine's `surface` verb does not set.
     // Appending its queue record proves the relay preserves them rather than
     // reconstructing the surface from the engine's own vocabulary.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the record
+    // is spelled by hand because carrying fields no verb here sets is the point,
+    // and the gate on its spelling is the read-back below: the engine reads it
+    // through the bus's registered `agent.planner-surface@1` and every assertion
+    // compares the words it read, so a moved schema fails this journey.
     let record = json!({
         "event": "queued",
         "id": 2,
@@ -1821,6 +1837,7 @@ fn undeclared_surface_kinds_are_relayed_identically() {
         .expect("the host bus opens the surface queue");
     use std::io::Write as _;
     writeln!(log, "{record}").expect("the host bus appends its surface");
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     let read = world.run(&["next", &run]);
     read.exited(0);
