@@ -705,9 +705,28 @@ fn a_driver_that_cannot_write_the_counts_it_was_asked_for_says_so() {
     // write refuse: the temporary lands beside it, and the rename onto it cannot
     // happen. This is what a host that had mounted something there, or left a
     // directory of that name behind, does to the next write.
+    //
+    // Placed until it stands rather than once: the driver writes the counts on
+    // every wait, so the file can land again between its removal and the
+    // directory — a Windows leg met exactly that, refused `AlreadyExists` for
+    // the directory over a file the driver had just renamed in — and the same
+    // leg can refuse the removal itself while that rename still holds the name.
+    // A rename onto a directory is what neither platform allows, so once the
+    // directory is there the driver's next write is the refusal under test.
     let obstruction = world.run_file("unwritable", "loop-stats.json");
-    std::fs::remove_file(&obstruction).expect("the counts are replaced");
-    std::fs::create_dir_all(&obstruction).expect("the obstruction is placed");
+    let placing = Instant::now();
+    let placed = loop {
+        let attempt = match std::fs::remove_file(&obstruction) {
+            Err(why) if why.kind() != std::io::ErrorKind::NotFound => Err(why),
+            _ => std::fs::create_dir(&obstruction),
+        };
+        match attempt {
+            Ok(()) => break Ok(()),
+            Err(_) if placing.elapsed() < Duration::from_secs(30) => {}
+            Err(why) => break Err(why),
+        }
+    };
+    placed.expect("the obstruction is placed");
     std::fs::write(obstruction.join("held"), "not the counts").expect("the obstruction holds");
 
     world.until("the driver to report what it could not write", |world| {
