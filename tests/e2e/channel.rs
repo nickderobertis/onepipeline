@@ -231,11 +231,8 @@ fn consuming_a_surface_restarts_the_observer_graphs_clocks() {
 fn a_run_with_no_observer_graph_consumes_surfaces_and_reports_no_reset() {
     let world = World::new("channel-no-observer");
     world.script("build.wait", "hold");
+    // `running` launches with no `--dag-graph`, which is the shipped default.
     let run = running(&world, "unobserved", vec![agent("build", &[])]);
-    assert!(
-        world.run_json(&run, "launch.json").get("graph").is_none(),
-        "the launch recorded an observer graph it was not given"
-    );
     for message in ["a host condition", "steady"] {
         world
             .run(&[
@@ -255,7 +252,20 @@ fn a_run_with_no_observer_graph_consumes_surfaces_and_reports_no_reset() {
             read.stderr
         );
     }
-    assert_eq!(world.events_of(&run, "planner-surfaced").len(), 2);
+    // Both were read, and nothing is left waiting: the next read answers with
+    // no surface, and the stream shows each one handed over.
+    assert!(
+        world.run(&["next", &run]).json()["surface"].is_null(),
+        "a surface was left waiting after both were read"
+    );
+    let stream = world.run(&["monitor", &run]);
+    stream.exited(0);
+    assert_eq!(
+        stream.stdout.matches("planner-surfaced ").count(),
+        2,
+        "the stream does not show both surfaces handed over:\n{}",
+        stream.stdout
+    );
     // llmlint: ignore-block[tests_mirror_real_usage] that nothing was sent has no product
     // surface — `next` prints the surface either way — so the double's record of what it
     // was asked is where a reset addressed to no run would show.

@@ -454,12 +454,8 @@ fn an_edit_applied_with_nothing_driving_is_surfaced_as_edit_applied_by_its_autho
     let path = world.plan(RUN, &plan_of(RUN, vec![human("approve", &[])]));
     world
         .run(&["start", &path, "--attach", "--bus-config", &file])
-        .exited(0);
-    assert!(
-        !world.events_of(RUN, "decision-pending").is_empty(),
-        "the run is not parked on its human node: {:?}",
-        world.kinds(RUN)
-    );
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
 
     let applied = world.run_with_stdin(
         &["reply", RUN],
