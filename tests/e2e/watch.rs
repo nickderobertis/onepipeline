@@ -132,7 +132,7 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
     let quiet_until = Instant::now();
 
     let mut serving = world
-        .cmd(&["channel", "serve", &run])
+        .host_channel(&run)
         // Nobody answers this one, and the server's own wait is not under test —
         // only long enough that the question is still open when the watch reads it.
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "5")
@@ -200,11 +200,12 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
     );
     let last = &records.last().expect("the watch says why it returned").1;
     assert_eq!(last["condition"], json!("surface-waiting"), "{last}");
-    assert!(
-        records
-            .iter()
-            .any(|(_, record)| record["watch"] == json!("event")
-                && record["event"]["kind"] == json!("planner-surface-queued")),
+    // What reached it is the surface as the channel carries it: the engine
+    // journals nothing for a surface a host's server raised, so the return line
+    // is where the watch says what is waiting and of which kind.
+    assert_eq!(
+        last["unread"]["kinds"],
+        json!([{"kind": "blocker", "count": 1}]),
         "the surface raised while the watch waited never reached it: {records:?}"
     );
 
@@ -293,20 +294,17 @@ fn agreed(watched: &Run, condition: &str, code: i32) {
 /// machine-readable form carries the same three. The other five meaningful kinds
 /// are driven by the journey below this one.
 ///
-/// The graph edit is issued by the **monitor**, because an edit is emitted
-/// whichever author issued it and the monitor's is the author a supervisor is
-/// least expecting.
 #[test]
 fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     let world = World::new("watch-classes");
     world.script("build.wait", "hold");
     let run = running(&world, "watchclasses", vec![agent("build", &[])]);
 
-    // A graph edit, issued by the monitor rather than by the planner.
+    // A graph edit issued through the public reply boundary.
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
                                        "task": "## What\nsweep"}}
             ]})
@@ -319,7 +317,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "finding", "id": "build", "message": "the branch has no commits yet"}
             ]})
             .to_string(),
@@ -370,7 +368,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
             "the machine form carries no `{kind}`, only {kinds:?}"
         );
     }
-    // The edit reaches the caller as the monitor's, which is the whole point of
+    // The edit reaches the caller with its author, which is the whole point of
     // emitting it: the author is on the record the watch handed over, so a
     // supervisor never has to go back to the store to find out whose it was.
     let edit = machine(&watched)
@@ -379,7 +377,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
         .expect("the edit was emitted");
     assert_eq!(
         edit["event"]["payload"]["author"],
-        json!("monitor"),
+        json!("planner"),
         "{edit}"
     );
 
@@ -441,7 +439,7 @@ fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
     // A blocking surface begins holding the subtree that depends on the node it
     // names, and answering it releases exactly that subtree.
     let mut serving = world
-        .cmd(&["channel", "serve", &run])
+        .host_channel(&run)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -630,10 +628,10 @@ fn a_blocking_surface_returns_a_status_of_its_own_and_only_when_asked_for() {
     world.script("build.wait", "hold");
     let run = running(&world, "watchsurface", vec![agent("build", &[])]);
 
-    // Through the channel server, because that is the only author of a blocking
-    // surface: `surface --kind finding` is a report and holds nothing back.
+    // Through the host's channel server, because that is the only author of a
+    // blocking surface: `surface --kind finding` is a report and holds nothing back.
     let mut serving = world
-        .cmd(&["channel", "serve", &run])
+        .host_channel(&run)
         // Nobody answers this one, and the server's own wait is not under test.
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
@@ -650,9 +648,9 @@ fn a_blocking_surface_returns_a_status_of_its_own_and_only_when_asked_for() {
     stdin.flush().expect("flushed");
     world.until("the blocking surface to reach the planner", |world| {
         world
-            .events_of(&run, "planner-surface-queued")
+            .queued_surfaces(&run)
             .iter()
-            .any(|event| event["payload"]["blocking"] == json!(true))
+            .any(|surface| surface["blocking"] == json!(true))
     });
 
     let watched = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
@@ -1954,7 +1952,13 @@ fn a_monitor_resumed_from_the_cursor_it_printed_repeats_nothing_and_misses_nothi
 
         let resumed = with(Some(&taken));
         let next = resume_line(&resumed);
-        resumed.out_has(&message).out_has(&format!("-- {run}  "));
+        let rendered_message = format!(
+            "message={}",
+            serde_json::to_string(&message).expect("the message renders")
+        );
+        resumed
+            .out_has(&rendered_message)
+            .out_has(&format!("-- {run}  "));
         for earlier in &said {
             resumed.out_lacks(earlier);
         }
@@ -1965,8 +1969,8 @@ fn a_monitor_resumed_from_the_cursor_it_printed_repeats_nothing_and_misses_nothi
 
         let again = with(Some(&next));
         resume_line(&again);
-        again.out_lacks(&message);
-        said.push(message);
+        again.out_lacks(&rendered_message);
+        said.push(rendered_message);
     }
 
     world.release("build.go");

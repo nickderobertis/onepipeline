@@ -59,7 +59,21 @@ fn recorded_run(world: &World, name: &str) -> String {
         name,
         &plan_of(name, vec![agent("slow", &[]), agent("after", &["slow"])]),
     );
-    world.run(&["start", &path, "--detach"]).exited(0);
+    let bus = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &bus,
+        "version: 1\ntransport: {kind: local}\nauthors:\n  monitor: {capabilities: [finding]}\n",
+    )
+    .expect("the legacy author is configured for the new recording");
+    world
+        .run(&[
+            "start",
+            &path,
+            "--bus-config",
+            &bus.to_string_lossy(),
+            "--detach",
+        ])
+        .exited(0);
     world.until("a node to be in flight", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });

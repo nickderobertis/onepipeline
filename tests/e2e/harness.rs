@@ -723,7 +723,7 @@ impl World {
             .env(RENDEZVOUS_SECONDS_ENV, "180")
             // The asker *this* suite's own dispatch was given. This suite runs
             // inside a dispatch of the very system it is a library for, and a
-            // leaked value would make every `channel serve` a journey starts one
+            // leaked value would make every `onemessagebus serve` a journey starts one
             // listener of one asker — so two sessions a journey means as
             // strangers would take each other's questions back over, and the
             // scoping under test would be true of nothing the journey ran. A
@@ -1896,6 +1896,73 @@ impl World {
         Run::of(command.output().expect("the binary runs"), &[args], self)
     }
 
+    /// The host's own channel server over one run's channel: the generic
+    /// `host-channel-server` double, which speaks the bus's serving contract and
+    /// nothing of this crate's — a JSON frame on its stdin is a surface of
+    /// whatever kind the frame names, raised through the bus's own library
+    /// server, and the line it answers with is the planner's reply or the bus's
+    /// own word for a wait that ended without one.
+    ///
+    /// The one author of a *blocking* surface these journeys have: `surface` is
+    /// a report and holds nothing back. Its stdio is the caller's to pipe. The
+    /// asker this suite's own dispatch carries is dropped for the reason
+    /// [`cmd`](World::cmd) drops it — a journey that means two sessions as one
+    /// asker sets it on the command itself.
+    pub fn host_channel(&self, run: &str) -> Command {
+        let mut command = Command::new(double("host-channel-server"));
+        command
+            .arg(self.run_file(run, "channel"))
+            .env_remove(onepipeline::channel::ASKER_ENV);
+        command
+    }
+
+    /// Every surface queued on one run's channel, as its log records them — once
+    /// the channel's own projection has accounted for the whole log, and nothing
+    /// before then, so a caller polling this reads a surface the bus has finished
+    /// writing rather than one it is halfway through.
+    ///
+    /// The channel rather than the journal, because a surface a host's server
+    /// raises reaches the planner without the engine writing a record of it: the
+    /// engine journals `planner-surface-queued` for what it raises itself, and
+    /// relays what any other writer queues as the queue says it.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two
+    // words read here — the projection's `accounted` and the log's `queued` event
+    // — are the bus's persisted spelling, and every journey polling this is the
+    // gate: a moved spelling reads as no surface ever arriving, which fails them.
+    // llmlint: ignore-block[tests_mirror_real_usage] read off the channel's files
+    // rather than a view because no view shows a surface a host's server raised
+    // as the bus wrote it — the views summarize, and what these journeys assert
+    // is the record's own words; the files are the bus's real transport, written
+    // by the real server, and nothing here is placed.
+    // llmlint: ignore-block[boundary_inputs_validated] a readiness probe, polled
+    // under `until`: a projection or log not there yet, or a line the bus is
+    // halfway through writing, is "not yet" and not a refusal, and the caller's
+    // deadline is what turns a state that never arrives into a failure.
+    pub fn queued_surfaces(&self, run: &str) -> Vec<Value> {
+        let log = self.run_file(run, "channel/surfaces.jsonl");
+        let projection = std::fs::read_to_string(self.run_file(run, "channel/queue.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let length = std::fs::metadata(&log).map_or(0, |meta| meta.len());
+        if projection
+            .as_ref()
+            .and_then(|state| state["accounted"].as_u64())
+            .unwrap_or(0)
+            < length
+        {
+            return Vec::new();
+        }
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["event"] == "queued")
+            .collect()
+    }
+    // llmlint: ignore-end[boundary_inputs_validated]
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
     /// Run a command with an envelope on stdin.
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {
         self.run_with_stdin_on(self.cmd(args), stdin)
@@ -2451,7 +2518,18 @@ impl World {
             .stdout
             .lines()
             .filter_map(|line| line.split_once("planner-surface-queued "))
-            .map(|(_, question)| question.trim().to_string())
+            .map(|(_, surface)| {
+                let message = surface
+                    .split_once(" message=")
+                    .and_then(|(_, rest)| rest.rsplit_once(" source="))
+                    .map(|(message, _)| message)
+                    .unwrap_or_else(|| {
+                        panic!("a queued surface did not render its message: {surface}")
+                    });
+                serde_json::from_str(message).unwrap_or_else(|error| {
+                    panic!("a surface rendered an invalid message ({error}): {surface}")
+                })
+            })
             .collect()
     }
 

@@ -18,7 +18,6 @@ use std::process::Command;
 const COMMANDS: &[(&str, &[&str])] = &[
     ("start", &["start", "plans:demo"]),
     ("adopt", &["adopt", "run-1"]),
-    ("channel", &["channel", "serve", "run-1"]),
     ("next", &["next", "run-1"]),
     ("reply", &["reply", "run-1"]),
     (
@@ -43,6 +42,27 @@ const COMMANDS: &[(&str, &[&str])] = &[
     ("transcript", &["transcript", "run-1"]),
     ("telemetry", &["telemetry"]),
 ];
+
+/// `channel` stays a verb with a help of its own so that a host reading the
+/// surface finds where serving went, and it offers nothing to run: its one
+/// parser sentinel is hidden from help and refused by name when spelled out.
+#[test]
+fn channel_help_does_not_offer_the_retired_server_and_serve_is_unknown() {
+    let world = World::new("surface-no-channel-serve");
+    world
+        .run(&["channel", "--help"])
+        .exited(0)
+        .out_lacks("serve")
+        .out_lacks("__no-engine-verb");
+    world
+        .run(&["channel", "serve", "run-1"])
+        .exited(USAGE_ERROR)
+        .err_has("unrecognized subcommand 'serve'");
+    world
+        .run(&["channel", "__no-engine-verb"])
+        .exited(REFUSED)
+        .err_has("the channel exposes no engine-owned verb");
+}
 
 fn onepipeline() -> Command {
     Command::new(crate::harness::binary())
@@ -273,16 +293,6 @@ fn a_message_argument_and_a_message_file_cannot_both_be_given() {
         .output()
         .expect("it runs");
     assert_eq!(output.status.code(), Some(USAGE_ERROR));
-}
-
-#[test]
-fn an_unknown_surface_kind_is_rejected_before_anything_is_attempted() {
-    let output = onepipeline()
-        .args(["surface", "run-1", "--kind", "digest", "--message", "hello"])
-        .output()
-        .expect("it runs");
-    assert_eq!(output.status.code(), Some(USAGE_ERROR));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("check-in"));
 }
 
 #[test]

@@ -1596,7 +1596,7 @@ mod tests {
     /// put back the state `Park::of` exists to keep out.
     #[test]
     fn a_park_the_writer_produced_is_one_the_reader_accepts() {
-        let written = crate::edits::Park::of(crate::channel::Author::Planner, Some("waiting"));
+        let written = crate::edits::Park::of(crate::channel::Author::planner(), Some("waiting"));
         let document = serde_json::to_value(&written).expect("it serialises");
         assert_eq!(
             serde_json::from_value::<crate::edits::Park>(document.clone())
@@ -1607,7 +1607,7 @@ mod tests {
         // A park with no reason writes none rather than a null, and reads back as
         // the same park.
         let none = serde_json::to_value(crate::edits::Park::of(
-            crate::channel::Author::Planner,
+            crate::channel::Author::planner(),
             None,
         ))
         .expect("it serialises");

@@ -58,19 +58,20 @@ fn the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in() {
     let Member::Onejudge(monitor) = monitor else {
         panic!("the monitor is a two-party conversation");
     };
-    // Its judge side is this crate's own channel server, so the planner reads
-    // what the monitor raises through the same conversation it runs in.
+    // Its judge side belongs to the host's message bus rather than this engine.
     let [JudgeSide::Command(judge)] = &monitor.judge[..] else {
         panic!(
             "the monitor's judge side is one command provider, not {:?}",
             monitor.judge
         );
     };
-    assert_eq!(judge.command[0], "onepipeline");
-    assert_eq!(judge.command[1], "channel");
-    assert_eq!(judge.command[2], "serve");
+    assert_eq!(judge.command[0], "onemessagebus");
+    assert_eq!(judge.command[1], "serve");
     assert!(
-        judge.command[3].contains("ONEPIPELINE_RUN_ID"),
+        judge
+            .command
+            .iter()
+            .any(|word| word.contains("ONEPIPELINE_RUN_ID")),
         "the launcher has nowhere to substitute the run id: {:?}",
         judge.command
     );

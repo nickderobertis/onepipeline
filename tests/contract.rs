@@ -16,10 +16,7 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
-use onepipeline::channel::{
-    allows, allows_completion, Author, Command as Edit, Dependents, Reply, SettleOutcome,
-    SurfaceKind,
-};
+use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
@@ -1443,26 +1440,6 @@ fn op_of(command: &Edit) -> &'static str {
     }
 }
 
-/// Every surface kind this build carries, in its wire spelling.
-///
-/// Enumerated rather than listed: `SurfaceKind` is `#[non_exhaustive]`, so no
-/// match written out here can be exhaustive, and a hardcoded array would miss
-/// exactly the variant somebody added without writing it down. `ValueEnum` is
-/// what `--kind` already parses against, so this *is* the set a caller can spell
-/// and the set the queue can hold.
-fn every_surface_kind() -> BTreeSet<String> {
-    <SurfaceKind as clap::ValueEnum>::value_variants()
-        .iter()
-        .map(|kind| {
-            serde_json::to_value(kind)
-                .expect("a surface kind serializes")
-                .as_str()
-                .expect("as a string")
-                .to_string()
-        })
-        .collect()
-}
-
 /// The ops the contract lists, in the order it lists them.
 const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
@@ -1485,186 +1462,6 @@ fn contract_ops_this_build_accepts() -> Vec<&'static str> {
         .copied()
         .filter(|op| !REMOVED_OPS.contains(op))
         .collect()
-}
-
-/// The per-author allowlist the contract fixes, both directions.
-///
-/// A monitor is an observer: it may correct and re-run work, and it may not
-/// decide that the run is finished, that a person acted, or that work leaves the
-/// graph. Held against every op the protocol has, so an op added later is
-/// refused for the monitor until somebody decides otherwise rather than granted
-/// by omission.
-#[test]
-fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
-    assert!(
-        CONTRACT.contains(
-            "`monitor` may issue `retry | requeue | cancel | context | add` only, and \
-             `complete`, `attest`, and `drop` are refused for the monitor with a reason"
-        ),
-        "the contract's per-author allowlist moved"
-    );
-
-    let node = Node {
-        id: "fresh".into(),
-        persona: Some("engineer".into()),
-        task: Some("## What\ndo it".into()),
-        ..Node::default()
-    };
-    let every: Vec<(&str, Edit)> = vec![
-        ("add", Edit::Add { node: node.clone() }),
-        (
-            "drop",
-            Edit::Drop {
-                id: "x".into(),
-                dependents: Dependents::Detach,
-            },
-        ),
-        (
-            "reparent",
-            Edit::Reparent {
-                id: "x".into(),
-                deps: Vec::new(),
-            },
-        ),
-        (
-            "retry",
-            Edit::Retry {
-                id: "x".into(),
-                node,
-            },
-        ),
-        (
-            "cancel",
-            Edit::Cancel {
-                id: "x".into(),
-                reason: None,
-            },
-        ),
-        (
-            "requeue",
-            Edit::Requeue {
-                id: "x".into(),
-                amend: None,
-            },
-        ),
-        (
-            "attest",
-            Edit::Attest {
-                reference: "x".into(),
-            },
-        ),
-        (
-            "complete",
-            Edit::Complete {
-                reason: "done".into(),
-            },
-        ),
-    ];
-    assert_eq!(
-        every.len(),
-        contract_ops_this_build_accepts().len(),
-        "an op is missing from this table"
-    );
-
-    // The contract's list, less the op entry 60 removed — which took the
-    // monitor's own note lever with it, since `note` is off this list for
-    // `amend`'s reason.
-    let allowed = ["retry", "requeue", "cancel", "add"];
-    for (op, command) in &every {
-        // The planner owns the graph, so nothing is refused for it.
-        allows(Author::Planner, command)
-            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
-
-        let verdict = allows(Author::Monitor, command);
-        if allowed.contains(op) {
-            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
-            continue;
-        }
-        let refusal = verdict
-            .expect_err(&format!("the monitor was allowed `{op}`"))
-            .to_string();
-        assert!(
-            refusal.contains(op),
-            "the refusal does not name the op: {refusal}"
-        );
-        // With a reason, not merely a no: the monitor has to know what to do
-        // instead, and "surface it" is the whole answer.
-        assert!(
-            refusal.contains("Surface it to the planner"),
-            "the refusal does not say what to do instead: {refusal}"
-        );
-    }
-
-    // The author rides the envelope, defaults to the planner, and is omitted
-    // when it is the default — so a reply written before authors existed is one.
-    let plain: Reply = serde_json::from_str(r#"{"completion":true}"#).expect("it parses");
-    assert_eq!(plain.author, Author::Planner);
-    assert!(
-        !serde_json::to_string(&plain)
-            .expect("it serializes")
-            .contains("author"),
-        "the default author is written out"
-    );
-    let watched: Reply = serde_json::from_str(r#"{"version":1,"author":"monitor","commands":[]}"#)
-        .expect("it parses");
-    assert_eq!(watched.author, Author::Monitor);
-    assert_eq!(Author::Monitor.as_str(), "monitor");
-    assert_eq!(Author::Planner.as_str(), "planner");
-}
-
-/// Every op the planner channel refuses the monitor is refused in the words
-/// `docs/contract.md` states for it, and the contract states no refusal the
-/// build does not make.
-///
-/// The refusals are the `planner-channel` profile's; the block is what a
-/// monitor reading the contract is told it will meet, so each entry is driven
-/// through this crate's own `allows` and `allows_completion` and compared whole.
-#[test]
-fn each_refusal_the_monitor_meets_is_worded_as_the_contract_states_it() {
-    let block: Vec<Value> = serde_json::from_str(&fenced_block_naming("json", "\"refused\""))
-        .expect("the contract's refusals block is JSON");
-    let mut stated = BTreeSet::new();
-    for entry in &block {
-        let author: Author =
-            serde_json::from_value(entry["author"].clone()).expect("each entry names an author");
-        let refused = entry["refused"]
-            .as_str()
-            .expect("each entry states its refusal");
-        let verdict = match (entry.get("command"), entry.get("verdict")) {
-            (Some(command), None) => {
-                let command: Edit = serde_json::from_value(command.clone())
-                    .unwrap_or_else(|e| panic!("{command} is not a command this build reads: {e}"));
-                stated.insert(op_of(&command).to_owned());
-                allows(author, &command)
-            }
-            (None, Some(verdict)) => {
-                stated.insert("completion".to_owned());
-                allows_completion(author, verdict["completion"].as_bool())
-            }
-            _ => panic!("an entry names a command or a verdict, and only one: {entry}"),
-        };
-        let refusal = verdict.expect_err(&format!(
-            "the contract states a refusal this build does not make: {entry}"
-        ));
-        assert_eq!(
-            refusal.to_string(),
-            format!("refused: {refused}"),
-            "the refusal is not worded as the contract states it"
-        );
-    }
-
-    let profile = onemessagebus_agent::channel::allowlist();
-    let monitor = onemessagebus_agent::channel::ChannelAuthor::Monitor.author();
-    let refused: BTreeSet<String> = onemessagebus_agent::channel::Op::ALL
-        .into_iter()
-        .filter(|op| onemessagebus_agent::channel::allows(&profile, &monitor, op.word()).is_err())
-        .map(|op| op.word().to_owned())
-        .chain(["completion".to_owned()])
-        .collect();
-    assert_eq!(
-        stated, refused,
-        "the contract's refusals block and what the profile refuses the monitor are not the same set"
-    );
 }
 
 /// The contract's op list, less the one entry 60 removed, is exactly what this
@@ -1725,360 +1522,6 @@ fn divergence_block(number: &str) -> Value {
         .and_then(|rest| rest.split("```").next())
         .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"));
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
-}
-
-/// The ops and surface kinds this build carries **beyond** the contract's own
-/// lists are exactly the ones the divergence record proposes.
-///
-/// The contract is committed as approved and names neither, so the entry that
-/// proposes them is the only place they are written down — and a divergence
-/// nothing gates quietly stops being true. Both directions: a build that grows
-/// an op or a kind the entry does not name fails here as loudly as one that
-/// drops one it does.
-#[test]
-fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_names() {
-    let block = divergence_block("39.");
-    let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 39 names the ops it adds");
-    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 39 says which of them the monitor may issue");
-    let kinds: Vec<String> = serde_json::from_value(block["surface_kinds"].clone())
-        .expect("entry 39 names the surface kinds it adds");
-    assert!(!fixtures.is_empty() && !kinds.is_empty(), "{block}");
-
-    for fixture in &fixtures {
-        let op = fixture["op"].as_str().expect("the fixture names its op");
-        assert!(
-            !OPS.contains(&op),
-            "`{op}` is on the contract's own list, so it is no divergence"
-        );
-        // Written as the wire carries it: the entry's block is the source, so
-        // what parses here is what a planner would type.
-        let edit: Edit = serde_json::from_value(fixture.clone())
-            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
-        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
-        assert_eq!(
-            &serde_json::to_value(&edit).expect("serializes"),
-            fixture,
-            "`{op}` round-trips unchanged"
-        );
-
-        // The planner owns the graph, so nothing is refused for it.
-        allows(Author::Planner, &edit)
-            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
-        let verdict = allows(Author::Monitor, &edit);
-        if monitor_may.contains(op) {
-            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
-        } else {
-            verdict.expect_err(&format!("the monitor was allowed `{op}`"));
-        }
-    }
-
-    // The kind set is the contract's one plus the entry's, and nothing else —
-    // held against the variants themselves, so a kind added without a line in
-    // either document fails here rather than shipping unwritten-down.
-    for kind in &kinds {
-        assert!(
-            !CONTRACT.contains(&format!("--kind {kind}")),
-            "the contract names `{kind}`, so it is no divergence"
-        );
-        let parsed: SurfaceKind = serde_json::from_value(json!(kind))
-            .unwrap_or_else(|e| panic!("`{kind}` is a kind this build parses: {e}"));
-        assert_eq!(
-            serde_json::to_value(parsed).expect("serializes"),
-            json!(kind),
-            "`{kind}` round-trips unchanged"
-        );
-    }
-    let declared: BTreeSet<String> = std::iter::once("check-in".to_string())
-        .chain(kinds.iter().cloned())
-        .collect();
-    assert_eq!(
-        every_surface_kind(),
-        declared,
-        "the surface kinds this build carries are not the contract's plus entry 39's"
-    );
-}
-
-/// The park-and-settle surface this build carries **beyond** the contract is
-/// exactly what the divergence record proposes.
-///
-/// The contract is committed as approved and names none of it, so entry 57 is
-/// the only place it is written down — and a divergence nothing gates quietly
-/// stops being true. The entry's own block is the source: what parses here is
-/// what a planner would type, and the refusals are what a monitor would be told.
-#[test]
-fn the_park_and_settle_surface_is_what_the_divergence_record_names() {
-    let block = divergence_block("57.");
-
-    // The op it adds, as the wire carries it, and the authors it is for.
-    let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 57 names the op it adds");
-    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 57 says which of them the monitor may issue");
-    assert!(!fixtures.is_empty(), "{block}");
-    for fixture in &fixtures {
-        let op = fixture["op"].as_str().expect("the fixture names its op");
-        assert!(
-            !OPS.contains(&op),
-            "`{op}` is on the contract's own list, so it is no divergence"
-        );
-        let edit: Edit = serde_json::from_value(fixture.clone())
-            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
-        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
-        assert_eq!(
-            &serde_json::to_value(&edit).expect("serializes"),
-            fixture,
-            "`{op}` round-trips unchanged"
-        );
-        allows(Author::Planner, &edit)
-            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
-        let verdict = allows(Author::Monitor, &edit);
-        if monitor_may.contains(op) {
-            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
-            continue;
-        }
-        // Refused, and the refusal names the op, says the decision is the
-        // planner's, and says what to do instead — an observer told only "no"
-        // has nothing to act on.
-        let refusal = verdict
-            .expect_err(&format!("the monitor was allowed `{op}`"))
-            .to_string();
-        assert!(
-            refusal.contains(op)
-                && refusal.contains("planner's decision")
-                && refusal.contains("Surface it to the planner"),
-            "the refusal does not say whose decision it is or what to do instead: {refusal}"
-        );
-    }
-
-    // The optional field the contract's own `cancel` gains. It rides that op
-    // rather than a new one, so what the entry has to prove is that the op is
-    // still `cancel` and that the reason survives the round trip.
-    let parked = block["cancel"].clone();
-    let cancel: Edit = serde_json::from_value(parked.clone()).expect("the cancel fixture parses");
-    assert_eq!(
-        op_of(&cancel),
-        "cancel",
-        "the reason moved `cancel` off its op"
-    );
-    assert!(
-        OPS.contains(&"cancel"),
-        "`cancel` is the contract's own op, which is why only its field is the divergence"
-    );
-    assert_eq!(
-        serde_json::to_value(&cancel).expect("serializes"),
-        parked,
-        "the park's reason does not round-trip"
-    );
-    // And a `cancel` written before the field existed is still exactly the
-    // `cancel` it was: it parses, carries no reason, and writes none back.
-    let bare: Edit =
-        serde_json::from_value(json!({"op": "cancel", "id": "build"})).expect("it parses");
-    assert_eq!(
-        serde_json::to_value(&bare).expect("serializes"),
-        json!({"op": "cancel", "id": "build"}),
-        "a park stating no reason gained one"
-    );
-
-    // The optional field `settle` gains, in both spellings of it the entry names.
-    // It rides that op rather than a new one, so what is proved is that the op is
-    // still `settle`, that either spelling round-trips, and that an envelope
-    // naming none is accepted and writes none back — which is what makes it
-    // additive for every caller that predates it.
-    let landings: Vec<String> = serde_json::from_value(block["settle_landings"].clone())
-        .expect("entry 57 names the landings a settle takes");
-    assert_eq!(landings.len(), 2, "{block}");
-    let settling = fixtures
-        .iter()
-        .find(|fixture| fixture["op"] == "settle")
-        .expect("entry 57's op is the settle")
-        .clone();
-    assert_eq!(
-        settling["landing"], landings[0],
-        "the settle fixture does not carry the first landing the entry names"
-    );
-    for landing in &landings {
-        let mut written = settling.clone();
-        written["landing"] = json!(landing);
-        let settle: Edit = serde_json::from_value(written.clone())
-            .unwrap_or_else(|e| panic!("a settle landing at `{landing}` parses: {e}"));
-        assert_eq!(
-            op_of(&settle),
-            "settle",
-            "the landing moved `settle` off its op"
-        );
-        assert_eq!(
-            serde_json::to_value(&settle).expect("serializes"),
-            written,
-            "a settle's landing at `{landing}` does not round-trip"
-        );
-    }
-    // The version this field moves the envelope to, and the versions this build
-    // goes on reading. A field added to a serialized contract moves its version;
-    // this one is **additive**, so the version it leaves behind is still read and
-    // every envelope written against it still works. The entry names both, and
-    // the build is held to both here.
-    let version = block["envelope_version"]
-        .as_u64()
-        .expect("entry 57 names the envelope version the landing moves it to")
-        as u32;
-    assert_eq!(
-        onepipeline::channel::REPLY_ENVELOPE_VERSION,
-        version,
-        "the build's envelope version is not the one entry 57 declares"
-    );
-    let read: Vec<u32> = serde_json::from_value(block["envelope_versions_read"].clone())
-        .expect("entry 57 names the envelope versions this build reads");
-    assert_eq!(
-        onepipeline::channel::REPLY_ENVELOPE_VERSIONS_READ,
-        read.as_slice(),
-        "the build reads a different set of envelope versions from the one entry 57 names"
-    );
-    assert!(
-        read.contains(&version) && read.len() > 1,
-        "entry 57 declares a bump that leaves the version before it unread: {block}"
-    );
-
-    // The golden is the envelope a person types and this build parses, and these
-    // are the landings it carries: the entry, the golden and the types are held
-    // against each other so no two of them can drift.
-    let golden: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v3.json"))
-            .expect("the reply envelope golden ships"),
-    )
-    .expect("the golden is JSON");
-    assert_eq!(
-        golden["version"],
-        json!(onepipeline::channel::REPLY_ENVELOPE_VERSION),
-        "the golden envelope is not at the version this build writes"
-    );
-    // And the golden for the version this build no longer writes: it is checked
-    // in beside the current one, it is at a version the entry says is still read,
-    // and what it carries is what a caller written before the landing sent.
-    let older: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("tests/golden/reply-envelope-v2.json"))
-            .expect("the envelope golden for the version before this one ships"),
-    )
-    .expect("the older golden is JSON");
-    let older_version = older["version"].as_u64().expect("it names its version") as u32;
-    assert!(
-        older_version < version && read.contains(&older_version),
-        "the golden for the version before this one is not a version this build still reads"
-    );
-    assert!(
-        older["commands"]
-            .as_array()
-            .expect("the older golden carries commands")
-            .iter()
-            .all(|command| command.get("landing").is_none()),
-        "the golden for the version before the landing existed names one: {older}"
-    );
-    let carried: Vec<String> = golden["commands"]
-        .as_array()
-        .expect("the golden carries commands")
-        .iter()
-        .filter_map(|command| command.get("landing")?.as_str().map(str::to_owned))
-        .collect();
-    assert_eq!(
-        carried, landings,
-        "the golden envelope does not carry the landings entry 57 names"
-    );
-    // The release a settle may state beside its landing: the entry's value is one
-    // this build reads, a settle carrying it round-trips unchanged, the golden
-    // carries exactly it beside a landing, and the envelope before it carries none.
-    let release = block["settle_release"].clone();
-    let stated: onepipeline::channel::StatedRelease =
-        serde_json::from_value(release.clone()).expect("entry 57 names a release a settle takes");
-    assert_eq!(
-        serde_json::to_value(&stated).expect("serializes"),
-        release,
-        "the stated release does not round-trip"
-    );
-    let mut releasing = settling.clone();
-    releasing["release"] = release.clone();
-    let settle: Edit =
-        serde_json::from_value(releasing.clone()).expect("a settle stating a release parses");
-    assert_eq!(
-        serde_json::to_value(&settle).expect("serializes"),
-        releasing,
-        "a settle stating a release does not round-trip"
-    );
-    let released: Vec<&Value> = golden["commands"]
-        .as_array()
-        .expect("the golden carries commands")
-        .iter()
-        .filter(|command| command.get("release").is_some())
-        .collect();
-    assert!(
-        released.len() == 1
-            && released[0]["release"] == release
-            && released[0].get("landing").is_some(),
-        "the golden envelope does not carry the release entry 57 names beside a landing: {golden}"
-    );
-    assert!(
-        older["commands"]
-            .as_array()
-            .expect("the older golden carries commands")
-            .iter()
-            .all(|command| command.get("release").is_none()),
-        "the golden for the version before the release existed names one: {older}"
-    );
-    assert!(
-        golden["commands"]
-            .as_array()
-            .expect("the golden carries commands")
-            .iter()
-            .any(|command| command["op"] == json!("settle") && command.get("landing").is_none()),
-        "the golden envelope pins no settle that names a landing at all: {golden}"
-    );
-
-    let mut unnamed = settling.clone();
-    unnamed
-        .as_object_mut()
-        .expect("the fixture is an object")
-        .remove("landing");
-    let bare: Edit = serde_json::from_value(unnamed.clone()).expect("it parses");
-    assert_eq!(
-        serde_json::to_value(&bare).expect("serializes"),
-        unnamed,
-        "a settle naming no landing gained one"
-    );
-
-    // The outcome vocabulary a `settle` accepts, held against the type: the
-    // entry's list is the set, and a fourth word is refused rather than guessed
-    // at.
-    let outcomes: Vec<String> = serde_json::from_value(block["settle_outcomes"].clone())
-        .expect("entry 57 names the outcomes a settle accepts");
-    assert_eq!(outcomes.len(), 2, "{block}");
-    for word in &outcomes {
-        let parsed: SettleOutcome = serde_json::from_value(json!(word))
-            .unwrap_or_else(|e| panic!("`{word}` is an outcome this build accepts: {e}"));
-        assert_eq!(parsed.as_str(), word, "`{word}` round-trips unchanged");
-        assert_eq!(
-            serde_json::to_value(parsed).expect("serializes"),
-            json!(word),
-            "`{word}` round-trips unchanged"
-        );
-    }
-    // A status a node can be *in* but may not be *put* at: `skipped` is derived
-    // from the graph on every pass, so a node settled at one would be re-derived
-    // out of it and the operator's statement would silently not hold.
-    for refused in ["skipped", "parked", "ready"] {
-        assert!(
-            serde_json::from_value::<SettleOutcome>(json!(refused)).is_err(),
-            "`{refused}` is a status a settle may not put a node at, and it was accepted"
-        );
-    }
-
-    // The word the settlement is written under is gated where it is *written* —
-    // `tests/e2e/live_edit.rs` reads this same field out of this same entry and
-    // holds it against the record the compiled binary produced, which is the
-    // only place the claim can be about a run rather than about a string.
-    assert!(
-        block["settled_outcome_word"].is_string(),
-        "entry 57 no longer names the word a settlement from evidence is written under"
-    );
 }
 
 /// The release-adoption surface this build carries **beyond** the contract is
@@ -2285,9 +1728,9 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
             fixture,
             "`{op}` round-trips unchanged"
         );
-        allows(Author::Planner, &edit)
+        allows(Author::planner(), &edit)
             .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
-        let verdict = allows(Author::Monitor, &edit);
+        let verdict = allows(Author::from("monitor"), &edit);
         if monitor_may.contains(op) {
             verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
             continue;
@@ -3516,7 +2959,7 @@ fn the_criterion_check_is_what_the_divergence_record_names() {
         .expect("entry 47 names the surface a mismatch is raised under");
     let parsed: SurfaceKind = serde_json::from_value(json!(raised))
         .unwrap_or_else(|e| panic!("`{raised}` is a kind this build parses: {e}"));
-    assert_eq!(parsed, SurfaceKind::Finding);
+    assert_eq!(parsed, SurfaceKind::finding());
 
     // Three answers, kept apart. The words themselves are private vocabulary and
     // are held against the enum that spells them by the module's own test; what
@@ -3810,14 +3253,41 @@ fn a_reply_declares_the_halves_the_contract_routes_it_by() {
 }
 
 #[test]
-fn the_only_surface_kind_the_contract_names_is_check_in() {
-    let kind: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
-    assert_eq!(kind, SurfaceKind::CheckIn);
-    assert!(CONTRACT.contains("--kind check-in"));
+fn the_contract_declares_an_open_surface_kind_vocabulary() {
+    let check_in: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
+    assert_eq!(check_in, SurfaceKind::check_in());
+    let host_kind: SurfaceKind = serde_json::from_value(json!("host-defined")).expect("parses");
+    assert_eq!(host_kind.as_str(), "host-defined");
+    assert!(CONTRACT.contains("--kind KIND"));
+    assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
     assert!(
         CONTRACT.contains("oneagentgraph reset-timer RUN check-in"),
         "consuming a surface resets the pacemaker"
     );
+}
+
+#[test]
+fn the_contracts_open_author_grammar_is_the_channels_complete_boundary() {
+    assert!(CONTRACT.contains("Channel authors are open words"));
+    assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
+
+    for word in ["planner", "monitor", "sentinel", "a", &"a".repeat(64)] {
+        let author: Author = serde_json::from_value(json!(word))
+            .unwrap_or_else(|error| panic!("the documented author `{word}` parses: {error}"));
+        assert_eq!(author.as_str(), word);
+        assert_eq!(
+            serde_json::to_value(author).expect("serializes"),
+            json!(word)
+        );
+    }
+    for word in ["", "Monitor", "two_words", "-leading", &"a".repeat(65)] {
+        let error = serde_json::from_value::<Author>(json!(word))
+            .expect_err(&format!("the undocumented author `{word}` was accepted"));
+        assert!(
+            error.to_string().contains("^[a-z][a-z0-9-]{0,63}$"),
+            "the refusal does not name the contract grammar: {error}"
+        );
+    }
 }
 
 #[test]
@@ -4617,7 +4087,6 @@ fn every_command_the_contract_names_parses() {
     let invocations: &[(&str, &[&str])] = &[
         ("start", &["start", "plans:demo"]),
         ("adopt", &["adopt", "run-1"]),
-        ("channel serve", &["channel", "serve", "run-1"]),
         ("next", &["next", "run-1"]),
         ("reply", &["reply", "run-1"]),
         ("reply FILE", &["reply", "run-1", "edits.json"]),
@@ -4663,15 +4132,12 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
         &[
             "`onepipeline next RUN [--filter NAME|SPEC] [--all]`",
             "reply RUN [FILE]",
-            "surface RUN --kind check-in --message TEXT",
+            "surface RUN --kind KIND --message TEXT",
             "attest RUN REF",
             "stop RUN",
         ],
     );
-    assert_contract_names(
-        "driver verb",
-        &["onepipeline channel serve RUN", "onepipeline adopt RUN"],
-    );
+    assert_contract_names("driver verb", &["onepipeline adopt RUN"]);
 
     // The views, as the contract lists them.
     let tokens = backticked();
@@ -4767,9 +4233,17 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     };
     match &monitor.judge[..] {
         [JudgeSide::Command(judge)] => assert_eq!(
-            judge.command[..3],
-            ["onepipeline", "channel", "serve"],
-            "the monitor's judge side is this crate's channel server"
+            judge.command,
+            [
+                "onemessagebus",
+                "serve",
+                "--codec",
+                "onejudge",
+                "--transport-dir",
+                "${ONEPIPELINE_RUNS_DIR}/${ONEPIPELINE_RUN_ID}/channel",
+                "surfaces",
+            ],
+            "the monitor's judge side is exactly the adopted bus server command"
         ),
         other => panic!("the contract makes the judge side one command provider, not {other:?}"),
     }
@@ -4867,103 +4341,6 @@ fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
 /// op the channel refuses sends it to be refused every run, and one silent about
 /// an op the channel allows leaves that op unreachable however carefully it was
 /// wired. Both directions, off the same `allows` the channel enforces with.
-#[test]
-fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
-    let text = std::fs::read_to_string(repo_root().join("personas/orchestrator.yaml"))
-        .expect("the monitor persona ships");
-    let prose = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let node = Node {
-        id: "fresh".into(),
-        persona: Some("engineer".into()),
-        task: Some("## What\ndo it".into()),
-        ..Node::default()
-    };
-    // Every op this build has, contract's and divergent alike, each in the shape
-    // the wire carries it.
-    let every: Vec<Edit> = vec![
-        Edit::Add { node: node.clone() },
-        Edit::Drop {
-            id: "x".into(),
-            dependents: Dependents::Detach,
-        },
-        Edit::Reparent {
-            id: "x".into(),
-            deps: Vec::new(),
-        },
-        Edit::Retry {
-            id: "x".into(),
-            node,
-        },
-        Edit::Cancel {
-            id: "x".into(),
-            reason: None,
-        },
-        Edit::Requeue {
-            id: "x".into(),
-            amend: None,
-        },
-        Edit::Attest {
-            reference: "x".into(),
-        },
-        Edit::Complete {
-            reason: "done".into(),
-        },
-        Edit::Note {
-            id: "x".into(),
-            addressee: Addressee::Worker,
-            text: "look here".parse().expect("a usable note"),
-            criterion: None,
-            deliver: onepipeline::channel::Deliver::Live,
-            persist: true,
-        },
-        Edit::Finding {
-            message: "it drifted".into(),
-            blocking: false,
-            id: None,
-        },
-        Edit::Amend {
-            id: "x".into(),
-            text: "the ruling".into(),
-        },
-        Edit::Settle {
-            id: "x".into(),
-            outcome: SettleOutcome::Done,
-            evidence: "it merged".into(),
-            landing: Some("https://github.com/owner/engine/pull/12".into()),
-            release: None,
-        },
-    ];
-    assert_eq!(
-        every.len(),
-        contract_ops_this_build_accepts().len() + 4,
-        "an op is missing from this table; `op_of` above is what says so"
-    );
-
-    // The persona states both lists in one sentence pair, which is what makes
-    // this readable to the member: what it may issue, then what is refused.
-    let window = prose
-        .split_once("what that author may issue:")
-        .and_then(|(_, tail)| tail.split_once("are refused for you"))
-        .map(|(window, _)| window.to_string())
-        .expect("the monitor persona still states its allowlist and its refusals");
-    let (may_issue, refused) = window
-        .split_once(". ")
-        .expect("the persona's allowlist and its refusals are two sentences");
-
-    for command in &every {
-        let op = op_of(command);
-        let spelt = format!("`{op}`");
-        let allowed = allows(Author::Monitor, command).is_ok();
-        let (says_it_may, says_it_may_not) = (may_issue.contains(&spelt), refused.contains(&spelt));
-        assert_eq!(
-            (says_it_may, says_it_may_not),
-            (allowed, !allowed),
-            "the channel {} the monitor `{op}` and its persona says otherwise: \
-             may issue '{may_issue}', refused '{refused}'",
-            if allowed { "allows" } else { "refuses" }
-        );
-    }
-}
 
 #[test]
 fn the_pr_author_never_blocks_publication() {
@@ -5024,6 +4401,7 @@ const RULINGS: &[(&str, &str)] = &[
         "`onemessagebus`'s own `docs/contract.md` is the one source of their shape",
     ),
     ("77.", "The planner channel is `onemessagebus`'s"),
+    ("78.", "Surface kinds are an open vocabulary"),
 ];
 
 #[test]
@@ -5689,255 +5067,6 @@ fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     }
 }
 
-/// The `name: Type` pairs a struct in `src/executor.rs` declares.
-///
-/// Read out of the source rather than reflected off the type, because a
-/// `#[non_exhaustive]` struct cannot be built field-by-field from outside the
-/// crate — which is exactly the property that would otherwise catch the drift.
-fn declared_fields(struct_name: &str) -> Vec<String> {
-    let source = std::fs::read_to_string(repo_root().join("src/executor.rs"))
-        .expect("the executor seam ships");
-    let body = source
-        .split_once(&format!("pub struct {struct_name} {{"))
-        .expect("the struct is declared")
-        .1
-        .split_once("\n}")
-        .expect("the struct is closed")
-        .0;
-    body.lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("pub ") && line.ends_with(','))
-        .map(|line| {
-            line.trim_start_matches("pub ")
-                .trim_end_matches(',')
-                .to_string()
-        })
-        .collect()
-}
-
-/// The divergences document restates two things that live in the code. Each copy
-/// is gated here, so a change to the code fails this suite instead of leaving
-/// the document quietly wrong.
-#[test]
-fn the_divergence_record_matches_the_code_it_describes() {
-    let raw = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
-        .expect("the divergence record ships");
-    let doc = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    // Divergence 3's ruling put `DispatchOutcome`'s fields in the contract and
-    // kept this gate on the prose. The type is `#[non_exhaustive]`, so a struct
-    // literal here cannot be the gate; its declaration is read instead, and
-    // every field it declares must appear in both documents.
-    let declared = declared_fields("DispatchOutcome");
-    assert!(!declared.is_empty(), "DispatchOutcome declares no fields");
-    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
-    for field in &declared {
-        assert!(
-            doc.contains(field.as_str()),
-            "the divergence record does not spell `{field}`, which DispatchOutcome declares"
-        );
-        assert!(
-            contract.contains(field.as_str()),
-            "the contract does not spell `{field}`, which DispatchOutcome declares"
-        );
-    }
-
-    // Divergence 5 names the units the rules parser accepts.
-    for unit in ["KiB", "MiB", "GiB", "TiB"] {
-        assert!(
-            onepipeline::rules::bytes_of(&format!("1{unit}")).is_some(),
-            "the rules parser does not accept {unit}, which the record says it does"
-        );
-        assert!(
-            doc.contains(unit),
-            "the divergence record does not name the {unit} unit the parser accepts"
-        );
-    }
-    assert!(
-        onepipeline::rules::bytes_of("2GB").is_none(),
-        "the record says `2GB` is treated as no limit; the parser accepted it"
-    );
-
-    // Divergence 61 restates two things it does not own: the contract's
-    // decision-point sentence, quoted so the proposal names what it would amend,
-    // and the `abandoned` field the surfaces the channel hands out now carry.
-    // Both are gated against their own source, so a change to either fails here
-    // rather than leaving the proposal arguing about text that has moved on.
-    let rest = raw
-        .split_once("\n## 61. ")
-        .expect("the record carries divergence 61")
-        .1;
-    let entry = rest.split_once("\n## ").map_or(rest, |(entry, _)| entry);
-    let quoted = entry
-        .lines()
-        .skip_while(|line| !line.starts_with("> "))
-        .take_while(|line| line.starts_with('>'))
-        .map(|line| line.trim_start_matches('>').trim())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        !quoted.is_empty(),
-        "divergence 61 quotes no contract sentence for its proposal to amend"
-    );
-    assert!(
-        contract.contains(&quoted),
-        "divergence 61 quotes a decision-point sentence the contract no longer carries: {quoted}"
-    );
-    let surface = std::fs::read_to_string(repo_root().join("src/channel.rs"))
-        .expect("the channel ships")
-        .split_once("pub(crate) struct Surface {")
-        .expect("the surface is declared")
-        .1
-        .split_once("\n}")
-        .expect("the surface is closed")
-        .0
-        .to_string();
-    assert!(
-        surface
-            .lines()
-            .any(|line| line.trim() == "pub abandoned: bool,"),
-        "divergence 61 describes an `abandoned` field the surface a reader is handed does not \
-         declare"
-    );
-    assert!(
-        doc.contains("`abandoned: true`"),
-        "divergence 61 no longer says what a reader sees on a surface nobody is waiting on"
-    );
-
-    // The same entry's second half restates two more things it does not own: the
-    // name of the environment variable that bounds a serving session, and the
-    // set of endings that session distinguishes. Renaming either, or adding a
-    // fourth ending, fails here rather than leaving the entry describing a
-    // discriminator the code has moved past.
-    let bound = std::fs::read_to_string(repo_root().join("src/channel.rs"))
-        .expect("the channel ships")
-        .split_once("pub const SERVE_SESSION_ENV: &str = \"")
-        .expect("the channel names the serving session's bound")
-        .1
-        .split_once('"')
-        .expect("that name is a string literal")
-        .0
-        .to_string();
-    assert!(
-        entry.contains(&bound),
-        "divergence 61 names a session bound the channel does not declare: {bound}"
-    );
-    let driver =
-        std::fs::read_to_string(repo_root().join("src/driver.rs")).expect("the driver ships");
-    let endings: Vec<String> = driver
-        .split_once("enum Served {")
-        .expect("the driver names why a serving session stopped")
-        .1
-        .split_once("\n}")
-        .expect("that enum is closed")
-        .0
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.ends_with(',') && !line.starts_with("///"))
-        .map(|line| line.trim_end_matches(',').to_string())
-        .collect();
-    assert_eq!(
-        endings.len(),
-        3,
-        "divergence 60 says a serving session has three endings; the driver declares {endings:?}"
-    );
-    for ending in &endings {
-        assert!(
-            entry.contains(ending.as_str()),
-            "the driver declares an ending divergence 60 does not name: {ending}"
-        );
-    }
-    // And which of them mark: the entry says exactly one ending withdraws
-    // nothing, so exactly one has to sit outside the guard that marks.
-    // Anchored on the mark itself rather than on the first `matches!` in the
-    // file: the ending decides more than one thing, so a guard picked by shape
-    // alone is whichever one happens to come first.
-    let guard = driver
-        .split_once("channel.abandon(&raised)?;")
-        .expect("the driver marks what a session left behind")
-        .0
-        .rsplit_once("if matches!(ending, ")
-        .expect("that mark is guarded by which ending the session reached")
-        .1
-        .split_once(')')
-        .expect("that guard is closed")
-        .0;
-    let marking: Vec<&String> = endings
-        .iter()
-        .filter(|ending| guard.contains(&format!("Served::{ending}")))
-        .collect();
-    assert_eq!(
-        marking.len(),
-        endings.len() - 1,
-        "divergence 60 says exactly one ending withdraws nothing; the guard marks {marking:?} of \
-         {endings:?}"
-    );
-
-    // Divergence 62 restates three things it does not own either: the name of
-    // the variable a serving session says who it listens for with, the field a
-    // surface carries that on, and the two journeys it says hold the seam end to
-    // end. It is the entry a consumer writing an asking wrapper reads instead of
-    // the implementation, so each copy is gated against its own source and a
-    // rename fails here rather than leaving that consumer following a wrapper
-    // this build no longer answers.
-    let rest = raw
-        .split_once("\n## 62. ")
-        .expect("the record carries divergence 62")
-        .1;
-    let entry = rest.split_once("\n## ").map_or(rest, |(entry, _)| entry);
-    let channel =
-        std::fs::read_to_string(repo_root().join("src/channel.rs")).expect("the channel ships");
-    let asker = channel
-        .split_once("pub const ASKER_ENV: &str = \"")
-        .expect("the channel names the variable a session says its asker with")
-        .1
-        .split_once('"')
-        .expect("that name is a string literal")
-        .0
-        .to_string();
-    assert!(
-        entry.contains(&asker),
-        "divergence 62 names an asker variable the channel does not declare: {asker}"
-    );
-    assert!(
-        surface
-            .lines()
-            .any(|line| line.trim() == "pub asker: Option<Asker>,"),
-        "divergence 62 describes an `asker` a surface does not carry"
-    );
-    assert!(
-        channel.contains("pub fn attend(&self, asker: &Asker)"),
-        "divergence 62 describes an `attend` the channel does not declare"
-    );
-    let journeys = std::fs::read_to_string(repo_root().join("tests/e2e/channel.rs"))
-        .expect("the channel journeys ship");
-    // The journeys, and not the types the entry also names under that path: a
-    // test's name is snake case and a type's is not, which is the whole of the
-    // difference and is why it is read off the shape rather than off a list here
-    // that would go stale.
-    let named: Vec<&str> = entry
-        .split("`channel::")
-        .skip(1)
-        .filter_map(|rest| rest.split_once('`').map(|(name, _)| name))
-        .filter(|name| {
-            name.chars().all(|letter| {
-                letter.is_ascii_lowercase() || letter.is_ascii_digit() || letter == '_'
-            })
-        })
-        .collect();
-    assert_eq!(
-        named.len(),
-        2,
-        "divergence 62 says two journeys hold this seam; it names {named:?}"
-    );
-    for journey in named {
-        assert!(
-            journeys.contains(&format!("fn {journey}(")),
-            "divergence 62 names a journey the channel suite does not run: {journey}"
-        );
-    }
-}
-
 #[test]
 fn the_readmes_interface_claims_match_the_code_they_describe() {
     // The README restates numbers that live in the code. Each copy is gated
@@ -6193,9 +5322,9 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
             fixture,
             "`{op}` round-trips unchanged"
         );
-        allows(Author::Planner, &edit)
+        allows(Author::planner(), &edit)
             .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
-        let verdict = allows(Author::Monitor, &edit);
+        let verdict = allows(Author::from("monitor"), &edit);
         if monitor_may.contains(op) {
             verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
             continue;

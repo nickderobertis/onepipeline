@@ -363,7 +363,7 @@ fn session_of_worktree(worktree: &Path) -> Option<String> {
 /// is why the launch below declares [`Environment::PerLaunch`]: the pair has to
 /// live somewhere no sibling dispatch can read or overwrite, and that is a
 /// process rather than a map. The **asker** is that same uniqueness read as an
-/// identity: the wrapper above asks through a succession of `channel serve`
+/// identity: the wrapper above asks through a succession of the host bus server
 /// listeners, and this is what tells them they are serving one side that is
 /// still waiting rather than a series of sides that have each gone.
 ///

@@ -267,7 +267,7 @@ pub fn deliver_with(
 ) -> Result<Delivered> {
     let envelope = Reply {
         version: Some(REPLY_ENVELOPE_VERSION),
-        author: Author::Planner,
+        author: Author::planner(),
         commands: vec![Command::Note {
             id: node.to_string(),
             addressee: note.addressee,
@@ -524,7 +524,7 @@ impl Standing {
 /// committed `note` adds its note. Both are this crate's own records, and both
 /// are **refused** rather than read past where they cannot be read: a
 /// `notes_carried` that is not a list of notes, or an operation list this build
-/// cannot parse, would otherwise decide *by its absence* which rulings a dispatch
+/// cannot parse, would otherwise decide by its absence which rulings a dispatch
 /// is composed with, which is the silent loss this fold exists to end. The
 /// refusal names the record, so a reader is sent at the line rather than at the
 /// run.

@@ -28,11 +28,17 @@ members:
     persona: ../personas/orchestrator.yaml
     agent:
       oneharness_config: ./oneharness.orchestrator.toml
-    # The judge side is this crate's own channel server, so the planner reads
-    # what the monitor raises through the same conversation the monitor runs in.
-    # The launcher substitutes the run id.
+    # The host's message bus owns the judge side. The launcher substitutes the
+    # run root; the host supplies ONEMESSAGEBUS_CONFIG with its codec binding.
     judge:
-      command: ["onepipeline", "channel", "serve", "${ONEPIPELINE_RUN_ID}"]
+      # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] This is one
+      # invocation of the adopted bus's `serve` verb — a use of that CLI's
+      # grammar, as a script's `git commit` is of git's, not a second statement
+      # of it. The suite installs no bus binary and the bus library exposes no
+      # parser to ask, so what this repository holds is the shape a launch
+      # substitutes into (`tests/e2e/shipped.rs`); the flags are the bus's to
+      # move, and a move shows where a host runs this graph.
+      command: ["onemessagebus", "serve", "--codec", "onejudge", "--transport-dir", "${ONEPIPELINE_RUNS_DIR}/${ONEPIPELINE_RUN_ID}/channel", "surfaces"]
     mode: bypass
   check-in:
     kind: oneharness

@@ -153,7 +153,7 @@ pub enum Command {
     Plan(PlanCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
-    /// The channel's server side.
+    /// Inspect the channel command group.
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Read the next planner surface.
@@ -212,6 +212,14 @@ pub enum PlanCommand {
     /// Run the engine's own plan loader, and every registered check, over one
     /// project.
     Check(PlanCheckArgs),
+}
+
+/// The channel has no engine-owned serving verbs.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ChannelCommand {
+    /// Parser sentinel: the channel exposes no executable engine verb.
+    #[command(hide = true, name = "__no-engine-verb")]
+    NoEngineVerb,
 }
 
 /// `onepipeline plan check`.
@@ -312,9 +320,9 @@ pub struct StartArgs {
     /// The `onemessagebus` configuration this run's channel is kept under.
     ///
     /// Read at the launch and retained in the launch record: its `authors` block
-    /// may narrow what an author may issue and never widen it, its `validators`
-    /// judge what is offered to the channel's queues, and its `codecs.onejudge`
-    /// block sets what `channel serve` waits and reads. Its transport is the run
+    /// declares who may issue which operations, and its `validators` judge what
+    /// is offered to the channel's queues. Codec and schema-link settings belong
+    /// to the host's bus server and are retained without being acted on. Its transport is the run
     /// root's own, so a `transport` other than `local`, a `transport.dir`, a
     /// `profile` other than `planner-channel`, and a `queues` block are refused,
     /// naming the key and the value read, before any run exists. Given here it
@@ -747,14 +755,6 @@ pub struct DriveArgs {
     pub await_ending: bool,
 }
 
-/// The channel's server side.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-#[command(rename_all = "kebab-case")]
-pub enum ChannelCommand {
-    /// Serve the channel as an observer member's judge-side command provider.
-    Serve(RunArgs),
-}
-
 /// A command that names one run and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct RunArgs {
@@ -798,7 +798,7 @@ pub struct SurfaceArgs {
     #[arg(conflicts_with = "message")]
     pub file: Option<PathBuf>,
     /// What the surface is asking about.
-    #[arg(long, value_enum)]
+    #[arg(long, value_name = "KIND")]
     pub kind: SurfaceKind,
     /// The surface's text, inline. Prefer the file or the stdin form: whatever
     /// is written here is read by a shell first.

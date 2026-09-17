@@ -56,7 +56,7 @@ use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord};
-use crate::projection::{MemberLabel, Refusal, RunState, Served};
+use crate::projection::{MemberLabel, Refusal, RunState, ServiceRecord};
 use crate::rendercost::Rendered;
 use crate::report::{ToolText, Truncation};
 use crate::sys;
@@ -2109,7 +2109,7 @@ fn cancelling_for(state: &RunState, id: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Fallthrough {
     /// Another identity went on to run that side's invocation on that turn.
-    Served(String),
+    PassedTo(String),
     /// Nothing served it: the chain had no successful candidate.
     Refused,
     /// This run's records do not say. A single-sided member attributes nothing
@@ -2145,7 +2145,7 @@ impl ChainRecord<'_> {
     fn lead_in(&self) -> &'static str {
         match self.became {
             Fallthrough::Refused => "failed",
-            Fallthrough::Served(_) | Fallthrough::Unrecorded => "fallback",
+            Fallthrough::PassedTo(_) | Fallthrough::Unrecorded => "fallback",
         }
     }
 }
@@ -2194,7 +2194,7 @@ fn became_of(state: &RunState, node: &str, refusal: &Refusal) -> Fallthrough {
         return Fallthrough::Unrecorded;
     };
     match served_in(state, node, &refusal.member, role, turn) {
-        Some(served) => Fallthrough::Served(served.session.identity.clone()),
+        Some(served) => Fallthrough::PassedTo(served.session.identity.clone()),
         None => Fallthrough::Refused,
     }
 }
@@ -2211,7 +2211,7 @@ fn served_in<'a>(
     member: &MemberLabel,
     role: oneagentgraph::event::Role,
     turn: u64,
-) -> Option<&'a Served> {
+) -> Option<&'a ServiceRecord> {
     state.served.get(node)?.iter().find(|served| {
         served.member == *member && served.session.role == role && served.session.turn == turn
     })
@@ -2284,7 +2284,7 @@ fn chain_phrase(record: &ChainRecord) -> String {
     let identity = &refusal.advanced.identity;
     one_line(&match &record.became {
         Fallthrough::Refused => format!("{side}: identity '{identity}' refused {reason}{again}"),
-        Fallthrough::Served(who) => {
+        Fallthrough::PassedTo(who) => {
             format!("{side} fell through '{identity}' {reason} → served by '{who}'{again}")
         }
         Fallthrough::Unrecorded => format!(
@@ -2841,10 +2841,24 @@ fn superseded_suffix(view: &RunView, event: &Envelope) -> String {
 fn summarize(event: &Envelope) -> String {
     const CAP: usize = 96;
     let mut detail = event.kind.0.clone();
+    let surface = matches!(
+        event.kind.0.as_str(),
+        "planner-surface-queued" | "planner-surfaced"
+    );
+    if surface {
+        for key in ["kind", "message", "source", "blocking"] {
+            if let Some(value) = event.payload.get(key) {
+                detail.push_str(&format!(" {key}={value}"));
+            }
+        }
+    }
     // `landing` beside `status`: a `node-settled` and a `published` both carry
     // it, and a monitor line that showed only `done` said the same thing about a
     // merge and about an open change request.
     for key in ["status", "landing", "outcome", "state", "message", "reason"] {
+        if surface && key == "message" {
+            continue;
+        }
         if let Some(value) = event.payload.get(key).and_then(|v| v.as_str()) {
             detail.push_str(&format!(" {value}"));
         }
@@ -2853,6 +2867,9 @@ fn summarize(event: &Envelope) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
+    if surface {
+        return stripped;
+    }
     if stripped.chars().count() <= CAP {
         return stripped;
     }
@@ -4608,7 +4625,7 @@ mod tests {
     /// One chain, two turns, two endings: the recovered turn and the one that
     /// ran out are two facts, and each is rendered as itself.
     ///
-    /// The fold keeps them apart *by turn* for exactly this — a record that had
+    /// The fold keeps them apart by turn for exactly this — a record that had
     /// collapsed them could only ever be rendered as one of the two, and which
     /// one it picked would decide where a reader went.
     #[test]
@@ -4899,7 +4916,7 @@ mod tests {
         };
         let phrase = chain_phrase(&ChainRecord {
             refusal: &refusal,
-            became: Fallthrough::Served("codex\r\nprovider: forged".into()),
+            became: Fallthrough::PassedTo("codex\r\nprovider: forged".into()),
             records: std::num::NonZeroU64::MIN,
         });
         assert!(!phrase.contains('\n') && !phrase.contains('\r'), "{phrase}");
