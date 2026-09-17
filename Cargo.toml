@@ -509,10 +509,14 @@ onemessagebus-agent = "0.7.0"
 # requirement for the same pre-1.0 reason as the last: `^0.10` admits no 0.11.x.
 #
 # 0.12.0 is the release that adopted the bus: its command-provider frames are the
-# agent profile's registered messages. `oneagentgraph` 0.4.2 requires exactly it,
-# and the three of them resolve the one `onemessagebus` and `onemessagebus-agent`
-# the pins above name, so the four move together or a relayed envelope is two
-# types. A requirement for the same reason again: `^0.11` admits no 0.12.x.
+# agent profile's registered messages, and from it on the graph, the judge and
+# this crate resolve the one `onemessagebus` and `onemessagebus-agent` the pins
+# above name, so the four move together or a relayed envelope is two types.
+#
+# 0.13.0 is the release beside the 0.7.0 bus, whose authors are the launch's
+# configuration rather than a built-in pair. `oneagentgraph` 0.4.3 requires
+# exactly it, so the two move together, and it is a requirement for the same
+# pre-1.0 reason as every entry above: `^0.12` admits no 0.13.x.
 onejudge = "0.13.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is

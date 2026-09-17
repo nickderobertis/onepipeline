@@ -2235,10 +2235,10 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     frames.push_str(
         "{\"kind\":\"planner-question\",\"message\":\"Which base should build target?\"}\n",
     );
-    // The last of these carries a newline inside its kind. A kind is the
-    // observer persona's own word, so it is a stranger's string on the one line
-    // a supervisor may not filter out — and a second line spliced into that line
-    // is how a run hides the question above it.
+    // Four more kinds than the summary has room to name, the last hyphenated. A
+    // kind is the observer persona's own word, so it is a stranger's string on
+    // the one line a supervisor may not filter out — and a render that wrapped
+    // at its hyphen would put half of it on a second line.
     for kind in ["edit-rejected", "quiet-worker", "check-in", "pro-posal"] {
         frames.push_str(&format!(
             "{{\"kind\":\"{kind}\",\"message\":\"one {kind}\",\"blocking\":false}}\n"
@@ -2246,7 +2246,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     }
 
     // The server waits for a verdict after every frame, and nothing here is
-    // going to answer six of them: a one-second bound makes each frame's wait
+    // going to answer ten of them: a one-second bound makes each frame's wait
     // its own synthesized `continue`, which is the timeout path this journey
     // rides rather than the question it is about.
     let mut command = world.host_channel(&run);
@@ -2268,7 +2268,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     // The one question leads the parenthetical rather than sitting behind the
     // five updates that outnumber it; a queue of more kinds than a line can
     // carry says how many it left out rather than cutting them silently; and the
-    // kind carrying a newline is rendered on the one line it belongs to.
+    // hyphenated kind is rendered whole on the one line it belongs to.
     for view in [vec!["runs"], vec!["status", &run]] {
         let rendered = world.run(&view);
         rendered
