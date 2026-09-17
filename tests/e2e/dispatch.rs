@@ -3289,6 +3289,34 @@ fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_o
     );
 }
 
+/// The line `fake-codex` answers with is one the **linked** classifier reads as
+/// a server overload.
+///
+/// The drift gate for that double's copy of Codex's wire: no crate here declares
+/// that shape as data, and its one reader in this build is `oneharness_core`'s
+/// Codex dialect. A release of that core that stopped reading this line as
+/// `server_overloaded` — or a Codex whose spelling moved and took the classifier
+/// with it — fails here by name rather than as a journey that stepped past
+/// nothing. Beside the journey above rather than instead of it: this holds the
+/// bytes, and that holds what the graph does with them.
+#[test]
+fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
+    use oneharness_core::domain::signals::{
+        detect_harness_provider_failure, FailureDialect, FailureKind,
+    };
+
+    let read = detect_harness_provider_failure(
+        FailureDialect::Codex,
+        onepipeline_testfakes::CODEX_SERVER_OVERLOADED,
+    )
+    .expect("the linked classifier reads the double's terminal event as a failure");
+    assert_eq!(
+        read.kind,
+        FailureKind::ServerOverloaded,
+        "the linked core reads the double's answer as some other failure: {read:?}"
+    );
+}
+
 /// The turn ceiling the dispatch of `node` — or of one of its steps — was
 /// actually handed.
 ///
