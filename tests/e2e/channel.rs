@@ -11,39 +11,8 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{
-    agent, double, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR,
-};
+use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR};
 use serde_json::{json, Value};
-
-fn host_channel(world: &World, run: &str) -> std::process::Command {
-    let mut command = std::process::Command::new(double("host-channel-server"));
-    command.arg(world.run_file(run, "channel"));
-    command.env_remove(onepipeline::channel::ASKER_ENV);
-    command
-}
-
-fn queued_surfaces(world: &World, run: &str) -> Vec<Value> {
-    let log = world.run_file(run, "channel/surfaces.jsonl");
-    let projection = std::fs::read_to_string(world.run_file(run, "channel/queue.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let length = std::fs::metadata(&log).map_or(0, |meta| meta.len());
-    if projection
-        .as_ref()
-        .and_then(|state| state["accounted"].as_u64())
-        .unwrap_or(0)
-        < length
-    {
-        return Vec::new();
-    }
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| record["event"] == "queued")
-        .collect()
-}
 
 /// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -2281,7 +2250,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     // going to answer six of them: a one-second bound makes each frame's wait
     // its own synthesized `continue`, which is the timeout path this journey
     // rides rather than the question it is about.
-    let mut command = host_channel(&world, &run);
+    let mut command = world.host_channel(&run);
     command
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
@@ -2294,7 +2263,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     stdin.flush().expect("the frames flush");
 
     world.until("every frame to reach the planner", |world| {
-        queued_surfaces(&world, &run).len() == 10
+        world.queued_surfaces(&run).len() == 10
     });
 
     // The one question leads the parenthetical rather than sitting behind the
@@ -2346,7 +2315,7 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
     // The observer's judge side: the one question it stopped to ask, and one
     // report beside it. A one-second bound makes each wait its own synthesized
     // `continue`, so nothing here is ever answered.
-    let mut command = host_channel(&world, &run);
+    let mut command = world.host_channel(&run);
     command
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
@@ -2366,7 +2335,7 @@ fn a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread() 
         .expect("the frames write");
     stdin.flush().expect("the frames flush");
     world.until("both frames to reach the planner", |world| {
-        queued_surfaces(&world, &run).len() == 2
+        world.queued_surfaces(&run).len() == 2
     });
 
     // While the member is still there, both are exactly what they look like:
@@ -2459,7 +2428,8 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
 
     // The observer's judge side stops to ask about `build`, which is what makes
     // the question hold everything downstream of it.
-    let mut asking = host_channel(&world, &run)
+    let mut asking = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2535,7 +2505,8 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
     // A live report queued after it goes first, though it is newer and holds
     // nothing: the older question is blocking and would have led the queue, and
     // it does not, because nobody is waiting on it.
-    let mut reporting = host_channel(&world, &run)
+    let mut reporting = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2550,7 +2521,7 @@ fn a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last() {
     .expect("the frame is written");
     reported.flush().expect("the frame flushes");
     world.until("the report to reach the planner", |world| {
-        queued_surfaces(&world, &run).len() == 2
+        world.queued_surfaces(&run).len() == 2
     });
 
     let live = world.run(&["next", &run]);
@@ -2598,7 +2569,8 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     let run = running(&world, "otherasker", vec![agent("build", &[])]);
 
     let serving = |asker: &str, frame: &str| {
-        let mut serving = host_channel(&world, &run)
+        let mut serving = world
+            .host_channel(&run)
             .env(onepipeline::channel::ASKER_ENV, asker)
             .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
             .stdin(std::process::Stdio::piped())
@@ -2620,7 +2592,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
         r#"{"kind":"blocker","message":"who owns this decision?","node":"build"}"#,
     );
     world.until("the question to reach the planner", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("who owns this decision?");
@@ -2647,7 +2619,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
         r#"{"kind":"monitor","message":"unrelated work is green","blocking":false}"#,
     );
     world.until("the stranger's report to reach the planner", |world| {
-        queued_surfaces(&world, &run).len() == 2
+        world.queued_surfaces(&run).len() == 2
     });
     world
         .run(&["status", &run])
@@ -2667,7 +2639,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
         r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
     );
     world.until("the stranger's question to reach the planner", |world| {
-        queued_surfaces(&world, &run).len() == 3
+        world.queued_surfaces(&run).len() == 3
     });
     let live = world.run(&["next", &run]);
     live.exited(0);
@@ -2728,7 +2700,8 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
     let stale = std::fs::read(&queue).expect("the reader left the queue it read");
 
     // The worker's blocking question, queued while that read is in flight.
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2743,7 +2716,7 @@ fn a_surface_queued_during_a_read_of_the_channel_survives_that_readers_write_bac
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the question to be queued", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
 
     // The reader's write-back lands: its stale copy over the queue the question
@@ -2849,7 +2822,8 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
     world.script("seed.wait", "hold");
     let run = running(&world, "movedclaims", vec![agent("seed", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env(onepipeline::channel::ASKER_ENV, "dispatch-seed")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2864,7 +2838,7 @@ fn a_projection_whose_claims_moved_under_an_intact_stamp_is_rebuilt_from_the_log
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the question to be queued", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
 
     // llmlint: ignore-block[tests_mirror_real_usage] the document is edited in
@@ -2947,7 +2921,8 @@ fn a_run_awaiting_an_answer_takes_a_reply_though_its_graph_has_settled() {
     );
 
     // A blocking question about the run, raised after all of that.
-    let mut serving = host_channel(&world, "asked")
+    let mut serving = world
+        .host_channel("asked")
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2962,7 +2937,7 @@ fn a_run_awaiting_an_answer_takes_a_reply_though_its_graph_has_settled() {
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the question to reach the planner", |world| {
-        !queued_surfaces(&world, "asked").is_empty()
+        !world.queued_surfaces("asked").is_empty()
     });
     world.run(&["next", "asked"]).exited(0);
 
@@ -3009,7 +2984,8 @@ fn a_verdict_echoing_an_asks_token_reaches_that_ask_whichever_order_they_were_ra
         let mut sessions = std::collections::BTreeMap::new();
         for (raised, asker) in order.iter().enumerate() {
             let token = format!("ask-manager-token:{asker}{round}");
-            let mut serving = host_channel(&world, &run)
+            let mut serving = world
+                .host_channel(&run)
                 .env("ONEPIPELINE_CHANNEL_ASKER", format!("asker-{asker}"))
                 .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
                 .stdin(std::process::Stdio::piped())
@@ -3027,7 +3003,7 @@ fn a_verdict_echoing_an_asks_token_reaches_that_ask_whichever_order_they_were_ra
             stdin.flush().expect("flushed");
             let lines = BufReader::new(serving.stdout.take().expect("stdout is piped")).lines();
             world.until("the ask to be queued", |world| {
-                queued_surfaces(&world, &run).len() > 2 * round + raised
+                world.queued_surfaces(&run).len() > 2 * round + raised
             });
             sessions.insert(*asker, (serving, stdin, lines, token));
         }
@@ -3077,7 +3053,8 @@ fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     // This is an observer member's judge side: it reads the frame that member
     // emits when it has something to raise, relays it to the planner, and
     // writes the answer back into the conversation.
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3093,7 +3070,8 @@ fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     stdin.flush().expect("flushed");
 
     world.until("the frame to reach the planner", |world| {
-        queued_surfaces(&world, &run)
+        world
+            .queued_surfaces(&run)
             .iter()
             .any(|event| event["kind"] == "blocker")
     });
@@ -3146,7 +3124,8 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
     world.script("build.wait", "hold");
     let run = running(&world, "routed", vec![agent("build", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         // The wait itself is not what this journey is about: bounded well past
         // the handful of verbs below, so a slow machine answers the question
         // rather than the timeout answering it.
@@ -3167,7 +3146,7 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
     // Read, so the question is outstanding and the observer member is between
     // turns with its judge side blocked on the answer.
     world.until("the frame to reach the planner", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
     world.run(&["next", &run]).exited(0).out_has("go on?");
     world
@@ -3267,7 +3246,8 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
         !world.events_of("refused", "turn-started").is_empty()
     });
 
-    let mut serving = host_channel(&world, "refused")
+    let mut serving = world
+        .host_channel("refused")
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3282,7 +3262,7 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the frame to reach the planner", |world| {
-        !queued_surfaces(&world, "refused").is_empty()
+        !world.queued_surfaces("refused").is_empty()
     });
     world.run(&["next", "refused"]).exited(0);
 
@@ -3368,7 +3348,8 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
         !world.events_of("bothrefused", "turn-started").is_empty()
     });
 
-    let mut serving = host_channel(&world, "bothrefused")
+    let mut serving = world
+        .host_channel("bothrefused")
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3383,7 +3364,7 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the frame to reach the planner", |world| {
-        !queued_surfaces(&world, "bothrefused").is_empty()
+        !world.queued_surfaces("bothrefused").is_empty()
     });
     world.run(&["next", "bothrefused"]).exited(0);
 
@@ -3455,7 +3436,8 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
     );
     world.run(&["start", &path, "--attach"]).exited(0);
 
-    let mut serving = host_channel(&world, "underlock")
+    let mut serving = world
+        .host_channel("underlock")
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3470,7 +3452,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the frame to reach the planner", |world| {
-        !queued_surfaces(&world, "underlock").is_empty()
+        !world.queued_surfaces("underlock").is_empty()
     });
     world.run(&["next", "underlock"]).exited(0);
 
@@ -3559,7 +3541,8 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     world.script("build.wait", "hold");
     let run = running(&world, "queuededit", vec![agent("build", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3574,7 +3557,7 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the question to reach the planner", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
     world.run(&["next", &run]).exited(0);
 
@@ -3655,7 +3638,8 @@ fn a_reply_carrying_both_halves_reaches_both_readers() {
     world.script("build.wait", "hold");
     let run = running(&world, "bothhalves", vec![agent("build", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3670,7 +3654,7 @@ fn a_reply_carrying_both_halves_reaches_both_readers() {
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the frame to reach the planner", |world| {
-        !queued_surfaces(&world, &run).is_empty()
+        !world.queued_surfaces(&run).is_empty()
     });
     world.run(&["next", &run]).exited(0);
 
@@ -3728,7 +3712,8 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
     world.script("build.wait", "hold");
     let run = running(&world, "contended", vec![agent("build", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3748,7 +3733,7 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
         .expect("the frame is written");
         stdin.flush().expect("flushed");
         world.until("the frame to reach the planner", |world| {
-            queued_surfaces(&world, &run).len() >= round
+            world.queued_surfaces(&run).len() >= round
         });
         world.run(&["next", &run]).exited(0);
 
@@ -3820,7 +3805,8 @@ fn a_verdict_naming_its_question_binds_to_it_and_a_stranger_is_refused_by_name()
     let world = World::new("channel-reply-correlation");
     world.script("build.wait", "hold");
     let run = running(&world, "named", vec![agent("build", &[])]);
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
         .env(onepipeline::channel::ASKER_ENV, "dispatch-build")
         .stdin(std::process::Stdio::piped())
@@ -3947,7 +3933,7 @@ fn a_wait_nobody_answers_is_answered_with_the_wait_and_never_with_a_ruling() {
     world.script("build.wait", "hold");
     let run = running(&world, "unanswered", vec![agent("build", &[])]);
 
-    let mut command = host_channel(&world, &run);
+    let mut command = world.host_channel(&run);
     command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
     let mut serving = command
         .stdin(std::process::Stdio::piped())
@@ -4002,7 +3988,7 @@ fn a_listener_re_armed_on_an_abandoned_question_is_answered_abandoned() {
     world.script("build.wait", "hold");
     let run = running(&world, "abandonedask", vec![agent("build", &[])]);
     let session = |window: &str| {
-        let mut command = host_channel(&world, &run);
+        let mut command = world.host_channel(&run);
         command
             .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", window)
             .env_remove("ONEPIPELINE_CHANNEL_ASKER");
@@ -4058,7 +4044,8 @@ fn the_channel_server_refuses_a_frame_it_cannot_read() {
     world.script("build.wait", "hold");
     let run = running(&world, "badframe", vec![agent("build", &[])]);
 
-    let mut serving = host_channel(&world, &run)
+    let mut serving = world
+        .host_channel(&run)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4094,7 +4081,8 @@ fn the_channel_server_refuses_a_frame_missing_what_a_surface_needs() {
         r#"{"message":"no kind"}"#,
         r#"{"kind":"blocker","message":"m","urgency":"high"}"#,
     ] {
-        let mut serving = host_channel(&world, &run)
+        let mut serving = world
+            .host_channel(&run)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -4113,7 +4101,7 @@ fn the_channel_server_refuses_a_frame_missing_what_a_surface_needs() {
         );
     }
     assert!(
-        queued_surfaces(&world, &run).is_empty(),
+        world.queued_surfaces(&run).is_empty(),
         "a refused frame still reached the planner"
     );
     world.release("build.go");
@@ -4157,7 +4145,8 @@ fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answere
     });
 
     // The observer raises a blocking question about `seed`.
-    let mut serving = host_channel(&world, "surfacegate")
+    let mut serving = world
+        .host_channel("surfacegate")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4262,7 +4251,8 @@ fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner
         .out_has("\"settlement\":\"unattended\"");
 
     // A blocking question about the run rather than about any node in it.
-    let mut serving = host_channel(&world, "runwide")
+    let mut serving = world
+        .host_channel("runwide")
         // Nobody answers this one, and the server's own wait is not what is
         // under test: shortened so the journey is not the timeout.
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
@@ -4279,7 +4269,7 @@ fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner
     .expect("the frame is written");
     stdin.flush().expect("flushed");
     world.until("the question to reach the planner", |world| {
-        !queued_surfaces(&world, "runwide").is_empty()
+        !world.queued_surfaces("runwide").is_empty()
     });
 
     // The same run, driven again: it still cannot move, and now it says why.

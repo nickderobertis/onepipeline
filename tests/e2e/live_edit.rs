@@ -1820,7 +1820,147 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
 // reader's benefit. The dependency the finding names, `onepipeline` on
 // `onepipeline-note-journeys`, is the repository's existing project graph rather than
 // anything this change introduces.
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+/// A park says who made it and why, and a host-declared author may not undo the
+/// planner's.
+///
+/// The failure this closes, measured on a live run: a manager parked a node to
+/// keep a third very large build off a disk with little room left, the run's
+/// watcher read an idle node and requeued it, then cancelled it, and four
+/// dispatches were destroyed in five minutes — one of them with uncommitted work
+/// lost. What the observer lacked was the one fact that would have stopped it,
+/// so the park carries it and the refusal reads it back. The watcher is whatever
+/// author the launch's bus configuration declares: the engine builds none in.
+#[test]
+fn a_park_records_its_author_and_reason_and_another_author_may_not_undo_the_planners() {
+    const WATCHER: &str = "watcher";
+    let world = World::new("edit-park-authored");
+    let disk = from_entry_57("cancel")["reason"]
+        .as_str()
+        .expect("entry 57's cancel fixture states a reason")
+        .to_string();
+    let bus_config = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &bus_config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nauthors:\n  {WATCHER}:\n    \
+             capabilities: [add, cancel, requeue]\n"
+        ),
+    )
+    .expect("the bus configuration is written");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "authored",
+        &plan_of(
+            "authored",
+            vec![agent("slow", &[]), agent("sweep", &["slow"])],
+        ),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--bus-config",
+            &bus_config.to_string_lossy(),
+        ])
+        .exited(0);
+    world.until("a node to be in flight", |world| {
+        !world.events_of("authored", "node-dispatched").is_empty()
+    });
+    let run = "authored";
+    let by_watcher = |commands: Value| {
+        json!({"version": 2, "author": WATCHER, "commands": commands}).to_string()
+    };
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": disk}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, run).contains(&"cancel".to_string())
+    });
+    let park = operations(&world, run)
+        .into_iter()
+        .find(|operation| operation["kind"] == "node-parked")
+        .expect("the park was recorded");
+    assert_eq!(
+        park,
+        json!({"kind": "node-parked", "node": "sweep", "by": "planner", "reason": disk}),
+        "the park does not say who made it or why"
+    );
+
+    // The watcher may not undo it, and is told whose decision it was and what it
+    // said — which is what sends it to the planner instead of round the loop.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &by_watcher(json!([{"op": "requeue", "id": "sweep"}])),
+        )
+        .exited(REFUSED)
+        .err_has("parked by the planner")
+        .err_has(&disk)
+        .err_has("surface it to the planner");
+
+    // A reason that says nothing is refused rather than recorded: a park nobody
+    // can read is indistinguishable from one that stated none.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": "   "}])),
+        )
+        .exited(REFUSED)
+        .err_has("empty reason");
+
+    // Its own park it may undo — in **one envelope**, which is how an observer
+    // that has decided something writes it: the park it makes is the park the
+    // requeue beside it is judged against, rather than one the frontier this
+    // envelope was validated against had never heard of.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &by_watcher(json!([
+                {"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                       "task": "## What\nsweep up", "deps": ["slow"]}},
+                {"op": "cancel", "id": "extra", "reason": "it is plainly redundant"},
+                {"op": "requeue", "id": "extra"},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    let watchers = operations(&world, run)
+        .into_iter()
+        .find(|operation| operation["node"] == "extra" && operation["kind"] == "node-parked")
+        .expect("the watcher's own park was recorded");
+    assert_eq!(
+        watchers,
+        json!({"kind": "node-parked", "node": "extra", "by": WATCHER,
+               "reason": "it is plainly redundant"})
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "requeue", "id": "sweep"}])),
+        )
+        .exited(0);
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let result = world.run_json(run, "result.json");
+    for id in ["sweep", "extra"] {
+        let node = result["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("the run holds '{id}': {result}"));
+        assert_eq!(node["status"], "done", "a requeued node was not dispatched");
+    }
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
 // beside the twenty-seven other live-edit journeys in this file, which is where a reader

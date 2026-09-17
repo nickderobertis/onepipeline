@@ -1896,6 +1896,57 @@ impl World {
         Run::of(command.output().expect("the binary runs"), &[args], self)
     }
 
+    /// The host's own channel server over one run's channel: the generic
+    /// `host-channel-server` double, which speaks the bus's serving contract and
+    /// nothing of this crate's — a JSON frame on its stdin is a surface of
+    /// whatever kind the frame names, raised through the bus's own library
+    /// server, and the line it answers with is the planner's reply or the bus's
+    /// own word for a wait that ended without one.
+    ///
+    /// The one author of a *blocking* surface these journeys have: `surface` is
+    /// a report and holds nothing back. Its stdio is the caller's to pipe. The
+    /// asker this suite's own dispatch carries is dropped for the reason
+    /// [`cmd`](World::cmd) drops it — a journey that means two sessions as one
+    /// asker sets it on the command itself.
+    pub fn host_channel(&self, run: &str) -> Command {
+        let mut command = Command::new(double("host-channel-server"));
+        command
+            .arg(self.run_file(run, "channel"))
+            .env_remove(onepipeline::channel::ASKER_ENV);
+        command
+    }
+
+    /// Every surface queued on one run's channel, as its log records them — once
+    /// the channel's own projection has accounted for the whole log, and nothing
+    /// before then, so a caller polling this reads a surface the bus has finished
+    /// writing rather than one it is halfway through.
+    ///
+    /// The channel rather than the journal, because a surface a host's server
+    /// raises reaches the planner without the engine writing a record of it: the
+    /// engine journals `planner-surface-queued` for what it raises itself, and
+    /// relays what any other writer queues as the queue says it.
+    pub fn queued_surfaces(&self, run: &str) -> Vec<Value> {
+        let log = self.run_file(run, "channel/surfaces.jsonl");
+        let projection = std::fs::read_to_string(self.run_file(run, "channel/queue.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let length = std::fs::metadata(&log).map_or(0, |meta| meta.len());
+        if projection
+            .as_ref()
+            .and_then(|state| state["accounted"].as_u64())
+            .unwrap_or(0)
+            < length
+        {
+            return Vec::new();
+        }
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["event"] == "queued")
+            .collect()
+    }
+
     /// Run a command with an envelope on stdin.
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {
         self.run_with_stdin_on(self.cmd(args), stdin)
