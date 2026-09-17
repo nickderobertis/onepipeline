@@ -478,23 +478,36 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
             .expect("re-parses");
     assert_eq!(round_tripped, filters);
 
-    // The checked-in golden **is** the contract's own example. Two documents that
-    // both claim to pin the launch config's shape and could disagree would be two
-    // sources; this is the one place they are held to being one.
+    // The checked-in golden **is** the contract's own example in every
+    // respect but one name. Two documents that both claim to pin the launch
+    // config's shape and could disagree would be two sources; this is the one
+    // place they are held to being one. The one name: the golden is a recording,
+    // written when the unfiltered profile shipped as `monitor`, and a recording
+    // is never renamed — so it declares its unfiltered override under that
+    // retired name, where the contract's example declares it under `detailed`.
+    // Same filter, same shape, the operator's own name for it in each.
     let golden: LaunchConfig = serde_json::from_str(
         &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v2.json"))
             .expect("the golden ships"),
     )
     .expect("the golden parses");
+    let mut recorded = golden.filters.clone();
+    let retired = recorded
+        .profiles
+        .remove("monitor")
+        .expect("the golden records an override under the name the profile shipped as then");
+    assert_eq!(retired, EventFilter::default());
+    let mut stated = filters.clone();
+    let detailed = stated
+        .profiles
+        .remove("detailed")
+        .expect("the contract's example overrides the shipped `detailed` profile");
+    assert_eq!(detailed, EventFilter::default());
     assert_eq!(
-        (
-            golden.schema_version,
-            golden.filters,
-            golden.pr_author_graph
-        ),
-        (config.schema_version, filters, config.pr_author_graph),
+        (golden.schema_version, recorded, golden.pr_author_graph),
+        (config.schema_version, stated, config.pr_author_graph),
         "tests/golden/launch-config-v2.json and the contract's own example are \
-         different documents"
+         different documents beyond the recorded override's name"
     );
 
     // The version before it is still a document this build reads, and it ships

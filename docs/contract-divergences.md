@@ -1049,9 +1049,11 @@ What moved, and what a recorded run still reads:
   any name: a launch configuration already on disk declaring a `monitor` profile
   still loads as the profile it declared, and `--filter monitor` then reads it.
   The launch-config schema is unchanged — a profile's name is the operator's —
-  so its version is not bumped; the goldens `tests/golden/launch-config-v1.json`
-  to `v7.json`, which the contract's own example is held to be one document
-  with, name their unfiltered override `detailed` as the contract now does.
+  so its version is not bumped, and the recorded goldens
+  `tests/golden/launch-config-v1.json` to `v7.json` keep the `monitor` override
+  they were written with, byte for byte: `src/filter.rs` holds each to loading
+  as the document it is, and `tests/contract.rs` holds the contract's example to
+  the schema-2 golden in every respect but that recorded name.
 - **The refusal examples name an author nothing built in knows.** The contract's
   refusal block reads `observer` where it read the retired built-in author, and
   its reasons are the words the linked bus answers an author granted nothing
