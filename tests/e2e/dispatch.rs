@@ -3338,8 +3338,9 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The Codex double refuses an argument `codex exec` does not take, and a
-/// `--version` that is not the probe on its own.
+/// The Codex double refuses an argument `codex exec` does not take, a
+/// `--version` that is not the probe on its own, and an option where
+/// `--model`'s value should be.
 ///
 /// The half no passing journey can show, as for `fake-claude` above: the
 /// overload journey proves the real `oneharness` drives this binary on the
@@ -3365,16 +3366,23 @@ fn the_codex_double_refuses_an_argument_the_real_codex_does_not_take() {
             .expect("the double runs")
     };
 
-    for flag in ["--dangerously-skip-permissions", "--version"] {
-        let refused = sent(&[flag]);
+    for (extra, named) in [
+        (
+            &["--dangerously-skip-permissions"][..],
+            "--dangerously-skip-permissions",
+        ),
+        (&["--version"][..], "--version"),
+        (&["--model", "--json"][..], "--json"),
+    ] {
+        let refused = sent(extra);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();
         assert_eq!(
             refused.status.code(),
             Some(i32::from(onepipeline_testfakes::USAGE)),
-            "an argv the real codex exits on ran a turn instead of refusing {flag}: {said}"
+            "an argv the real codex exits on ran a turn instead of refusing {extra:?}: {said}"
         );
         assert!(
-            said.contains(flag),
+            said.contains(named),
             "the refusal does not name what it refused: {said}"
         );
     }

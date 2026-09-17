@@ -79,8 +79,14 @@ fn declared(args: &[String]) -> Result<(), String> {
                 }
             }
             "--model" => {
-                rest.next()
+                let model = rest
+                    .next()
                     .ok_or("codex's --model takes a value, and nothing followed it")?;
+                if model.starts_with('-') {
+                    return Err(format!(
+                        "codex's --model takes a model name, and {model:?} is an option"
+                    ));
+                }
             }
             flag if flag.starts_with('-') && flag != "-" => {
                 return Err(format!("codex takes no argument {flag:?}"));
