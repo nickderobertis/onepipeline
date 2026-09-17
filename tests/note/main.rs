@@ -1999,7 +1999,7 @@ fn a_note_is_refused_when_this_run_composes_the_sibling_as_an_executable() {
 /// own queue is asked, and it is asked while the conversation is still live and
 /// the reconciler is still passing over it.
 #[test]
-fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
+fn an_undeclared_monitor_is_refused_before_its_note_is_queued() {
     let world = World::new("note-monitor");
     let run = "notemonitor";
     held_conversation(&world, run, vec![agent("build", &[])]);
@@ -2015,9 +2015,8 @@ fn a_monitor_is_refused_note_by_name_and_nothing_of_it_is_queued() {
     );
     refused
         .exited(REFUSED)
-        .err_has("'note' is not an op the monitor may issue")
-        .err_has("the planner's decision rather than an observation")
-        .err_has("Surface it to the planner instead");
+        .err_has("the envelope's author `monitor` is not declared")
+        .err_has("the declared authors are: planner");
 
     // Nothing of it is durable: the queue the reconciler reads carries no note, so
     // there is nothing for it to offer the turn that is still open — and the run
