@@ -572,7 +572,7 @@ pub struct LaunchRecord {
     /// Written after the launch that produced it, and rewritten by every
     /// `adopt`, because an adoption starts a fresh graph run with an id of its
     /// own. It is how a later `onepipeline next` — a different process, with no
-    /// handle on the observer — addresses the run's pacemaker. Empty when no
+    /// handle on the observer — addresses the run's check-in clocks. Empty when no
     /// observer graph was launched.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub graph_run: String,
@@ -581,7 +581,7 @@ pub struct LaunchRecord {
     ///
     /// A different question from that field, and it becomes one the moment an
     /// observer is replaced: `graph_run` says what to address **now** — the
-    /// pacemaker a later `next` resets — while this says what has watched the
+    /// clocks a later `next` restarts — while this says what has watched the
     /// run at all. A graph run that ended is still the producer of every
     /// envelope it wrote, and once `graph_run` has moved past it a reader
     /// meeting one of its records in the merged store has nothing else to tell
@@ -745,12 +745,12 @@ pub struct LaunchRecord {
     /// age it accordingly.
     #[serde(default)]
     pub started_at: String,
-    /// The pacemaker interval, in seconds, or `0` on a record that names none.
+    /// The check-in interval, in seconds, or `0` on a record that names none.
     ///
     /// Read through [`pacemaker_interval`](Self::pacemaker_interval), which is
     /// where `0` becomes "the record does not say" again: the shipped default,
-    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`], or no pacemaker at all —
-    /// and never a zero-second one. A pacemaker that fires continuously is worse
+    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`], or no check-in at all —
+    /// and never a zero-second one. A check-in that fires continuously is worse
     /// than a run with none: it buries every real surface under its own.
     ///
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
@@ -982,14 +982,14 @@ impl LaunchRecord {
         (!self.started_at.is_empty()).then_some(self.started_at.as_str())
     }
 
-    /// The pacemaker interval this launch recorded, when it recorded one.
+    /// The check-in interval this launch recorded, when it recorded one.
     ///
     /// `None` for the `0` a record carrying no interval defaults to, and a
     /// caller that must pace something takes the shipped default —
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`] — or paces nothing. **Never
-    /// `Some(0)`**: a zero-second pacemaker fires continuously, and a run whose
-    /// every surface is its own pacemaker's is worse off than a run with no
-    /// pacemaker at all.
+    /// `Some(0)`**: a zero-second check-in fires continuously, and a run whose
+    /// every surface is its own check-in's is worse off than a run with no
+    /// check-in at all.
     ///
     /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     pub fn pacemaker_interval(&self) -> Option<u64> {
@@ -2939,7 +2939,7 @@ mod tests {
     /// default stands for *the record does not say*, and every reading of it says
     /// so. Each assertion here fails if the value were invented — a session that
     /// named somebody, a pid a reader would probe, a host a reader would claim,
-    /// an instant nobody measured, a pacemaker that fires every zero seconds, a
+    /// an instant nobody measured, a check-in that fires every zero seconds, a
     /// write-back budget of zero seconds per item, a run-end hook nobody named,
     /// or a hook timeout of zero.
     #[test]
@@ -3022,12 +3022,12 @@ mod tests {
                     assert_eq!(
                         read.pacemaker_interval(),
                         None,
-                        "a record naming no interval produced a pacemaker interval"
+                        "a record naming no interval produced a check-in interval"
                     );
                     assert_ne!(
                         read.pacemaker_interval(),
                         Some(0),
-                        "a zero-second pacemaker was served as an interval"
+                        "a zero-second check-in was served as an interval"
                     );
                 }
                 "writeback_item_budget" => {

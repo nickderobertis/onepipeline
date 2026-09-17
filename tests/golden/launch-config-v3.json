@@ -19,7 +19,7 @@
       ]
     },
     "profiles": {
-      "monitor": {},
+      "detailed": {},
       "planner": {
         "include": [
           {

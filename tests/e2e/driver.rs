@@ -1301,7 +1301,7 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// An adoption re-addresses the pacemaker at the graph run now driving the run.
+/// An adoption re-addresses the check-in reset at the graph run now driving the run.
 ///
 /// An adoption starts a *fresh* graph run with an id of its own, so the id the
 /// record carried is a run `oneagentgraph` has already finished with. A reset
@@ -1313,8 +1313,8 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
 // record's own two values are read through the product's file, and the claim that the old
 // one was not used has nowhere else to be observed.
 #[test]
-fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
-    let world = World::new("driver-adopt-pacemaker");
+fn adoption_re_addresses_the_clock_reset_at_the_graph_run_now_driving() {
+    let world = World::new("driver-adopt-clock-reset");
     let run = start_detached_observed(&world, "readdressed", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
@@ -1351,8 +1351,9 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A run that records no graph run says why its pacemaker was not reset, and
-/// still hands the planner the surface they asked for.
+/// A run that launched an observer graph but records no graph run says why its
+/// clocks were not restarted, and still hands the planner the surface they asked
+/// for.
 ///
 /// The case a record written before the field existed leaves: there is no
 /// address, so there is nothing to send. Saying so is the point — the reset is
@@ -1368,7 +1369,7 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 // did. A product surface reporting "no reset was attempted" does not exist, and inventing
 // one to make the assertion product-shaped would be a surface nobody asked for.
 #[test]
-fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
+fn a_run_with_no_recorded_graph_run_says_why_the_clocks_were_not_restarted() {
     // What this asserts is a *read* of a record with `graph_run` taken out of it,
     // and the record is one the live driver also writes: every observer restart
     // calls `Launch::watched_by` and puts the whole record back, `graph_run`
@@ -1404,7 +1405,7 @@ fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
 
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("steady");
-    read.err_has("could not reset the check-in pacemaker")
+    read.err_has("could not restart the check-in clock")
         .err_has("records no agent-graph run");
 
     // And one that carries a value the sibling would never answer to — a run
@@ -1419,7 +1420,7 @@ fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
         .exited(0);
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("again");
-    read.err_has("could not reset the check-in pacemaker")
+    read.err_has("could not restart the check-in clock")
         .err_has("../elsewhere");
 
     assert!(

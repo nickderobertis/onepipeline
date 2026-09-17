@@ -558,9 +558,7 @@ pub(crate) fn monitor(
     writeln!(out, "{document}")
         .and_then(|()| out.flush())
         .map_err(|e| {
-            Error::Invalid(format!(
-                "the monitor could not write to standard output: {e}"
-            ))
+            Error::Invalid(format!("`monitor` could not write to standard output: {e}"))
         })?;
     // llmlint: ignore-end[cli_output_contract]
     Ok(EXIT_SUCCESS)
@@ -854,7 +852,7 @@ fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     let Cursor { run, at } = parse_cursor(token)?;
     if run != paths.run {
         return Err(Error::Invalid(format!(
-            "cursor '{token}' was printed by a watch or monitor of run '{run}', and this \
+            "cursor '{token}' was printed by a `watch` or `monitor` of run '{run}', and this \
              reads run '{}'; a cursor is only readable by the run it was printed for",
             paths.run
         )));
@@ -1197,7 +1195,7 @@ mod tests {
                 id: 0,
                 kind: "finding".to_owned(),
                 message: "raised while nobody was reading".to_owned(),
-                source: "monitor".to_owned(),
+                source: "watcher".to_owned(),
                 blocking: false,
                 queued_at: 1,
                 workstream: None,
@@ -1468,11 +1466,11 @@ mod tests {
             "the entry proposes a different set of flags than this build offers"
         );
         // The one flag the entry mentions that this verb must never take: the
-        // pacemaker's cadence is `start`'s clock, and the entry says so in prose
+        // check-in cadence is `start`'s clock, and the entry says so in prose
         // rather than in the schema.
         assert!(
             !offered.contains("heartbeat-interval"),
-            "`watch` took `start`'s pacemaker flag"
+            "`watch` took `start`'s check-in interval flag"
         );
     }
 

@@ -3792,7 +3792,7 @@ mod tests {
     ///
     /// Two rules, enforced where the fixture is built rather than trusted to be
     /// remembered per test, because each of them is a defect that shipped
-    /// through a worker, a judge, a monitor and a manager. Under a store whose
+    /// through a worker, a judge, an observer and a manager. Under a store whose
     /// project's native id *is* its title, writing the identifier as the title
     /// was byte-identical to preserving it; under a fixture holding one of
     /// everything the code filters on, an ignored filter and an honoured one

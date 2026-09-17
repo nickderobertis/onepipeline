@@ -809,6 +809,25 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
         .ok_or_else(|| format!("{graph} declares no member on a schedule"))
 }
 
+/// Every member one graph document declares, as the sibling records them, or
+/// why it declares none.
+///
+/// Read through `oneagentgraph`'s own config types and its own `validate`, as
+/// [`scheduled_member`] is, so the members a double says a run has are the ones
+/// the real CLI would have recorded for it.
+pub fn declared_members(graph: &str) -> std::result::Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(graph)
+        .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
+    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+        .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
+    oneagentgraph::config::validate(&config)
+        .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
+    if config.members.is_empty() {
+        return Err(format!("{graph} declares no member"));
+    }
+    Ok(config.members.keys().cloned().collect())
+}
+
 /// The command one graph document declares a command judge with, or why it
 /// declares none this double can run.
 ///

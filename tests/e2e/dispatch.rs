@@ -2254,13 +2254,16 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
     world.release("turn.settle");
 }
 
-/// Consuming a planner surface restarts the **real** pacemaker's clock.
+/// Consuming a planner surface restarts the **real** check-in clock of the
+/// shipped example graph.
 ///
-/// `next` is the channel's only consumer, and consumption is what resets the
-/// pacemaker — so this is the one journey that reaches
+/// `next` is the channel's only consumer, and consumption is what restarts the
+/// clock — so this is one of the journeys that reach
 /// `oneagentgraph::run::signal` on the default path rather than through the
 /// override, against a real graph that really declares a resettable `check-in`
-/// member.
+/// member. The engine names no member: which clock restarts is the graph's
+/// own `resettable` saying so, and the journey below with several clocks holds
+/// that rule member by member.
 ///
 /// The address is what this crate owns, and it is what a real sibling can
 /// judge: `oneagentgraph::run::signal` reads the run's record, refuses a member
@@ -2315,9 +2318,7 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let read = world.run_on(world.agentgraph_cmd(&["next", "paced"]), "next paced");
     read.exited(0).out_has("\"surface\"");
     assert!(
-        !read
-            .stderr
-            .contains("could not reset the check-in pacemaker"),
+        !read.stderr.contains("could not restart the check-in clock"),
         "the real sibling refused the reset: {}",
         read.stderr
     );
@@ -2367,6 +2368,162 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
         },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
+}
+
+/// The members of one graph run that recorded a `cron-reset`, off the sibling's
+/// own event log for it.
+fn members_reset_in(world: &World, graph_run: &str) -> std::collections::BTreeSet<String> {
+    world
+        .graph_journal(graph_run)
+        .iter()
+        .filter(|event| event["kind"] == "cron-reset")
+        .filter_map(|event| event["labels"]["member"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// One observed launch of an observer graph of this world's own, with the
+/// observer held so the graph run the record names stays the one every clock
+/// below belongs to. Answers the graph run's id.
+fn observed_by_clocks(world: &World, run: &str, graph: &str) -> String {
+    world.script("observer.wait", "hold");
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", graph])
+        .exited(0);
+    world.until("the observer to be watching the run", |world| {
+        world.observer_saw().len() == 1
+    });
+    let graph_run = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(graph_run, run);
+    graph_run
+}
+
+/// Which clocks a planner's reading restarts is the observer graph's own to
+/// say, and the engine names none of them.
+///
+/// A real graph whose members are named by nothing built in — an observer
+/// beside **two** resettable clocks and one that declared its cadence fixed —
+/// and one surface consumed through `next`: the sibling records a `cron-reset`
+/// on each resettable member and on no other, and the fixed member's signal
+/// sits where the sibling left it, unread, because a schedule that is not
+/// `resettable` takes no reset. An engine restarting only the first resettable
+/// member, or one still naming a member of its own, leaves a different set.
+#[test]
+fn consuming_a_surface_restarts_every_resettable_clock_the_observer_graph_declares() {
+    let world = World::new("real-resettable-clocks");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[
+        ("pulse", true),
+        ("second-pulse", true),
+        ("fixed-cadence", false),
+    ]);
+    let graph_run = observed_by_clocks(&world, "clocks", &graph);
+
+    world
+        .run_on_agentgraph(&[
+            "surface",
+            "clocks",
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+    let read = world.run_on(world.agentgraph_cmd(&["next", "clocks"]), "next clocks");
+    read.exited(0).out_has("\"surface\"");
+    assert!(
+        !read.stderr.contains("could not restart"),
+        "the reset was reported as a failure: {}",
+        read.stderr
+    );
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a clock restarting has no
+    // product-facing result — `next` hands the surface over either way, by design — and
+    // the sibling's own event log and signal directory, both derived from the graph
+    // run's id, are where what became of each member's reset *is*.
+    world.until("every resettable clock to record its reset", |world| {
+        let reset = members_reset_in(world, &graph_run);
+        reset.contains("pulse") && reset.contains("second-pulse")
+    });
+    assert_eq!(
+        members_reset_in(&world, &graph_run),
+        ["pulse", "second-pulse"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "a clock that is not resettable, or a member with no clock, recorded a reset"
+    );
+    let signals = world
+        .graph_state()
+        .join(&graph_run)
+        .join(oneagentgraph::run::SIGNAL_DIR);
+    assert!(
+        signals.join("fixed-cadence.reset").is_file(),
+        "the fixed-cadence member's signal is not where the sibling leaves one it ignores"
+    );
+    for consumed in ["pulse", "second-pulse"] {
+        assert!(
+            !signals.join(format!("{consumed}.reset")).is_file(),
+            "{consumed}'s reset was recorded and its signal left behind"
+        );
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(
+        world.observer_saw().len(),
+        1,
+        "the observer was replaced mid-journey, so the clocks above are another run's"
+    );
+    world.release("observer.go");
+}
+
+/// An observer graph that declares no resettable member is a graph nothing
+/// restarts, and that is not a failure: the surface is delivered and `next`
+/// reports nothing on stderr.
+#[test]
+fn consuming_a_surface_under_an_observer_graph_with_no_resettable_clock_reports_no_failure() {
+    let world = World::new("real-fixed-clock");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[("fixed-cadence", false)]);
+    let graph_run = observed_by_clocks(&world, "fixed", &graph);
+
+    world
+        .run_on_agentgraph(&[
+            "surface",
+            "fixed",
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+    let read = world.run_on(world.agentgraph_cmd(&["next", "fixed"]), "next fixed");
+    read.exited(0).out_has("steady");
+    assert!(
+        !read.stderr.contains("could not restart"),
+        "a graph with no resettable clock was reported as a reset failure: {}",
+        read.stderr
+    );
+    assert_eq!(world.events_of("fixed", "planner-surfaced").len(), 1);
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: what the sibling did with
+    // the signal is in its own log and signal directory and nowhere on a product surface.
+    assert!(
+        members_reset_in(&world, &graph_run).is_empty(),
+        "a clock that declared its cadence fixed recorded a reset"
+    );
+    assert!(
+        world
+            .graph_state()
+            .join(&graph_run)
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("fixed-cadence.reset")
+            .is_file(),
+        "the signal is not where the sibling leaves one it ignores"
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
 }
 
 /// A view still renders when the provider-health block comes from the library.

@@ -6,7 +6,7 @@
 //! the cheapest check there is — read the file on the branch and look — and
 //! nothing was making it. A criterion reading "the row is `complete_dataset:
 //! true` in `tests/shared.rs`" has shipped against a branch whose file read
-//! `complete_dataset: false`, past a worker, a judge, a monitor and a manager,
+//! `complete_dataset: false`, past a worker, a judge, an observer and a manager,
 //! because every one of them read the prose rather than the file.
 //!
 //! Two bounds, and both are the point.

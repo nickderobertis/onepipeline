@@ -212,10 +212,11 @@ pub(crate) fn completion_allowed_by(
 /// The ops one author may issue, or a refusal naming what it may not.
 ///
 /// The allowlist is the `planner-channel` profile's, and it is exhaustive: an op
-/// nothing grants is refused, so a new op is refused for the monitor until
-/// somebody decides otherwise rather than being granted by omission. Every op
-/// the profile does not grant the monitor carries the reason it is refused
-/// with, and `docs/contract.md` states each of those refusals.
+/// nothing grants is refused, so a new op is refused for every author but the
+/// planner until somebody decides otherwise rather than being granted by
+/// omission. Every op the profile does not grant such an author carries the
+/// reason it is refused with, and `docs/contract.md` states each of those
+/// refusals.
 pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
     allowed_by(profile_allowlist(), author, command)
 }
@@ -792,6 +793,9 @@ impl SurfaceKind {
     pub const CHECK_IN: &'static str = "check-in";
     /// Something a watcher decided the planner should know.
     pub const FINDING: &'static str = "finding";
+    /// An edit an author other than the planner applied on its own judgement,
+    /// reported after the fact; the surface's source is that author's word.
+    pub const EDIT_APPLIED: &'static str = "edit-applied";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())
@@ -881,7 +885,7 @@ fn recorded_correlation<'de, D: serde::Deserializer<'de>>(
 
 /// What raised a surface.
 ///
-/// A pacemaker update and a worker's proposal are the same wire shape and
+/// A check-in update and a worker's proposal are the same wire shape and
 /// different facts, so a journal reader can tell "nothing was sent" from
 /// "updates were sent and nobody read them". The words are the profile's.
 pub(crate) use onemessagebus_agent::channel::source;
@@ -2162,7 +2166,7 @@ mod tests {
     ///
     /// This is the whole of what makes the bump additive: version 3 added an
     /// optional field and took nothing away, so every caller still typing 2 —
-    /// this crate's own journeys, the shipped monitor persona, and the
+    /// this crate's own journeys, the shipped observer persona, and the
     /// orchestration repository's reply wrapper, which passes an operator's
     /// envelope through — sends a document this build reads unchanged. The number
     /// it declares is what it was written against; the number it is read at is

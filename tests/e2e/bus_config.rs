@@ -19,7 +19,7 @@ use std::io::Write;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, double, plan_of, World, REFUSED};
+use crate::harness::{agent, double, human, plan_of, World, REFUSED};
 
 /// A configuration narrowing the monitor to `retry` alone, taking away the
 /// `cancel` the profile grants it beside `retry`.
@@ -271,12 +271,27 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
                 event["payload"]["kind"] == "finding" && event["payload"]["source"] == AUTHOR
             })
     });
-    let edit_surface = world
+    // The applied edit is reported once, as what it is: a non-blocking
+    // `edit-applied` from the author that applied it, naming that author — a
+    // word nothing built in knows — and the edit. The finding beside it raised
+    // no second surface: it has already said its piece.
+    let edit_surfaces: Vec<Value> = world
         .events_of(RUN, "planner-surface-queued")
         .into_iter()
-        .find(|event| event["payload"]["kind"] == "monitor-edit")
-        .expect("the non-planner edit is surfaced");
+        .filter(|event| event["payload"]["kind"] == "edit-applied")
+        .collect();
+    let [edit_surface] = &edit_surfaces[..] else {
+        panic!("one applied edit is one `edit-applied` surface: {edit_surfaces:?}");
+    };
     assert_eq!(edit_surface["payload"]["source"], AUTHOR);
+    assert_eq!(edit_surface["payload"]["blocking"], json!(false));
+    let message = edit_surface["payload"]["message"]
+        .as_str()
+        .expect("the surface carries a message");
+    assert!(
+        message.starts_with(&format!("{AUTHOR} applied an edit: ")) && message.contains("\"add\""),
+        "the surface does not name the author and the edit: {message}"
+    );
 
     for (command, refusal) in [
         (
@@ -384,6 +399,92 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
         )
         .exited(0);
     world.release("slow.go");
+}
+
+/// An edit applied by `reply` while nothing is driving the run is reported the
+/// same way the loop reports one: one non-blocking `edit-applied` surface from
+/// the author that applied it, and none for a `finding`.
+///
+/// Which side applies an edit is an accident of whether a driver happened to be
+/// alive, and the planner reads the same report either way — through `next`,
+/// which is where a planner away from a parked run meets it.
+#[test]
+fn an_edit_applied_with_nothing_driving_is_surfaced_as_edit_applied_by_its_author() {
+    const RUN: &str = "bus-undriven-edit";
+    const AUTHOR: &str = "sentinel";
+    let world = World::new(RUN);
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel:\n    capabilities: [add, finding]\n",
+    );
+    // A human node: the attached launch returns awaiting the planner, and
+    // nothing is driving the run when the replies below arrive.
+    let path = world.plan(RUN, &plan_of(RUN, vec![human("approve", &[])]));
+    world
+        .run(&["start", &path, "--attach", "--bus-config", &file])
+        .exited(0);
+    assert!(
+        !world.events_of(RUN, "decision-pending").is_empty(),
+        "the run is not parked on its human node: {:?}",
+        world.kinds(RUN)
+    );
+
+    let applied = world.run_with_stdin(
+        &["reply", RUN],
+        &json!({"version": 3, "author": AUTHOR, "commands": [
+            {"op": "finding", "id": "approve", "message": "the approval has waited a while"},
+            {"op": "add", "node": agent("extra", &["approve"])}
+        ]})
+        .to_string(),
+    );
+    applied.exited(0);
+    assert_eq!(applied.json()["commands"], "applied", "{}", applied.stdout);
+
+    let queued: Vec<Value> = world.events_of(RUN, "planner-surface-queued");
+    let edits: Vec<&Value> = queued
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "edit-applied")
+        .collect();
+    let [edit] = &edits[..] else {
+        panic!("the add is one `edit-applied` surface and the finding none: {queued:?}");
+    };
+    assert_eq!(edit["payload"]["source"], AUTHOR);
+    assert_eq!(edit["payload"]["blocking"], json!(false));
+    assert!(
+        edit["payload"]["message"]
+            .as_str()
+            .is_some_and(
+                |message| message.starts_with(&format!("{AUTHOR} applied an edit: "))
+                    && message.contains("\"add\"")
+            ),
+        "the surface does not name the author and the edit: {edit}"
+    );
+    assert!(
+        queued.iter().any(|event| {
+            event["payload"]["kind"] == "finding" && event["payload"]["source"] == AUTHOR
+        }),
+        "the finding itself was not queued under its author: {queued:?}"
+    );
+
+    // The planner reads both, and the edit report is the applied `add`.
+    let mut kinds = Vec::new();
+    for _ in 0..2 {
+        let read = world.run(&["next", RUN]);
+        read.exited(0);
+        let surface = read.json()["surface"].clone();
+        assert_eq!(surface["source"], AUTHOR, "{}", read.stdout);
+        kinds.push(surface["kind"].as_str().unwrap_or_default().to_string());
+    }
+    kinds.sort();
+    assert_eq!(kinds, ["edit-applied", "finding"]);
+    let handed = world.events_of(RUN, "planner-surfaced");
+    assert!(
+        handed
+            .iter()
+            .any(|event| event["payload"]["kind"] == "edit-applied"),
+        "the consumed edit report was not journalled: {handed:?}"
+    );
 }
 
 /// Recorded identity is data, not fresh authority: removing the launch grant

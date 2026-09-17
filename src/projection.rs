@@ -208,7 +208,7 @@ pub struct RunState {
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
     pub surfaces_queued: u64,
-    /// Surfaces consumed through `next`. This is what resets the pacemaker.
+    /// Surfaces consumed through `next`. This is what restarts the check-in clock.
     pub surfaces_read: u64,
     /// When the last surface was read, in epoch milliseconds.
     pub last_surface_at: Option<u64>,
@@ -291,7 +291,7 @@ pub struct RunState {
     /// node it supersedes out of the graph in the same edit, so every view built
     /// from the graph loses it — while the store still carries the `node-settled`
     /// that failed it, with nothing beside that record saying it was replaced. A
-    /// reader of the stream, the run's own monitor included, met a `failed` node
+    /// reader of the stream, the run's own observer included, met a `failed` node
     /// and proposed retrying work that had already been redone and merged; on one
     /// run eleven entries read `failed` and not one was a node anybody could
     /// retry. This is what every reader of that settlement is qualified by.
@@ -1427,7 +1427,7 @@ fn settlement_ends_the_park(status: NodeStatus) -> bool {
 /// Both, because they are read by different questions: the graph's flag is what
 /// [`graph::derive`] holds the node out of every later dispatch by, and the
 /// park's record is what a later `cancel` or `requeue` of the same node is judged
-/// against — a park nothing cleared would tell a monitor that re-parks a settled
+/// against — a park nothing cleared would tell an observer that re-parks a settled
 /// node it was undoing the planner's decision.
 fn end_the_park(state: &mut RunState, node: &str) {
     if let Some(parked) = state.graph.get_mut(node) {
@@ -1576,7 +1576,7 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
 /// minutes into a push reported the last worker command from *before* it
 /// settled — `now Bash git status --porcelain (67 event(s), 3m43s ago)`, which
 /// is the exact shape a supervisor is taught to read as a stalled dispatch, and
-/// a monitor read it as one. The sibling's events were in the run's journal the
+/// an observer read it as one. The sibling's events were in the run's journal the
 /// whole time, labelled with the node; nothing had to start emitting anything.
 /// Publication is the longest and most failure-prone stretch of a lifecycle
 /// node's life, because the whole gate runs inside that push.
@@ -3476,7 +3476,7 @@ mod tests {
                 "operations",
                 json!([Operation::NodeParked {
                     node: "sweep".into(),
-                    by: crate::channel::Author::from("monitor"),
+                    by: crate::channel::Author::from("watcher"),
                     reason: Some("taking the deliverable over by hand".into())
                 }]),
             )],
@@ -3724,7 +3724,7 @@ mod tests {
                 "operations",
                 json!([Operation::NodeParked {
                     node: "build".into(),
-                    by: crate::channel::Author::from("monitor"),
+                    by: crate::channel::Author::from("watcher"),
                     reason: Some(disk.into())
                 }]),
             )],
@@ -3733,7 +3733,7 @@ mod tests {
         assert_eq!(
             state.frontier().parks.get("build"),
             Some(&edits::Park::of(
-                crate::channel::Author::from("monitor"),
+                crate::channel::Author::from("watcher"),
                 Some(disk)
             )),
             "the park's own account of itself did not reach the frontier"

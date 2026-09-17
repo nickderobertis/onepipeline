@@ -789,7 +789,7 @@ fn tally(done: usize, total: usize, skipped: usize, outstanding: &Outstanding) -
 /// What one run's unread surfaces are, as the one line reporting them needs them.
 ///
 /// A blocking surface produces no other signal, and on a host holding thousands
-/// of routine `monitor` updates against a handful of questions a bare count read
+/// of routine observer updates against a handful of questions a bare count read
 /// the same either way.
 #[derive(Debug, Default)]
 pub(crate) struct Unread {
@@ -2745,7 +2745,7 @@ pub fn host(survey: &Survey) -> String {
 /// source filters a launch passes through to `oneagentgraph` and `onevcs`.
 ///
 /// Borrowed rather than cloned where nothing is dropped, because the common case
-/// — `--all`, and the shipped `monitor` profile — is a filter that admits
+/// — `--all`, and the shipped `detailed` profile — is a filter that admits
 /// everything.
 pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> {
     view.events
@@ -2757,7 +2757,7 @@ pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> 
 /// `onepipeline monitor` — one pass over the merged stream.
 ///
 /// The first line is the contract, not a banner: every event line carries the
-/// typed id a detail lookup resolves, and the monitor never tries to *be* the
+/// typed id a detail lookup resolves, and `monitor` never tries to *be* the
 /// detail.
 pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
     monitor_of(view, &view.events, filter)
@@ -2817,8 +2817,8 @@ pub(crate) fn event_line(view: &RunView, event: &Envelope) -> String {
 /// for every other line.
 ///
 /// The stream keeps the `node-settled` that failed the node, and it is what the
-/// run's own monitor persona reads — see
-/// [`crate::projection::RunState::superseded`] for what that monitor did with an
+/// run's own observer reads — see
+/// [`crate::projection::RunState::superseded`] for what that observer did with an
 /// unqualified one.
 ///
 /// Only the records *about the node* carry it, which keeps it a qualification
@@ -2853,7 +2853,7 @@ fn summarize(event: &Envelope) -> String {
         }
     }
     // `landing` beside `status`: a `node-settled` and a `published` both carry
-    // it, and a monitor line that showed only `done` said the same thing about a
+    // it, and a `monitor` line that showed only `done` said the same thing about a
     // merge and about an open change request.
     for key in ["status", "landing", "outcome", "state", "message", "reason"] {
         if surface && key == "message" {
@@ -3596,7 +3596,7 @@ mod tests {
     /// cursor would step past that record and no later pass would render it.
     #[test]
     fn a_monitor_renders_a_record_appended_after_its_view_was_read_before_its_cursor_passes_it() {
-        let root = scratch("monitor-one-read");
+        let root = scratch("view-one-read");
         let paths = write_run(
             &root,
             "demo",
@@ -3698,7 +3698,7 @@ mod tests {
     ///
     /// A blocking question behind a pile of routine updates is exactly the case
     /// a bare count hid: this host's own history holds a handful of questions
-    /// against thousands of `monitor` surfaces, and both rendered as a number.
+    /// against thousands of observer surfaces, and both rendered as a number.
     /// So the kinds are named, the blocking one leads, and a queue of unrelated
     /// kinds is summarised out loud rather than silently cut.
     #[test]
@@ -3732,7 +3732,7 @@ mod tests {
                 .expect("the surface queues");
         };
         for _ in 0..6 {
-            queue("monitor", false);
+            queue("observation", false);
         }
         queue("planner-question", true);
         for kind in ["edit-rejected", "quiet-worker", "check-in", "proposal"] {
@@ -3878,7 +3878,7 @@ mod tests {
                 id: 0,
                 kind: "blocker".into(),
                 message: "Node build needs a decision; proceed?".into(),
-                source: "monitor".into(),
+                source: "watcher".into(),
                 blocking: true,
                 queued_at: sys::now_millis(),
                 abandoned: false,

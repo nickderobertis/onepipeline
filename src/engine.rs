@@ -2746,7 +2746,7 @@ fn commit_command(
 /// **report** — a `finding` that went to the planner's surface queue, a
 /// `complete` journalled as its own `completion-requested` — changed nothing a
 /// reader folds, and calling it a committed edit made one kind carry two
-/// meanings. A correct monitor raised that as a defect twice.
+/// meanings. A correct observer raised that as a defect twice.
 ///
 /// The question is [`edits::Operation::commits_a_change`]'s, and it is
 /// deliberately wider than the desired graph: an operation that moves only the
@@ -5212,10 +5212,7 @@ pub(crate) fn non_planner_edit(
     }
     Some(Surface {
         id: 0,
-        // llmlint: ignore[names_match_behavior] the kind keeps its word although any
-        // author but the planner raises it now: renaming it is the next node's
-        // (`onepipeline-no-member-names`), and this node was told to leave it spelled so.
-        kind: "monitor-edit".into(),
+        kind: crate::channel::SurfaceKind::EDIT_APPLIED.into(),
         message: format!(
             "{} applied an edit: {}",
             author.as_str(),
@@ -5235,7 +5232,7 @@ pub(crate) fn non_planner_edit(
 ///
 /// Its source is the envelope's author, so the journal keeps a watcher's finding
 /// and a worker's proposal apart — the same reason [`source`] separates a
-/// pacemaker update from advice.
+/// check-in update from advice.
 ///
 /// [`source`]: crate::channel::source
 pub(crate) fn finding_surface(
@@ -6438,7 +6435,7 @@ mod tests {
             stepped_past("check-in", Some((Role::Judge, 2)), "j/first", "quota"),
             served("check-in", Role::Judge, 2, "j/second"),
             // Another member's chain, which must not be read into this one's.
-            stepped_past("monitor", Some((Role::Agent, 2)), "m/first", "spawn"),
+            stepped_past("watcher", Some((Role::Agent, 2)), "m/first", "spawn"),
         ] {
             chains.read(&envelope);
             assert!(

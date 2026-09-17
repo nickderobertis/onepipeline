@@ -35,8 +35,9 @@ pub use onemessagebus_agent::event::{EventFilter, Matcher};
 /// The profile `next` and `monitor` read through when a caller names none.
 pub const DEFAULT_PROFILE: &str = "planner";
 
-/// The profile that shows the detailed activity the default one leaves out.
-pub const MONITOR_PROFILE: &str = "monitor";
+/// The profile that shows the detailed activity the default one leaves out:
+/// the whole merged stream, which is what an observer of a run reads.
+pub const DETAILED_PROFILE: &str = "detailed";
 
 /// The launch-config schema version this build **writes**.
 ///
@@ -625,7 +626,7 @@ impl Filters {
     /// The profile a reader named, or the reason there is none.
     ///
     /// A launch's own profile of that name wins over the shipped one, so both
-    /// `planner` and `monitor` are overridable without being special-cased here:
+    /// `planner` and `detailed` are overridable without being special-cased here:
     /// the launch's map is consulted first and the shipped defaults are the
     /// fallback.
     ///
@@ -643,7 +644,7 @@ impl Filters {
             return Ok(filter);
         }
         let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
-        for shipped in [DEFAULT_PROFILE, MONITOR_PROFILE] {
+        for shipped in [DEFAULT_PROFILE, DETAILED_PROFILE] {
             if !names.contains(&shipped) {
                 names.push(shipped);
             }
@@ -661,8 +662,8 @@ impl Filters {
 /// `planner` is every pipeline-level event and nothing else — node dispatch,
 /// settlement and failure, decisions, surfaces, edits, attestations, stop and
 /// adopt — with the detailed `agentgraph` and `vcs` activity behind them left
-/// out, because planner attention is the scarce resource. `monitor` is
-/// unfiltered: the observer's whole job is to read the detail.
+/// out, because planner attention is the scarce resource. `detailed` is
+/// unfiltered: an observer's whole job is to read the detail.
 fn shipped_profile(name: &str) -> Option<EventFilter> {
     match name {
         DEFAULT_PROFILE => Some(EventFilter {
@@ -672,7 +673,7 @@ fn shipped_profile(name: &str) -> Option<EventFilter> {
             }],
             exclude: Vec::new(),
         }),
-        MONITOR_PROFILE => Some(EventFilter::default()),
+        DETAILED_PROFILE => Some(EventFilter::default()),
         _ => None,
     }
 }
@@ -731,8 +732,8 @@ mod tests {
                     shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
                 ),
                 (
-                    MONITOR_PROFILE.to_string(),
-                    shipped_profile(MONITOR_PROFILE).expect("monitor ships"),
+                    DETAILED_PROFILE.to_string(),
+                    shipped_profile(DETAILED_PROFILE).expect("detailed ships"),
                 ),
             ]
             .into_iter()
@@ -930,7 +931,7 @@ mod tests {
         // profile that was never declared.
         let value: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
         assert_eq!(
-            value["filters"]["profiles"]["monitor"],
+            value["filters"]["profiles"][DETAILED_PROFILE],
             serde_json::json!({})
         );
         assert!(

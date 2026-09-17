@@ -103,6 +103,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("run") => run(&args, &dir),
         Some("reset-timer") => reset_timer(&args, &dir),
+        Some("history") => history(&args, &dir),
         Some("interrupt") => interrupt(&args, &dir),
         Some("health") => {
             println!("fake-provider: 1 identity bound, 0% utilized");
@@ -184,6 +185,71 @@ fn reset_timer(args: &[String], dir: &std::path::Path) -> ExitCode {
         eprintln!("no resettable schedule named that member");
         return ExitCode::from(2);
     }
+    ExitCode::SUCCESS
+}
+
+/// Where this double keeps which graph document each of its runs was launched
+/// with, so a later process of it can answer for that run.
+fn graph_runs(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("graph-runs.jsonl")
+}
+
+/// `oneagentgraph history show RUN`
+///
+/// The one record a launcher reads back off the sibling: the run's own
+/// `record.json`, printed as the sibling's [`Record`](oneagentgraph::run::Record)
+/// type serialises it, with `declared_members` naming every member of the graph
+/// document the run was launched with — read through the sibling's own config
+/// types, as [`fake::scheduled_member`] reads it, so the members this double
+/// says a run has are the members its document declares rather than a copy kept
+/// here. A run this double never started is refused the way the real verb
+/// refuses one it has no record of.
+fn history(args: &[String], dir: &std::path::Path) -> ExitCode {
+    if args.get(1).map(String::as_str) != Some("show") {
+        return fake::refuse("this double answers `history show RUN` and no other history");
+    }
+    let run = match fake::required(args, 2, "RUN") {
+        Ok(run) => run,
+        Err(refusal) => return refusal,
+    };
+    let Some(graph) = std::fs::read_to_string(graph_runs(dir))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|entry| entry["run"] == run)
+        .and_then(|entry| entry["graph"].as_str().map(str::to_string))
+    else {
+        eprintln!("oneagentgraph: no run {run:?} under this double's state");
+        return invalid_config();
+    };
+    let run_id = match oneagentgraph::run::RunId::parse(&run) {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            eprintln!("oneagentgraph: {error}");
+            return invalid_config();
+        }
+    };
+    let declared = fake::declared_members(&graph).unwrap_or_else(|why| fake::fail(&why));
+    let record = oneagentgraph::run::Record {
+        schema_version: oneagentgraph::run::RECORD_SCHEMA_VERSION,
+        run_id,
+        graph: graph.clone(),
+        name: std::path::Path::new(&graph)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        started_ms: 0,
+        finished_ms: None,
+        exit_code: None,
+        members: std::collections::BTreeMap::new(),
+        declared_members: declared,
+        refs: Vec::new(),
+        events_path: String::new(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&record).unwrap_or_default()
+    );
     ExitCode::SUCCESS
 }
 
@@ -376,6 +442,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join("run.exit-quietly").exists() {
         return ExitCode::SUCCESS;
     }
+
+    // Which document this run was launched with, for the `history show` a later
+    // process of this double answers about it.
+    fake::append(
+        &graph_runs(dir),
+        &serde_json::json!({"run": graph_run(), "graph": graph}).to_string(),
+    );
 
     // The dag-scope graph is the run's *observer*: its monitor member watches
     // and changes nothing, because `onepipeline start` drives the run itself.

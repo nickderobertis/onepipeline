@@ -279,7 +279,7 @@ pub(crate) struct RunStarted {
     pub(crate) graph: Option<String>,
     /// The directory the run was launched from.
     pub(crate) dir: String,
-    /// The pacemaker's interval, in seconds.
+    /// The check-in interval, in seconds.
     pub(crate) heartbeat_interval: u64,
 }
 
@@ -1037,7 +1037,7 @@ mod tests {
         }
         for author in [
             crate::channel::Author::planner(),
-            crate::channel::Author::from("monitor"),
+            crate::channel::Author::from("watcher"),
         ] {
             assert_eq!(word(&AuthorWord::from(author.clone())), author.as_str());
             assert_eq!(word(&AuthorWord::from(author.clone())), word(&author));

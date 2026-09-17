@@ -137,7 +137,7 @@ pub enum PipelineKind {
     EditRejected,
     /// A surface was *sent*. Delivery is a separate fact.
     PlannerSurfaceQueued,
-    /// A surface was *consumed* by the planner. This is what resets the pacemaker.
+    /// A surface was *consumed* by the planner. This is what restarts the check-in clock.
     PlannerSurfaced,
     /// The planner answered a consumed surface.
     PlannerReplied,

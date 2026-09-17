@@ -1746,6 +1746,46 @@ impl World {
         self.write_graphs_with(Some(&pacemaker), CONSUMER_GRAPH_SCHEMA);
     }
 
+    /// A dag-scope graph of this world's own whose members are named by nothing
+    /// built in: `watcher`, the observer, carrying [`MONITOR_TASK`] as the
+    /// dag-scope member of [`write_graphs`](World::write_graphs) does, and one
+    /// single-sided member on a clock for each of `scheduled` — `(member,
+    /// resettable)` — every one on an interval no journey outlasts and no first
+    /// turn inside it, so what a journey observes of a clock is the *reset* and
+    /// never a firing.
+    ///
+    /// Written beside the graphs [`write_graphs`](World::write_graphs) writes,
+    /// which a journey still needs for its node dispatches; the path is what
+    /// `--dag-graph` takes. The schema is the consumer's, so a schedule naming
+    /// no `start_after` waits its whole interval first.
+    pub fn write_observer_graph_with_clocks(&self, scheduled: &[(&str, bool)]) -> String {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        let mut members = format!(
+            "  watcher:\n    kind: oneharness\n    oneharness_config: {}\n    task: {}\n",
+            self.harness_config("watcher"),
+            yaml_scalar(MONITOR_TASK)
+        );
+        for (member, resettable) in scheduled {
+            members.push_str(&format!(
+                "  {member}:\n    kind: oneharness\n    oneharness_config: {}\n    \
+                 schedule: {{every: 3600, resettable: {resettable}}}\n",
+                self.harness_config(member)
+            ));
+        }
+        let graph = dir.join("observer-with-clocks.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: {CONSUMER_GRAPH_SCHEMA}\nname: observer-with-clocks\nmembers:\n{members}\
+                 env:\n  ONEPIPELINE_RUN_ID: ${{ONEPIPELINE_RUN_ID}}\n  \
+                 ONEPIPELINE_RUNS_DIR: ${{ONEPIPELINE_RUNS_DIR}}\n"
+            ),
+        )
+        .expect("the observer graph is written");
+        graph.display().to_string()
+    }
+
     /// The graph a launch drafts change request bodies with, as
     /// `--pr-author-graph` takes it.
     ///

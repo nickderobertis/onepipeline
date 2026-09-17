@@ -1,5 +1,5 @@
 //! The planner-facing channel: reading a surface, answering it, raising one, and
-//! the pacemaker reset that consumption triggers. **Rendering is not reading** —
+//! the check-in clock reset that consumption triggers. **Rendering is not reading** —
 //! `monitor` shows a pending surface without consuming it, and `next` is the
 //! only consumer.
 //!
@@ -26,9 +26,9 @@ fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
 
 /// The same, with an observer graph attached.
 ///
-/// Only the pacemaker journeys need one: the clock a surface resets belongs to a
-/// member of that graph, and a run launched with `--dag-graph off` — the shipped
-/// default — has no member to address.
+/// Only the clock-reset journeys need one: the clock a surface resets belongs to
+/// a member of that graph, and a run launched with `--dag-graph off` — the
+/// shipped default — has no member to address.
 ///
 /// The observer is **held** at its first instruction, which is what keeps the id
 /// it answers to still. A double that is not held announces itself and exits at
@@ -152,7 +152,9 @@ fn a_second_check_in_replaces_the_one_still_waiting_to_be_read() {
     world.release("build.go");
 }
 
-/// Consumption resets the pacemaker, addressed by the **graph** run's id.
+/// Consumption restarts the observer graph's resettable clocks, addressed by the
+/// **graph** run's id — every member the graph run declares is signalled, and
+/// the shipped example graph's `check-in` is among them.
 ///
 /// The two run ids on one run are the whole trap here. `oneagentgraph` mints an
 /// id for the graph it starts, and its signals — a resettable schedule's clock
@@ -161,8 +163,8 @@ fn a_second_check_in_replaces_the_one_still_waiting_to_be_read() {
 /// reset is best-effort by design, so the assertion names the id rather than
 /// only the verb.
 #[test]
-fn consuming_a_surface_resets_the_check_in_pacemaker() {
-    let world = World::new("channel-pacemaker");
+fn consuming_a_surface_restarts_the_observer_graphs_clocks() {
+    let world = World::new("channel-clock-reset");
     world.script("build.wait", "hold");
     let run = observed(&world, "paced", vec![agent("build", &[])]);
     world
@@ -209,7 +211,7 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
     // where the sibling puts it; this is the half that names the argument.
     assert!(
         world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "check-in"]),
-        "consumption did not reset the check-in pacemaker by the graph run's own id: {:?}",
+        "consumption did not restart the check-in clock by the graph run's own id: {:?}",
         world.invocations()
     );
     assert!(
@@ -219,6 +221,51 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("observer.go");
+    world.release("build.go");
+}
+
+/// A run launched with no observer graph — the shipped default — has no clock
+/// to restart: its surfaces are queued and consumed through `next` without
+/// error, nothing is addressed to the sibling, and no reset failure is reported.
+#[test]
+fn a_run_with_no_observer_graph_consumes_surfaces_and_reports_no_reset() {
+    let world = World::new("channel-no-observer");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unobserved", vec![agent("build", &[])]);
+    assert!(
+        world.run_json(&run, "launch.json").get("graph").is_none(),
+        "the launch recorded an observer graph it was not given"
+    );
+    for message in ["a host condition", "steady"] {
+        world
+            .run(&[
+                "surface",
+                &run,
+                "--kind",
+                "host-condition",
+                "--message",
+                message,
+            ])
+            .exited(0);
+        let read = world.run(&["next", &run]);
+        read.exited(0).out_has(message);
+        assert!(
+            !read.stderr.contains("could not restart"),
+            "a run with no observer graph reported a reset failure: {}",
+            read.stderr
+        );
+    }
+    assert_eq!(world.events_of(&run, "planner-surfaced").len(), 2);
+    // llmlint: ignore-block[tests_mirror_real_usage] that nothing was sent has no product
+    // surface — `next` prints the surface either way — so the double's record of what it
+    // was asked is where a reset addressed to no run would show.
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer"])
+            && !world.was_invoked("oneagentgraph", &["history"]),
+        "a reset was addressed with no observer graph to address it to: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
 
@@ -1612,7 +1659,7 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
 }
 
 #[test]
-fn a_read_survives_a_pacemaker_it_could_not_reset_and_says_so() {
+fn a_read_survives_a_clock_it_could_not_restart_and_says_so() {
     let world = World::new("channel-reset-fails");
     world.script("build.wait", "hold");
     world.script("reset-timer.fail", "");
@@ -1625,7 +1672,7 @@ fn a_read_survives_a_pacemaker_it_could_not_reset_and_says_so() {
     // the clock is reported rather than allowed to fail the read.
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("steady");
-    read.err_has("could not reset the check-in pacemaker");
+    read.err_has("could not restart the check-in clock");
     assert_eq!(world.events_of(&run, "planner-surfaced").len(), 1);
     world.release("observer.go");
     world.release("build.go");
@@ -1725,14 +1772,15 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
     // journey separately proves that a host author's word becomes the source.
     assert_eq!(surface["source"], "proposal");
 
-    // One thing said once. Every other monitor op additionally raises a "monitor
-    // applied an edit" surface, and a finding is the op that has already spoken.
+    // One thing said once. Every other op an author besides the planner applies
+    // additionally raises an `edit-applied` surface, and a finding is the op
+    // that has already spoken.
     assert!(
         world
             .events_of(&run, "planner-surface-queued")
             .iter()
-            .all(|event| event["payload"]["kind"] != json!("monitor-edit")),
-        "the finding was also reported as an edit the monitor made"
+            .all(|event| event["payload"]["kind"] != json!("edit-applied")),
+        "the finding was also reported as an applied edit"
     );
 
     // The run is genuinely waiting on a decision, which is what holds `after`

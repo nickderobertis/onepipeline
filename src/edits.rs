@@ -105,7 +105,7 @@ pub enum Operation {
         /// who decided rather than leaving a reader to infer it from the
         /// `edit-committed` around it. Absent from a record written before this
         /// field existed, which reads back as [`Author::planner()`] — every park
-        /// written then was one, because the monitor had no author to be.
+        /// written then was one, because no other author existed to make one.
         #[serde(default)]
         by: Author,
         /// Why, in that author's own words, when it stated one.
@@ -424,11 +424,11 @@ pub struct Frontier {
     /// What each parked node's park recorded about itself, by node.
     ///
     /// Carried because a `requeue` is judged against the **park** rather than
-    /// against the node: the monitor may return its own park to the frontier
-    /// and may not undo one the planner made. A node this map has no entry for
-    /// reads as the planner's park with no reason — which is what a park
-    /// recorded before the record carried an author was, and what a `parked:
-    /// true` written into the plan file itself is.
+    /// against the node: an author other than the planner may return its own
+    /// park to the frontier and may not undo one the planner made. A node this
+    /// map has no entry for reads as the planner's park with no reason — which
+    /// is what a park recorded before the record carried an author was, and
+    /// what a `parked: true` written into the plan file itself is.
     pub parks: BTreeMap<String, Park>,
     /// The dispatches the loop still has running, by node.
     ///
@@ -632,7 +632,7 @@ pub fn compile(
 /// A caller that validates a whole envelope before committing any of it holds
 /// one frontier for all of it, and two of the facts this vocabulary judges
 /// against move *within* an envelope. A park is a decision a later `requeue` is
-/// judged against: without this, a monitor that parks a node and requeues it in
+/// judged against: without this, an observer that parks a node and requeues it in
 /// one envelope is refused for undoing "the planner's" park — the park it just
 /// made itself. And a settlement is the state a later `settle` would be saying
 /// nothing about.
@@ -1618,14 +1618,14 @@ fn compile_requeue(
     if !node.parked {
         return Err(refuse(format!("requeue: node '{id}' is not parked")));
     }
-    // A park is a decision, and whose it was decides who may undo it. The
-    // monitor exists to apply unambiguous fixes without waiting for a planner,
-    // and an idle node is exactly what one looks like — so a node the planner
-    // held is the one case where the fix is not unambiguous, and the refusal
-    // hands over the decision itself rather than only turning the edit down. A
-    // park this frontier has no record of reads as the planner's: that is what a
-    // record written before parks carried an author was, and what a `parked:
-    // true` a plan file states is.
+    // A park is a decision, and whose it was decides who may undo it. An
+    // observing author exists to apply unambiguous fixes without waiting for a
+    // planner, and an idle node is exactly what one looks like — so a node the
+    // planner held is the one case where the fix is not unambiguous, and the
+    // refusal hands over the decision itself rather than only turning the edit
+    // down. A park this frontier has no record of reads as the planner's: that
+    // is what a record written before parks carried an author was, and what a
+    // `parked: true` a plan file states is.
     let park = frontier.parks.get(id).cloned().unwrap_or_default();
     if !author.is_planner() && park.by != author {
         return Err(refuse(format!(
@@ -2343,7 +2343,7 @@ mod tests {
     /// Shadows [`super::compile`] deliberately: the author is part of the
     /// judgement for two ops and irrelevant to the other eleven, so every test
     /// below that is not about authorship reads as the planner — which is what
-    /// an envelope stating no author is. The monitor's own cases call
+    /// an envelope stating no author is. The other author's own cases call
     /// `super::compile` with the author spelt out, which is what makes them
     /// visible as the cases about authorship.
     fn compile(
@@ -2808,7 +2808,7 @@ mod tests {
         let operations = super::compile(
             &mut graph,
             &Frontier::default(),
-            Author::from("monitor"),
+            Author::from("watcher"),
             &Command::Cancel {
                 id: "build".into(),
                 reason: Some(disk.into()),
@@ -2819,7 +2819,7 @@ mod tests {
             operations,
             vec![Operation::NodeParked {
                 node: "build".into(),
-                by: Author::from("monitor"),
+                by: Author::from("watcher"),
                 reason: Some(disk.into()),
             }],
             "the park does not say who made it or why"
@@ -2907,8 +2907,8 @@ mod tests {
             "a blank recorded reason was kept as a reason"
         );
         assert_ne!(
-            Park::of(Author::from("monitor"), Some("it is redundant")),
-            Park::of(Author::from("monitor"), None),
+            Park::of(Author::from("watcher"), Some("it is redundant")),
+            Park::of(Author::from("watcher"), None),
             "a reason that says something was dropped"
         );
 
@@ -2928,7 +2928,7 @@ mod tests {
                 .collect(),
                 ..Frontier::default()
             },
-            Author::from("monitor"),
+            Author::from("watcher"),
             &Command::Requeue {
                 id: "build".into(),
                 amend: None,
@@ -2943,9 +2943,9 @@ mod tests {
     }
 
     /// A `requeue` is judged against the park it would undo, not against the
-    /// node: the monitor may return its own park and not the planner's.
+    /// node: an author other than the planner may return its own park and not the planner's.
     #[test]
-    fn a_monitor_may_requeue_only_a_park_it_made_itself() {
+    fn another_author_may_requeue_only_a_park_it_made_itself() {
         let disk = "a third very large build would fill the disk this host has 8G left on";
         let parked = |by: Author, reason: Option<&str>| Frontier {
             parks: [("build".to_string(), Park::of(by, reason))]
@@ -2967,7 +2967,7 @@ mod tests {
         let message = super::compile(
             &mut graph(),
             &parked(Author::planner(), Some(disk)),
-            Author::from("monitor"),
+            Author::from("watcher"),
             &requeue,
         )
         .unwrap_err()
@@ -2985,7 +2985,7 @@ mod tests {
         let message = super::compile(
             &mut graph(),
             &parked(Author::planner(), None),
-            Author::from("monitor"),
+            Author::from("watcher"),
             &requeue,
         )
         .unwrap_err()
@@ -2997,7 +2997,7 @@ mod tests {
         let message = super::compile(
             &mut graph(),
             &Frontier::default(),
-            Author::from("monitor"),
+            Author::from("watcher"),
             &requeue,
         )
         .unwrap_err()
@@ -3008,11 +3008,11 @@ mod tests {
         let mut live = graph();
         super::compile(
             &mut live,
-            &parked(Author::from("monitor"), Some("it was plainly redundant")),
-            Author::from("monitor"),
+            &parked(Author::from("watcher"), Some("it was plainly redundant")),
+            Author::from("watcher"),
             &requeue,
         )
-        .expect("the monitor may requeue its own park");
+        .expect("an author may requeue its own park");
         assert!(!live.get("build").expect("build").parked);
 
         let mut live = graph();
@@ -3364,7 +3364,7 @@ mod tests {
     /// The case this exists for: a node one party parked and another settled read
     /// *parked and settled at once*, and the only op that cleared the park was a
     /// `requeue` — which returns the node for a redispatch and refuses across
-    /// authorship besides. So a monitor that parks a node and a planner that then
+    /// authorship besides. So an observer that parks a node and a planner that then
     /// settles it must leave a node nobody's decision holds idle; and a `cancel`
     /// of the same node afterwards is judged against its settlement rather than
     /// refused as a second park.

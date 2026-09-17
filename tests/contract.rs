@@ -471,7 +471,7 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
             exclude: Vec::new(),
         }
     );
-    assert_eq!(filters.profiles["monitor"], EventFilter::default());
+    assert_eq!(filters.profiles["detailed"], EventFilter::default());
 
     let round_tripped: Filters =
         serde_json::from_str(&serde_json::to_string(&filters).expect("serializes"))
@@ -560,23 +560,33 @@ fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
         }
     );
     assert_eq!(
-        empty.profile("monitor").expect("monitor ships"),
+        empty.profile("detailed").expect("detailed ships"),
         EventFilter::default(),
-        "the shipped monitor profile is unfiltered"
+        "the shipped detailed profile is unfiltered"
+    );
+    // The name the profile shipped under before it was `detailed` is no alias
+    // of it: a launch that declares no profile of that name has none.
+    let retired = empty
+        .profile("monitor")
+        .expect_err("the retired profile name is not an alias")
+        .to_string();
+    assert!(
+        retired.contains("'monitor' is not a filter profile") && retired.contains("detailed"),
+        "{retired}"
     );
 
     let mine = EventFilter::parse(r#"{"include": [{"kind": "node-*"}]}"#).expect("a filter");
     let overridden = Filters {
         profiles: [
             ("planner".to_string(), mine.clone()),
-            ("monitor".to_string(), mine.clone()),
+            ("detailed".to_string(), mine.clone()),
         ]
         .into_iter()
         .collect(),
         ..Filters::default()
     };
     assert_eq!(overridden.profile("planner").expect("overridden"), mine);
-    assert_eq!(overridden.profile("monitor").expect("overridden"), mine);
+    assert_eq!(overridden.profile("detailed").expect("overridden"), mine);
 
     let unknown = empty
         .profile("planer")
@@ -584,7 +594,7 @@ fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
     let said = unknown.to_string();
     assert!(said.contains("planer"), "{said}");
     assert!(
-        said.contains("planner") && said.contains("monitor"),
+        said.contains("planner") && said.contains("detailed"),
         "{said}"
     );
 }
@@ -3261,9 +3271,54 @@ fn the_contract_declares_an_open_surface_kind_vocabulary() {
     assert!(CONTRACT.contains("--kind KIND"));
     assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
     assert!(
-        CONTRACT.contains("oneagentgraph reset-timer RUN check-in"),
-        "consuming a surface resets the pacemaker"
+        CONTRACT.contains(
+            "restarts the check-in clock of **every member the run's recorded observer graph \
+             declares `resettable` in its `schedule`**"
+        ),
+        "consuming a surface restarts the resettable clocks"
     );
+    assert!(
+        !CONTRACT.contains("reset-timer RUN check-in"),
+        "the contract names a member of one host's observer graph"
+    );
+    // The one kind the engine raises of its own, stated with its source and its
+    // message.
+    assert!(CONTRACT.contains("`edit-applied`, queued non-blocking"));
+    assert!(CONTRACT.contains("`<author> applied an edit: <command>`"));
+}
+
+/// The refusals the contract lists for an author granted nothing are the
+/// linked bus's own words, op by op and for the legacy verdict.
+///
+/// The block is the contract's; each entry is driven through the same `allows`
+/// and `allows_completion` the channel refuses with, under the profile's own
+/// allowlist — which grants an author the launch configuration never declared
+/// nothing, exactly as a declared author granted nothing is refused. The author
+/// is a word nothing built in knows.
+#[test]
+fn the_refusals_the_contract_lists_are_the_channels_own_words() {
+    let examples: Vec<Value> = serde_json::from_str(&fenced_block_naming("json", "\"refused\""))
+        .expect("the block is JSON");
+    assert!(examples.len() >= 8, "{examples:?}");
+    for example in &examples {
+        let author = Author::from(example["author"].as_str().expect("an author word"));
+        assert_ne!(author.as_str(), "planner", "{example}");
+        let refused = example["refused"].as_str().expect("a refusal");
+        let answered = if example.get("verdict").is_some() {
+            onepipeline::channel::allows_completion(author, Some(true))
+        } else {
+            let edit: Edit = serde_json::from_value(example["command"].clone())
+                .unwrap_or_else(|e| panic!("the example's command parses: {e}: {example}"));
+            allows(author, &edit)
+        }
+        .expect_err("an author granted nothing is refused")
+        .to_string();
+        assert_eq!(
+            answered,
+            format!("refused: {refused}"),
+            "the channel refuses in different words than the contract states"
+        );
+    }
 }
 
 #[test]
@@ -3524,7 +3579,7 @@ fn the_wire_types_resolve_where_they_did_and_are_the_buss_own() {
     );
     assert_eq!(ArtifactId("gate-log".into()).0, "gate-log");
     assert_eq!(onepipeline::filter::DEFAULT_PROFILE, "planner");
-    assert_eq!(onepipeline::filter::MONITOR_PROFILE, "monitor");
+    assert_eq!(onepipeline::filter::DETAILED_PROFILE, "detailed");
     assert_eq!(
         LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.first(),
         Some(&LAUNCH_CONFIG_SCHEMA_VERSION)
@@ -4219,7 +4274,11 @@ fn a_command_outside_the_surface_is_refused() {
 
 #[test]
 fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
-    assert!(CONTRACT.contains("shipped: `monitor` member + resettable-cron `check-in` member"));
+    assert!(CONTRACT.contains(
+        "the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a \
+         resettable-cron `check-in` member; a host copies it or brings its own, and the \
+         engine names no member of it"
+    ));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -4263,6 +4322,133 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     );
 }
 
+/// The engine names no member of the observer graph a host runs.
+///
+/// The words that named one host's members — `monitor`, the observer, and
+/// `pacemaker`, its clock — are gone from `src/` and `docs/`: identifiers,
+/// comments, help text, messages and documentation describe the observer graph,
+/// a scheduled member, an author other than the planner, and the check-in clock
+/// instead. What the shipped example graph and personas under `graphs/` and
+/// `personas/` call their members is theirs, as examples a host may copy, and the
+/// engine reads none of them at runtime.
+///
+/// **The one allowance, by name, is the `onepipeline monitor` view verb**: it
+/// means "watch a run" and names no member. An occurrence is that verb when it
+/// is spelled as its invocation (`onepipeline monitor`); as its bare name in
+/// backticks in prose (`` `monitor` ``) — provided the next word is not a
+/// member, an author, a persona, a profile or a graph, which are the things a
+/// member word would name — or with its arguments (`` `monitor RUN``,
+/// `` `monitor --all``); as a string on a line that also spells its invocation
+/// (the key beside `onepipeline monitor {run}`) or reads clap's name for it
+/// (`get_name()`, `find_subcommand(`); or as the verb's own identifiers in code
+/// (`Verb::Monitor(..)`, `fn monitor(..)` and calls of it). Every other
+/// occurrence fails, named by file and line — a `"monitor"` author or member in
+/// a fixture among them. `MonitorArgs` and `monitor_of`-style identifiers are
+/// not whole words and are not asked about.
+///
+/// `CHANGELOG.md` and `docs/contract-divergences.md` are records of what was and
+/// are exempt; so are recordings and fixtures under `tests/`, which this walk
+/// never enters.
+#[test]
+fn no_member_word_names_the_observer_graph_in_the_engine_or_its_docs() {
+    const VERB: &str = "monitor";
+    const NAMED_THINGS: [&str; 7] = [
+        "member", "author", "persona", "profile", "graph", "op", "role",
+    ];
+    fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("a directory to walk") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                walk(&path, into);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "md")
+            {
+                into.push(path);
+            }
+        }
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // Whether the whole word at `at` in `line` (lowercased) is the view verb.
+    let names_the_verb = |line: &str, lower: &str, at: usize| -> bool {
+        let before = &line[..at];
+        let after = &line[at + VERB.len()..];
+        let spelled = &line[at..at + VERB.len()];
+        // `onepipeline monitor`: the verb invoked.
+        if before.ends_with("onepipeline ") {
+            return true;
+        }
+        // `Verb::Monitor(..)`, `fn monitor(..)`, `views::monitor(..)`.
+        if after.starts_with('(') && (spelled == "monitor" || spelled == "Monitor") {
+            return true;
+        }
+        if spelled != VERB {
+            return false;
+        }
+        // The bare name in backticks, or the name with its arguments.
+        if before.ends_with('`') && after.starts_with('`') {
+            let rest = after[1..].trim_start_matches(|c: char| !c.is_alphanumeric());
+            let next_word: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+            return !NAMED_THINGS.contains(&next_word.as_str());
+        }
+        if before.ends_with('`')
+            && (after.starts_with(" RUN")
+                || after.starts_with(" <RUN>")
+                || after.starts_with(" --"))
+        {
+            return true;
+        }
+        // The name as a string: only beside its invocation, or as the name
+        // clap gives the verb.
+        if before.ends_with('"') && after.starts_with('"') {
+            return lower.contains("onepipeline monitor")
+                || line.contains("get_name()")
+                || line.contains("find_subcommand(");
+        }
+        false
+    };
+
+    let mut files = Vec::new();
+    walk(&repo_root().join("src"), &mut files);
+    walk(&repo_root().join("docs"), &mut files);
+    files.sort();
+    let mut offences = Vec::new();
+    for path in files {
+        if path.ends_with("docs/contract-divergences.md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a source or document reads");
+        for (number, line) in text.lines().enumerate() {
+            let lower = line.to_lowercase();
+            for word in [VERB, "pacemaker"] {
+                let mut from = 0;
+                while let Some(found) = lower[from..].find(word) {
+                    let at = from + found;
+                    from = at + word.len();
+                    let whole = !line[..at].chars().next_back().is_some_and(is_word)
+                        && !line[at + word.len()..].chars().next().is_some_and(is_word);
+                    if !whole || (word == VERB && names_the_verb(line, &lower, at)) {
+                        continue;
+                    }
+                    offences.push(format!(
+                        "{}:{}: `{}` names a member of one host's observer graph: {}",
+                        path.strip_prefix(repo_root()).unwrap_or(&path).display(),
+                        number + 1,
+                        &line[at..at + word.len()],
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offences.is_empty(),
+        "the engine names a member of the observer graph; the only allowance is the \
+         `onepipeline monitor` view verb:\n{}",
+        offences.join("\n")
+    );
+}
+
 #[test]
 fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
     assert!(CONTRACT.contains("a default node-scope config (worker+judge)"));
@@ -4303,9 +4489,14 @@ const SHIPPED_PERSONAS: [(&str, &str); 3] = [
 #[test]
 fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
     assert!(CONTRACT.contains(
-        "personas `monitor` (at `personas/orchestrator.yaml`, the shipped file the \
-         orchestrator persona was rewritten into), `check-in`, `pr-author`"
+        "example personas — an observer (at `personas/orchestrator.yaml`, the shipped file \
+         the orchestrator persona was rewritten into), `check-in`, `pr-author`"
     ));
+    assert!(
+        CONTRACT
+            .contains("The files under `graphs/` and `personas/` are **examples a host may copy**"),
+        "the contract no longer says the shipped graph and personas are examples"
+    );
     for (file, role) in SHIPPED_PERSONAS {
         let path = repo_root().join("personas").join(format!("{file}.yaml"));
         let text =
@@ -4402,6 +4593,7 @@ const RULINGS: &[(&str, &str)] = &[
     ),
     ("77.", "The planner channel is `onemessagebus`'s"),
     ("78.", "Surface kinds are an open vocabulary"),
+    ("79.", "edit-applied"),
 ];
 
 #[test]

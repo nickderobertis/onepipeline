@@ -106,7 +106,12 @@ fn source_filters(world: &World) -> Vec<serde_json::Value> {
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The shipped `planner` profile is what `monitor` reads through by default, and
-/// `--all` and the shipped `monitor` profile are the whole store.
+/// `--all` and the shipped `detailed` profile are the whole store — through
+/// `monitor` and through `next`, which read the same profiles.
+///
+/// The name the unfiltered profile shipped under before it was `detailed` is
+/// no alias of it: a launch that declares no profile of that name has none, and
+/// asking for it is refused naming the profiles the run does have.
 #[test]
 fn monitor_defaults_to_the_planner_profile_and_all_bypasses_it() {
     let world = World::new("filter-monitor-default");
@@ -126,10 +131,36 @@ fn monitor_defaults_to_the_planner_profile_and_all_bypasses_it() {
 
     for bypass in [
         vec!["monitor", &run, "--all"],
-        vec!["monitor", &run, "--filter", "monitor"],
+        vec!["monitor", &run, "--filter", "detailed"],
     ] {
         let read = world.run(&bypass);
         read.exited(0).out_has("agent:").out_has("node-dispatched");
+    }
+
+    // `next` reads the same profile: its event view under `detailed` carries the
+    // sibling's own activity, which the default view leaves out.
+    let detailed = world.run(&["next", &run, "--filter", "detailed"]);
+    detailed.exited(0);
+    let events = detailed.json()["events"]
+        .as_array()
+        .expect("`next` reports its event view")
+        .clone();
+    assert!(
+        events.iter().any(|event| event["source"] == "agentgraph")
+            && events.iter().any(|event| event["source"] == "pipeline"),
+        "`next --filter detailed` did not deliver the whole merged stream: {events:?}"
+    );
+
+    for verb in ["monitor", "next"] {
+        let retired = world.run(&[verb, &run, "--filter", "monitor"]);
+        retired.exited(REFUSED);
+        assert!(
+            retired.stderr.contains("'monitor' is not a filter profile")
+                && retired.stderr.contains("detailed")
+                && retired.stderr.contains("planner"),
+            "`{verb} --filter monitor` was not refused naming the profiles this run has:\n{}",
+            retired.stderr
+        );
     }
 }
 
@@ -185,7 +216,7 @@ fn a_filter_flag_takes_an_inline_spec_as_well_as_a_profile_name() {
     let unknown = world.run(&["monitor", &run, "--filter", "planer"]);
     unknown.exited(REFUSED);
     assert!(
-        unknown.stderr.contains("planner") && unknown.stderr.contains("monitor"),
+        unknown.stderr.contains("planner") && unknown.stderr.contains("detailed"),
         "the refusal does not name the profiles this run has:\n{}",
         unknown.stderr
     );
@@ -284,7 +315,10 @@ fn a_filter_naming_a_phase_admits_and_excludes_envelopes_by_it() {
     );
 }
 
-/// A launch overrides either shipped profile by declaring one of that name.
+/// A launch overrides either shipped profile by declaring one of that name —
+/// and declares any other name it likes, the name the unfiltered profile once
+/// shipped under included, which is then a profile of the run's own rather than
+/// an alias of anything.
 #[test]
 fn a_launch_overrides_the_shipped_profiles_by_name() {
     let world = World::new("filter-override");
@@ -295,7 +329,9 @@ fn a_launch_overrides_the_shipped_profiles_by_name() {
             "--filter-profile",
             r#"planner={"include": [{"kind": "node-dispatched"}]}"#,
             "--filter-profile",
-            r#"monitor={"include": [{"kind": "run-started"}]}"#,
+            r#"detailed={"include": [{"kind": "run-started"}]}"#,
+            "--filter-profile",
+            r#"monitor={"include": [{"kind": "node-ready"}]}"#,
         ],
     );
 
@@ -308,13 +344,23 @@ fn a_launch_overrides_the_shipped_profiles_by_name() {
         planner.stdout
     );
 
-    // And `monitor` is no longer unfiltered, because this run said otherwise.
-    let monitor = world.run(&["monitor", &run, "--filter", "monitor"]);
-    monitor.exited(0).out_has("run-started");
+    // And `detailed` is no longer unfiltered, because this run said otherwise.
+    let detailed = world.run(&["monitor", &run, "--filter", "detailed"]);
+    detailed.exited(0).out_has("run-started");
     assert!(
-        !monitor.stdout.contains("node-dispatched"),
-        "the shipped monitor profile was read instead of the launch's own:\n{}",
-        monitor.stdout
+        !detailed.stdout.contains("node-dispatched"),
+        "the shipped detailed profile was read instead of the launch's own:\n{}",
+        detailed.stdout
+    );
+
+    // A profile the launch declared under the retired name is the launch's own,
+    // read by that name and shaped as the launch said.
+    let declared = world.run(&["monitor", &run, "--filter", "monitor"]);
+    declared.exited(0).out_has("node-ready");
+    assert!(
+        !declared.stdout.contains("node-dispatched") && !declared.stdout.contains("run-started"),
+        "the launch's own `monitor` profile was not the one read:\n{}",
+        declared.stdout
     );
 
     // `--all` is not a profile, so nothing a launch declares reaches it.
@@ -410,7 +456,7 @@ fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
         written[0]
     );
     world
-        .run(&["monitor", &run, "--filter", "monitor"])
+        .run(&["monitor", &run, "--filter", "detailed"])
         .exited(0);
     world
         .run(&[
@@ -455,7 +501,7 @@ fn every_spelling_of_a_profile_shapes_the_view_and_still_delivers_a_blocking_sur
 
     for (filter, expected) in [
         // Named, inline, from a file, bypassed, and defaulted.
-        (vec!["--filter", "monitor"], View::Everything),
+        (vec!["--filter", "detailed"], View::Everything),
         (vec!["--filter", "planner"], View::PipelineOnly),
         (
             vec![
@@ -546,7 +592,7 @@ fn naming_both_a_filter_and_all_is_refused() {
     let run = settled(&world, "conflicted", &[]);
 
     for verb in ["next", "monitor"] {
-        let refused = world.run(&[verb, &run, "--filter", "monitor", "--all"]);
+        let refused = world.run(&[verb, &run, "--filter", "detailed", "--all"]);
         refused.exited(REFUSED);
         assert!(
             refused.stderr.contains("--all") && refused.stderr.contains("--filter"),
