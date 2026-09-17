@@ -3302,7 +3302,7 @@ fn serve_asker(key: &str) -> Result<Option<crate::channel::Asker>> {
 /// [`REPLY_TIMEOUT_ENV`](crate::channel::REPLY_TIMEOUT_ENV) where it says, which
 /// is what the host's scripts set; otherwise the reply window the run's bus
 /// configuration sets for the `onejudge` codec; otherwise the shipped default.
-fn serve_reply_window(codec: &onemessagebus::CodecConfig) -> Duration {
+fn serve_reply_window(codec: &crate::channel::ServeCodec) -> Duration {
     // llmlint: ignore-block[boundary_inputs_validated] this is 0.28.2's reading of the variable, kept exactly: a value that does not parse, or zero, has always meant the default window rather than a refusal, and the host's scripts set this variable until that host's own node retires it, which this change is told not to break. The session bound and the asker, which 0.28.2 already refused, are still refused.
     let variable = std::env::var(crate::channel::REPLY_TIMEOUT_ENV)
         .ok()

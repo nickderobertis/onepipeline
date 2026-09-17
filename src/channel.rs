@@ -42,12 +42,12 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use onemessagebus::{
     Allowlist, AskOptions, Bus, BusError, CodecConfig, CodecName, Config, ConsumerName,
-    Correlation, Fingerprint, Layouts, Lifetime, LocalTransport, Message, OpWord, Pending,
-    QueueError, QueueName, QueueSpec, RawQueue, Read, Registry, SchemaId, Transport,
+    Correlation, EnvName, Fingerprint, Layout, Layouts, Lifetime, LocalTransport, Message, OpWord,
+    Pending, QueueError, QueueName, QueueSpec, RawQueue, Read, Registry, SchemaId, Transport,
     TransportConfig, TransportKinds,
 };
 use onemessagebus_agent::channel::{
-    ChannelAuthor, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
+    Op, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -136,7 +136,10 @@ pub enum Author {
 impl Author {
     /// The word a record names this author with.
     pub fn as_str(self) -> &'static str {
-        ChannelAuthor::from(self).as_str()
+        match self {
+            Self::Planner => "planner",
+            Self::Monitor => "monitor",
+        }
     }
 
     /// Whether this is the default, so serialization can omit it.
@@ -146,24 +149,104 @@ impl Author {
 
     /// The bus's open author this one is, as an allowlist names it.
     pub(crate) fn word(self) -> onemessagebus::Author {
-        ChannelAuthor::from(self).author()
+        onemessagebus::Author::from(self.as_str())
     }
 }
 
-impl From<Author> for ChannelAuthor {
-    fn from(author: Author) -> Self {
-        match author {
-            Author::Planner => Self::Planner,
-            Author::Monitor => Self::Monitor,
+/// The ops the monitor is granted: the ones that correct and re-run work.
+const MONITOR_OPS: [Op; 5] = [Op::Retry, Op::Requeue, Op::Cancel, Op::Finding, Op::Add];
+
+/// Each op the monitor is not granted, with the reason it is refused with.
+///
+/// The words are `docs/contract.md`'s, and `tests/contract.rs` holds each
+/// refusal this crate makes against the document's own block of them.
+const MONITOR_REFUSALS: [(Op, &str); 7] = [
+    (
+        Op::Complete,
+        "whether the run is finished is the planner's verdict, not an observation",
+    ),
+    (
+        Op::Attest,
+        "a human action is attested by the person who took it, never by a watcher",
+    ),
+    (
+        Op::Drop,
+        "removing work from the graph is a decomposition decision the planner owns",
+    ),
+    (
+        Op::Reparent,
+        "rewiring dependencies is a decomposition decision the planner owns",
+    ),
+    (
+        Op::Amend,
+        "what a node is judged against is a decomposition decision the planner owns",
+    ),
+    (
+        Op::Note,
+        "a note may bind a criterion the node's judge decides against, which is the planner's \
+         decision rather than an observation",
+    ),
+    (
+        Op::Settle,
+        "settling a node from evidence declares an outcome this run never observed, which is the \
+         planner's decision rather than an observation",
+    ),
+];
+
+/// The `planner-channel` layout with this crate's second author declared on it.
+///
+/// The profile declares one built-in author, the planner, granted every op;
+/// since `onemessagebus` 0.7 every other author of a layout is declared by
+/// whoever links it. The monitor is this crate's: it is granted
+/// [`MONITOR_OPS`] and refused each other op with the reason the contract
+/// states, **on the layout** rather than through a configuration's `authors`
+/// block, so that a run's configuration meets it as an author already declared
+/// — one it may narrow and never widen, exactly as it meets the planner.
+/// Everything else — the queues, their records, the registry — is the profile's,
+/// and delegated to it.
+struct MonitoredPlannerChannel;
+
+impl Layout for MonitoredPlannerChannel {
+    fn name(&self) -> &str {
+        PlannerChannel.name()
+    }
+
+    fn queues(&self) -> Vec<QueueSpec> {
+        PlannerChannel.queues()
+    }
+
+    fn allowlist(&self) -> Allowlist<OpWord> {
+        let mut allowlist = onemessagebus_agent::channel::allowlist();
+        let monitor = Author::Monitor.word();
+        for op in MONITOR_OPS {
+            allowlist.grant(monitor.clone(), op);
         }
+        for (op, reason) in MONITOR_REFUSALS {
+            allowlist.refuse(monitor.clone(), &op, reason);
+        }
+        allowlist.words()
+    }
+
+    fn registry(&self) -> Registry {
+        PlannerChannel.registry()
+    }
+
+    fn prepare(
+        &self,
+        queue: &QueueName,
+        record: Value,
+        allowlist: &Allowlist<OpWord>,
+    ) -> std::result::Result<Vec<(QueueName, Value)>, String> {
+        PlannerChannel.prepare(queue, record, allowlist)
     }
 }
 
-/// The `planner-channel` layout's allowlist as the profile declares it, before
-/// any configuration narrows it.
-fn profile_allowlist() -> &'static Allowlist<OpWord> {
+/// The `planner-channel` layout's allowlist as this crate declares it — the
+/// profile's planner beside this crate's monitor — before any configuration
+/// narrows it.
+pub fn profile_allowlist() -> &'static Allowlist<OpWord> {
     static ALLOWLIST: std::sync::OnceLock<Allowlist<OpWord>> = std::sync::OnceLock::new();
-    ALLOWLIST.get_or_init(|| onemessagebus_agent::channel::allowlist().words())
+    ALLOWLIST.get_or_init(|| MonitoredPlannerChannel.allowlist())
 }
 
 /// Whether one author may declare the run finished, or a refusal saying why not.
@@ -873,8 +956,16 @@ fn recorded_correlation<'de, D: serde::Deserializer<'de>>(
 ///
 /// A pacemaker update and a worker's proposal are the same wire shape and
 /// different facts, so a journal reader can tell "nothing was sent" from
-/// "updates were sent and nobody read them". The words are the profile's.
-pub(crate) use onemessagebus_agent::channel::source;
+/// "updates were sent and nobody read them". The words are the profile's, plus
+/// the one for the author the profile no longer declares.
+pub(crate) mod source {
+    pub(crate) use onemessagebus_agent::channel::source::*;
+
+    /// The monitor: a finding it raised, or an edit it applied and is telling
+    /// the planner about. The word every record before `onemessagebus` 0.7
+    /// carried, kept.
+    pub(crate) const MONITOR: &str = "monitor";
+}
 
 /// One surface, as it sits in the durable queue.
 ///
@@ -1115,7 +1206,44 @@ pub(crate) enum CommandVerdict {
 
 /// The one layout a run's channel is kept under.
 fn planner_channel() -> Layouts {
-    Layouts::new().with(Arc::new(PlannerChannel))
+    Layouts::new().with(Arc::new(MonitoredPlannerChannel))
+}
+
+/// The one codec `channel serve` speaks, as a configuration's `codecs` block
+/// names it.
+///
+/// The name is this crate's: `onemessagebus` 0.6 stopped shipping a codec by
+/// this name, and what a run's configuration may still set under it —
+/// [`ServeCodec`] — is read by `channel serve` and by nothing in the bus.
+pub(crate) const ONEJUDGE_CODEC: &str = "onejudge";
+
+/// What a run's configuration sets for the codec `channel serve` speaks: the
+/// variables its bound and its asker are read from, and how long it waits.
+///
+/// The three keys of the bus's codec block that session reads. The rest of
+/// that block — what `select`s a frame and the `frames` it binds — describes a
+/// protocol served by the bus's own `serve`, which `channel serve` is not: its
+/// frames are advice in this crate's own vocabulary, and every one is answered
+/// by this crate's own loop.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ServeCodec {
+    /// Whole seconds a question waits for its ruling before it is answered
+    /// with the wait.
+    pub(crate) reply_window_seconds: Option<std::num::NonZeroU64>,
+    /// The variable the session bound is read from.
+    pub(crate) session_env: Option<EnvName>,
+    /// The variable the asker is read from.
+    pub(crate) asker_env: Option<EnvName>,
+}
+
+impl From<&CodecConfig> for ServeCodec {
+    fn from(block: &CodecConfig) -> Self {
+        Self {
+            reply_window_seconds: block.reply_window_seconds,
+            session_env: block.session_env.clone(),
+            asker_env: block.asker_env.clone(),
+        }
+    }
 }
 
 /// Read the `onemessagebus` configuration a launch names, and refuse — naming
@@ -1183,7 +1311,7 @@ pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config>
              — leave `queues` out"
         )));
     }
-    let onejudge = onemessagebus_agent::codec::onejudge::CODEC;
+    let onejudge = ONEJUDGE_CODEC;
     for (codec, block) in &config.codecs {
         let refused = if codec.as_str() != onejudge {
             Some(format!(
@@ -1197,11 +1325,6 @@ pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config>
         {
             Some(format!(
                 "codecs.{onejudge}.queue is `{queue}`, and `channel serve` asks on `{SURFACES}`"
-            ))
-        } else if let Some(run_env) = &block.run_env {
-            Some(format!(
-                "codecs.{onejudge}.run_env is `{run_env}`, and `channel serve` takes its run from \
-                 its own argument"
             ))
         } else {
             block.about_env.as_ref().map(|about_env| {
@@ -1426,14 +1549,14 @@ impl ChannelState {
 
     /// What the run's configuration sets for the `onejudge` codec `channel serve`
     /// speaks, or nothing for a run whose launch named no configuration.
-    pub(crate) fn codec(&self) -> CodecConfig {
+    pub(crate) fn codec(&self) -> ServeCodec {
         let Some(config) = &self.config else {
-            return CodecConfig::default();
+            return ServeCodec::default();
         };
-        onemessagebus_agent::codec::onejudge::CODEC
+        ONEJUDGE_CODEC
             .parse::<CodecName>()
             .ok()
-            .and_then(|name| config.codecs.get(&name).cloned())
+            .and_then(|name| config.codecs.get(&name).map(ServeCodec::from))
             .unwrap_or_default()
     }
 
@@ -2286,24 +2409,14 @@ mod tests {
         );
     }
 
-    /// The two variables a serving session reads are the names the profile's
-    /// codec reads them under.
+    /// The asker variable a serving session reads is the name the profile
+    /// reads it under.
     ///
-    /// The host's scripts set them by these names, and the codec block's
-    /// defaults are these names; a rename here that the profile did not make
-    /// would leave the host setting a variable nothing reads.
+    /// The host's scripts set it by this name; a rename here that the profile
+    /// did not make would leave the host setting a variable nothing reads.
     #[test]
     fn the_session_variables_are_the_names_the_profile_reads() {
         assert_eq!(ASKER_ENV, onemessagebus_agent::channel::ASKER_ENV);
-        assert_eq!(
-            ASKER_ENV,
-            onemessagebus_agent::codec::onejudge::ASKER_ENV,
-            "the codec reads the asker from another variable"
-        );
-        assert_eq!(
-            SERVE_SESSION_ENV,
-            onemessagebus_agent::codec::onejudge::SESSION_ENV
-        );
     }
 
     /// A question's token is the prefix and the rest of the first line carrying

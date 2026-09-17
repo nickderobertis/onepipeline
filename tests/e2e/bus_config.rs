@@ -29,6 +29,26 @@ const WITHOUT_CANCEL: &str = "version: 1\n\
                               profile: planner-channel\n\
                               authors:\n  monitor: {capabilities: [retry]}\n";
 
+/// The part of an `onejudge` codec block the bus requires of every codec and
+/// `channel serve` reads nothing of.
+///
+/// Since `onemessagebus` 0.6 a codec block describes a protocol the bus's own
+/// `serve` runs — the frame field it `select`s on and the `frames` it binds —
+/// and a block naming neither does not parse. `channel serve` is not that
+/// loop: it reads the block's `asker_env`, `session_env` and
+/// `reply_window_seconds` and answers every frame itself, so what these
+/// journeys put here is the smallest thing the bus accepts, on a frame no
+/// journey ever sends.
+const CODEC_FRAMES: &str = "select: kind
+    frames:
+                                  never-sent: {schema: agent.planner-surface@1,                             bindings: [{do: answer, response: {}}]}
+";
+
+/// An `onejudge` codec block setting `keys`, over [`CODEC_FRAMES`].
+fn onejudge_codec(keys: &str) -> String {
+    format!("version: 1\ntransport: {{kind: local}}\ncodecs:\n  onejudge:\n    {keys}\n    {CODEC_FRAMES}")
+}
+
 fn configuration(world: &World, name: &str, body: &str) -> String {
     let path = world.root.join(name);
     std::fs::write(&path, body).expect("the configuration is written");
@@ -207,38 +227,43 @@ fn a_bus_config_widening_the_monitors_grants_is_refused_before_a_run_exists() {
 /// at the launch, naming the key and its value, before any run exists: a
 /// transport option the local transport does not take, queues of the
 /// configuration's own, a codec `channel serve` does not speak, and an
-/// `onejudge` codec pointed at another queue or at variables `channel serve`
-/// does not read its run or its node from.
+/// `onejudge` codec pointed at another queue or at a variable `channel serve`
+/// does not read its node from. The `run_env` an earlier bus let a codec name
+/// is no key of one since `onemessagebus` 0.6, so it is refused by the bus's
+/// own reading — as an unknown field, naming the key — before this crate reads
+/// the block at all.
 #[test]
 fn a_bus_config_moving_what_the_channel_decides_for_itself_is_refused_before_a_run_exists() {
     let world = World::new("bus-config-corners");
     for (body, named) in [
         (
-            "version: 1\ntransport: {kind: local, poll: fast}\n",
+            "version: 1\ntransport: {kind: local, poll: fast}\n".to_owned(),
             ["transport.poll", "`fast`"],
         ),
         (
-            "version: 1\ntransport: {kind: local}\nqueues:\n  surfaces: {}\n",
+            "version: 1\ntransport: {kind: local}\nqueues:\n  surfaces: {}\n".to_owned(),
             ["queues.surfaces", "leave `queues` out"],
         ),
         (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  another: {}\n",
+            format!(
+                "version: 1\ntransport: {{kind: local}}\ncodecs:\n  another:\n    {CODEC_FRAMES}"
+            ),
             ["codecs.another", "`onejudge`"],
         ),
         (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {queue: replies}\n",
+            onejudge_codec("queue: replies"),
             ["codecs.onejudge.queue", "`replies`"],
         ),
         (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {run_env: HOST_RUN}\n",
-            ["codecs.onejudge.run_env", "`HOST_RUN`"],
+            onejudge_codec("run_env: HOST_RUN"),
+            ["codecs.onejudge", "unknown field `run_env`"],
         ),
         (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {about_env: HOST_ABOUT}\n",
+            onejudge_codec("about_env: HOST_ABOUT"),
             ["codecs.onejudge.about_env", "`HOST_ABOUT`"],
         ),
     ] {
-        refused_before_a_run_exists(&world, body, &named);
+        refused_before_a_run_exists(&world, &body, &named);
     }
 }
 
@@ -319,8 +344,7 @@ fn channel_serve_reads_its_asker_and_bound_from_the_variables_the_codec_names() 
     let file = configuration(
         &world,
         "onemessagebus.yaml",
-        "version: 1\ntransport: {kind: local}\ncodecs:\n  \
-         onejudge: {asker_env: HOST_ASKER, session_env: HOST_SESSION}\n",
+        &onejudge_codec("asker_env: HOST_ASKER\n    session_env: HOST_SESSION"),
     );
     let path = plan(&world, "buscodecenv");
     launched(&world, &path, "buscodecenv", &["--bus-config", &file]);
@@ -569,10 +593,7 @@ fn the_reply_window_a_bus_config_sets_is_how_long_channel_serve_waits() {
     let file = configuration(
         &world,
         "onemessagebus.yaml",
-        &format!(
-            "version: 1\ntransport: {{kind: local}}\ncodecs:\n  \
-             onejudge: {{reply_window_seconds: {WINDOW}}}\n"
-        ),
+        &onejudge_codec(&format!("reply_window_seconds: {WINDOW}")),
     );
     let path = plan(&world, "buswindow");
     launched(&world, &path, "buswindow", &["--bus-config", &file]);

@@ -1653,17 +1653,21 @@ fn each_refusal_the_monitor_meets_is_worded_as_the_contract_states_it() {
         );
     }
 
-    let profile = onemessagebus_agent::channel::allowlist();
-    let monitor = onemessagebus_agent::channel::ChannelAuthor::Monitor.author();
+    // The allowlist a run meets before any configuration narrows it: the
+    // profile's planner beside the monitor this crate declares on the layout,
+    // since `onemessagebus` 0.7 left every author but the planner to whoever
+    // links the profile.
+    let profile = onepipeline::channel::profile_allowlist();
+    let monitor = onemessagebus::Author::from(Author::Monitor.as_str());
     let refused: BTreeSet<String> = onemessagebus_agent::channel::Op::ALL
         .into_iter()
-        .filter(|op| onemessagebus_agent::channel::allows(&profile, &monitor, op.word()).is_err())
+        .filter(|op| onemessagebus_agent::channel::allows(profile, &monitor, op.word()).is_err())
         .map(|op| op.word().to_owned())
         .chain(["completion".to_owned()])
         .collect();
     assert_eq!(
         stated, refused,
-        "the contract's refusals block and what the profile refuses the monitor are not the same set"
+        "the contract's refusals block and what this crate refuses the monitor are not the same set"
     );
 }
 

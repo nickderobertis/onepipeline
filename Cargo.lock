@@ -1278,16 +1278,16 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "255a1800b68091ac1e1f3a97448789a6e3ed725cd0dab26c20ebf0c1f45b2477"
+checksum = "a4d315bbe31bb399e0e6736d7a7f782edc83484efc2e186e2c21e2978f09d6ed"
 dependencies = [
  "clap",
  "libc",
- "oneharness-core 0.13.2",
+ "oneharness-core",
  "onejudge",
- "onemessagebus 0.7.0",
- "onemessagebus-agent 0.7.0",
+ "onemessagebus",
+ "onemessagebus-agent",
  "schemars",
  "serde",
  "serde_json",
@@ -1296,27 +1296,6 @@ dependencies = [
  "thiserror 2.0.20",
  "toml_edit",
  "ureq",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "oneharness-core"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be7da96c308201de958dd4bb245014b8215a3841a6252486ada9c510dc3cff5e"
-dependencies = [
- "fs2",
- "jsonschema 0.33.0",
- "libc",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "toml",
- "uuid",
- "wait-timeout",
- "which",
  "windows-sys 0.61.2",
 ]
 
@@ -1348,31 +1327,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8aa5c3b955eedb5d7541f71d74fe9a7dba5a0f2225b2881b049e6f395591c4f5"
 dependencies = [
  "clap",
- "oneharness-core 0.14.0",
- "onemessagebus 0.7.0",
- "onemessagebus-agent 0.7.0",
+ "oneharness-core",
+ "onemessagebus",
+ "onemessagebus-agent",
  "rustix",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "onemessagebus"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "043c787aab421ae0b3d0179f5f15390ea70b8117577d109533f72ac662ca5fa5"
-dependencies = [
- "getrandom 0.3.4",
- "jsonschema 0.56.0",
- "schemars",
- "serde",
- "serde_json",
- "serde_norway",
- "sha2",
- "thiserror 2.0.20",
- "time",
 ]
 
 [[package]]
@@ -1397,24 +1359,11 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus-agent"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad99ed32fab0e37d111b6555ef741f9e65d1628e3263470742cb3c3ec2f73dd6"
-dependencies = [
- "onemessagebus 0.4.0",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "onemessagebus-agent"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80344b1afbb5054e33b01a12318487fd8753a0c03e82429840d2b2115e65360f"
 dependencies = [
- "onemessagebus 0.7.0",
+ "onemessagebus",
  "schemars",
  "serde",
  "serde_json",
@@ -1430,10 +1379,10 @@ dependencies = [
  "libc",
  "minijinja",
  "oneagentgraph",
- "oneharness-core 0.14.0",
+ "oneharness-core",
  "onejudge",
- "onemessagebus 0.4.0",
- "onemessagebus-agent 0.4.0",
+ "onemessagebus",
+ "onemessagebus-agent",
  "onepipeline-testfakes",
  "onevcs",
  "onevcs-testing",
@@ -1454,7 +1403,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
- "oneharness-core 0.14.0",
+ "oneharness-core",
  "onejudge",
  "onetaskgraph-core",
  "onetaskgraph-local-md",
@@ -1578,8 +1527,8 @@ dependencies = [
  "icu_properties",
  "libc",
  "minijinja",
- "onemessagebus 0.7.0",
- "onemessagebus-agent 0.7.0",
+ "onemessagebus",
+ "onemessagebus-agent",
  "semver",
  "serde",
  "serde_json",
@@ -1599,7 +1548,7 @@ version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7331e69ace24fd7a484ec975b8a8687be8c1ab90a5d09e1462b554118bb6146"
 dependencies = [
- "onemessagebus-agent 0.7.0",
+ "onemessagebus-agent",
  "onevcs",
  "serde",
  "serde_json",
