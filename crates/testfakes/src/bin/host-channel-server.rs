@@ -41,8 +41,18 @@ struct SurfaceFrame {
     message: String,
     #[serde(default = "blocking")]
     blocking: bool,
+    // llmlint: ignore-block[boundary_inputs_validated] the node a surface names is
+    // the test's word, written through as the record's `workstream` — which the
+    // engine itself holds as a plain string, and reads as the root of the subtree
+    // a blocking surface holds: a name no node has holds nothing, by design.
+    // llmlint: ignore-block[invalid_states_unrepresentable] so a bare word here, for
+    // the same reason `kind` is one: what the engine does with a workstream it
+    // cannot place is the engine's to decide, and a double that could only name a
+    // node the run has could not hand it one to decide about.
     #[serde(default)]
     node: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-end[boundary_inputs_validated]
 }
 
 #[derive(Deserialize)]
