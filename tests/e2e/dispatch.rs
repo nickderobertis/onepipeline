@@ -3186,11 +3186,26 @@ fn a_claude_login_refusal_is_stepped_past_as_unauthenticated_rather_than_rate_li
     );
 }
 
-/// A Codex server-overload refusal is retried on its candidate, then reaches a
-/// node settlement in the linked classifier's own spelling.
+/// A Codex `server_overloaded` refusal is retried on its candidate and, once
+/// the budget is spent, stepped past as **server-overloaded** — oneharness's own
+/// reason — and the node settles on the provider rather than on its task.
+///
+/// What puts that reading in front of a dispatch is **this build's lock**, as
+/// with the two journeys above: the classifier that reads Codex's terminal
+/// `turn.failed` is the `oneharness_core` this crate links
+/// (nickderobertis/oneharness#1295). Below the release carrying it the refusal
+/// matched nothing, the candidate was neither retried nor stepped past, and
+/// the node failed on a sentence rather than a classification.
+///
+/// Driven through the real graph and the real `oneharness_core`, with the one
+/// stand-in at the paid harness: `fake-codex`, named on this launch alone —
+/// the suite's launches otherwise leave Codex uninstalled — answers every
+/// attempt with the overload event Codex ends on. The chain is the one
+/// candidate, so the retry the linked core makes is observable as a second
+/// attempt on the same double, and the chain has nothing left to reach.
 #[test]
-fn codex_server_overload_exhaustion_settles_with_the_producers_classification() {
-    use oneharness_core::domain::signals::FailureKind;
+fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_overloaded() {
+    use oneharness_core::domain::fallback::FallThroughReason;
 
     let world = World::new("real-server-overloaded");
     world.write_graphs();
@@ -3203,32 +3218,74 @@ fn codex_server_overload_exhaustion_settles_with_the_producers_classification() 
         "overloaded",
         &plan_of("overloaded", vec![agent("build", &[])]),
     );
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path,
-            "--attach",
-            "--node-set",
-            "members.worker.oneharness_config=./overloaded.toml",
-        ])
-        .settled();
+    let mut launch = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--node-set",
+        "members.worker.oneharness_config=./overloaded.toml",
+    ]);
+    launch.env("ONEHARNESS_BIN_CODEX", crate::harness::double("fake-codex"));
+    world.run_on(launch, "start --attach").settled();
     world.until("the overloaded node to settle", |world| {
         world.run_file("overloaded", "result.json").is_file()
     });
 
-    let node = world.run_json("overloaded", "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "failed", "{node}");
+    // The linked core's own retry: one configured retry is two attempts on the
+    // same candidate before the chain gives it up.
+    let attempts: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "codex")
+        .collect();
     assert_eq!(
-        node["cause"],
-        FailureKind::ServerOverloaded.as_str(),
-        "the linked classifier's failure kind did not reach settlement: {node}"
+        attempts.len(),
+        2,
+        "one configured retry means two attempts on the same candidate: {attempts:#?}"
+    );
+
+    // The advance, as the real graph published it and this crate relayed it:
+    // the identity, under oneharness's own reason for stepping past it.
+    let advanced: Vec<Value> = world
+        .journal("overloaded")
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "fallback-advanced"
+                && event["labels"]["onepipeline.node"] == "build"
+        })
+        .collect();
+    assert_eq!(
+        advanced.len(),
+        1,
+        "the overloaded candidate was not stepped past once: {advanced:#?}"
+    );
+    let advanced: oneagentgraph::event::FallbackAdvanced =
+        serde_json::from_value(advanced[0]["payload"].clone())
+            .expect("the relayed advance is the sibling's own payload");
+    assert_eq!(advanced.identity, "codex", "{advanced:?}");
+    assert_eq!(
+        advanced.reason,
+        FallThroughReason::ServerOverloaded.as_str(),
+        "a Codex overload was stepped past as something other than a server overload: \
+         {advanced:?}"
+    );
+
+    // The settlement: the provider's failure, not the task's. Its `cause` reads
+    // `unclassified` rather than the kind above, because `oneagentgraph` 0.4.4
+    // publishes `unclassified` for every single-sided oneharness failure —
+    // oneharness's `FailureKind`s have no spelling in that crate's closed
+    // `cause` set, and widening it is a proposal its `docs/oneharness-library.md`
+    // records — and this crate carries a published death's word as it was
+    // published rather than re-deriving it from the advance above.
+    let node = world.run_json("overloaded", "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["status"], "failed",
+        "a turn no server ever accepted settled as work: {node}"
     );
     assert_eq!(
-        std::fs::read_to_string(world.root.join("codex-overloaded.calls"))
-            .expect("the Codex double counted each attempt")
-            .trim(),
-        "2",
-        "one configured retry means two attempts on the same candidate"
+        node["outcome"], "provider-failed",
+        "a chain that reached no server settled on something other than the provider: {node}"
     );
 }
 
