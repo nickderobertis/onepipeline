@@ -2271,20 +2271,21 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// The host double refuses an asker it cannot read rather than serving as if
-/// none had been set.
+/// The host double refuses environment it cannot act on rather than serving as
+/// if it had been set to something else.
 ///
 /// `ONEPIPELINE_CHANNEL_ASKER` decides whether a surface's listener outlives the
 /// serving process, so a value the host silently dropped would turn a durable
-/// wait into a session-scoped one with nothing saying so. The double is the
-/// thing every host journey here trusts to raise what it was told, which is why
-/// its own boundary is held to the same bar as the engine's.
+/// wait into a session-scoped one with nothing saying so; a reply window of no
+/// length is a wait nobody meant. The double is the thing every host journey
+/// here trusts to raise what it was told, which is why its own boundary is held
+/// to the same bar as the engine's.
 #[test]
-fn the_host_double_refuses_an_asker_it_cannot_read() {
+fn the_host_double_refuses_environment_it_cannot_act_on() {
     use std::os::unix::ffi::OsStrExt;
 
-    let world = World::new("channel-host-bad-asker");
-    let run = running(&world, "badasker", vec![agent("build", &[])]);
+    let world = World::new("channel-host-bad-env");
+    let run = running(&world, "badenv", vec![agent("build", &[])]);
 
     let mut command = world.host_channel(&run);
     command
@@ -2302,6 +2303,20 @@ fn the_host_double_refuses_an_asker_it_cannot_read() {
     served
         .err_has(onepipeline::channel::ASKER_ENV)
         .err_has("cannot read");
+
+    let mut command = world.host_channel(&run);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "0")
+        .stdin(std::process::Stdio::null());
+    let served = world.run_on(command, "host-channel-server");
+    assert_ne!(
+        served.code, 0,
+        "a reply window of no length is refused: {}",
+        served.stderr
+    );
+    served
+        .err_has("ONEPIPELINE_REPLY_TIMEOUT_SECONDS")
+        .err_has("above zero");
 }
 
 /// A surface whose server exited with the side that asked already gone stops

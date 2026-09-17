@@ -1,7 +1,9 @@
 //! A host-owned, generic channel server used by the compiled-binary journeys.
 //!
-//! This deliberately knows only the bus's serving contract: a JSON frame is a
-//! surface to raise or ask. Kinds and authors remain data chosen by each test.
+//! This deliberately knows only the bus's serving contract: it is one codec the
+//! bus's library server drives, and what it reads off its stdin is a surface to
+//! raise or a correlation to listen for again. Kinds and authors remain data
+//! chosen by each test.
 
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
@@ -13,6 +15,11 @@ use onemessagebus_agent::channel::{PlannerChannel, PLANNER_CHANNEL, SURFACES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] The frames
+// below are this double's own stdin protocol, and this file is their one source:
+// the bus's `Codec` trait hands a codec an opaque string and leaves the frame's
+// shape to the codec, so there is no bus-side schema for these to drift from,
+// and the journeys that write them are the only other party.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceFrame {
@@ -39,6 +46,7 @@ enum Frame {
     Relisten(RelistenFrame),
     Surface(SurfaceFrame),
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 fn blocking() -> bool {
     true
@@ -110,6 +118,16 @@ fn optional(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// A bound spelled in whole seconds. Zero is refused with the rest of what is not
+/// a duration: a wait or a session of no length is a value nobody meant.
+fn seconds(name: &str, word: &str) -> Result<Duration, String> {
+    word.parse::<std::num::NonZeroU64>()
+        .map(|seconds| Duration::from_secs(seconds.get()))
+        .map_err(|failure| {
+            format!("{name} is set to {word:?}, which is not a whole number of seconds above zero: {failure}")
+        })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     let channel = PathBuf::from(
@@ -128,18 +146,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // historical journeys. The production engine owns only ASKER_ENV; the other two
     // are not product contracts and disappear with those fixtures.
     let reply_window = optional("ONEPIPELINE_REPLY_TIMEOUT_SECONDS")?
-        .map(|word| word.parse::<u64>())
+        .map(|word| seconds("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", &word))
         .transpose()?
-        .unwrap_or(60);
+        .unwrap_or(Duration::from_secs(60));
     let options = ServeOptions {
         asker: optional("ONEPIPELINE_CHANNEL_ASKER")?
             .map(|word| Asker::new(&word, "ONEPIPELINE_CHANNEL_ASKER"))
             .transpose()?,
         about: None,
         session: optional("ONEPIPELINE_SERVE_SESSION_SECONDS")?
-            .map(|word| word.parse::<u64>().map(Duration::from_secs))
+            .map(|word| seconds("ONEPIPELINE_SERVE_SESSION_SECONDS", &word))
             .transpose()?,
-        reply_window: Duration::from_secs(reply_window),
+        reply_window,
     };
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     let queue: QueueName = SURFACES.parse()?;
