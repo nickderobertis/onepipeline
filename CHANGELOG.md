@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0](https://github.com/nickderobertis/onepipeline/compare/v0.34.0...v0.35.0) - 2026-09-17
+
+### Added
+
+- *(channel)* [**breaking**] open the surface kind vocabulary and retire channel serve ([#346](https://github.com/nickderobertis/onepipeline/pull/346))
+
+### Fixed
+
+- *(tests)* give each writeback test its own scratch directory ([#340](https://github.com/nickderobertis/onepipeline/pull/340))
+
 ## [0.34.0](https://github.com/nickderobertis/onepipeline/compare/v0.33.2...v0.34.0) - 2026-09-16
 
 ### Fixed
