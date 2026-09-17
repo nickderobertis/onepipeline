@@ -716,12 +716,23 @@ fn over(child: &Mutex<Child>) -> bool {
 /// separates the two: what has arrived is yielded as it arrives, and a silence is
 /// the moment to ask whether there is still anything that could write.
 ///
-/// Nothing is lost by ending there. What the graph wrote before it exited is in
-/// the pipe and read before the first silence; what could arrive afterwards is
-/// another process's output on a stream this run has finished with.
+/// A silence ends the stream only when it **began** with the graph already known
+/// to be over. What the graph wrote before it exited is in the pipe, but it is
+/// the reading thread that carries it from there to here, and that thread has no
+/// claim on the processor: a poll that expires as the graph's last burst lands
+/// finds the graph gone and the burst still unread, and a stream that ended on
+/// that finding lost the turn that settles the node. So the first silence in
+/// which the graph is found over is the one that says so, and the stream ends on
+/// the next full silence after it — with a line arriving in between starting the
+/// count again, so the burst is delivered whole before the stream ends on the
+/// quiet after it. A launch whose pipe closes the moment its graph exits still
+/// ends on the pipe and pays nothing for this.
+///
+/// `over` answers whether the graph process has ended, without waiting to find
+/// out; the launch's own answer is [`over`], and a test hands in one of its own.
 fn relayed_lines(
-    reader: BufReader<std::process::ChildStdout>,
-    child: Arc<Mutex<Child>>,
+    reader: impl BufRead + Send + 'static,
+    over: impl Fn() -> bool + Send + 'static,
 ) -> impl Iterator<Item = std::io::Result<String>> + Send {
     let (lines, arriving) = mpsc::channel();
     // Not waited on, and not branched on: the channel closing is what says the
@@ -738,14 +749,19 @@ fn relayed_lines(
                 }
             }
         });
+    // Whether the silence now being waited out began with the graph over.
+    let mut found_over = false;
     std::iter::from_fn(move || loop {
         match arriving.recv_timeout(RELAY_POLL) {
-            Ok(line) => return Some(line),
+            Ok(line) => {
+                found_over = false;
+                return Some(line);
+            }
             // The pipe reached its end, which is the stream ending as it always
             // did on a host that leaves nothing holding it.
             Err(mpsc::RecvTimeoutError::Disconnected) => return None,
-            Err(mpsc::RecvTimeoutError::Timeout) if over(&child) => return None,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) if found_over => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => found_over = over(),
         }
     })
 }
@@ -1526,7 +1542,10 @@ impl ProcessGraphRun {
             announced
                 .into_iter()
                 .map(Ok)
-                .chain(relayed_lines(stdout, Arc::clone(&self.child)))
+                .chain(relayed_lines(stdout, {
+                    let child = Arc::clone(&self.child);
+                    move || over(&child)
+                }))
                 .filter_map(|line| match line {
                     // A stream that broke is not a stream that ended. Read as the same
                     // thing, a relay stops mid-run and reports a clean finish, and the
@@ -4071,5 +4090,111 @@ mod tests {
             stderr: String::new()
         }
         .succeeded());
+    }
+
+    /// A pipe as the relay's reading thread meets it, scripted in time: `held`
+    /// is waited out before the first byte is handed over, then the burst is
+    /// read whole, and then the pipe is either at its end or held open by
+    /// something that never writes, which `held_open` keeps it until the test
+    /// lets go of its sender.
+    struct ScriptedPipe {
+        held: Duration,
+        burst: std::io::Cursor<Vec<u8>>,
+        held_open: Option<mpsc::Receiver<()>>,
+    }
+
+    impl std::io::Read for ScriptedPipe {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.held.is_zero() {
+                std::thread::sleep(std::mem::take(&mut self.held));
+            }
+            let read = self.burst.read(buf)?;
+            if read > 0 {
+                return Ok(read);
+            }
+            // A handle some orphan of the graph still holds: nothing more ever
+            // arrives, and the end comes only when the test drops the sender.
+            if let Some(held_open) = self.held_open.take() {
+                let _ = held_open.recv();
+            }
+            Ok(0)
+        }
+    }
+
+    fn lines_relayed_from(pipe: ScriptedPipe, over: bool) -> Vec<String> {
+        relayed_lines(BufReader::new(pipe), move || over)
+            .map(|line| line.expect("a scripted pipe reads"))
+            .collect()
+    }
+
+    /// The race the relay used to lose: the graph wrote its last burst and
+    /// exited, and its reading thread had not yet been scheduled when the poll
+    /// expired. The stream must wait out one more silence and deliver the burst
+    /// rather than end on the exit it found.
+    #[test]
+    fn a_burst_the_graph_wrote_before_exiting_is_delivered_however_late_the_relay_reads_it() {
+        let lines = lines_relayed_from(
+            ScriptedPipe {
+                held: RELAY_POLL + Duration::from_millis(100),
+                burst: std::io::Cursor::new(b"{\"seq\":1}\n{\"seq\":2}\n".to_vec()),
+                held_open: None,
+            },
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec!["{\"seq\":1}".to_string(), "{\"seq\":2}".to_string()],
+            "the burst the graph wrote before it exited was not delivered whole"
+        );
+    }
+
+    /// The case the poll exists for: the graph is over, its burst was read, and
+    /// an orphan still holds the pipe open. The stream ends on the silence after
+    /// the burst rather than waiting on a process this run never started.
+    #[test]
+    fn a_pipe_an_orphan_holds_open_ends_on_the_silence_after_the_graph_is_over() {
+        let (holder, held_open) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let lines = lines_relayed_from(
+            ScriptedPipe {
+                held: Duration::ZERO,
+                burst: std::io::Cursor::new(b"{\"seq\":1}\n".to_vec()),
+                held_open: Some(held_open),
+            },
+            true,
+        );
+        let waited = started.elapsed();
+        drop(holder);
+        assert_eq!(lines, vec!["{\"seq\":1}".to_string()]);
+        assert!(
+            waited < RELAY_POLL * 4,
+            "the stream waited {waited:?} on a pipe the graph had already left"
+        );
+    }
+
+    /// A graph still running is never ended on a silence, however long: the
+    /// stream waits for the pipe.
+    #[test]
+    fn a_silence_with_the_graph_still_running_ends_nothing() {
+        let (holder, held_open) = mpsc::channel::<()>();
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(RELAY_POLL * 3);
+            drop(holder);
+        });
+        let started = Instant::now();
+        let lines = lines_relayed_from(
+            ScriptedPipe {
+                held: Duration::ZERO,
+                burst: std::io::Cursor::new(b"{\"seq\":1}\n".to_vec()),
+                held_open: Some(held_open),
+            },
+            false,
+        );
+        releasing.join().expect("the releasing thread finishes");
+        assert_eq!(lines, vec!["{\"seq\":1}".to_string()]);
+        assert!(
+            started.elapsed() >= RELAY_POLL * 3,
+            "the stream ended on a silence while the graph was still running"
+        );
     }
 }
