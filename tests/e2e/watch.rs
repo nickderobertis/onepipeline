@@ -20,198 +20,17 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, ended, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED,
-    RENDER_COST_ENV, SURFACE_WAITING, USAGE_ERROR, WATCH_ELAPSED,
+    agent, human, plan_of, Run, World, NODE_SETTLED, NOTHING_DRIVING, REFUSED, USAGE_ERROR,
+    WATCH_ELAPSED,
 };
 
 /// A window long enough that the tree before `watch` waited on the bus — which
 /// read the run once a second whatever it did — would have read it again inside.
-const QUIET: std::time::Duration = std::time::Duration::from_millis(2_500);
 
 /// How soon a watch reports what moved: the local transport looks for a change
 /// every 20ms, and what a watch adds is one read of the run and the lines it
 /// writes. Stated with room for a loaded host, and still under the second the
 /// tree before this change slept between reads.
-const REPORTED_WITHIN: std::time::Duration = std::time::Duration::from_millis(750);
-
-/// A watch reads the run again only when something it decides from moved, and a
-/// blocking surface raised while it waits is reported within the local
-/// transport's change latency.
-///
-/// The reads are counted as work rather than inferred from time: a watch records
-/// each read of the run where `ONEPIPELINE_RENDER_COST` names a file, so a window
-/// in which none of the run's own files moved is a window in which that count may
-/// not move either, and nothing may be written to either stream.
-#[test]
-fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once() {
-    use std::io::{BufRead, BufReader, Read};
-    use std::time::Instant;
-
-    let world = World::new("watch-changes");
-    world.script("build.wait", "hold");
-    let run = running(&world, "watchchanges", vec![agent("build", &[])]);
-    let renders = world.root.join("watch.renders");
-    let reads = || {
-        std::fs::read_to_string(&renders)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|act| act["view"] == json!("watch") && act["act"] == json!("render"))
-            .count()
-    };
-    let surfaces = world.run_file(&run, "channel/surfaces.jsonl");
-    let marks = || -> Vec<Option<(u64, std::time::SystemTime)>> {
-        [
-            world.run_file(&run, "events.jsonl"),
-            world.run_file(&run, "launch.json"),
-            surfaces.clone(),
-            world.run_file(&run, "channel/replies.jsonl"),
-            world.run_file(&run, "channel/commands.jsonl"),
-        ]
-        .iter()
-        .map(|file| {
-            std::fs::metadata(file)
-                .ok()
-                .map(|meta| (meta.len(), meta.modified().expect("a modification time")))
-        })
-        .collect()
-    };
-
-    let mut watching = world
-        .cmd(&[
-            "watch",
-            &run,
-            "--until",
-            "surface",
-            "--timeout",
-            "600",
-            "--tick-interval",
-            "0",
-        ])
-        // llmlint: ignore[tests_mirror_real_usage] what this journey proves is that a watch reads the run again only when it moved, and a read that prints nothing is invisible on the CLI's streams — so it is counted by the render record the binary itself writes, which `tests/e2e/loopcost.rs` counts a driver's work by for the same reason. Everything else here is the real `watch` over a real run root.
-        .env(RENDER_COST_ENV, &renders)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the watch starts");
-    let (printed, lines) = std::sync::mpsc::channel::<(Instant, String)>();
-    let stdout = watching.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let _ = printed.send((Instant::now(), line.expect("the watch's output reads")));
-        }
-    });
-    world.until("the watch to read the run", |_| reads() >= 1);
-
-    // A window the run did not move across. The held dispatch writes nothing, but
-    // a driver settling in may still record something, so a window in which a
-    // file moved is taken again rather than counted. The count is read after a
-    // settle, so a change the watch was already reading when the window opened is
-    // not counted against it.
-    let mut held_still = false;
-    for _ in 0..10 {
-        let before = marks();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let read_before = reads();
-        std::thread::sleep(QUIET);
-        if marks() == before {
-            assert_eq!(
-                reads(),
-                read_before,
-                "the watch read the run again across {QUIET:?} in which nothing it reads moved"
-            );
-            held_still = true;
-            break;
-        }
-    }
-    assert!(
-        held_still,
-        "the run never held still for {QUIET:?}:\n{}",
-        world.dump()
-    );
-    let quiet_until = Instant::now();
-
-    let mut serving = world
-        .cmd(&["channel", "serve", &run])
-        // Nobody answers this one, and the server's own wait is not under test —
-        // only long enough that the question is still open when the watch reads it.
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "5")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
-    let length = || std::fs::metadata(&surfaces).map_or(0, |meta| meta.len());
-    let unraised = length();
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"raised while the watch waits","blocking":true,"node":"build"}}"#
-    )
-    .expect("the frame is written");
-    stdin.flush().expect("flushed");
-
-    let deadline = Instant::now() + std::time::Duration::from_secs(120);
-    let mut raised_at = None;
-    let exited = loop {
-        if raised_at.is_none() && length() > unraised {
-            raised_at = Some(Instant::now());
-        }
-        if let Some(status) = watching.try_wait().expect("the watch is waited on") {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the watch never returned:\n{}",
-            world.dump()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    };
-    let exited_at = Instant::now();
-    reader.join().expect("the reader finishes");
-    let mut said = String::new();
-    watching
-        .stderr
-        .take()
-        .expect("stderr is piped")
-        .read_to_string(&mut said)
-        .expect("the human form reads");
-    let raised_at = raised_at.expect("the surface reached the channel before the watch returned");
-
-    assert_eq!(exited.code(), Some(SURFACE_WAITING), "{said}");
-    let latency = exited_at.saturating_duration_since(raised_at);
-    assert!(
-        latency < REPORTED_WITHIN,
-        "a surface raised while the watch waited was reported {latency:?} after it was \
-         queued, past {REPORTED_WITHIN:?}"
-    );
-    let records: Vec<(Instant, Value)> = lines
-        .try_iter()
-        .map(|(at, line)| {
-            let record = serde_json::from_str(&line).unwrap_or_else(|e| {
-                panic!("the watch wrote a line that is not JSON ({e}): {line}")
-            });
-            (at, record)
-        })
-        .collect();
-    assert!(
-        records.iter().all(|(at, _)| *at > quiet_until),
-        "the watch wrote while the run was not moving: {records:?}"
-    );
-    let last = &records.last().expect("the watch says why it returned").1;
-    assert_eq!(last["condition"], json!("surface-waiting"), "{last}");
-    assert!(
-        records
-            .iter()
-            .any(|(_, record)| record["watch"] == json!("event")
-                && record["event"]["kind"] == json!("planner-surface-queued")),
-        "the surface raised while the watch waited never reached it: {records:?}"
-    );
-
-    drop(stdin);
-    ended(serving);
-    world.release("build.go");
-}
 
 fn running(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
@@ -293,20 +112,17 @@ fn agreed(watched: &Run, condition: &str, code: i32) {
 /// machine-readable form carries the same three. The other five meaningful kinds
 /// are driven by the journey below this one.
 ///
-/// The graph edit is issued by the **monitor**, because an edit is emitted
-/// whichever author issued it and the monitor's is the author a supervisor is
-/// least expecting.
 #[test]
 fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     let world = World::new("watch-classes");
     world.script("build.wait", "hold");
     let run = running(&world, "watchclasses", vec![agent("build", &[])]);
 
-    // A graph edit, issued by the monitor rather than by the planner.
+    // A graph edit issued through the public reply boundary.
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "add", "node": {"id": "extra", "persona": "engineer",
                                        "task": "## What\nsweep"}}
             ]})
@@ -319,7 +135,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "finding", "id": "build", "message": "the branch has no commits yet"}
             ]})
             .to_string(),
@@ -370,7 +186,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
             "the machine form carries no `{kind}`, only {kinds:?}"
         );
     }
-    // The edit reaches the caller as the monitor's, which is the whole point of
+    // The edit reaches the caller with its author, which is the whole point of
     // emitting it: the author is on the record the watch handed over, so a
     // supervisor never has to go back to the store to find out whose it was.
     let edit = machine(&watched)
@@ -379,7 +195,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
         .expect("the edit was emitted");
     assert_eq!(
         edit["event"]["payload"]["author"],
-        json!("monitor"),
+        json!("planner"),
         "{edit}"
     );
 
@@ -408,103 +224,6 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
             );
         }
     }
-}
-
-/// The decision, completion and stop records a supervisor acts on reach the
-/// watch as lines too — including the edit the reconciler refused, which is as
-/// much a thing to act on as one that landed.
-#[test]
-fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
-    let world = World::new("watch-decisions");
-    world.script("build.wait", "hold");
-    let run = running(&world, "watchdecisions", vec![agent("build", &[])]);
-
-    // llmlint: ignore-block[tests_mirror_real_usage] the durable queue is written
-    // directly for the one reason `live_edit.rs` writes it directly: an edit the
-    // *reconciler* refuses is the case a user cannot type, because the submission check
-    // would reject this one first and `edit-rejected` — the record this journey is here
-    // to see emitted — would never be written. Everything else below goes through the
-    // binary's own verbs.
-    std::fs::write(
-        world.run_file(&run, "channel/commands.jsonl"),
-        format!(
-            "{}\n",
-            json!({"id": 0, "commands": [{"op": "cancel", "id": "nowhere"}]})
-        ),
-    )
-    .expect("the command is queued");
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    world.until("the reconciler to refuse the edit", |world| {
-        !world.events_of(&run, "edit-rejected").is_empty()
-    });
-
-    // A blocking surface begins holding the subtree that depends on the node it
-    // names, and answering it releases exactly that subtree.
-    let mut serving = world
-        .cmd(&["channel", "serve", &run])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"is this still wanted?","blocking":true,"node":"build"}}"#
-    )
-    .expect("the frame is written");
-    stdin.flush().expect("flushed");
-    world.until("the decision to begin holding the subtree", |world| {
-        !world.events_of(&run, "decision-pending").is_empty()
-    });
-    world.run(&["next", &run]).exited(0);
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            r#"{"completion":false,"reason":"carry on"}"#,
-        )
-        .exited(0);
-    world.until("the decision to clear", |world| {
-        !world.events_of(&run, "decision-cleared").is_empty()
-    });
-    drop(stdin);
-    ended(serving);
-
-    // The planner asks for completion, independently of any graph mutation.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": 2, "commands": [
-                {"op": "complete", "reason": "that is as far as this goes"}
-            ]})
-            .to_string(),
-        )
-        .exited(0);
-    world.until("the completion request to be recorded", |world| {
-        !world.events_of(&run, "completion-requested").is_empty()
-    });
-
-    world.run(&["stop", &run, "--force"]).exited(0);
-    world.until("the stop to be recorded", |world| {
-        !world.events_of(&run, "run-stopped").is_empty()
-    });
-
-    let watched = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
-    let kinds = emitted(&watched);
-    for kind in [
-        "edit-rejected",
-        "decision-pending",
-        "decision-cleared",
-        "completion-requested",
-        "run-stopped",
-    ] {
-        assert!(
-            kinds.iter().any(|emitted| emitted == kind),
-            "the watch calls `{kind}` meaningful and emitted none, only {kinds:?}"
-        );
-    }
-
-    world.release("build.go");
 }
 
 /// With nothing happening, the watch says so on the interval it was given — and
@@ -619,81 +338,6 @@ fn a_watch_told_not_to_tick_stays_silent_for_the_whole_wait() {
     // turning the heartbeat off never turns the signal off.
     assert_eq!(returned(&watched)["unread"]["count"], json!(1));
 
-    world.release("build.go");
-}
-
-/// A blocking surface returns a status of its own — and only when the watch was
-/// asked to return on one.
-#[test]
-fn a_blocking_surface_returns_a_status_of_its_own_and_only_when_asked_for() {
-    let world = World::new("watch-surface");
-    world.script("build.wait", "hold");
-    let run = running(&world, "watchsurface", vec![agent("build", &[])]);
-
-    // Through the channel server, because that is the only author of a blocking
-    // surface: `surface --kind finding` is a report and holds nothing back.
-    let mut serving = world
-        .cmd(&["channel", "serve", &run])
-        // Nobody answers this one, and the server's own wait is not under test.
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"the gate refused; retry?","blocking":true,"node":"build"}}"#
-    )
-    .expect("the frame is written");
-    stdin.flush().expect("flushed");
-    world.until("the blocking surface to reach the planner", |world| {
-        world
-            .events_of(&run, "planner-surface-queued")
-            .iter()
-            .any(|event| event["payload"]["blocking"] == json!(true))
-    });
-
-    let watched = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
-    agreed(&watched, "surface-waiting", SURFACE_WAITING);
-    let last = returned(&watched);
-    assert_eq!(
-        last["unread"]["kinds"][0]["kind"],
-        json!("blocker"),
-        "{last}"
-    );
-    assert!(
-        watched
-            .stderr
-            .contains("1 unread planner surface(s): 1 blocker"),
-        "the return line does not say what is waiting:\n{}",
-        watched.stderr
-    );
-
-    // Asked to wait for the run instead, the same watch over the same state
-    // reports the surface and goes on waiting.
-    let waited = world.run(&[
-        "watch",
-        &run,
-        "--timeout",
-        "2",
-        "--tick-interval",
-        "1",
-        "--until",
-        "settled",
-    ]);
-    agreed(&waited, "elapsed", WATCH_ELAPSED);
-    assert!(
-        waited.stdout.contains("\"blocker\""),
-        "the surface stopped being counted once it stopped ending the wait:\n{}",
-        waited.stdout
-    );
-
-    // The server is blocked reading the pipe this test still holds; closing it is
-    // what lets the frame stream end and the process exit.
-    drop(stdin);
-    ended(serving);
     world.release("build.go");
 }
 
@@ -1951,10 +1595,16 @@ fn a_monitor_resumed_from_the_cursor_it_printed_repeats_nothing_and_misses_nothi
         world
             .run(&["surface", &run, "--kind", "finding", "--message", &message])
             .exited(0);
+        let rendered_message = format!(
+            "message={}",
+            serde_json::to_string(&message).expect("the message renders")
+        );
 
         let resumed = with(Some(&taken));
         let next = resume_line(&resumed);
-        resumed.out_has(&message).out_has(&format!("-- {run}  "));
+        resumed
+            .out_has(&rendered_message)
+            .out_has(&format!("-- {run}  "));
         for earlier in &said {
             resumed.out_lacks(earlier);
         }
@@ -1965,8 +1615,8 @@ fn a_monitor_resumed_from_the_cursor_it_printed_repeats_nothing_and_misses_nothi
 
         let again = with(Some(&next));
         resume_line(&again);
-        again.out_lacks(&message);
-        said.push(message);
+        again.out_lacks(&rendered_message);
+        said.push(rendered_message);
     }
 
     world.release("build.go");

@@ -1001,7 +1001,7 @@ key nothing can satisfy.
 channel authors are open words, with author grants supplied by the launch's bus
 configuration as stated in the contract.
 
-The former `channel serve` command and its member-protocol implementation are
+The former `onemessagebus serve` command and its member-protocol implementation are
 removed. The host's message-bus process owns codec bindings and schema links;
 onepipeline loads those configuration fields but neither resolves nor interprets
 them. `SurfaceKind` now carries every word matching
@@ -4100,7 +4100,7 @@ The contract says, of a decision point:
 
 Two clearings are named and both are somebody answering. There is a third, and
 it is not an answer: the observer member's conversation ends, its graph tears
-down, and the the retired channel server that raised the question reaches the
+down, and the the retired onemessagebus server that raised the question reaches the
 end of its frame stream and exits. The question is left in the queue with no
 reader for its answer — `serve` is the only process that was waiting on one —
 and every supervisory view goes on reporting it. An operator measured one such
@@ -4131,7 +4131,7 @@ the readable ones; **62** is why it is not, and what that cost.)
 
 **The discriminator is the asker, never the server**, and `serve` now names which
 ending it reached rather than inferring one from the fact that its loop stopped.
-`driver::Served` is that set, and it has exactly three members. `StreamEnded` —
+the former driver outcome is that set, and it has exactly three members. `StreamEnded` —
 the frame stream ended — and `Completed` — the member declared its work done in a
 verdict this session carried back to it — both mark what the session leaves
 behind. `SessionOver` proves only that *this process* is done: the member is
@@ -4165,7 +4165,7 @@ bound must not raise a question it will not stay for.
 Held end to end by
 `channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread`
 and `channel::a_blocking_surface_outlives_a_server_that_stopped_while_its_asker_stayed`,
-each against a real the retired channel server the test starts and lets end on its own —
+each against a real the retired onemessagebus server the test starts and lets end on its own —
 neither signals one — asserting on what `runs` and `status` printed, on what
 `next` handed back, and on `reply` still being accepted afterwards.
 
@@ -4194,7 +4194,7 @@ frame stream ending proves the side that was asking has gone — true of a membe
 whose whole conversation the stream is, and **false of every asker that rents a
 listener**. The one supported way a dispatched agent puts a blocking question to
 its manager is such an asker: `ask-manager.sh` raises the question through one
-the retired channel server, whose stdin is a pipe a `printf` closes at once, and
+the retired onemessagebus server, whose stdin is a pipe a `printf` closes at once, and
 then waits for a verdict through a *succession* of those sessions — re-arming
 each time one exits with the same question still open and the same agent still
 blocked. Every one of those exits was read as the agent going away.
@@ -4266,7 +4266,7 @@ inside this crate.
 **What a consumer writing an asking wrapper may rely on**, without reading any of
 the above:
 
-1. A question is raised by writing one compact JSON frame to one the retired channel server
+1. A question is raised by writing one compact JSON frame to one the retired onemessagebus server
    session, which queues it and waits for the verdict.
 2. That session carries an asker if `ONEPIPELINE_CHANNEL_ASKER` is set in its
    environment. A dispatch this engine makes sets it; a wrapper may set it
@@ -4292,7 +4292,7 @@ the above:
 
 Held end to end by
 `channel::a_question_survives_its_listener_being_replaced_and_the_verdict_reaches_the_asker`,
-which drives three real the retired channel server processes it starts and lets end on their
+which drives three real the retired onemessagebus server processes it starts and lets end on their
 own — none is signalled — leaves one question open across **two** replacements of
 the listener, and asserts on the verdict a manager sent afterwards arriving on
 the third listener's own stdout rather than on any stand-in for it; and by
@@ -4319,7 +4319,7 @@ two claimants for one ruling.**
 **What the code does.** `ChannelState::claim_reply` hands the oldest reply no
 reader has taken to whoever asks next, advancing one cursor. Which readers reach
 it at all is decided by the halves — a commands-only envelope is not on this
-queue — and among the ones that do, nothing distinguishes them. the retired channel server
+queue — and among the ones that do, nothing distinguishes them. the retired onemessagebus server
 follows **every** frame with a wait that claims, a monitor's non-blocking
 narration included, so a scoring session that raised something nobody is waiting
 on takes the ruling meant for the blocking question a dispatched agent is still
@@ -4346,7 +4346,7 @@ by — so the two entries are one decision, not two. Recorded rather than repair
 **Ruling: a reply is addressed.** The planner ruled it for
 `onepipeline-adopt-bus-channel`, and `docs/contract.md`'s channel paragraph states
 it, `--correlation` included. The channel is `onemessagebus`'s now, and a question
-the retired channel server raises is asked through the bus, which stamps it with a
+the retired onemessagebus server raises is asked through the bus, which stamps it with a
 correlation; a verdict is bound to one question and stamped with that question's
 correlation on `replies.jsonl`. `reply --correlation <c>` binds to the question
 `c` names, and refuses, naming it, a correlation no pending question holds. A
@@ -5947,7 +5947,7 @@ records; and the envelope reviewer takes a bar under which its passes are kept,
 while the node validator keeps none.**
 
 What moved. The channel directory's queues, cursors, projection and exclusive
-sections are the bus's `Queue` over `LocalTransport`. A question the retired channel server
+sections are the bus's `Queue` over `LocalTransport`. A question the retired onemessagebus server
 raises is asked with `Bus::ask` under a durable `Asker` and waited on with
 `Pending::wait`. The per-author allowlist is the profile's, and a bus configuration
 may narrow it. The reply envelope is the registered message
@@ -5964,7 +5964,7 @@ second.
 Where that is not what 0.28.2 did:
 
 - **Ask and reply records carry `correlation`.** The correlation the bus mints for
-  a question is written on its ask — the surface record the retired channel server queues on
+  a question is written on its ask — the surface record the retired onemessagebus server queues on
   `surfaces.jsonl` — and on the reply record on `replies.jsonl` that answers it.
   0.28.2 wrote no such field, so the byte comparison with 0.28.2's channel
   (`recorded_channel::a_channel_this_build_writes_is_byte_for_byte_the_channel_the_release_writes`)
@@ -5975,7 +5975,7 @@ Where that is not what 0.28.2 did:
   verdict on another asker's question. 0.28.2 handed a verdict to whichever reader
   polled first (entry 63).
 - **An unanswered question is answered with the wait.** A question nobody answers
-  within the reply window is answered on the retired channel server's stdout with
+  within the reply window is answered on the retired onemessagebus server's stdout with
   `{"answer": "timeout", "correlation": C}`. That answer carries no completion and
   appends no reply; the question stays queued, and a frame `{"correlation": C}`
   waits for its answer again.
@@ -5993,11 +5993,11 @@ Where that is not what 0.28.2 did:
   `onejudge`, an `onejudge` codec asking on a queue other than `surfaces`, its
   `run_env` or `about_env`, and an `authors` block that widens a grant are each
   refused at the launch, naming the key and its value, before any run exists. The
-  run's channel is its run root's, its queues are the layout's, and the retired channel server
+  run's channel is its run root's, its queues are the layout's, and the retired onemessagebus server
   takes its run and each question's node from its own argument and frame.
 - **A surface this crate raises itself is not offered to the validators.** The
   engine's own reports and the `surface` verb append unjudged. A configuration's
-  validators judge the questions the retired channel server raises and the replies `reply`
+  validators judge the questions the retired onemessagebus server raises and the replies `reply`
   submits.
 - **The envelope reviewer's passes can be kept.** Under a bar named by
   `--envelope-reviewer-bar`, `ONEPIPELINE_ENVELOPE_REVIEWER_BAR` or

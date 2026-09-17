@@ -153,6 +153,9 @@ pub enum Command {
     Plan(PlanCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
+    /// Inspect the channel command group.
+    #[command(subcommand)]
+    Channel(ChannelCommand),
     /// Read the next planner surface.
     Next(ReadArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
@@ -209,6 +212,14 @@ pub enum PlanCommand {
     /// Run the engine's own plan loader, and every registered check, over one
     /// project.
     Check(PlanCheckArgs),
+}
+
+/// The channel has no engine-owned serving verbs.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ChannelCommand {
+    /// Parser sentinel: the channel exposes no executable engine verb.
+    #[command(hide = true, name = "__no-engine-verb")]
+    NoEngineVerb,
 }
 
 /// `onepipeline plan check`.

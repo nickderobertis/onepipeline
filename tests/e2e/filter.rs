@@ -15,7 +15,7 @@
 
 use std::io::Write;
 
-use crate::harness::{agent, ended, plan_of, World, REFUSED};
+use crate::harness::{agent, plan_of, World, REFUSED};
 
 /// Run one node to settlement, and answer with the run's id.
 ///
@@ -37,11 +37,8 @@ fn settled(world: &World, name: &str, flags: &[&str]) -> String {
     name.to_string()
 }
 
-/// Raise a blocking question about the run, and wait until it is queued.
-///
-/// Through the channel server, because that is the only author of a blocking
-/// surface: `surface --kind check-in` is a report and never holds anything back.
-fn raise_blocker(world: &World, run: &str) -> std::process::Child {
+/// Append the blocking surface a host-owned bus binding would send.
+fn raise_blocker(world: &World, run: &str) {
     let waiting = |world: &World| {
         world
             .run(&["status", run])
@@ -57,29 +54,15 @@ fn raise_blocker(world: &World, run: &str) -> std::process::Child {
         !waiting(world),
         "a surface was already waiting, so this journey cannot tell its own from it"
     );
-    let mut serving = world
-        .cmd(&["channel", "serve", run])
-        // Nobody answers this one, and the server's own wait is not what is under
-        // test.
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the channel server starts");
-    // Written through the child's own handle rather than taken out of it: the
-    // server is the reader waiting on this question, and a stream closed here
-    // would say nobody was waiting on it before the caller has read it. Each
-    // caller closes it when it is done — `drop(serving.stdin.take())`.
-    let stdin = serving.stdin.as_mut().expect("stdin is piped");
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"the plan looks wrong; what now?"}}"#
+    std::fs::write(
+        world.run_file(run, "channel/surfaces.jsonl"),
+        concat!(
+            r#"{"event":"queued","id":0,"kind":"blocker","message":"the plan looks wrong; what now?","source":"host-watch","blocking":true,"queued_at":0,"asker":"host-watch"}"#,
+            "\n"
+        ),
     )
-    .expect("the frame is written");
-    stdin.flush().expect("flushed");
+    .expect("the host binding appends its surface");
     world.until("the question to reach the planner", waiting);
-    serving
 }
 
 /// Every `--event-filter` this world's launches spelled onto the sibling they
@@ -335,7 +318,7 @@ fn a_launch_overrides_the_shipped_profiles_by_name() {
 fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
     let world = World::new("filter-readonly");
     let run = settled(&world, "shaped", &[]);
-    let mut serving = raise_blocker(&world, &run);
+    raise_blocker(&world, &run);
 
     // The store as a reader sees the whole of it: `monitor --all` is the
     // unfiltered view, one line per event, so "the store did not change" is
@@ -429,9 +412,6 @@ fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
         store(),
         "reading a run through a profile changed its merged store"
     );
-
-    drop(serving.stdin.take());
-    ended(serving);
 }
 
 /// Every way of naming a profile shapes `next`'s event view, and none of them
@@ -475,7 +455,7 @@ fn every_spelling_of_a_profile_shapes_the_view_and_still_delivers_a_blocking_sur
         (vec!["--all"], View::Everything),
         (vec![], View::PipelineOnly),
     ] {
-        let mut serving = raise_blocker(&world, &run);
+        raise_blocker(&world, &run);
         let mut args = vec!["next", &run];
         args.extend_from_slice(&filter);
         let read = world.run(&args);
@@ -505,9 +485,6 @@ fn every_spelling_of_a_profile_shapes_the_view_and_still_delivers_a_blocking_sur
             saw, expected,
             "`next {filter:?}` shaped its view as {saw:?}, over sources {sources:?}"
         );
-
-        drop(serving.stdin.take());
-        ended(serving);
     }
 }
 
@@ -690,7 +667,7 @@ fn a_launch_composing_an_installed_sibling_spells_the_filter_onto_its_argv() {
 fn a_next_that_refuses_its_filter_leaves_the_surface_unclaimed() {
     let world = World::new("filter-claim-order");
     let run = settled(&world, "unclaimed", &[]);
-    let mut serving = raise_blocker(&world, &run);
+    raise_blocker(&world, &run);
 
     let refused = world.run(&["next", &run, "--filter", r#"{"include": [{"role": "a"}]}"#]);
     refused.exited(REFUSED);
@@ -709,9 +686,6 @@ fn a_next_that_refuses_its_filter_leaves_the_surface_unclaimed() {
         "a refused read spent the surface it refused to render:\n{}",
         read.stdout
     );
-
-    drop(serving.stdin.take());
-    ended(serving);
 }
 
 /// A launch config declares the whole `filters:` block, and it is the same block

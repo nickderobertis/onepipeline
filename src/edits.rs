@@ -350,7 +350,7 @@ impl Operation {
             // reads them off `edit-committed`; these fail it — `recorded` in
             // `tests/note/main.rs` reads a delivered note off that kind and
             // predates the split — so moving them is the regression the split was
-            // written to avoid. Splitting them by.clone() disposition* is worse again: one
+            // written to avoid. Splitting them by disposition is worse again: one
             // op word would land under two kinds depending on what a conversation
             // answered, and no reader could key on `note` at all. Which operations
             // answer this is entry 65 of `docs/contract-divergences.md`, still open

@@ -140,7 +140,7 @@ pub enum BucketName {
     Llmlint,
     /// Wall time a repository's own verification gate was running.
     ///
-    /// **Served absent by every run this build produces.** Nothing in the stack
+    /// **Recorded absent by every run this build produces.** Nothing in the stack
     /// runs a gate any more: `onevcs` names none, and what verifies a change is
     /// the repository's own merge path — the host's required checks, or the
     /// `pre-push` hook git runs at the publishing push, whose wall time is the

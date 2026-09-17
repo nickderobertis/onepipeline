@@ -974,7 +974,7 @@ impl LaunchRecord {
 
     /// When the run was launched, when the record says.
     ///
-    /// Served **absent** rather than as an instant: a launch instant nobody
+    /// Reported **absent** rather than as an instant: a launch instant nobody
     /// recorded is a different fact from one recorded at the epoch, and only the
     /// second is a measurement. This is the one place that decision is made, so
     /// no caller invents a date for a record that carries none.

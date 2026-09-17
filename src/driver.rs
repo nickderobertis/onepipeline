@@ -78,6 +78,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
         Verb::Adopt(args) => adopt(&args),
+        Verb::Channel(crate::cli::ChannelCommand::NoEngineVerb) => Err(Error::Invalid(
+            "the channel exposes no engine-owned verb".to_owned(),
+        )),
         Verb::DriveRun(args) => drive_run(&args),
         Verb::Next(args) => next(&args),
         Verb::Reply(args) => reply(&args),
@@ -283,7 +286,7 @@ fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
 /// The `filters:` block one launch declared, read and checked at its boundary.
 ///
 /// The launch config is the base and each flag overrides the part of it that it
-/// names — the two source filters wholesale, and a profile by.clone() name*, so a
+/// names — the two source filters wholesale, and a profile by name, so a
 /// config holding a team's five profiles beside a plan can have one of them
 /// replaced for one launch without restating the other four. A launch naming no
 /// config is the same code path with an empty base, which is what makes the two
@@ -2296,14 +2299,14 @@ enum Submitted {
         /// The reply's id in the channel.
         reply: u64,
     },
-    /// Every command applied *by.clone() this process**, which took the run's ownership
+    /// Every command applied **by this process**, which took the run's ownership
     /// lock because nothing was driving it.
     AppliedHere {
         /// What they compiled to. In hand, so a caller needs no second read of
         /// the record to find out what it just did.
         operations: Vec<edits::Operation>,
     },
-    /// Every command applied *by.clone() the run's own reconciler**, over the durable
+    /// Every command applied **by the run's own reconciler**, over the durable
     /// queue: the driver holding the run, or this process once that driver had
     /// gone and this one took the run over. What they became is in the run's
     /// record rather than here.
@@ -2950,7 +2953,9 @@ fn submit_envelope(
                 // whether anything was driving the run, and the planner owns the
                 // graph either way.
                 if !envelope.author.is_planner() {
-                    if let Some(raised) = engine::monitor_edit(&envelope.author.clone(), command) {
+                    if let Some(raised) =
+                        engine::non_planner_edit(&envelope.author.clone(), command)
+                    {
                         engine::raise(paths, &mut journal, raised)?;
                     }
                 }
@@ -3295,8 +3300,6 @@ fn report(args: &OptionalRunArgs, render: fn(&views::Survey) -> String) -> Resul
     print!("{}", render(&survey));
     Ok(EXIT_SUCCESS)
 }
-// llmlint: ignore-end[cli_output_contract]
-
 /// `onepipeline transcript`.
 ///
 /// A node this run never dispatched is refused rather than answered with an

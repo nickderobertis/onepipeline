@@ -832,30 +832,8 @@ pub const REPLY_TIMEOUT_ENV: &str = "ONEPIPELINE_REPLY_TIMEOUT_SECONDS";
 /// it.
 pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 
-/// The environment variable bounding how long one `channel serve` session
-/// serves before it stops of its own accord.
-///
-/// Unset — the default — is unbounded, which is what a member whose whole
-/// conversation this channel carries wants: the session ends when that member's
-/// frame stream does. A host that spawns the judge side **per turn** bounds it
-/// instead, so the server does not outlive the turn it was spawned for while the
-/// member that spawned it goes on working.
-///
-/// It is a deadline and not a hint: a member that has gone quiet does not hold a
-/// session past the moment it said it would stop, and neither does one still
-/// sending. What it never does is land mid-exchange — it is read before a frame
-/// is, so a verdict a member is waiting on is never cut off half-written.
-///
-/// The endings are not the same fact and are deliberately not treated the same.
-/// A stream that ended leaves what this session raised marked: nothing is
-/// listening for those answers *now*, which is what the mark says and all it says
-/// — an asker that rents its listeners takes them back through
-/// `ChannelState::attend` the moment it arms another. A session that reached
-/// this bound does not even say that much: the stream is still open, the member
-/// is still there, and every question it raised is still owed an answer, so
-/// nothing is marked at all.
-/// The environment variable naming who a `channel serve` session listens on
-/// behalf of.
+/// The environment variable naming which asker a host-owned bus listener acts
+/// for.
 ///
 /// A serving process is a listener a side rents, and never that side itself: an
 /// asker may raise one question through one session and wait for the verdict
@@ -962,8 +940,7 @@ pub(crate) struct Surface {
     )]
     pub asker: Option<Asker>,
     /// The correlation a reply echoes to answer it, when it was raised as a
-    /// question through the bus's `ask` — which is how `channel serve` raises
-    /// every frame. Omitted while absent, so a surface raised any other way is
+    /// question through the bus's `ask`. Omitted while absent, so a surface raised any other way is
     /// written byte for byte as 0.28.2 wrote it.
     #[serde(
         default,
@@ -1159,9 +1136,8 @@ fn planner_channel() -> Layouts {
 /// is the run root's local one, so another kind, a directory or a key of its own
 /// is refused; the layout is `planner-channel`, whose queues are the files a
 /// release that predates the bus reads, so another profile or a `queues` block
-/// is refused; and `channel serve` speaks `onejudge` on `surfaces`, taking its
-/// run from its argument and a question's node from its frame, so the codec keys
-/// it would not read are refused rather than ignored. What only the layout
+/// is refused. The host-owned bus server alone interprets `schemas` and
+/// `codecs`; this engine accepts and ignores both. What only the layout
 /// decides — an author it does not declare, a grant it does not give, a
 /// validator on a queue it does not have — is decided by resolving the
 /// configuration against it over a transport that keeps nothing, so a refused
@@ -1433,8 +1409,6 @@ impl ChannelState {
         })
     }
 
-    /// What the run's configuration sets for the `onejudge` codec `channel serve`
-    /// speaks, or nothing for a run whose launch named no configuration.
     /// Whether `author` may issue `command` on this run, under the grants its
     /// configuration narrowed.
     pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
@@ -2360,7 +2334,7 @@ mod tests {
             }
         }
 
-        /// A question raised as `channel serve` raises one.
+        /// A question raised through the host bus.
         fn asked(&self, message: &str, blocking: bool) -> Correlation {
             self.channel
                 .ask(Surface {

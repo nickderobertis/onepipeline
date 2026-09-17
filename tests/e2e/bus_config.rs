@@ -15,12 +15,11 @@
 // names, and this suite supplies a real one. `harness.rs` carries the same suppression and
 // the full rationale.
 
-use std::io::{BufRead, BufReader, Write};
-use std::time::{Duration, Instant};
+use std::io::Write;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, double, ended, plan_of, World, REFUSED};
+use crate::harness::{agent, double, plan_of, World, REFUSED};
 
 /// A configuration narrowing the monitor to `retry` alone, taking away the
 /// `cancel` the profile grants it beside `retry`.
@@ -63,10 +62,6 @@ fn launched(world: &World, path: &str, run: &str, extra: &[&str]) {
 
 fn channel_file(world: &World, run: &str, file: &str) -> String {
     std::fs::read_to_string(world.run_file(run, &format!("channel/{file}"))).unwrap_or_default()
-}
-
-fn from_the_monitor(commands: Value) -> String {
-    json!({"version": 3, "author": "monitor", "commands": commands}).to_string()
 }
 
 /// Launch a plan under a configuration its channel could not be kept under, and
@@ -240,161 +235,195 @@ fn codec_and_unreachable_schema_configuration_is_accepted_without_network() {
     world.release("slow.go");
 }
 
-/// A validator the configuration names on the surfaces queue judges each
-/// question `channel serve` raises: one it refuses is refused in its words and
-/// queues nothing, and one it passes reaches the planner.
+/// A host-named author gets exactly its configured authority on both ingress
+/// paths, and its identity survives edits, findings, surfaces, and parks.
 #[test]
-fn a_validator_on_the_surfaces_queue_judges_the_questions_channel_serve_raises() {
-    let world = World::new("bus-config-surfaces");
-    let validator = double("bus-validator").to_string_lossy().into_owned();
+fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
+    const RUN: &str = "bus-author-contract";
+    const AUTHOR: &str = "sentinel";
+    let world = World::new(RUN);
     let file = configuration(
         &world,
         "onemessagebus.yaml",
-        &format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: surfaces, kind: command, command: [{validator:?}]}}\n"
-        ),
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel:\n    capabilities: [add, cancel, requeue, finding]\n    refusals:\n      amend: only the planner may alter a task's acceptance bar\n",
     );
-    let path = plan(&world, "bussurfaces");
-    launched(&world, &path, "bussurfaces", &["--bus-config", &file]);
-    let served = || {
-        let mut serving = world.cmd(&["channel", "serve", "bussurfaces"]);
-        // Nobody answers a question that is raised, and the wait is not under test.
-        serving.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
-        serving
-    };
+    let path = plan(&world, RUN);
+    launched(&world, &path, RUN, &["--bus-config", &file]);
+    let envelope =
+        |commands: Value| json!({"version": 3, "author": AUTHOR, "commands": commands}).to_string();
 
-    let reason = "a question has to name the node it is about";
-    world.script("bus-validator.refuse", reason);
-    let refused = "refused before it is raised";
-    world
-        .run_with_stdin_on(
-            served(),
-            &format!(r#"{{"kind":"blocker","message":"{refused}"}}"#),
-        )
-        .exited(REFUSED)
-        .err_has(reason);
-    assert!(
-        !channel_file(&world, "bussurfaces", "surfaces.jsonl").contains(refused),
-        "a question the validator refused was queued"
-    );
-    let judged: Vec<Value> = std::fs::read_to_string(world.fakes.join("bus-validator.jsonl"))
-        .expect("the validator was run")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("the validator records JSON"))
-        .collect();
-    assert!(
-        judged
-            .iter()
-            .any(|record| record["queue"] == json!("surfaces")
-                && record["message"]["message"] == json!(refused)),
-        "the validator was not offered the question on the surfaces queue: {judged:?}"
-    );
-
-    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
-    let passed = "passed and raised";
-    world
-        .run_with_stdin_on(
-            served(),
-            &format!(r#"{{"kind":"blocker","message":"{passed}"}}"#),
-        )
-        .exited(0)
-        .out_has("\"answer\":\"timeout\"");
-    assert!(
-        channel_file(&world, "bussurfaces", "surfaces.jsonl").contains(passed),
-        "a question the validator passed never reached the planner"
-    );
-    world.release("slow.go");
-}
-
-/// `channel serve` reads its asker and its session bound from the variables the
-/// configuration's `codecs.onejudge` block names rather than its own: the
-/// question is raised under the asker the named variable holds, and a bound the
-/// named variable holds that cannot be read is refused naming that variable.
-#[test]
-fn channel_serve_reads_its_asker_and_bound_from_the_variables_the_codec_names() {
-    let world = World::new("bus-config-codec-env");
-    let file = configuration(
-        &world,
-        "onemessagebus.yaml",
-        "version: 1\ntransport: {kind: local}\ncodecs:\n  \
-         onejudge: {asker_env: HOST_ASKER, session_env: HOST_SESSION}\n",
-    );
-    let path = plan(&world, "buscodecenv");
-    launched(&world, &path, "buscodecenv", &["--bus-config", &file]);
-
-    let question = "asked under the asker the codec names";
-    let mut serving = world.cmd(&["channel", "serve", "buscodecenv"]);
-    serving
-        .env("HOST_ASKER", "host-named-asker")
-        .env("ONEPIPELINE_CHANNEL_ASKER", "the-default-variables-asker")
-        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
-    world
-        .run_with_stdin_on(
-            serving,
-            &format!(r#"{{"kind":"blocker","message":"{question}"}}"#),
-        )
-        .exited(0);
-    let queued = channel_file(&world, "buscodecenv", "surfaces.jsonl")
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("a surface record"))
-        .find(|record| record["event"] == json!("queued") && record["message"] == json!(question))
-        .expect("the question was queued");
-    assert_eq!(queued["asker"], json!("host-named-asker"), "{queued}");
-
-    let mut bounded = world.cmd(&["channel", "serve", "buscodecenv"]);
-    bounded
-        .env("HOST_SESSION", "0")
-        .env("ONEPIPELINE_SERVE_SESSION_SECONDS", "30");
-    world
-        .run_with_stdin_on(bounded, "")
-        .exited(REFUSED)
-        .err_has("HOST_SESSION");
-    world.release("slow.go");
-}
-
-/// A configured author is refused an ungranted operation with nothing appended,
-/// and an operation it was granted reaches the reconciler.
-#[test]
-fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_it_left() {
-    let world = World::new("bus-config-narrowed");
-    let file = configuration(&world, "onemessagebus.yaml", WITHOUT_CANCEL);
-    let path = plan(&world, "busnarrowed");
-    // Both runs launched from the one plan, and both held, before anything is
-    // edited: a retry supersedes the held node, and what a superseded dispatch
-    // releases as it ends is the hold every run of this world shares.
-    launched(&world, &path, "busnarrowed", &["--bus-config", &file]);
-
-    let cancel = from_the_monitor(json!([
-        {"op": "cancel", "id": "spare", "reason": "a monitor's park"}
-    ]));
-    world
-        .run_with_stdin(&["reply", "busnarrowed"], &cancel)
-        .exited(REFUSED)
-        .err_has("'cancel' is not an op the monitor may issue: nothing grants it to this author");
-    for file in ["replies.jsonl", "commands.jsonl"] {
-        assert_eq!(
-            channel_file(&world, "busnarrowed", file),
-            "",
-            "a refused envelope reached {file}"
-        );
-    }
-
-    // And what the configuration kept still reaches the reconciler.
     world
         .run_with_stdin(
-            &["reply", "busnarrowed"],
-            &from_the_monitor(json!([
-                {"op": "retry", "id": "slow", "node": agent("slow-2", &[])}
+            &["reply", RUN],
+            &envelope(json!([
+                {"op": "add", "node": agent("extra", &["slow"])},
+                {"op": "finding", "id": "slow", "message": "the host noticed this"}
             ])),
         )
         .exited(0);
-    world.until("the monitor's retry to be committed", |world| {
-        world
-            .events_of("busnarrowed", "edit-committed")
+    world.until("the custom author's edit and finding to commit", |world| {
+        world.events_of(RUN, "edit-committed").iter().any(|event| {
+            event["payload"]["author"] == AUTHOR && event["payload"]["command"]["op"] == "add"
+        }) && world
+            .events_of(RUN, "planner-surface-queued")
             .iter()
-            .any(|event| event["payload"]["author"] == json!("monitor"))
+            .any(|event| {
+                event["payload"]["kind"] == "finding" && event["payload"]["source"] == AUTHOR
+            })
     });
+    let edit_surface = world
+        .events_of(RUN, "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "monitor-edit")
+        .expect("the non-planner edit is surfaced");
+    assert_eq!(edit_surface["payload"]["source"], AUTHOR);
+
+    for (command, refusal) in [
+        (
+            json!({"op": "amend", "id": "spare", "text": "a different bar"}),
+            "only the planner may alter a task's acceptance bar",
+        ),
+        (
+            json!({"op": "drop", "id": "spare", "dependents": "detach"}),
+            "nothing grants it to this author",
+        ),
+    ] {
+        world
+            .run_with_stdin(&["reply", RUN], &envelope(json!([command])))
+            .exited(REFUSED)
+            .err_has(refusal);
+    }
+
+    let before = world.events_of(RUN, "edit-committed").len();
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &json!({"version": 3, "author": "stranger", "commands": [
+                {"op": "add", "node": agent("never", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("author `stranger` is not declared")
+        .err_has("planner, sentinel");
+    assert_eq!(world.events_of(RUN, "edit-committed").len(), before);
+
+    for payload in [
+        json!({"id": 900, "author": "stranger", "commands": [
+            {"op": "add", "node": agent("also-never", &[])}
+        ]}),
+        json!({"id": 901, "author": AUTHOR, "commands": [
+            {"op": "complete", "reason": "looks done"}
+        ]}),
+    ] {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(world.run_file(RUN, "channel/commands.jsonl"))
+            .expect("the host bus opens the command queue");
+        writeln!(file, "{payload}").expect("the host bus appends the envelope");
+    }
+    world.until("the direct envelopes to be rejected", |world| {
+        world.events_of(RUN, "edit-rejected").len() >= 2
+    });
+    let rejected = world.events_of(RUN, "edit-rejected");
+    assert!(rejected.iter().any(|event| {
+        event["payload"]["author"] == "stranger"
+            && event["payload"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("not declared"))
+    }));
+    assert!(rejected.iter().any(|event| {
+        event["payload"]["author"] == AUTHOR && event["payload"]["command"]["op"] == "complete"
+    }));
+    assert_eq!(world.events_of(RUN, "edit-committed").len(), before);
+    assert!(world.events_of(RUN, "completion-requested").is_empty());
+
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &json!({"author": AUTHOR, "completion": true, "reason": "looks done"}).to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the sentinel may do");
+    assert!(world.events_of(RUN, "completion-requested").is_empty());
+
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &json!({"version": 3, "commands": [
+                {"op": "cancel", "id": "spare", "reason": "planner hold"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &envelope(json!([{"op": "requeue", "id": "spare"}])),
+        )
+        .exited(REFUSED)
+        .err_has("parked by the planner");
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &envelope(json!([
+                {"op": "cancel", "id": "extra", "reason": "sentinel hold"},
+                {"op": "requeue", "id": "extra"}
+            ])),
+        )
+        .exited(0);
+    world.release("slow.go");
+}
+
+/// Recorded identity is data, not fresh authority: removing the launch grant
+/// after a `monitor` park was recorded does not make its journal or checkpoint
+/// unreadable.
+#[test]
+fn a_legacy_monitor_author_replays_from_the_journal_and_checkpoint() {
+    const RUN: &str = "bus-legacy-monitor";
+    let world = World::new(RUN);
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\nauthors:\n  monitor: {capabilities: [cancel]}\n",
+    );
+    let path = plan(&world, RUN);
+    launched(&world, &path, RUN, &["--bus-config", &file]);
+    world
+        .run_with_stdin(
+            &["reply", RUN],
+            &json!({"version": 3, "author": "monitor", "commands": [
+                {"op": "cancel", "id": "spare", "reason": "legacy watcher park"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["status", RUN]).exited(0);
+    let checkpoint = std::fs::read_to_string(world.run_file(RUN, "checkpoint.json"))
+        .expect("the replay checkpoint exists");
+    assert!(checkpoint.contains("monitor"), "{checkpoint}");
+
+    let launch_path = world.run_file(RUN, "launch.json");
+    let mut launch: Value = serde_json::from_str(
+        &std::fs::read_to_string(&launch_path).expect("the launch record reads"),
+    )
+    .expect("the launch record is JSON");
+    launch
+        .as_object_mut()
+        .expect("the launch record is an object")
+        .remove("bus_config");
+    std::fs::write(
+        &launch_path,
+        serde_json::to_vec_pretty(&launch).expect("the legacy launch serializes"),
+    )
+    .expect("the launch now carries only the default planner author");
+
+    world.run(&["status", RUN]).exited(0).out_has("0/2 done");
+    world
+        .run(&["monitor", RUN])
+        .exited(0)
+        .out_has("legacy watcher park");
     world.release("slow.go");
 }
 
@@ -541,105 +570,5 @@ fn a_validator_on_the_commands_queue_judges_the_edits_a_reply_carries() {
         offered.len(),
         "a verdict carrying no commands was offered to the commands queue's validator"
     );
-    world.release("slow.go");
-}
-
-/// The reply window the configuration's `codecs.onejudge` block sets is how long
-/// `channel serve` waits, with no variable overriding it: a question nobody
-/// answers is answered with the elapsed wait no earlier than the window and
-/// within a bounded margin after it, and one answered inside the window is
-/// answered with the ruling.
-#[test]
-// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the six seconds are the claim rather than a knob: what this proves is that `channel serve` waits no less than the window a configuration sets, which only a wait of that window can show, and the window is read by the crate's own launch and serve code, so any change under `src/` can cut it short. The one separately-edged project here, `onepipeline-note-journeys`, is edged on conversational cost and would put it where a change to `src/driver.rs` does not run it.
-fn the_reply_window_a_bus_config_sets_is_how_long_channel_serve_waits() {
-    const WINDOW: u64 = 6;
-    let world = World::new("bus-config-window");
-    let file = configuration(
-        &world,
-        "onemessagebus.yaml",
-        &format!(
-            "version: 1\ntransport: {{kind: local}}\ncodecs:\n  \
-             onejudge: {{reply_window_seconds: {WINDOW}}}\n"
-        ),
-    );
-    let path = plan(&world, "buswindow");
-    launched(&world, &path, "buswindow", &["--bus-config", &file]);
-
-    let mut serving = world
-        .cmd(&["channel", "serve", "buswindow"])
-        .env_remove("ONEPIPELINE_REPLY_TIMEOUT_SECONDS")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the channel server starts");
-    let mut stdin = serving.stdin.take().expect("stdin is piped");
-    let mut lines = BufReader::new(serving.stdout.take().expect("stdout is piped")).lines();
-    let mut read = move || -> Value {
-        serde_json::from_str(
-            &lines
-                .next()
-                .expect("the server wrote a line")
-                .expect("the line reads"),
-        )
-        .expect("the line is JSON")
-    };
-
-    let asked = Instant::now();
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"nobody answers this one"}}"#
-    )
-    .expect("written");
-    stdin.flush().expect("flushed");
-    let told = read();
-    let waited = asked.elapsed();
-    assert_eq!(told["answer"], json!("timeout"), "{told}");
-    assert!(
-        waited >= Duration::from_secs(WINDOW),
-        "the wait was cut short of the configured window: {waited:?}"
-    );
-    assert!(
-        waited < Duration::from_secs(WINDOW + 10),
-        "the wait ran on past the configured window: {waited:?}"
-    );
-    // Ruled on late, by name, so it is not the question a plain verdict binds to.
-    let first = told["correlation"]
-        .as_str()
-        .expect("a correlation")
-        .to_owned();
-    world
-        .run_with_stdin(
-            &["reply", "buswindow", "--correlation", &first],
-            r#"{"completion":false,"reason":"late, for the first"}"#,
-        )
-        .exited(0);
-
-    let asked = Instant::now();
-    writeln!(
-        stdin,
-        r#"{{"kind":"blocker","message":"this one is answered"}}"#
-    )
-    .expect("written");
-    stdin.flush().expect("flushed");
-    world.until("the second question to reach the planner", |world| {
-        world.events_of("buswindow", "planner-surface-queued").len() >= 2
-    });
-    world
-        .run_with_stdin(
-            &["reply", "buswindow"],
-            r#"{"completion":false,"reason":"in time"}"#,
-        )
-        .exited(0);
-    let ruled = read();
-    assert_eq!(ruled["reason"], json!("in time"), "{ruled}");
-    assert!(
-        asked.elapsed() < Duration::from_secs(WINDOW),
-        "the ruling did not end the wait inside the window: {:?}",
-        asked.elapsed()
-    );
-
-    drop(stdin);
-    ended(serving);
     world.release("slow.go");
 }

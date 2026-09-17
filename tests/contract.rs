@@ -3278,14 +3278,41 @@ fn a_reply_declares_the_halves_the_contract_routes_it_by() {
 }
 
 #[test]
-fn the_only_surface_kind_the_contract_names_is_check_in() {
-    let kind: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
-    assert_eq!(kind, SurfaceKind::check_in());
-    assert!(CONTRACT.contains("--kind check-in"));
+fn the_contract_declares_an_open_surface_kind_vocabulary() {
+    let check_in: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
+    assert_eq!(check_in, SurfaceKind::check_in());
+    let host_kind: SurfaceKind = serde_json::from_value(json!("host-defined")).expect("parses");
+    assert_eq!(host_kind.as_str(), "host-defined");
+    assert!(CONTRACT.contains("--kind KIND"));
+    assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
     assert!(
         CONTRACT.contains("oneagentgraph reset-timer RUN check-in"),
         "consuming a surface resets the pacemaker"
     );
+}
+
+#[test]
+fn the_contracts_open_author_grammar_is_the_channels_complete_boundary() {
+    assert!(CONTRACT.contains("Channel authors are open words"));
+    assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
+
+    for word in ["planner", "monitor", "sentinel", "a", &"a".repeat(64)] {
+        let author: Author = serde_json::from_value(json!(word))
+            .unwrap_or_else(|error| panic!("the documented author `{word}` parses: {error}"));
+        assert_eq!(author.as_str(), word);
+        assert_eq!(
+            serde_json::to_value(author).expect("serializes"),
+            json!(word)
+        );
+    }
+    for word in ["", "Monitor", "two_words", "-leading", &"a".repeat(65)] {
+        let error = serde_json::from_value::<Author>(json!(word))
+            .expect_err(&format!("the undocumented author `{word}` was accepted"));
+        assert!(
+            error.to_string().contains("^[a-z][a-z0-9-]{0,63}$"),
+            "the refusal does not name the contract grammar: {error}"
+        );
+    }
 }
 
 #[test]
@@ -4130,7 +4157,7 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
         &[
             "`onepipeline next RUN [--filter NAME|SPEC] [--all]`",
             "reply RUN [FILE]",
-            "surface RUN --kind check-in --message TEXT",
+            "surface RUN --kind KIND --message TEXT",
             "attest RUN REF",
             "stop RUN",
         ],
@@ -4231,9 +4258,17 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     };
     match &monitor.judge[..] {
         [JudgeSide::Command(judge)] => assert_eq!(
-            judge.command[..3],
-            ["onepipeline", "channel", "serve"],
-            "the monitor's judge side is this crate's channel server"
+            judge.command,
+            [
+                "onemessagebus",
+                "serve",
+                "--codec",
+                "onejudge",
+                "--transport-dir",
+                "${ONEPIPELINE_RUNS_DIR}/${ONEPIPELINE_RUN_ID}/channel",
+                "surfaces",
+            ],
+            "the monitor's judge side is exactly the adopted bus server command"
         ),
         other => panic!("the contract makes the judge side one command provider, not {other:?}"),
     }

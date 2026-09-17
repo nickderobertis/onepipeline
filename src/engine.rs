@@ -2731,7 +2731,7 @@ fn commit_command(
     // monitor's own judgement, so the planner learns of it without being asked to
     // approve it first.
     if !author.is_planner() {
-        if let Some(surface) = monitor_edit(&author, command) {
+        if let Some(surface) = non_planner_edit(&author, command) {
             raise(paths, journal, surface)?;
         }
     }
@@ -5202,7 +5202,10 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
 /// to the planner: it compiles to the surface the planner reads, so reporting it
 /// a second time as an edit the monitor made would put two entries on the queue
 /// for one thing said once — the multiplication this op exists to end.
-pub(crate) fn monitor_edit(author: &crate::channel::Author, command: &Command) -> Option<Surface> {
+pub(crate) fn non_planner_edit(
+    author: &crate::channel::Author,
+    command: &Command,
+) -> Option<Surface> {
     if matches!(command, Command::Finding { .. }) {
         return None;
     }

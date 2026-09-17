@@ -28,11 +28,10 @@ members:
     persona: ../personas/orchestrator.yaml
     agent:
       oneharness_config: ./oneharness.orchestrator.toml
-    # The judge side is this crate's own channel server, so the planner reads
-    # what the monitor raises through the same conversation the monitor runs in.
-    # The launcher substitutes the run id.
+    # The host's message bus owns the judge side. The launcher substitutes the
+    # run root; the host supplies ONEMESSAGEBUS_CONFIG with its codec binding.
     judge:
-      command: ["onepipeline", "channel", "serve", "${ONEPIPELINE_RUN_ID}"]
+      command: ["onemessagebus", "serve", "--codec", "onejudge", "--transport-dir", "${ONEPIPELINE_RUNS_DIR}/${ONEPIPELINE_RUN_ID}/channel", "surfaces"]
     mode: bypass
   check-in:
     kind: oneharness

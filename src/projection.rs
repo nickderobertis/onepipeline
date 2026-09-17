@@ -277,7 +277,7 @@ pub struct RunState {
     /// it names the identity that went on to serve that side's turn. Without it
     /// every fall-through reads as fatal, and a reader is sent at a
     /// subscription that never blocked a turn.
-    pub served: BTreeMap<String, Vec<Served>>,
+    pub served: BTreeMap<String, Vec<ServiceRecord>>,
     // llmlint: ignore-block[invalid_states_unrepresentable] both sides are node ids, and a
     // node id is the plain `String` every map on this struct is keyed by — `recorded`,
     // `outcomes`, `branches`, and the rest — for the reason `src/error.rs`'s file-level
@@ -502,7 +502,7 @@ pub struct Refusal {
 /// ran out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Served {
+pub struct ServiceRecord {
     /// The invocation exactly as `oneagentgraph` published it.
     pub session: oneagentgraph::event::OneharnessSession,
     /// The member whose invocation it was, as the producer labelled the
@@ -1741,7 +1741,7 @@ fn fold_invocation(state: &mut RunState, event: &Envelope) {
         return;
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    let served = Served {
+    let served = ServiceRecord {
         session,
         member: member_label(event),
     };

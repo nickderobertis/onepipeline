@@ -2220,7 +2220,7 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [{
+            &json!({"version": 2, "commands": [{
                 "op": "cancel", "id": "service",
                 "reason": "this looked stalled at its push",
             }]})

@@ -723,7 +723,7 @@ impl World {
             .env(RENDEZVOUS_SECONDS_ENV, "180")
             // The asker *this* suite's own dispatch was given. This suite runs
             // inside a dispatch of the very system it is a library for, and a
-            // leaked value would make every `channel serve` a journey starts one
+            // leaked value would make every `onemessagebus serve` a journey starts one
             // listener of one asker — so two sessions a journey means as
             // strangers would take each other's questions back over, and the
             // scoping under test would be true of nothing the journey ran. A
@@ -2451,7 +2451,18 @@ impl World {
             .stdout
             .lines()
             .filter_map(|line| line.split_once("planner-surface-queued "))
-            .map(|(_, question)| question.trim().to_string())
+            .map(|(_, surface)| {
+                let message = surface
+                    .split_once(" message=")
+                    .and_then(|(_, rest)| rest.rsplit_once(" source="))
+                    .map(|(message, _)| message)
+                    .unwrap_or_else(|| {
+                        panic!("a queued surface did not render its message: {surface}")
+                    });
+                serde_json::from_str(message).unwrap_or_else(|error| {
+                    panic!("a surface rendered an invalid message ({error}): {surface}")
+                })
+            })
             .collect()
     }
 

@@ -57,7 +57,7 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 7;
 /// reviewing an envelope, a version-4 one says nothing about the write-back's
 /// budget, a version-5 one says nothing about a run-end hook, and a version-6 one
 /// says nothing about the bus or a reviewer's bar, which is what a launch naming
-/// none of them means — and naming a later key there is refused *by.clone() that field's
+/// none of them means — and naming a later key there is refused by that field's
 /// name**, exactly as a key no version ever had is.
 pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 7] =
     [LAUNCH_CONFIG_SCHEMA_VERSION, 6, 5, 4, 3, 2, 1];
@@ -140,7 +140,7 @@ fn refused_blank(key: &str) -> String {
 /// Serde's own reading of a `u64` would take the key present and holding
 /// nothing — `writeback_item_budget:` — as the document omitting it, which is the
 /// half-written decision every other refused-when-blank key is turned down for,
-/// and would accept zero, which is no budget at all. Both are refused here *by.clone() the
+/// and would accept zero, which is no budget at all. Both are refused here by the
 /// key's name**, where the value is read, because a number has no blank for
 /// [`LaunchConfig::load`]'s loop to see; the blank's sentence is the one that
 /// loop uses, and zero's is the one the flag and the variable use.

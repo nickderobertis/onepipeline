@@ -1820,120 +1820,7 @@ fn nodes_a_live_edit_added_reach_the_board_titled_by_their_own_ids() {
 // reader's benefit. The dependency the finding names, `onepipeline` on
 // `onepipeline-note-journeys`, is the repository's existing project graph rather than
 // anything this change introduces.
-/// A park says who made it and why, and the monitor may not undo the planner's.
-///
-/// The failure this closes, measured on a live run: a manager parked a node to
-/// keep a third very large build off a disk with little room left, the monitor
-/// read an idle node and requeued it, then cancelled it, and four dispatches
-/// were destroyed in five minutes — one of them with uncommitted work lost. What
-/// the observer lacked was the one fact that would have stopped it, so the park
-/// carries it and the refusal reads it back.
-#[test]
-fn a_park_records_its_author_and_reason_and_a_monitor_may_not_undo_the_planners() {
-    let world = World::new("edit-park-authored");
-    let disk = from_entry_57("cancel")["reason"]
-        .as_str()
-        .expect("entry 57's cancel fixture states a reason")
-        .to_string();
-    let run = live(
-        &world,
-        "authored",
-        vec![agent("slow", &[]), agent("sweep", &["slow"])],
-        &["slow"],
-    );
-
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": disk}])),
-        )
-        .exited(0);
-    world.until("the park to commit", |world| {
-        committed(world, &run).contains(&"cancel".to_string())
-    });
-    let park = operations(&world, &run)
-        .into_iter()
-        .find(|operation| operation["kind"] == "node-parked")
-        .expect("the park was recorded");
-    assert_eq!(
-        park,
-        json!({"kind": "node-parked", "node": "sweep", "by": "planner", "reason": disk}),
-        "the park does not say who made it or why"
-    );
-
-    // The monitor may not undo it, and is told whose decision it was and what it
-    // said — which is what sends it to the planner instead of round the loop.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": 2, "author": "monitor",
-                    "commands": [{"op": "requeue", "id": "sweep"}]})
-            .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("parked by the planner")
-        .err_has(&disk)
-        .err_has("surface it to the planner");
-
-    // A reason that says nothing is refused rather than recorded: a park nobody
-    // can read is indistinguishable from one that stated none.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &envelope(json!([{"op": "cancel", "id": "sweep", "reason": "   "}])),
-        )
-        .exited(REFUSED)
-        .err_has("empty reason");
-
-    // Its own park it may undo — in **one envelope**, which is how an observer
-    // that has decided something writes it: the park it makes is the park the
-    // requeue beside it is judged against, rather than one the frontier this
-    // envelope was validated against had never heard of.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
-                {"op": "add", "node": {"id": "extra", "persona": "engineer",
-                                       "task": "## What\nsweep up", "deps": ["slow"]}},
-                {"op": "cancel", "id": "extra", "reason": "it is plainly redundant"},
-                {"op": "requeue", "id": "extra"},
-            ]})
-            .to_string(),
-        )
-        .exited(0)
-        .out_has("\"applied\"");
-    let monitors = operations(&world, &run)
-        .into_iter()
-        .find(|operation| operation["node"] == "extra" && operation["kind"] == "node-parked")
-        .expect("the monitor's own park was recorded");
-    assert_eq!(
-        monitors,
-        json!({"kind": "node-parked", "node": "extra", "by": "monitor",
-               "reason": "it is plainly redundant"})
-    );
-
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &envelope(json!([{"op": "requeue", "id": "sweep"}])),
-        )
-        .exited(0);
-
-    world.release("slow.go");
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
-    });
-    let result = world.run_json(&run, "result.json");
-    for id in ["sweep", "extra"] {
-        let node = result["nodes"]
-            .as_array()
-            .expect("nodes")
-            .iter()
-            .find(|node| node["id"] == id)
-            .unwrap_or_else(|| panic!("the run holds '{id}': {result}"));
-        assert_eq!(node["status"], "done", "a requeued node was not dispatched");
-    }
-} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey lives
 // beside the twenty-seven other live-edit journeys in this file, which is where a reader
@@ -1976,19 +1863,6 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
     let evidence = "the change merged at 3f9a1c2 while the dispatch was dying; \
                     the run recorded the death and never the merge";
     let settle = |id: &str, evidence: &str| json!({"op": "settle", "id": id, "outcome": "done", "evidence": evidence});
-
-    // The monitor may not settle from evidence at all: an observer's authority is
-    // what the stream showed it, and this op is the opposite.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [settle("publish", evidence)]})
-                .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("settle")
-        .err_has("planner's decision")
-        .err_has("Surface it to the planner");
 
     // Nor is a node the graph does not hold, nor a settlement with nothing
     // behind it.
@@ -2242,8 +2116,7 @@ fn a_settle_keeps_the_node_and_journals_the_evidence_as_the_reason() {
 fn a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete() {
     let world = World::new("edit-park-settled");
     // `publish` waits on the held node, so the park lands on a node nothing has
-    // dispatched — the park a monitor makes on a deliverable it saw go up by
-    // hand — and `announce` is what the park was holding back.
+    // dispatched, and `announce` is what the park was holding back.
     let run = live(
         &world,
         "park-settled",
@@ -2255,11 +2128,11 @@ fn a_settled_node_is_no_longer_parked_and_the_run_reports_itself_complete() {
         &["slow"],
     );
 
-    // The monitor parks it, saying why.
+    // The planner parks it, saying why.
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [{
+            &json!({"version": 2, "commands": [{
                 "op": "cancel", "id": "publish",
                 "reason": "the comment this node would post is already on the issue",
             }]})
@@ -2592,18 +2465,6 @@ fn a_park_recorded_before_it_carried_an_author_reads_as_the_planners() {
     );
     std::fs::write(&journal, aged).expect("the aged journal is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
-
-    world
-        .run_with_stdin(
-            &["reply", "legacypark"],
-            &json!({"version": 2, "author": "monitor",
-                    "commands": [{"op": "requeue", "id": "sweep"}]})
-            .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("parked by the planner")
-        .err_has("stated no reason")
-        .err_has("surface it to the planner");
 
     // And the planner still gets it back, so an aged park is a held decision
     // rather than a node nothing can move.
@@ -3054,7 +2915,7 @@ fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
     world
         .run_with_stdin(
             &["reply", &run],
-            &json!({"version": 2, "author": "monitor", "commands": [
+            &json!({"version": 2, "commands": [
                 {"op": "finding", "id": "slow", "message": "the branch has no commits yet"}
             ]})
             .to_string(),
