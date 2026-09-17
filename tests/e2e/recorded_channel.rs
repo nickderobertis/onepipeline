@@ -140,7 +140,6 @@ const RESET_REPORT_OF_0_28_2: &str = "onepipeline: could not reset the check-in 
                                      invalid: run 'onemessagebus-repair-2' records no \
                                      agent-graph run to address it by\n";
 
-/// `text` without [`RESET_REPORT_OF_0_28_2`].
 fn without_the_reset_report(text: &str) -> String {
     text.replace(RESET_REPORT_OF_0_28_2, "")
 }

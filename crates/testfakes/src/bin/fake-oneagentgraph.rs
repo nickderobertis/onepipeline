@@ -194,6 +194,34 @@ fn graph_runs(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("graph-runs.jsonl")
 }
 
+/// One line of that file: a run this double started, and the document it ran.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchedRun {
+    run: String,
+    graph: String,
+}
+
+/// Every run this double has started, or nothing when it has started none.
+///
+/// The file is this double's own, so a line it cannot read is a defect of the
+/// double rather than a run to pass over: it fails the process naming the line.
+fn launched_runs(dir: &std::path::Path) -> Vec<LaunchedRun> {
+    let text = match std::fs::read_to_string(graph_runs(dir)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => fake::fail(&format!("cannot read this double's launched runs: {error}")),
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                fake::fail(&format!("a launched-run line is not one: {error}: {line}"))
+            })
+        })
+        .collect()
+}
+
 /// `oneagentgraph history show RUN`
 ///
 /// The one record a launcher reads back off the sibling: the run's own
@@ -212,12 +240,10 @@ fn history(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(run) => run,
         Err(refusal) => return refusal,
     };
-    let Some(graph) = std::fs::read_to_string(graph_runs(dir))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|entry| entry["run"] == run)
-        .and_then(|entry| entry["graph"].as_str().map(str::to_string))
+    let Some(graph) = launched_runs(dir)
+        .into_iter()
+        .find(|launched| launched.run == run)
+        .map(|launched| launched.graph)
     else {
         eprintln!("oneagentgraph: no run {run:?} under this double's state");
         return invalid_config();
@@ -447,7 +473,11 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // process of this double answers about it.
     fake::append(
         &graph_runs(dir),
-        &serde_json::json!({"run": graph_run(), "graph": graph}).to_string(),
+        &serde_json::to_string(&LaunchedRun {
+            run: graph_run(),
+            graph: graph.clone(),
+        })
+        .unwrap_or_else(|error| fake::fail(&format!("a launched run serialises: {error}"))),
     );
 
     // The dag-scope graph is the run's *observer*: its monitor member watches
