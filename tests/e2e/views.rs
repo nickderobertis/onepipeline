@@ -2030,6 +2030,63 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     worker.release();
 }
 
+/// A dispatch that has ended, on a node that has not settled, is on the run's
+/// registry as a process this host can prove is gone — and a `stop` landing then
+/// leaves it there.
+///
+/// The defect this states: a dispatch's registry entry went with its handle the
+/// moment its stream drained, and the node settled later, on the loop's thread.
+/// Between the two the run said the node was running and no process claimed it,
+/// so `host` rendered `UNPROVEN` over a process it could have proved gone. A
+/// `stop` landing in that window left the run that way for good — and on
+/// Windows, where `taskkill /T` ends a dispatch before the driver holding it,
+/// every stop opens it, which is where the journey above failed on this suite's
+/// own merge path.
+///
+/// The window here is a lifecycle node's publication: its worker has exited by
+/// the time the push is queued, and the node settles only once the held push
+/// goes through.
+#[test]
+fn host_proves_stale_the_dispatch_a_running_node_has_already_ended() {
+    let world = World::new("views-ended-unsettled");
+    let go = world.fakes.join("push.go");
+    // Declared after the world, so its release runs before the world takes
+    // the tree away.
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("local-direct", &held.argv());
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "between",
+        &plan_of("between", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the publication to reach its merge path", |world| {
+        !world.events_of("between", "merge-queued").is_empty()
+    });
+
+    // The worker is gone and its node is not settled: the entry it held is
+    // still there, and it says which process to prove gone.
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("between/service")
+        .out_has("is gone");
+
+    // A stop landing in that window ends the driver, and the entry it was
+    // holding stays where the view can prove it.
+    world.run(&["stop", "between"]).exited(0);
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("between/service")
+        .out_has("is gone");
+    held.release();
+}
+
 /// And a run stopped and then **adopted** is running what its fresh driver
 /// dispatched.
 ///
