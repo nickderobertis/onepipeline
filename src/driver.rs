@@ -13,7 +13,6 @@
 //! because taking over ongoing work is exactly the case where a second opinion
 //! is worth more than an override.
 
-use std::io::{BufRead, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,9 +23,8 @@ use serde_json::json;
 use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
-    AdoptArgs, AttestArgs, ChannelCommand, Cli, DriveRunArgs, OptionalRunArgs, ReadArgs, ReplyArgs,
-    RunArgs, RunsArgs, StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, ADOPT_FLAG,
-    DAG_GRAPH_OFF,
+    AdoptArgs, AttestArgs, Cli, DriveRunArgs, OptionalRunArgs, ReadArgs, ReplyArgs, RunsArgs,
+    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, ADOPT_FLAG, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
@@ -40,7 +38,6 @@ use crate::plan::Plan;
 use crate::sys::{self, Claim};
 use crate::telemetry;
 use crate::views::{self, RunView};
-use onemessagebus::Answer;
 
 /// How often an attach re-reads the run to see whether it has settled.
 const ATTACH_POLL: Duration = Duration::from_millis(50);
@@ -82,7 +79,6 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
         Verb::Adopt(args) => adopt(&args),
         Verb::DriveRun(args) => drive_run(&args),
-        Verb::Channel(ChannelCommand::Serve(args)) => serve(&args),
         Verb::Next(args) => next(&args),
         Verb::Reply(args) => reply(&args),
         Verb::Surface(args) => surface(&args),
@@ -287,7 +283,7 @@ fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
 /// The `filters:` block one launch declared, read and checked at its boundary.
 ///
 /// The launch config is the base and each flag overrides the part of it that it
-/// names — the two source filters wholesale, and a profile *by name*, so a
+/// names — the two source filters wholesale, and a profile by.clone() name*, so a
 /// config holding a team's five profiles beside a plan can have one of them
 /// replaced for one launch without restating the other four. A launch naming no
 /// config is the same code path with an empty base, which is what makes the two
@@ -2193,9 +2189,10 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
     let message = surface_message(args)?;
     // What it is about, and what raised it, are two facts: a check-in is the
     // pacemaker's own, and a finding typed here is advice like any other.
-    let source = match args.kind {
-        SurfaceKind::CheckIn => crate::channel::source::CHECK_IN,
-        SurfaceKind::Finding => crate::channel::source::PROPOSAL,
+    let source = if args.kind.as_str() == SurfaceKind::CHECK_IN {
+        crate::channel::source::CHECK_IN
+    } else {
+        crate::channel::source::PROPOSAL
     };
     let queued = ChannelState::new(&paths).push(Surface {
         id: 0,
@@ -2240,7 +2237,7 @@ fn attest(args: &AttestArgs) -> Result<i32> {
             version: Some(crate::channel::REPLY_ENVELOPE_VERSION),
             // The person who took the action, through the planner's own channel:
             // `attest` is not an op an observer may issue at all.
-            author: Author::Planner,
+            author: Author::planner(),
             commands: vec![Command::Attest {
                 reference: args.reference.clone(),
             }],
@@ -2299,14 +2296,14 @@ enum Submitted {
         /// The reply's id in the channel.
         reply: u64,
     },
-    /// Every command applied **by this process**, which took the run's ownership
+    /// Every command applied *by.clone() this process**, which took the run's ownership
     /// lock because nothing was driving it.
     AppliedHere {
         /// What they compiled to. In hand, so a caller needs no second read of
         /// the record to find out what it just did.
         operations: Vec<edits::Operation>,
     },
-    /// Every command applied **by the run's own reconciler**, over the durable
+    /// Every command applied *by.clone() the run's own reconciler**, over the durable
     /// queue: the driver holding the run, or this process once that driver had
     /// gone and this one took the run over. What they became is in the run's
     /// record rather than here.
@@ -2671,7 +2668,7 @@ fn journal_verdict(paths: &RunPaths, envelope: &Reply) -> Result<()> {
         journal::PipelineKind::PlannerReplied,
         journal::labels(&paths.run, None),
         journal::payload(&[
-            ("author", json!(envelope.author)),
+            ("author", json!(envelope.author.clone())),
             ("completion", json!(envelope.completion)),
             ("reason", json!(envelope.reason)),
         ]),
@@ -2723,6 +2720,7 @@ fn submit_envelope(
 ) -> Result<Submitted> {
     let view = RunView::open(paths)?;
     let channel = ChannelState::of_run(paths, &view.launch);
+    channel.declares(&envelope.author)?;
 
     // A correlation names the question a verdict answers, so an envelope with no
     // verdict half has nothing to bind to it — and silently dropping the flag
@@ -2747,7 +2745,7 @@ fn submit_envelope(
     //
     // Before anything is validated, queued, or applied, so the whole envelope is
     // turned away rather than half of it.
-    channel.allows_completion(envelope.author, envelope.completion)?;
+    channel.allows_completion(envelope.author.clone(), envelope.completion)?;
 
     if envelope.commands.is_empty() {
         // A settled run has no reader left, now or later, so queuing a reply to
@@ -2789,7 +2787,7 @@ fn submit_envelope(
     // an op outside the allowlist is refused by name and with the reason, and
     // never reaches the durable queue.
     for command in &envelope.commands {
-        channel.allows(envelope.author, command)?;
+        channel.allows(envelope.author.clone(), command)?;
     }
 
     // Every edit is validated against the graph projected from the journal,
@@ -2812,7 +2810,8 @@ fn submit_envelope(
     // from one this pass has already walked forward.
     let mut checking = frontier.clone();
     for command in &envelope.commands {
-        let operations = edits::compile(&mut projected, &checking, envelope.author, command)?;
+        let operations =
+            edits::compile(&mut projected, &checking, envelope.author.clone(), command)?;
         edits::advance(&mut checking, &operations);
     }
 
@@ -2854,7 +2853,7 @@ fn submit_envelope(
     // owner letting go of the run takes across its own last look at the queue —
     // so the answer this fork is taken on is still true when the commands land.
     // See [`engine::accept`].
-    match engine::accept(paths, &channel, envelope.author, &envelope.commands)? {
+    match engine::accept(paths, &channel, envelope.author.clone(), &envelope.commands)? {
         engine::Accepted::NothingIsDriving(lock) => {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
@@ -2871,21 +2870,26 @@ fn submit_envelope(
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
             for command in &envelope.commands {
-                let step =
-                    match validate_here(paths, &mut graph, &frontier, envelope.author, command) {
-                        Ok(step) => step,
-                        Err(error) => {
-                            engine::record_rejection(
-                                paths,
-                                &mut journal,
-                                envelope.author,
-                                command,
-                                &error,
-                            )?;
-                            lock.release();
-                            return Err(error);
-                        }
-                    };
+                let step = match validate_here(
+                    paths,
+                    &mut graph,
+                    &frontier,
+                    envelope.author.clone(),
+                    command,
+                ) {
+                    Ok(step) => step,
+                    Err(error) => {
+                        engine::record_rejection(
+                            paths,
+                            &mut journal,
+                            envelope.author.clone(),
+                            command,
+                            &error,
+                        )?;
+                        lock.release();
+                        return Err(error);
+                    }
+                };
                 edits::advance(&mut frontier, step.staged());
                 staged.push(step);
             }
@@ -2908,7 +2912,7 @@ fn submit_envelope(
                         engine::record_rejection(
                             paths,
                             &mut journal,
-                            envelope.author,
+                            envelope.author.clone(),
                             command,
                             &error,
                         )?;
@@ -2926,7 +2930,7 @@ fn submit_envelope(
                     engine::journalled_as(operations),
                     journal::labels(&paths.run, None),
                     journal::payload(&[
-                        ("author", json!(envelope.author)),
+                        ("author", json!(envelope.author.clone())),
                         ("command", json!(command)),
                         ("operations", json!(operations)),
                         (
@@ -2935,13 +2939,18 @@ fn submit_envelope(
                         ),
                     ]),
                 )?;
-                engine::record_operation_facts(paths, &mut journal, envelope.author, operations)?;
+                engine::record_operation_facts(
+                    paths,
+                    &mut journal,
+                    envelope.author.clone(),
+                    operations,
+                )?;
                 // The planner is told what the monitor did here as well as in
                 // the loop: which of the two applied an edit is an accident of
                 // whether anything was driving the run, and the planner owns the
                 // graph either way.
-                if envelope.author == Author::Monitor {
-                    if let Some(raised) = engine::monitor_edit(command) {
+                if !envelope.author.is_planner() {
+                    if let Some(raised) = engine::monitor_edit(&envelope.author.clone(), command) {
                         engine::raise(paths, &mut journal, raised)?;
                     }
                 }
@@ -3243,458 +3252,6 @@ fn reply_timeout_seconds() -> u64 {
 /// that runs until its member's stream ends.
 ///
 /// Absent is the default and is what
-/// [`SERVE_SESSION_ENV`](crate::channel::SERVE_SESSION_ENV) documents. Anything
-/// *present* is external input at a trust boundary and is **refused** unless it
-/// is a whole number of seconds greater than zero: read as unset instead, a
-/// mistyped bound would silently give the session the one behaviour the operator
-/// was trying to change, and a zero one would end it before it carried anything.
-/// The refusal is made before the first frame is read, so a session that cannot
-/// honour its bound never raises a surface it will not stay for.
-fn serve_session_deadline(key: &str) -> Result<Option<Instant>> {
-    let Some(value) = std::env::var_os(key) else {
-        return Ok(None);
-    };
-    let value = value.to_string_lossy().into_owned();
-    let seconds = value
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .filter(|seconds| *seconds > 0)
-        .ok_or_else(|| {
-            Error::Refused(format!(
-                "{key} is a whole number of seconds greater than zero, and this session was \
-                 given '{value}'; leave it unset for a session that serves until its member's \
-                 frame stream ends"
-            ))
-        })?;
-    // A bound this host's clock cannot name is refused rather than added: the
-    // sum is what every later comparison reads, and `Instant` addition panics on
-    // an overflow rather than saturating.
-    Instant::now()
-        .checked_add(Duration::from_secs(seconds))
-        .map(Some)
-        .ok_or_else(|| {
-            Error::Refused(format!(
-                "{key} of {seconds} seconds is further ahead than this host's clock can name"
-            ))
-        })
-}
-
-/// Who this session listens on behalf of, or `None` for one that listens on its
-/// own.
-///
-/// Absent is the default and is what [`ASKER_ENV`](crate::channel::ASKER_ENV)
-/// documents: a session that names no asker adopts nothing and is adopted by
-/// nobody. Anything *present* is external input at a trust boundary, and a blank
-/// value is **refused** rather than read as the absence it is not — an asker
-/// every session matches equally is not an identity, and the session that had it
-/// would take over questions belonging to askers it has never heard of. The
-/// refusal is made before the first frame is read, so a session that cannot say
-/// who it listens for never raises a question under the wrong name.
-fn serve_asker(key: &str) -> Result<Option<crate::channel::Asker>> {
-    std::env::var_os(key)
-        .map(|value| crate::channel::asker_named(&value, key))
-        .transpose()
-}
-
-/// How long a serving session waits for each question's answer.
-///
-/// [`REPLY_TIMEOUT_ENV`](crate::channel::REPLY_TIMEOUT_ENV) where it says, which
-/// is what the host's scripts set; otherwise the reply window the run's bus
-/// configuration sets for the `onejudge` codec; otherwise the shipped default.
-fn serve_reply_window(codec: &onemessagebus::CodecConfig) -> Duration {
-    // llmlint: ignore-block[boundary_inputs_validated] this is 0.28.2's reading of the variable, kept exactly: a value that does not parse, or zero, has always meant the default window rather than a refusal, and the host's scripts set this variable until that host's own node retires it, which this change is told not to break. The session bound and the asker, which 0.28.2 already refused, are still refused.
-    let variable = std::env::var(crate::channel::REPLY_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0);
-    // llmlint: ignore-end[boundary_inputs_validated]
-    Duration::from_secs(match (variable, codec.reply_window_seconds) {
-        (Some(seconds), _) => seconds,
-        (None, Some(configured)) => configured.get(),
-        (None, None) => crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS,
-    })
-}
-
-/// Why a serving session stopped, which is the whole of what decides whether
-/// what it raised is still owed an answer.
-///
-/// The discriminator is the **asker**, never the server. Read off the server's
-/// own exit instead, a question would be taken out from under a member that is
-/// still working and still waiting for it.
-enum Served {
-    /// The frame stream ended, so this loop is done reading: nothing is listening
-    /// for an answer to anything it raised *now*. Named for what it observed and
-    /// not for what that used to be read as — an asker that rents its listeners
-    /// is still there after one of them ends, and takes back what this one leaves
-    /// the moment it arms another.
-    StreamEnded,
-    /// The member declared its work complete in a verdict this session carried
-    /// back to it. Its conversation is over, so this loop is done reading too,
-    /// reached by the member saying so rather than by its stream closing.
-    Completed,
-    /// This session reached its own bound with the stream still open. The member
-    /// is still there and still sending, so nothing it raised is marked.
-    SessionOver,
-}
-
-/// `onepipeline channel serve` — an observer member's judge side.
-///
-/// The observer emits one JSON frame on stdout whenever it has something to
-/// raise; this relays it to the planner as a surface, waits for the answer, and
-/// writes the verdict back. A frame is advice: this side never authors an edit
-/// on the observer's behalf, and an edit it wants comes through `reply` with its
-/// own author, where the allowlist applies.
-fn serve(args: &RunArgs) -> Result<i32> {
-    let paths = resolve(&args.run)?;
-    let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
-    let channel = ChannelState::of_run(&paths, &launch);
-    // What the run's configuration sets for the codec this session speaks: the
-    // variables its bound and its asker are read from, and how long it waits.
-    let codec = channel.codec();
-    // Every surface this session raised, so that what it leaves behind can be
-    // said out loud rather than left standing as a question with no asker.
-    let mut raised: Vec<u64> = Vec::new();
-    let asker = serve_asker(
-        codec
-            .asker_env
-            .as_ref()
-            .map_or(crate::channel::ASKER_ENV, onemessagebus::EnvName::as_str),
-    )?;
-    let session_deadline = serve_session_deadline(codec.session_env.as_ref().map_or(
-        crate::channel::SERVE_SESSION_ENV,
-        onemessagebus::EnvName::as_str,
-    ))?;
-    let window = serve_reply_window(&codec);
-    // Before a frame is read, and before anything this session raises: an asker
-    // that re-armed is waiting on a question an earlier listener of its own gave
-    // up, and the manager it is waiting on may look at the queue at any moment.
-    // Taken into `raised` as well, because this session is now the listener that
-    // will leave them behind if its own asker goes.
-    if let Some(asker) = &asker {
-        raised.extend(channel.attend(asker)?.into_iter().map(|surface| surface.id));
-    }
-    let mut ending = Served::StreamEnded;
-    // Frames arrive on a thread of their own, so the bound above is a real
-    // deadline and not merely a thing noticed between exchanges: a member that
-    // has gone quiet must not hold a session past the moment it said it would
-    // stop, and a blocking read on this stream is exactly what would. Nothing
-    // joins it — the process ending is what ends it, and what it may still be
-    // holding is a line nobody asked for.
-    let (frames, arriving) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if frames.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    loop {
-        // Asked before a frame is read and never during an exchange: a bound
-        // that cut one off mid-answer would leave the member waiting on a
-        // verdict this process had already decided not to write.
-        let waiting_for = match session_deadline {
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    ending = Served::SessionOver;
-                    break;
-                }
-                Some(left)
-            }
-            None => None,
-        };
-        let line = match waiting_for {
-            Some(left) => match arriving.recv_timeout(left) {
-                Ok(line) => line,
-                // The bound came due with the stream still open and quiet.
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    ending = Served::SessionOver;
-                    break;
-                }
-                // The reader is gone, which is the frame stream ending.
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match arriving.recv() {
-                Ok(line) => line,
-                Err(_) => break,
-            },
-        };
-        // End of input and a broken pipe are not the same fact. Read as one,
-        // the observer's judge side exits 0 on a stream that failed mid-frame,
-        // so the question it was carrying never reaches the planner and nothing
-        // anywhere says why.
-        let line = line.map_err(|e| Error::Sibling {
-            tool: "oneagentgraph",
-            message: format!("the observer's frame stream could not be read: {e}"),
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let pending = match ObserverFrame::read(line.trim())? {
-            ObserverFrame::Question(frame) => {
-                // The node is external input like the rest of the frame, and it
-                // decides what a *blocking* frame holds back: a name the graph
-                // does not carry would pass validation and then hold nothing, so
-                // a question raised about work nobody is doing would read as one
-                // the run is waiting on. Judged against the graph as it stands,
-                // because that is what the subtree is derived from.
-                if let Some(node) = &frame.node {
-                    let graph = RunView::open(&paths)?.state.graph;
-                    if !graph.contains(node) {
-                        return Err(Error::Refused(format!(
-                            "the observer raised a frame about node '{node}', which run '{}' \
-                             does not have; it has: {}",
-                            paths.run,
-                            graph.ids().cloned().collect::<Vec<_>>().join(", ")
-                        )));
-                    }
-                }
-                // Asked rather than pushed: the bus stamps the question with the
-                // correlation its answer has to echo, and this session waits for
-                // that answer and no other.
-                let pending = channel.ask(Surface {
-                    id: 0,
-                    kind: frame.kind.clone(),
-                    message: frame.message.clone(),
-                    source: crate::channel::source::PROPOSAL.to_string(),
-                    blocking: frame.blocking,
-                    queued_at: sys::now_millis(),
-                    workstream: frame.node.clone(),
-                    abandoned: false,
-                    asker: asker.clone(),
-                    correlation: None,
-                })?;
-                let mut journal = Journal::open(&paths);
-                journal.emit(
-                    journal::PipelineKind::PlannerSurfaceQueued,
-                    journal::labels(&paths.run, frame.node.as_deref()),
-                    journal::payload(&[
-                        ("kind", json!(frame.kind)),
-                        ("message", json!(frame.message)),
-                        ("source", json!(crate::channel::source::PROPOSAL)),
-                        ("blocking", json!(frame.blocking)),
-                    ]),
-                )?;
-                pending
-            }
-            // A listener re-armed over a question it was already told is still
-            // unanswered: nothing is raised, and an answer that arrived while
-            // nobody was listening is the one this wait returns.
-            ObserverFrame::Relisten(frame) => channel.listen(&frame.correlation, asker.as_ref())?,
-        };
-        raised.push(pending.id());
-
-        // Wait for the answer to this question and no other. A verdict another
-        // question's listener is owed is never taken here, and a live edit
-        // arriving while this waits is not an answer at all: it carries no
-        // ruling, so it goes to the command path and leaves this wait standing
-        // rather than ending the member with an envelope it cannot read.
-        let (written, completed) = match await_answer(&channel, &pending, asker.as_ref(), window)? {
-            Awaited::Reply(queued) => {
-                channel.delivered(&queued)?;
-                let completed = queued.reply.completion == Some(true);
-                let written = serde_json::to_value(&queued.reply)
-                    .map_err(|e| Error::Invalid(format!("verdict: {e}")))?;
-                (written, completed)
-            }
-            // No ruling arrived, and none is made up. The member is told, in the
-            // bus's own words, that the wait elapsed — or that nobody is
-            // listening — and which question still stands, in a response that
-            // carries none of the fields a ruling is read from. The question
-            // stays queued and answerable, and a frame naming its correlation
-            // waits for its answer again.
-            Awaited::Unanswered(why) => (
-                json!({"answer": why.word(), "correlation": pending.correlation()}),
-                false,
-            ),
-        };
-        println!("{written}");
-        std::io::stdout()
-            .flush()
-            .map_err(|e| Error::Refused(format!("cannot write the verdict: {e}")))?;
-        if completed {
-            ending = Served::Completed;
-            break;
-        }
-    }
-    if matches!(ending, Served::SessionOver) {
-        // This process is done; the member that spawned it is not. Said on
-        // stderr because an operator reading a run whose server went needs to
-        // know the questions are still standing rather than lost — and because
-        // it is the one visible difference between this ending and the two that
-        // withdraw.
-        eprintln!(
-            "onepipeline: this channel session reached its {} bound with the observer's stream \
-             still open; {}",
-            crate::channel::SERVE_SESSION_ENV,
-            match raised.len() {
-                0 => "it had raised nothing".to_owned(),
-                left => format!(
-                    "the {left} surface(s) it raised stay in the queue, still waiting for an \
-                     answer"
-                ),
-            }
-        );
-    }
-    // Which ending this was decides it, and the question each is answering is
-    // whether anything is listening for these answers as this process leaves. A
-    // stream that ended and a member that declared itself complete both say
-    // nothing is: what this session leaves behind is marked — rather than
-    // deleted, which [`ChannelState::abandon`] says why — so the run stops
-    // reporting a decision nobody is waiting on while the text stays where a
-    // manager can still read it. A session that reached its own bound says the
-    // opposite: the member is still holding the stream open and still owed every
-    // answer, so nothing is marked and everything stays counted.
-    //
-    // The mark is a statement about now and not a verdict about the asker, which
-    // is why it is [`ChannelState::attend`]'s to lift: an asker whose whole way
-    // of waiting is a succession of listeners reaches here on every one of them.
-    //
-    // Deliberately not reached by the `?` paths above either: a refused frame is
-    // this server rejecting what the member said, and the member is still there
-    // to be told.
-    if matches!(ending, Served::StreamEnded | Served::Completed) {
-        channel.abandon(&raised)?;
-    }
-    Ok(EXIT_SUCCESS)
-}
-
-/// What a listener's wait came back with.
-enum Awaited {
-    /// A ruling this listener is owed.
-    Reply(crate::channel::QueuedReply),
-    /// None, and why.
-    Unanswered(Unanswered),
-}
-
-/// Why a listener's wait ended with no ruling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Unanswered {
-    /// The reply window elapsed.
-    Timeout,
-    /// Nobody is listening for the question any more.
-    Abandoned,
-}
-
-impl Unanswered {
-    /// The bus's own word for it, which is what the member is told.
-    fn word(self) -> &'static str {
-        match self {
-            Self::Timeout => Answer::<()>::Timeout.word(),
-            Self::Abandoned => Answer::<()>::Abandoned.word(),
-        }
-    }
-}
-
-/// Wait up to `window` for what this listener is owed.
-///
-/// Its own question's answer first, through the handle the bus answers it on,
-/// wherever that answer sits on the reply queue; then, oldest first, anything
-/// else [`ChannelState::owed`] says a listener of this asker reads. Between
-/// looks the wait is the transport's own, on the reply queue moving, so an
-/// answer is read the moment it lands and nothing is read while it does not.
-fn await_answer(
-    channel: &ChannelState,
-    pending: &onemessagebus::Pending<serde_json::Value>,
-    asker: Option<&crate::channel::Asker>,
-    window: Duration,
-) -> Result<Awaited> {
-    let deadline = Instant::now().checked_add(window);
-    loop {
-        let since = channel.replies_mark()?;
-        match pending.wait(Duration::ZERO) {
-            Answer::Reply(record) => {
-                return serde_json::from_value(record)
-                    .map(Awaited::Reply)
-                    .map_err(|e| Error::Invalid(format!("verdict: {e}")));
-            }
-            Answer::Refused(refusal) => return Err(Error::Refused(refusal.reason)),
-            Answer::Abandoned => return Ok(Awaited::Unanswered(Unanswered::Abandoned)),
-            Answer::Timeout => {}
-        }
-        if let Some(owed) = channel.owed(asker)? {
-            return Ok(Awaited::Reply(owed));
-        }
-        // A deadline past what the clock can name is no deadline.
-        let left = deadline.map_or(Duration::MAX, |deadline| {
-            deadline.saturating_duration_since(Instant::now())
-        });
-        if left.is_zero() {
-            return Ok(Awaited::Unanswered(Unanswered::Timeout));
-        }
-        channel.wait_for_replies(&since, left)?;
-    }
-}
-
-/// What an observer emits: something to raise, or a question to wait on again.
-///
-/// External input, so each shape has a schema: an unknown key or a missing
-/// `kind` or `message` is refused by name rather than defaulted into a surface
-/// the planner then has to interpret.
-enum ObserverFrame {
-    /// Something to raise, asked as a question.
-    Question(QuestionFrame),
-    /// A question already asked, whose answer this listener waits for again.
-    Relisten(RelistenFrame),
-}
-
-impl ObserverFrame {
-    /// Read one frame. A frame naming a `correlation` is a re-arm and nothing
-    /// else; every other frame is something to raise.
-    fn read(line: &str) -> Result<Self> {
-        let bad =
-            |e: serde_json::Error| Error::Refused(format!("the observer emitted a bad frame: {e}"));
-        let frame: serde_json::Value = serde_json::from_str(line).map_err(bad)?;
-        if frame.get("correlation").is_some() {
-            return serde_json::from_value(frame)
-                .map(Self::Relisten)
-                .map_err(bad);
-        }
-        serde_json::from_value(frame)
-            .map(Self::Question)
-            .map_err(bad)
-    }
-}
-
-/// Something an observer raises.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QuestionFrame {
-    /// What the surface is asking about, in the observer persona's own
-    /// vocabulary.
-    kind: String,
-    /// Its text.
-    message: String,
-    /// Whether the run should wait on the answer. A frame that says nothing is
-    /// blocking, because an observer that stopped to ask is waiting; a monitor
-    /// reporting what it saw says `false` and holds nothing back.
-    #[serde(default = "blocking_by_default")]
-    blocking: bool,
-    /// The node that provoked it, when one did.
-    #[serde(default)]
-    node: Option<String>,
-}
-
-/// A re-arm: the question an earlier answer named as still standing.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RelistenFrame {
-    /// The correlation that answer named.
-    correlation: onemessagebus::Correlation,
-}
-
-fn blocking_by_default() -> bool {
-    true
-}
-
-// llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer these
-// views were asked for, not a failure of the command, so it goes to stdout and the exit
-// code stays 0: failing `runs` because one stray directory sits beside the runs would break
-// every wrapper over it. A caller that named *one* run and could not have it is a different
-// case, and `resolve` and `RunView::open` still refuse it outright.
-/// `onepipeline runs`.
 fn runs(args: &RunsArgs) -> Result<i32> {
     print!(
         "{}",

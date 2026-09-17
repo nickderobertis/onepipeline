@@ -5611,6 +5611,41 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
     world.release("build.go");
 }
 
+/// Surface kinds are host vocabulary: two words the engine never declared take
+/// the same path, while malformed input is refused at the CLI boundary.
+#[test]
+fn undeclared_surface_kinds_are_relayed_identically() {
+    let world = World::new("channel-open-kinds");
+    world.script("build.wait", "hold");
+    let run = running(&world, "openkinds", vec![agent("build", &[])]);
+
+    for kind in ["monitor-failed", "host-signal"] {
+        world
+            .run(&["surface", &run, "--kind", kind, "--message", "observed"])
+            .exited(0);
+    }
+    for kind in ["monitor-failed", "host-signal"] {
+        let read = world.run(&["next", &run]);
+        read.exited(0);
+        assert_eq!(read.json()["surface"]["kind"], kind);
+        assert_eq!(read.json()["surface"]["source"], "proposal");
+        assert_eq!(read.json()["surface"]["blocking"], false);
+    }
+
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "Bad_kind",
+            "--message",
+            "never queued",
+        ])
+        .exited(REFUSED)
+        .err_has("^[a-z][a-z0-9-]{0,63}$");
+    world.release("build.go");
+}
+
 /// A finding is validated like every other op — and the node it names is
 /// optional, so the two answers a name can get are both here beside the
 /// unnamed case that skips the question.

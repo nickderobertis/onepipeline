@@ -2207,11 +2207,16 @@ fn reconcile_edits(
 ) -> Result<bool> {
     let mut changed = false;
     for envelope in channel.claim_commands()? {
-        let author = envelope.author;
+        let author = envelope.author.clone();
         let commands = &envelope.commands;
 
         let staged = match all_or_each_ruling(validate_envelope(
-            paths, state, author, commands, launch, in_flight,
+            paths,
+            state,
+            author.clone(),
+            commands,
+            launch,
+            in_flight,
         )) {
             Ok(staged) => staged,
             Err(evaluated) => {
@@ -2222,7 +2227,7 @@ fn reconcile_edits(
                 // else of it happened.
                 for (command, ruling) in commands.iter().zip(&evaluated) {
                     if let Err(error) = ruling {
-                        record_rejection(paths, journal, author, command, error)?;
+                        record_rejection(paths, journal, author.clone(), command, error)?;
                     }
                 }
                 channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
@@ -2239,7 +2244,7 @@ fn reconcile_edits(
             Err(evaluated) => {
                 for (command, ruling) in commands.iter().zip(&evaluated) {
                     if let Err(error) = ruling {
-                        record_rejection(paths, journal, author, command, error)?;
+                        record_rejection(paths, journal, author.clone(), command, error)?;
                     }
                 }
                 channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
@@ -2252,7 +2257,7 @@ fn reconcile_edits(
                 paths,
                 journal,
                 state,
-                author,
+                author.clone(),
                 command,
                 delivery.committed(),
                 in_flight,
@@ -2453,9 +2458,20 @@ fn validate_envelope(
     // The run's own grants, as its launch narrowed them.
     let channel = ChannelState::of_run(paths, launch);
     for command in commands {
-        let ruling = channel.allows(author, command).and_then(|()| {
-            validate_command(paths, &staged_state, author, command, launch, in_flight)
-        });
+        let ruling = channel
+            .declares(&author)
+            .and_then(|()| channel.allows_completion(author.clone(), None))
+            .and_then(|()| channel.allows(author.clone(), command))
+            .and_then(|()| {
+                validate_command(
+                    paths,
+                    &staged_state,
+                    author.clone(),
+                    command,
+                    launch,
+                    in_flight,
+                )
+            });
         if let Ok(step) = &ruling {
             crate::projection::fold_operations(
                 &mut staged_state,
@@ -2710,12 +2726,12 @@ fn commit_command(
             ("operation_kinds", json!(operation_kinds(operations))),
         ]),
     )?;
-    record_operation_facts(paths, journal, author, operations)?;
+    record_operation_facts(paths, journal, author.clone(), operations)?;
     // An edit the monitor made is the planner's to review: it was applied on the
     // monitor's own judgement, so the planner learns of it without being asked to
     // approve it first.
-    if author == crate::channel::Author::Monitor {
-        if let Some(surface) = monitor_edit(command) {
+    if !author.is_planner() {
+        if let Some(surface) = monitor_edit(&author, command) {
             raise(paths, journal, surface)?;
         }
     }
@@ -3765,7 +3781,7 @@ pub(crate) struct SessionConflict {
 fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
     Surface {
         id: 0,
-        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        kind: crate::channel::SurfaceKind::FINDING.into(),
         message: format!(
             "node '{node}' cannot open a session: its branch and the base it would be \
              published into conflict, and no further attempt converges on that — opening \
@@ -4445,7 +4461,7 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
     };
     Surface {
         id: 0,
-        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        kind: crate::channel::SurfaceKind::FINDING.into(),
         message: bounded(&format!(
             "{whose} ({member}): its identity chain {candidate}, which ran and produced \
              no usable result. The provider failure could not be classified, so the chain \
@@ -5105,7 +5121,7 @@ pub(crate) fn record_operation_facts(
             } => raise(
                 paths,
                 journal,
-                finding_surface(author, node.clone(), message, *blocking),
+                finding_surface(author.clone(), node.clone(), message, *blocking),
             )?,
             // A node an operator settled from evidence settles like any other:
             // under this crate's own `node-settled`, so every reader of a run —
@@ -5186,7 +5202,7 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
 /// to the planner: it compiles to the surface the planner reads, so reporting it
 /// a second time as an edit the monitor made would put two entries on the queue
 /// for one thing said once — the multiplication this op exists to end.
-pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
+pub(crate) fn monitor_edit(author: &crate::channel::Author, command: &Command) -> Option<Surface> {
     if matches!(command, Command::Finding { .. }) {
         return None;
     }
@@ -5194,10 +5210,11 @@ pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
         id: 0,
         kind: "monitor-edit".into(),
         message: format!(
-            "monitor applied an edit: {}",
+            "{} applied an edit: {}",
+            author.as_str(),
             bounded(&serde_json::to_string(command).unwrap_or_default())
         ),
-        source: crate::channel::source::MONITOR.into(),
+        source: author.as_str().into(),
         blocking: false,
         queued_at: sys::now_millis(),
         abandoned: false,
@@ -5222,13 +5239,13 @@ pub(crate) fn finding_surface(
 ) -> Surface {
     Surface {
         id: 0,
-        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        kind: crate::channel::SurfaceKind::FINDING.into(),
         message: message.to_string(),
-        source: match author {
-            crate::channel::Author::Monitor => crate::channel::source::MONITOR,
-            crate::channel::Author::Planner => crate::channel::source::PROPOSAL,
-        }
-        .into(),
+        source: if author.is_planner() {
+            crate::channel::source::PROPOSAL.into()
+        } else {
+            author.as_str().into()
+        },
         blocking,
         queued_at: sys::now_millis(),
         abandoned: false,
@@ -5279,7 +5296,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
     let holds = bounded(holds);
     Surface {
         id: 0,
-        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        kind: crate::channel::SurfaceKind::FINDING.into(),
         message: format!(
             "node '{node}' settled against a criterion its branch contradicts.\n\
              criterion: {criterion}\n\
@@ -5354,7 +5371,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
     };
     Surface {
         id: 0,
-        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        kind: crate::channel::SurfaceKind::FINDING.into(),
         message: format!(
             "the onetaskgraph project '{project}' did not take this run's projection.\n\
              items: {items}\n\
@@ -5646,7 +5663,7 @@ mod tests {
         accepting_under_the_handover(
             paths,
             &ChannelState::new(paths),
-            crate::channel::Author::Planner,
+            crate::channel::Author::planner(),
             &[Command::Cancel {
                 id: "node".to_owned(),
                 reason: None,
@@ -5714,7 +5731,7 @@ mod tests {
                 accept(
                     &paths,
                     &ChannelState::new(&paths),
-                    crate::channel::Author::Planner,
+                    crate::channel::Author::planner(),
                     &[Command::Cancel {
                         id: "node".to_owned(),
                         reason: None,
@@ -5770,7 +5787,7 @@ mod tests {
         let refused = match accept(
             &paths,
             &ChannelState::new(&paths),
-            crate::channel::Author::Planner,
+            crate::channel::Author::planner(),
             &[Command::Cancel {
                 id: "node".to_owned(),
                 reason: None,
@@ -6485,7 +6502,7 @@ mod tests {
             stepped_past: vec![("j/first".into(), "quota".into())],
             detail: "no usable result; see `raw_response`".into(),
         });
-        assert_eq!(finding.kind, crate::channel::SurfaceKind::Finding.as_str());
+        assert_eq!(finding.kind, crate::channel::SurfaceKind::FINDING);
         assert!(!finding.blocking);
         assert_eq!(finding.workstream.as_deref(), Some("build"));
         for named in [
@@ -7315,7 +7332,7 @@ mod tests {
                     journalled_as(operations),
                     journal::labels(&paths.run, None),
                     journal::payload(&[
-                        ("author", json!(crate::channel::Author::Planner)),
+                        ("author", json!(crate::channel::Author::planner())),
                         ("operations", json!(operations)),
                         ("operation_kinds", json!(operation_kinds(operations))),
                     ]),
@@ -7471,7 +7488,7 @@ mod tests {
             },
             edits::Operation::NodeParked {
                 node: node(),
-                by: crate::channel::Author::Planner,
+                by: crate::channel::Author::planner(),
                 reason: Some("the disk is full".into()),
             },
             edits::Operation::NodeRequeued {

@@ -101,21 +101,13 @@ impl From<crate::graph::Landing> for LandingWord {
 }
 
 /// Who submitted a command or a reply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum AuthorWord {
-    /// `planner`.
-    Planner,
-    /// `monitor`.
-    Monitor,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct AuthorWord(String);
 
 impl From<crate::channel::Author> for AuthorWord {
     fn from(author: crate::channel::Author) -> Self {
-        match author {
-            crate::channel::Author::Planner => Self::Planner,
-            crate::channel::Author::Monitor => Self::Monitor,
-        }
+        Self(author.as_str().to_owned())
     }
 }
 
@@ -1038,11 +1030,11 @@ mod tests {
             assert_eq!(word(&LandingWord::from(landing)), landing.as_str());
         }
         for author in [
-            crate::channel::Author::Planner,
-            crate::channel::Author::Monitor,
+            crate::channel::Author::planner(),
+            crate::channel::Author::from("monitor"),
         ] {
-            assert_eq!(word(&AuthorWord::from(author)), author.as_str());
-            assert_eq!(word(&AuthorWord::from(author)), word(&author));
+            assert_eq!(word(&AuthorWord::from(author.clone())), author.as_str());
+            assert_eq!(word(&AuthorWord::from(author.clone())), word(&author));
         }
         for style in [
             onevcs::releases::ReleaseStyle::Automated,

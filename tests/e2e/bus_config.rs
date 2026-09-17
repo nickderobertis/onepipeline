@@ -192,23 +192,24 @@ fn a_bus_config_naming_another_profile_is_refused_before_a_run_exists() {
     );
 }
 
-/// A configuration may narrow an author's grants and never widen them.
+/// A host may declare an author the built-in layout has never named.
 #[test]
-fn a_bus_config_widening_the_monitors_grants_is_refused_before_a_run_exists() {
-    let world = World::new("bus-config-widened");
-    refused_before_a_run_exists(
+fn a_bus_config_declares_an_open_author() {
+    let world = World::new("bus-config-author");
+    let file = configuration(
         &world,
-        "version: 1\ntransport: {kind: local}\nauthors:\n  monitor: {capabilities: [retry, drop]}\n",
-        &["authors.monitor.capabilities", "`drop`"],
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel: {capabilities: [retry, drop]}\n",
     );
+    let path = plan(&world, "busauthor");
+    launched(&world, &path, "busauthor", &["--bus-config", &file]);
+    world.release("slow.go");
 }
 
 /// Every other part of a run's channel this crate decides for itself is refused
 /// at the launch, naming the key and its value, before any run exists: a
-/// transport option the local transport does not take, queues of the
-/// configuration's own, a codec `channel serve` does not speak, and an
-/// `onejudge` codec pointed at another queue or at variables `channel serve`
-/// does not read its run or its node from.
+/// transport option the local transport does not take and queues of the
+/// configuration's own.
 #[test]
 fn a_bus_config_moving_what_the_channel_decides_for_itself_is_refused_before_a_run_exists() {
     let world = World::new("bus-config-corners");
@@ -221,25 +222,22 @@ fn a_bus_config_moving_what_the_channel_decides_for_itself_is_refused_before_a_r
             "version: 1\ntransport: {kind: local}\nqueues:\n  surfaces: {}\n",
             ["queues.surfaces", "leave `queues` out"],
         ),
-        (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  another: {}\n",
-            ["codecs.another", "`onejudge`"],
-        ),
-        (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {queue: replies}\n",
-            ["codecs.onejudge.queue", "`replies`"],
-        ),
-        (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {run_env: HOST_RUN}\n",
-            ["codecs.onejudge.run_env", "`HOST_RUN`"],
-        ),
-        (
-            "version: 1\ntransport: {kind: local}\ncodecs:\n  onejudge: {about_env: HOST_ABOUT}\n",
-            ["codecs.onejudge.about_env", "`HOST_ABOUT`"],
-        ),
     ] {
         refused_before_a_run_exists(&world, body, &named);
     }
+}
+
+#[test]
+fn codec_and_unreachable_schema_configuration_is_accepted_without_network() {
+    let world = World::new("bus-config-host-owned");
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\nschemas:\n  - https://unreachable.invalid/frames.json@1\ncodecs:\n  foreign:\n    queue: surfaces\n    select: kind\n    frames:\n      ping:\n        schema: agent.planner-surface@1\n        bindings:\n          - {do: answer, response: {ok: true}}\n",
+    );
+    let path = plan(&world, "bushostowned");
+    launched(&world, &path, "bushostowned", &["--bus-config", &file]);
+    world.release("slow.go");
 }
 
 /// A validator the configuration names on the surfaces queue judges each
@@ -355,10 +353,8 @@ fn channel_serve_reads_its_asker_and_bound_from_the_variables_the_codec_names() 
     world.release("slow.go");
 }
 
-/// An author the configuration narrowed is refused what it took away — naming
-/// the author, the op and the configuration's reason, with nothing appended to
-/// the channel — and keeps what it left, while the same plan launched without the
-/// file takes the same envelope.
+/// A configured author is refused an ungranted operation with nothing appended,
+/// and an operation it was granted reaches the reconciler.
 #[test]
 fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_it_left() {
     let world = World::new("bus-config-narrowed");
@@ -368,7 +364,6 @@ fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_i
     // edited: a retry supersedes the held node, and what a superseded dispatch
     // releases as it ends is the hold every run of this world shares.
     launched(&world, &path, "busnarrowed", &["--bus-config", &file]);
-    launched(&world, &path, "busnarrowed-2", &[]);
 
     let cancel = from_the_monitor(json!([
         {"op": "cancel", "id": "spare", "reason": "a monitor's park"}
@@ -376,9 +371,7 @@ fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_i
     world
         .run_with_stdin(&["reply", "busnarrowed"], &cancel)
         .exited(REFUSED)
-        .err_has(
-            "'cancel' is not an op the monitor may issue: the configuration does not grant it",
-        );
+        .err_has("'cancel' is not an op the monitor may issue: nothing grants it to this author");
     for file in ["replies.jsonl", "commands.jsonl"] {
         assert_eq!(
             channel_file(&world, "busnarrowed", file),
@@ -386,11 +379,6 @@ fn an_author_a_bus_config_narrowed_is_refused_what_it_took_away_and_keeps_what_i
             "a refused envelope reached {file}"
         );
     }
-
-    // The same plan, launched without the configuration, takes the same cancel.
-    world
-        .run_with_stdin(&["reply", "busnarrowed-2"], &cancel)
-        .exited(0);
 
     // And what the configuration kept still reaches the reconciler.
     world

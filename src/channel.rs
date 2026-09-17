@@ -41,13 +41,12 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use onemessagebus::{
-    Allowlist, AskOptions, Bus, BusError, CodecConfig, CodecName, Config, ConsumerName,
-    Correlation, Fingerprint, Layouts, Lifetime, LocalTransport, Message, OpWord, Pending,
-    QueueError, QueueName, QueueSpec, RawQueue, Read, Registry, SchemaId, Transport,
-    TransportConfig, TransportKinds,
+    Allowlist, AskOptions, Bus, BusError, Config, ConsumerName, Correlation, Fingerprint, Layouts,
+    Lifetime, LocalTransport, Message, OpWord, Pending, QueueError, QueueName, QueueSpec, RawQueue,
+    Read, Registry, SchemaId, Transport, TransportConfig, TransportKinds,
 };
 use onemessagebus_agent::channel::{
-    ChannelAuthor, PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
+    PlannerChannel, COMMANDS, COMMAND_OUTCOMES, PLANNER_CHANNEL, REPLIES, SURFACES,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -122,41 +121,63 @@ where
 /// owns the graph and the monitor only watches it, and the difference has to be
 /// enforced rather than trusted. Omitted, an envelope is the planner's — every
 /// reply written before this field existed was.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Author {
-    /// The planner: it owns decomposition and review, and may issue every op.
-    #[default]
-    Planner,
-    /// An observing monitor: it may correct and re-run work, and may not decide
-    /// that the run is finished, that a person acted, or that a node goes away.
-    Monitor,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct Author(String);
 
 impl Author {
     /// The word a record names this author with.
-    pub fn as_str(self) -> &'static str {
-        ChannelAuthor::from(self).as_str()
+    pub fn planner() -> Self {
+        Self("planner".into())
+    }
+    /// The author's wire word.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     /// Whether this is the default, so serialization can omit it.
     pub(crate) fn is_planner(&self) -> bool {
-        matches!(self, Self::Planner)
+        self.as_str() == "planner"
     }
 
     /// The bus's open author this one is, as an allowlist names it.
-    pub(crate) fn word(self) -> onemessagebus::Author {
-        ChannelAuthor::from(self).author()
+    pub(crate) fn word(&self) -> onemessagebus::Author {
+        onemessagebus::Author::from(self.as_str())
     }
 }
 
-impl From<Author> for ChannelAuthor {
-    fn from(author: Author) -> Self {
-        match author {
-            Author::Planner => Self::Planner,
-            Author::Monitor => Self::Monitor,
-        }
+impl Default for Author {
+    fn default() -> Self {
+        Self::planner()
     }
+}
+impl From<&str> for Author {
+    fn from(word: &str) -> Self {
+        Self(word.into())
+    }
+}
+impl TryFrom<String> for Author {
+    type Error = String;
+    fn try_from(word: String) -> Result<Self, Self::Error> {
+        valid_word(&word)
+            .then(|| Self(word.clone()))
+            .ok_or_else(|| {
+                format!("'{word}' is not an author: authors match ^[a-z][a-z0-9-]{{0,63}}$")
+            })
+    }
+}
+impl From<Author> for String {
+    fn from(author: Author) -> Self {
+        author.0
+    }
+}
+
+fn valid_word(word: &str) -> bool {
+    (1..=64).contains(&word.len())
+        && word.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// The `planner-channel` layout's allowlist as the profile declares it, before
@@ -269,7 +290,7 @@ pub struct Reply {
         skip_serializing_if = "Option::is_none"
     )]
     pub version: Option<u32>,
-    /// Who wrote it. Omitted, [`Author::Planner`].
+    /// Who wrote it. Omitted, [`Author::planner()`].
     #[serde(default, skip_serializing_if = "Author::is_planner")]
     pub author: Author,
     /// The legacy verdict: whether the planner considers the run complete.
@@ -758,30 +779,48 @@ impl Deliver {
 }
 
 /// What a planner surface is asking about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-#[value(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum SurfaceKind {
-    /// The durable planner-update pacemaker came due. Consuming one resets that
-    /// clock through `oneagentgraph reset-timer RUN check-in`.
-    CheckIn,
-    /// Something a watcher saw and decided the planner should know. Raised
-    /// deliberately — by the [`Command::Finding`] op, or by `surface` — rather
-    /// than as a side effect of a turn having happened.
-    Finding,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct SurfaceKind(String);
 
 impl SurfaceKind {
     /// The word a queued surface names this kind with.
     ///
     /// The wire spelling is this enum's rather than a string beside it, so the
     /// kind a queue holds and the kind a command line accepts cannot drift.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::CheckIn => "check-in",
-            Self::Finding => "finding",
-        }
+    pub const CHECK_IN: &'static str = "check-in";
+    /// Something a watcher decided the planner should know.
+    pub const FINDING: &'static str = "finding";
+    /// The engine's check-in kind.
+    pub fn check_in() -> Self {
+        Self(Self::CHECK_IN.into())
+    }
+    /// The engine's finding kind.
+    pub fn finding() -> Self {
+        Self(Self::FINDING.into())
+    }
+    /// The kind's wire word.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::str::FromStr for SurfaceKind {
+    type Err = String;
+    fn from_str(word: &str) -> Result<Self, Self::Err> {
+        valid_word(word).then(|| Self(word.into())).ok_or_else(|| {
+            format!("'{word}' is not a surface kind: kinds match ^[a-z][a-z0-9-]{{0,63}}$")
+        })
+    }
+}
+impl TryFrom<String> for SurfaceKind {
+    type Error = String;
+    fn try_from(word: String) -> Result<Self, Self::Error> {
+        word.parse()
+    }
+}
+impl From<SurfaceKind> for String {
+    fn from(kind: SurfaceKind) -> Self {
+        kind.0
     }
 }
 
@@ -815,8 +854,6 @@ pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 /// this bound does not even say that much: the stream is still open, the member
 /// is still there, and every question it raised is still owed an answer, so
 /// nothing is marked at all.
-pub const SERVE_SESSION_ENV: &str = "ONEPIPELINE_SERVE_SESSION_SECONDS";
-
 /// The environment variable naming who a `channel serve` session listens on
 /// behalf of.
 ///
@@ -842,10 +879,6 @@ pub(crate) use onemessagebus::Asker;
 
 /// The asker one environment value names, or a refusal saying why it names none —
 /// naming `from`, the variable it was read from.
-pub(crate) fn asker_named(value: &std::ffi::OsStr, from: &str) -> crate::Result<Asker> {
-    Asker::named(value, from).map_err(|refused| crate::Error::Refused(refused.to_string()))
-}
-
 /// Read the asker a queue recorded, reading a name that names nobody as none.
 ///
 /// The one lenient boundary in this file, and the leniency is the point. A
@@ -1183,38 +1216,6 @@ pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config>
              — leave `queues` out"
         )));
     }
-    let onejudge = onemessagebus_agent::codec::onejudge::CODEC;
-    for (codec, block) in &config.codecs {
-        let refused = if codec.as_str() != onejudge {
-            Some(format!(
-                "codecs.{codec} is configured, and the one codec `channel serve` speaks is \
-                 `{onejudge}`"
-            ))
-        } else if let Some(queue) = block
-            .queue
-            .as_ref()
-            .filter(|queue| queue.as_str() != SURFACES)
-        {
-            Some(format!(
-                "codecs.{onejudge}.queue is `{queue}`, and `channel serve` asks on `{SURFACES}`"
-            ))
-        } else if let Some(run_env) = &block.run_env {
-            Some(format!(
-                "codecs.{onejudge}.run_env is `{run_env}`, and `channel serve` takes its run from \
-                 its own argument"
-            ))
-        } else {
-            block.about_env.as_ref().map(|about_env| {
-                format!(
-                    "codecs.{onejudge}.about_env is `{about_env}`, and `channel serve` takes what \
-                     a question is about from its frame's `node`"
-                )
-            })
-        };
-        if let Some(why) = refused {
-            return Err(named(why));
-        }
-    }
     config.profile = Some(PLANNER_CHANNEL.to_owned());
     let mut probe = config.clone();
     probe.transport = TransportConfig {
@@ -1273,6 +1274,10 @@ fn bus_failure(failure: BusError) -> crate::Error {
 }
 
 /// Surfaces a queue handed back as records, as the type they are.
+#[allow(
+    dead_code,
+    reason = "shared bus primitives remain part of the library channel API after the CLI server was retired"
+)]
 fn read_surfaces(records: Vec<Value>) -> crate::Result<Vec<Surface>> {
     records
         .into_iter()
@@ -1303,6 +1308,10 @@ fn echoed_token(message: &str) -> Option<String> {
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "shared bus primitives remain part of the library channel API after the CLI server was retired"
+)]
 impl ChannelState {
     /// The channel for one run.
     pub fn new(paths: &crate::ledger::RunPaths) -> Self {
@@ -1426,17 +1435,6 @@ impl ChannelState {
 
     /// What the run's configuration sets for the `onejudge` codec `channel serve`
     /// speaks, or nothing for a run whose launch named no configuration.
-    pub(crate) fn codec(&self) -> CodecConfig {
-        let Some(config) = &self.config else {
-            return CodecConfig::default();
-        };
-        onemessagebus_agent::codec::onejudge::CODEC
-            .parse::<CodecName>()
-            .ok()
-            .and_then(|name| config.codecs.get(&name).cloned())
-            .unwrap_or_default()
-    }
-
     /// Whether `author` may issue `command` on this run, under the grants its
     /// configuration narrowed.
     pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
@@ -1444,6 +1442,30 @@ impl ChannelState {
             None => allowed_by(profile_allowlist(), author, command),
             Some(_) => allowed_by(self.bus()?.allowlist(), author, command),
         }
+    }
+
+    pub(crate) fn declares(&self, author: &Author) -> crate::Result<()> {
+        let configured;
+        let allowlist = match &self.config {
+            None => profile_allowlist(),
+            Some(_) => {
+                configured = self.bus()?;
+                configured.allowlist()
+            }
+        };
+        if allowlist.declares(&author.word()) {
+            return Ok(());
+        }
+        Err(crate::Error::Refused(format!(
+            "the envelope's author `{}` is not declared; the declared authors are: {}",
+            author.as_str(),
+            allowlist
+                .authors()
+                .iter()
+                .map(onemessagebus::Author::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
     }
 
     /// Whether `author` may declare this run finished through a verdict, under
@@ -2085,7 +2107,7 @@ mod tests {
         };
         Reply {
             version: Some(REPLY_ENVELOPE_VERSION),
-            author: Author::Planner,
+            author: Author::planner(),
             commands: vec![
                 settled(
                     "publish",
@@ -2283,26 +2305,6 @@ mod tests {
             serde_json::to_value(&before).expect("it serialises"),
             bare,
             "an envelope written before the landing existed did not round-trip unchanged"
-        );
-    }
-
-    /// The two variables a serving session reads are the names the profile's
-    /// codec reads them under.
-    ///
-    /// The host's scripts set them by these names, and the codec block's
-    /// defaults are these names; a rename here that the profile did not make
-    /// would leave the host setting a variable nothing reads.
-    #[test]
-    fn the_session_variables_are_the_names_the_profile_reads() {
-        assert_eq!(ASKER_ENV, onemessagebus_agent::channel::ASKER_ENV);
-        assert_eq!(
-            ASKER_ENV,
-            onemessagebus_agent::codec::onejudge::ASKER_ENV,
-            "the codec reads the asker from another variable"
-        );
-        assert_eq!(
-            SERVE_SESSION_ENV,
-            onemessagebus_agent::codec::onejudge::SESSION_ENV
         );
     }
 

@@ -1694,7 +1694,7 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
     out
 }
 
-/// The rows of a listing in the order a view renders them: **by run id**.
+/// The rows of a listing in the order a view renders them: *by.clone() run id**.
 ///
 /// [`Listing`] serves its rows most recently written first, which is the order
 /// the ordering key on the document exists to make answerable without a fold. A
@@ -4608,7 +4608,7 @@ mod tests {
     /// One chain, two turns, two endings: the recovered turn and the one that
     /// ran out are two facts, and each is rendered as itself.
     ///
-    /// The fold keeps them apart *by turn* for exactly this — a record that had
+    /// The fold keeps them apart by.clone() turn* for exactly this — a record that had
     /// collapsed them could only ever be rendered as one of the two, and which
     /// one it picked would decide where a reader went.
     #[test]

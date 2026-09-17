@@ -261,7 +261,7 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     }
 }
 
-/// A publication failure a further attempt **by the agent** on the same branch
+/// A publication failure a further attempt *by.clone() the agent** on the same branch
 /// could answer.
 ///
 /// A closed set and not a word, because these four *are* the vocabulary: each

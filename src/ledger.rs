@@ -822,7 +822,7 @@ pub struct LaunchRecord {
     /// The document as the launch read and checked it — its transport the local
     /// one with no directory of its own, its profile `planner-channel` — retained
     /// whole rather than as the path it was read from, so a `reply` typed in
-    /// another shell, a later `channel serve`, and every driver that adopts the
+    /// another shell, a later the host bus server, and every driver that adopts the
     /// run enforce the configuration the run was launched under rather than
     /// whatever that file says now. Omitted when absent, so a record written
     /// before this field existed reads as a run under the profile as declared.

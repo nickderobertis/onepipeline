@@ -461,8 +461,8 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.4.2"
-onevcs = "0.24.0"
+oneagentgraph = "0.4.3"
+onevcs = "0.24.2"
 # The wire both siblings above now re-export: the envelope, its labels, sources
 # and phases, the filter grammar, the reader, the merge and the schema registry
 # are `onemessagebus-agent`'s over the `onemessagebus` core, and `src/event.rs`
@@ -470,8 +470,8 @@ onevcs = "0.24.0"
 # none: `oneagentgraph` 0.4.2, `onevcs` 0.24.0 and `onejudge` 0.12.0 each require
 # exactly these, so a lock carrying a second one would make a relayed envelope
 # two different types.
-onemessagebus = "0.4.0"
-onemessagebus-agent = "0.4.0"
+onemessagebus = "0.7.0"
+onemessagebus-agent = "0.7.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -514,7 +514,7 @@ onemessagebus-agent = "0.4.0"
 # and the three of them resolve the one `onemessagebus` and `onemessagebus-agent`
 # the pins above name, so the four move together or a relayed envelope is two
 # types. A requirement for the same reason again: `^0.11` admits no 0.12.x.
-onejudge = "0.12.0"
+onejudge = "0.13.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -548,7 +548,7 @@ oneharness-core = "0.13.2"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.6.2"
+onevcs-testing = "0.6.4"
 # **Test-support only**, and linked by `crates/testfakes` alone: the crate under test
 # still reads every plan by *driving* the `onetaskgraph` binary. These host the real
 # `local-md` plugin inside `label-strict-source`; that fake says why.

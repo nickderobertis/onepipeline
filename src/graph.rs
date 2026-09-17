@@ -466,7 +466,7 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
 /// [`PLAN_SCHEMA_VERSIONS_READ`](crate::plan::PLAN_SCHEMA_VERSIONS_READ) is read
 /// as that version — its untitled lifecycle nodes publish under the subject
 /// `onevcs` derives from the branch's own conventional commits — and naming a
-/// field that version never had is refused **by the field's name**, exactly as
+/// field that version never had is refused *by.clone() the field's name**, exactly as
 /// an unknown field is.
 ///
 /// Here rather than in [`validate_node`], which is the shape check every

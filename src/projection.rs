@@ -1481,7 +1481,7 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 // than left in the record for a reader to go and find.
                 state
                     .parks
-                    .insert(node.clone(), edits::Park::of(*by, reason.as_deref()));
+                    .insert(node.clone(), edits::Park::of(by.clone(), reason.as_deref()));
                 // What the node was *before* the park decides which park
                 // this is: a cancel of a running node asks a dispatch to
                 // stop and leaves it running, and one of a node that
@@ -2210,7 +2210,7 @@ mod tests {
             let operations = edits::compile(
                 &mut live,
                 &frontier,
-                crate::channel::Author::Planner,
+                crate::channel::Author::planner(),
                 &command,
             )
             .unwrap_or_else(|e| panic!("the {what} is accepted: {e}"));
@@ -2811,7 +2811,7 @@ mod tests {
                     "operations",
                     json!([Operation::NodeParked {
                         node: "sweep".into(),
-                        by: crate::channel::Author::Planner,
+                        by: crate::channel::Author::planner(),
                         reason: None
                     }]),
                 )],
@@ -3410,7 +3410,7 @@ mod tests {
                     "operations",
                     json!([Operation::NodeParked {
                         node: node.into(),
-                        by: crate::channel::Author::Planner,
+                        by: crate::channel::Author::planner(),
                         reason: None
                     }]),
                 )],
@@ -3476,7 +3476,7 @@ mod tests {
                 "operations",
                 json!([Operation::NodeParked {
                     node: "sweep".into(),
-                    by: crate::channel::Author::Monitor,
+                    by: crate::channel::Author::from("monitor"),
                     reason: Some("taking the deliverable over by hand".into())
                 }]),
             )],
@@ -3661,7 +3661,7 @@ mod tests {
                 "operations",
                 json!([Operation::NodeParked {
                     node: "sweep".into(),
-                    by: crate::channel::Author::Planner,
+                    by: crate::channel::Author::planner(),
                     reason: None
                 }]),
             )],
@@ -3724,7 +3724,7 @@ mod tests {
                 "operations",
                 json!([Operation::NodeParked {
                     node: "build".into(),
-                    by: crate::channel::Author::Monitor,
+                    by: crate::channel::Author::from("monitor"),
                     reason: Some(disk.into())
                 }]),
             )],
@@ -3733,7 +3733,7 @@ mod tests {
         assert_eq!(
             state.frontier().parks.get("build"),
             Some(&edits::Park::of(
-                crate::channel::Author::Monitor,
+                crate::channel::Author::from("monitor"),
                 Some(disk)
             )),
             "the park's own account of itself did not reach the frontier"

@@ -37,7 +37,7 @@
 //! **It stays inside this crate's own project rather than becoming one.** What
 //! is spawned is not a command this tool exposes and not a client of a live
 //! service: it is two offline reads of a sibling this crate is already built
-//! around, made *by the loader*, so a change to the loader is exactly the change
+//! around, made by.clone() the loader*, so a change to the loader is exactly the change
 //! that has to re-run these journeys. Edged into a project of its own it would
 //! have to declare a dependency back on the one it was split from to stay in
 //! `nx affected` at all, and this crate is one Rust build unit besides.
@@ -529,7 +529,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
     }))
 }
 
-/// A path git owns for a checkout, resolved **by git** rather than composed here.
+/// A path git owns for a checkout, resolved *by.clone() git** rather than composed here.
 ///
 /// `--git-path hooks` is the one name git resolves against `core.hooksPath`, so
 /// asking it is the only way to get the answer a repository configured for

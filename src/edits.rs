@@ -104,7 +104,7 @@ pub enum Operation {
         /// Written on every park, including the planner's, so the record says
         /// who decided rather than leaving a reader to infer it from the
         /// `edit-committed` around it. Absent from a record written before this
-        /// field existed, which reads back as [`Author::Planner`] — every park
+        /// field existed, which reads back as [`Author::planner()`] — every park
         /// written then was one, because the monitor had no author to be.
         #[serde(default)]
         by: Author,
@@ -350,7 +350,7 @@ impl Operation {
             // reads them off `edit-committed`; these fail it — `recorded` in
             // `tests/note/main.rs` reads a delivered note off that kind and
             // predates the split — so moving them is the regression the split was
-            // written to avoid. Splitting them *by disposition* is worse again: one
+            // written to avoid. Splitting them by.clone() disposition* is worse again: one
             // op word would land under two kinds depending on what a conversation
             // answered, and no reader could key on `note` at all. Which operations
             // answer this is entry 65 of `docs/contract-divergences.md`, still open
@@ -647,7 +647,7 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
             Operation::NodeParked { node, by, reason } => {
                 frontier
                     .parks
-                    .insert(node.clone(), Park::of(*by, reason.as_deref()));
+                    .insert(node.clone(), Park::of(by.clone(), reason.as_deref()));
             }
             Operation::NodeRequeued { node, .. } => {
                 frontier.parks.remove(node);
@@ -1627,7 +1627,7 @@ fn compile_requeue(
     // record written before parks carried an author was, and what a `parked:
     // true` a plan file states is.
     let park = frontier.parks.get(id).cloned().unwrap_or_default();
-    if author == Author::Monitor && park.by != Author::Monitor {
+    if !author.is_planner() && park.by != author {
         return Err(refuse(format!(
             "requeue: node '{id}' was parked by {}. Undoing that is the parking author's \
              decision rather than an observation: surface it to the planner instead",
@@ -2351,7 +2351,7 @@ mod tests {
         frontier: &Frontier,
         command: &Command,
     ) -> Result<Vec<Operation>> {
-        super::compile(graph, frontier, Author::Planner, command)
+        super::compile(graph, frontier, Author::planner(), command)
     }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
@@ -2808,7 +2808,7 @@ mod tests {
         let operations = super::compile(
             &mut graph,
             &Frontier::default(),
-            Author::Monitor,
+            Author::from("monitor"),
             &Command::Cancel {
                 id: "build".into(),
                 reason: Some(disk.into()),
@@ -2819,7 +2819,7 @@ mod tests {
             operations,
             vec![Operation::NodeParked {
                 node: "build".into(),
-                by: Author::Monitor,
+                by: Author::from("monitor"),
                 reason: Some(disk.into()),
             }],
             "the park does not say who made it or why"
@@ -2841,7 +2841,7 @@ mod tests {
             operations,
             vec![Operation::NodeParked {
                 node: "sweep".into(),
-                by: Author::Planner,
+                by: Author::planner(),
                 reason: None,
             }]
         );
@@ -2880,7 +2880,7 @@ mod tests {
             old,
             Operation::NodeParked {
                 node: "sweep".into(),
-                by: Author::Planner,
+                by: Author::planner(),
                 reason: None,
             }
         );
@@ -2902,13 +2902,13 @@ mod tests {
     #[test]
     fn a_recorded_reason_that_says_nothing_reads_as_a_park_that_stated_none() {
         assert_eq!(
-            Park::of(Author::Planner, Some("  \n ")),
-            Park::of(Author::Planner, None),
+            Park::of(Author::planner(), Some("  \n ")),
+            Park::of(Author::planner(), None),
             "a blank recorded reason was kept as a reason"
         );
         assert_ne!(
-            Park::of(Author::Monitor, Some("it is redundant")),
-            Park::of(Author::Monitor, None),
+            Park::of(Author::from("monitor"), Some("it is redundant")),
+            Park::of(Author::from("monitor"), None),
             "a reason that says something was dropped"
         );
 
@@ -2920,12 +2920,15 @@ mod tests {
         let message = super::compile(
             &mut graph,
             &Frontier {
-                parks: [("build".to_string(), Park::of(Author::Planner, Some("   ")))]
-                    .into_iter()
-                    .collect(),
+                parks: [(
+                    "build".to_string(),
+                    Park::of(Author::planner(), Some("   ")),
+                )]
+                .into_iter()
+                .collect(),
                 ..Frontier::default()
             },
-            Author::Monitor,
+            Author::from("monitor"),
             &Command::Requeue {
                 id: "build".into(),
                 amend: None,
@@ -2963,8 +2966,8 @@ mod tests {
         // The refusal names the park's author and quotes what it said.
         let message = super::compile(
             &mut graph(),
-            &parked(Author::Planner, Some(disk)),
-            Author::Monitor,
+            &parked(Author::planner(), Some(disk)),
+            Author::from("monitor"),
             &requeue,
         )
         .unwrap_err()
@@ -2981,8 +2984,8 @@ mod tests {
         // A park that carried no reason says so, rather than trailing off.
         let message = super::compile(
             &mut graph(),
-            &parked(Author::Planner, None),
-            Author::Monitor,
+            &parked(Author::planner(), None),
+            Author::from("monitor"),
             &requeue,
         )
         .unwrap_err()
@@ -2994,7 +2997,7 @@ mod tests {
         let message = super::compile(
             &mut graph(),
             &Frontier::default(),
-            Author::Monitor,
+            Author::from("monitor"),
             &requeue,
         )
         .unwrap_err()
@@ -3005,8 +3008,8 @@ mod tests {
         let mut live = graph();
         super::compile(
             &mut live,
-            &parked(Author::Monitor, Some("it was plainly redundant")),
-            Author::Monitor,
+            &parked(Author::from("monitor"), Some("it was plainly redundant")),
+            Author::from("monitor"),
             &requeue,
         )
         .expect("the monitor may requeue its own park");
@@ -3015,8 +3018,8 @@ mod tests {
         let mut live = graph();
         super::compile(
             &mut live,
-            &parked(Author::Planner, Some(disk)),
-            Author::Planner,
+            &parked(Author::planner(), Some(disk)),
+            Author::planner(),
             &requeue,
         )
         .expect("the planner may requeue any park");
@@ -4549,7 +4552,7 @@ mod tests {
             },
             Operation::NodeParked {
                 node: "gone".into(),
-                by: Author::Planner,
+                by: Author::planner(),
                 reason: None,
             },
             Operation::TaskAmended {
