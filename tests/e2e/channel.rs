@@ -1395,24 +1395,6 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
     world.release("build.go");
 }
 
-/// The whole seam, through a **real observer member and its judge side**: a live
-/// edit issued while that member is between turns leaves it supervising.
-///
-/// The other journeys drive `onemessagebus serve` directly, which proves the routing
-/// but not the thing that broke: what died was a *member*, because the side
-/// supervising it was handed a graph edit where a ruling belongs and a graph
-/// edit supervises nothing. So this one runs the member the shipped dag-scope
-/// graph declares, through the judge-side command provider that document names,
-/// and the operator's correction arrives exactly where it used to kill it —
-/// between the member's turns, while its judge side waits on the answer.
-/// Every shape a verdict is spelled in rules a supervised member.
-///
-/// Contract E names three fields — `completion`, `message`, `reason` — and any
-/// one of them alone is a ruling. The side supervising a member decides what a
-/// ruling is out of its own reading of that list, and this is the gate that
-/// keeps the two readings together: a half this crate calls a verdict and the
-/// supervising side does not would end the member the moment a planner used it,
-/// and the run would go blind with nobody having changed anything visible.
 /// A graph whose command judge names no command is refused by name, and the run
 /// it was watching goes on without it.
 ///
@@ -2288,6 +2270,39 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     world.release("build.go");
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The host double refuses an asker it cannot read rather than serving as if
+/// none had been set.
+///
+/// `ONEPIPELINE_CHANNEL_ASKER` decides whether a surface's listener outlives the
+/// serving process, so a value the host silently dropped would turn a durable
+/// wait into a session-scoped one with nothing saying so. The double is the
+/// thing every host journey here trusts to raise what it was told, which is why
+/// its own boundary is held to the same bar as the engine's.
+#[test]
+fn the_host_double_refuses_an_asker_it_cannot_read() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let world = World::new("channel-host-bad-asker");
+    let run = running(&world, "badasker", vec![agent("build", &[])]);
+
+    let mut command = world.host_channel(&run);
+    command
+        .env(
+            onepipeline::channel::ASKER_ENV,
+            std::ffi::OsStr::from_bytes(b"session-\xff"),
+        )
+        .stdin(std::process::Stdio::null());
+    let served = world.run_on(command, "host-channel-server");
+    assert_ne!(
+        served.code, 0,
+        "an unreadable asker is refused: {}",
+        served.stderr
+    );
+    served
+        .err_has(onepipeline::channel::ASKER_ENV)
+        .err_has("cannot read");
+}
 
 /// A surface whose server exited with the side that asked already gone stops
 /// counting as one the planner is waiting on.

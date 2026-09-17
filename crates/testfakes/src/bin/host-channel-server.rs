@@ -10,37 +10,21 @@ use onemessagebus::{
     QueueName, ServeOptions, ServeSession, TransportKinds,
 };
 use onemessagebus_agent::channel::{PlannerChannel, PLANNER_CHANNEL, SURFACES};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceFrame {
-    kind: HostKind,
+    /// The word as the test wrote it. The kind grammar is the engine's
+    /// (`SurfaceKind`, Contract K) and is enforced where the engine reads the
+    /// queue; a host that also spelled it would be a second copy to drift.
+    kind: String,
     message: String,
     #[serde(default = "blocking")]
     blocking: bool,
     #[serde(default)]
     node: Option<String>,
-}
-
-struct HostKind(String);
-
-impl<'de> Deserialize<'de> for HostKind {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let word = String::deserialize(deserializer)?;
-        let valid = !word.is_empty()
-            && word.len() <= 64
-            && word.bytes().enumerate().all(|(index, byte)| {
-                byte.is_ascii_lowercase() || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
-            });
-        if !valid {
-            return Err(serde::de::Error::custom(
-                "a kind matches ^[a-z][a-z0-9-]{0,63}$",
-            ));
-        }
-        Ok(Self(word))
-    }
 }
 
 #[derive(Deserialize)]
@@ -95,7 +79,7 @@ impl Codec for SurfaceCodec {
             unreachable!("the relisten frame returned above")
         };
         let mut surface = json!({
-            "kind": frame.kind.0,
+            "kind": frame.kind,
             "message": frame.message,
             "source": "proposal",
             "blocking": frame.blocking,
@@ -110,6 +94,19 @@ impl Codec for SurfaceCodec {
             Answer::Reply(reply) => reply.get("reply").cloned().unwrap_or(reply),
             other => json!({"answer": other.word(), "correlation": correlation}),
         })
+    }
+}
+
+/// An environment value that may be absent, but not unreadable: a variable that is
+/// set to something this process cannot read is refused rather than served as if
+/// nobody had set it.
+fn optional(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(word) => Ok(Some(word)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(failure) => Err(format!(
+            "{name} is set to a value this host cannot read: {failure}"
+        )),
     }
 }
 
@@ -130,19 +127,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compatibility inputs of this test-only host, deliberately exercised by ported
     // historical journeys. The production engine owns only ASKER_ENV; the other two
     // are not product contracts and disappear with those fixtures.
-    let reply_window = match std::env::var("ONEPIPELINE_REPLY_TIMEOUT_SECONDS") {
-        Ok(word) => word.parse::<u64>()?,
-        Err(std::env::VarError::NotPresent) => 60,
-        Err(failure) => return Err(failure.into()),
-    };
+    let reply_window = optional("ONEPIPELINE_REPLY_TIMEOUT_SECONDS")?
+        .map(|word| word.parse::<u64>())
+        .transpose()?
+        .unwrap_or(60);
     let options = ServeOptions {
-        asker: std::env::var("ONEPIPELINE_CHANNEL_ASKER")
-            .ok()
+        asker: optional("ONEPIPELINE_CHANNEL_ASKER")?
             .map(|word| Asker::new(&word, "ONEPIPELINE_CHANNEL_ASKER"))
             .transpose()?,
         about: None,
-        session: std::env::var("ONEPIPELINE_SERVE_SESSION_SECONDS")
-            .ok()
+        session: optional("ONEPIPELINE_SERVE_SESSION_SECONDS")?
             .map(|word| word.parse::<u64>().map(Duration::from_secs))
             .transpose()?,
         reply_window: Duration::from_secs(reply_window),
