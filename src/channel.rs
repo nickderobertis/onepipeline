@@ -127,7 +127,7 @@ where
 pub struct Author(String);
 
 impl Author {
-    /// The word a record names this author with.
+    /// The default author: the one an envelope that omits `author` is.
     pub fn planner() -> Self {
         Self("planner".into())
     }

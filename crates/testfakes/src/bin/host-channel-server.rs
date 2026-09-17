@@ -2,8 +2,8 @@
 //!
 //! This deliberately knows only the bus's serving contract: it is one codec the
 //! bus's library server drives, and what it reads off its stdin is a surface to
-//! raise or a correlation to listen for again. Kinds and authors remain data
-//! chosen by each test.
+//! raise or a correlation to listen for again. The kind is data chosen by each
+//! test; every surface it raises carries source `proposal`, as a watcher's does.
 
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
