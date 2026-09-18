@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0](https://github.com/nickderobertis/onepipeline/compare/v0.35.0...v0.36.0) - 2026-09-18
+
+### Added
+
+- *(dispatch)* refresh a node's environment from a hook before launch ([#358](https://github.com/nickderobertis/onepipeline/pull/358))
+
+### Fixed
+
+- *(tests)* stop e2e store commands inheriting ONETASKGRAPH_BIN ([#336](https://github.com/nickderobertis/onepipeline/pull/336))
+- *(deps)* relink the harness core, onejudge, oneagentgraph and onevcs ([#353](https://github.com/nickderobertis/onepipeline/pull/353))
+
 ## [0.35.0](https://github.com/nickderobertis/onepipeline/compare/v0.34.0...v0.35.0) - 2026-09-17
 
 ### Added
