@@ -2437,8 +2437,6 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
         "the unresolved dependencies to hold the consumer",
         |world| answered(world, &run, "consumer") == Some("unresolved".to_owned()),
     );
-    // Held, and not dispatched: a dependency the run could not describe is not a
-    // dependency the node does not have.
     assert!(
         !dispatched(&world, &run, "consumer"),
         "a published node was dispatched with its dependencies unresolved:\n{}",
@@ -2493,7 +2491,6 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
             .is_some_and(|hold| hold["payload"]["reasons"] == release_hold)
     });
     assert!(!dispatched(&world, &run, "consumer"));
-    // And the surface a person reads names each and says why.
     let surface = wait_surface(&world, &run, "consumer");
     for dep in [ENGINE, "packager"] {
         assert!(
@@ -2550,7 +2547,6 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
         assert_eq!(entry["style"], json!("automated"), "{entry}");
     }
 
-    // One release is not both: the node stays held on the other.
     releases_at(&answer, "0.2.0");
     world.until("the engine's release to arrive", |world| {
         world
@@ -2563,7 +2559,6 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
         "one of two releases started a node held on both"
     );
 
-    // Only both releases start it.
     releases_at(&tool_answer, "3.4.0");
     world.until("the held node to settle", |world| {
         settled_status(world, &run, "consumer").is_some()
@@ -2655,8 +2650,6 @@ fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replac
         settled_status(world, &run, replacement).as_deref() == Some("done")
     });
 
-    // Held on the replacement's release, and probed for it: the probe ran and
-    // said the version has not moved, which is an answer and not a release.
     world.until("the probe's answer to reach the wait", |world| {
         answered(world, &run, "consumer") == Some("not-released".to_owned())
     });
@@ -2694,7 +2687,6 @@ fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replac
         );
     }
 
-    // Only the release starts it.
     releases_at(&answer, "0.2.0");
     world.until("the held node to settle", |world| {
         settled_status(world, &run, "consumer").is_some()
@@ -2716,8 +2708,6 @@ fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replac
         Some(json!([{ "kind": "release", "awaiting": [replacement] }])),
         "{unheld:?}"
     );
-    // Its block names the replacement, at the target the plan stated against the
-    // original, and the version that released it.
     let task = task_of(&world, "consumer");
     let row = task
         .lines()
