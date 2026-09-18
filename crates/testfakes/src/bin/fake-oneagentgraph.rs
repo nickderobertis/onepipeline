@@ -175,13 +175,27 @@ fn outlived_by(dir: &std::path::Path, key: &str) {
 }
 
 /// `oneagentgraph reset-timer RUN MEMBER`
+///
+/// Scripted by `reset-timer.fail`: absent, every reset is taken; present and
+/// empty, every reset is refused; present and naming members, one per
+/// whitespace-separated word, only those are refused and the rest are taken —
+/// which is how a journey holds a reset that reaches several members against
+/// one of them refusing.
 fn reset_timer(args: &[String], dir: &std::path::Path) -> ExitCode {
     for (at, name) in [(1, "RUN"), (2, "MEMBER")] {
         if let Err(refusal) = fake::required(args, at, name) {
             return refusal;
         }
     }
-    if dir.join("reset-timer.fail").exists() {
+    let refused = match std::fs::read_to_string(dir.join("reset-timer.fail")) {
+        Ok(named) => {
+            let mut named = named.split_whitespace().peekable();
+            named.peek().is_none() || named.any(|member| member == args[2])
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => fake::fail(&format!("cannot read this double's reset script: {error}")),
+    };
+    if refused {
         eprintln!("no resettable schedule named that member");
         return ExitCode::from(2);
     }

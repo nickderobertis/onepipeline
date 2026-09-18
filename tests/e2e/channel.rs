@@ -1688,6 +1688,52 @@ fn a_read_survives_a_clock_it_could_not_restart_and_says_so() {
     world.release("build.go");
 }
 
+/// One clock the sibling would not restart does not stop the reset reaching the
+/// members beside it, and the read names the member that refused.
+///
+/// The shipped example graph declares two members, so a reset that stopped at
+/// the first refusal would leave the second un-restarted with nothing saying
+/// so. The double refuses exactly the member the script names: the read still
+/// delivers, reports that member's refusal and no other's, and the member
+/// beside it is signalled all the same.
+#[test]
+fn a_read_names_the_one_clock_it_could_not_restart_and_still_restarts_the_others() {
+    let world = World::new("channel-reset-partial");
+    world.script("build.wait", "hold");
+    world.script("reset-timer.fail", "check-in");
+    let run = observed(&world, "partlyreset", vec![agent("build", &[])]);
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+    let graph_run = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has(&format!("reset-timer {graph_run} check-in"));
+    assert!(
+        !read
+            .stderr
+            .contains(&format!("reset-timer {graph_run} monitor")),
+        "a member whose reset was taken was reported as refused:\n{}",
+        read.stderr
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] whether the member beside the refused
+    // one was signalled never appears on a product surface — `next` reports refusals and
+    // nothing about the resets that landed, deliberately — so the argv the double recorded
+    // is where that fact exists.
+    assert!(
+        world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "monitor"]),
+        "the reset stopped at the member that refused: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
+    world.release("build.go");
+}
+
 /// A message the shell would have eaten reaches the queue byte for byte, by
 /// both body paths.
 ///
