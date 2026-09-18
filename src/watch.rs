@@ -1197,7 +1197,7 @@ mod tests {
                 id: 0,
                 kind: "finding".to_owned(),
                 message: "raised while nobody was reading".to_owned(),
-                source: crate::channel::source::MONITOR.to_owned(),
+                source: "monitor".to_owned(),
                 blocking: false,
                 queued_at: 1,
                 workstream: None,

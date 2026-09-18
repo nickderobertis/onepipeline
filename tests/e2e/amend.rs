@@ -458,13 +458,9 @@ fn a_plan_amendment_that_says_nothing_is_refused_at_the_plan_boundary() {
         .err_has("says nothing");
 }
 
-/// An observer may not move a bar, and the refusal names the op it refused.
-///
-/// What a node is judged against is a decomposition decision the monitor's own
-/// persona already reserves to the planner — and an observer that could move a
-/// bar could resolve an ambiguity by editing rather than by escalating.
+/// An author absent from the launch's channel configuration may not move a bar.
 #[test]
-fn a_monitor_is_refused_amend_by_name_and_told_what_to_do_instead() {
+fn an_undeclared_monitor_is_refused_amend_before_it_can_change_the_plan() {
     let world = World::new("amend-monitor");
     let run = held_beside_a_pending_node(&world, "amendmonitor", Vec::new());
 
@@ -479,22 +475,8 @@ fn a_monitor_is_refused_amend_by_name_and_told_what_to_do_instead() {
             .to_string(),
         )
         .exited(REFUSED)
-        .err_has("'amend' is not an op the monitor may issue")
-        .err_has("Surface it to the planner instead");
-
-    // The lever it *does* have goes through, so what is refused is the authority
-    // rather than the author — and it is the one its own persona names as the
-    // answer: raise what it saw to the planner, who owns the bar.
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({
-                "version": 2,
-                "author": "monitor",
-                "commands": [{"op": "finding", "id": "later", "message": RULING}],
-            })
-            .to_string(),
-        )
-        .exited(0);
+        .err_has("the envelope's author `monitor` is not declared")
+        .err_has("the declared authors are: planner");
+    world.run(&["results", &run]).exited(0).out_lacks(RULING);
     world.release("slow.go");
 }

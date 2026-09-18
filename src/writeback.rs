@@ -2786,6 +2786,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -3211,7 +3212,7 @@ mod tests {
         let dir = scratch("stop-mid-wait");
         let paths = RunPaths {
             run: "stopmidwait".to_owned(),
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
         };
         let launch = a_launch(&paths);
         let writeback = Writeback::start(
@@ -3573,14 +3574,47 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
-            "onepipeline-writeback-{name}-{}",
-            crate::sys::pid()
+            "onepipeline-writeback-{name}-{}-{}",
+            crate::sys::pid(),
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed),
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        dir
+        std::fs::create_dir(&dir).expect("a unique scratch directory");
+        Scratch(dir)
+    }
+
+    #[test]
+    fn concurrent_scratch_directories_with_the_same_name_are_independent() {
+        let first = std::thread::spawn(|| scratch("concurrent-same-name"));
+        let second = std::thread::spawn(|| scratch("concurrent-same-name"));
+        let first = first.join().expect("the first scratch directory");
+        let second = second.join().expect("the second scratch directory");
+
+        assert_ne!(&*first, &*second, "parallel invocations shared a directory");
+        drop(first);
+        assert!(
+            second.is_dir(),
+            "removing one invocation removed the other's directory"
+        );
     }
 
     /// The reserved keys this worker owns and overwrites on a projected item.
@@ -3653,7 +3687,7 @@ mod tests {
     /// [`undiscriminating`].
     struct Fixture {
         name: &'static str,
-        dir: PathBuf,
+        dir: Scratch,
         snapshot: Snapshot,
         origins: BTreeMap<String, Origin>,
         destination: DestinationProjectItem,
@@ -3679,7 +3713,7 @@ mod tests {
                 name,
                 snapshot: Snapshot {
                     project: "plans:board".parse().expect("a qualified project"),
-                    dir: dir.clone(),
+                    dir: dir.to_path_buf(),
                     nodes: BTreeMap::from([
                         ("build".to_owned(), node("build", &["design"])),
                         ("design".to_owned(), node("design", &[])),
@@ -3750,12 +3784,6 @@ mod tests {
                     .join(super::project_file(&self.snapshot.project))
                     .join(format!("{}.md", super::task_file(node))),
             )
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -4480,6 +4508,5 @@ mod tests {
                 .expect("JSON"),
             json!({"version": "0.2.30", "members": true}),
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

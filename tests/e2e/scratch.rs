@@ -161,7 +161,7 @@ fn every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away(
 /// Every dispatch is given an asker of its own, and no two dispatches share one.
 ///
 /// This is the half of the re-arm repair that belongs to the *executor*, and the
-/// half a `channel serve` cannot state for itself. A dispatched agent asks its
+/// half a `onemessagebus serve` cannot state for itself. A dispatched agent asks its
 /// manager through a succession of serving sessions and waits for its verdict
 /// through all of them; what makes those sessions one side rather than a series
 /// of sides that have each gone is the word they carry, and nothing the agent

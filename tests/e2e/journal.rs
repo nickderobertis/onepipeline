@@ -491,7 +491,7 @@ fn leave_a_fragment(journal: &std::path::Path, bytes: usize) -> String {
 #[cfg(unix)]
 #[test]
 fn a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed() {
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
 
     // A short wait, so the envelope carrying commands reaches the branch where
     // the reconciler has not answered in time.
@@ -539,6 +539,27 @@ fn a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed() {
     ];
 
     for (nth, (shape, envelope)) in envelopes.into_iter().enumerate() {
+        // The reader the ruling is owed to: a host session that has asked and is
+        // waiting on the answer, which is what a ruling binds to when it is queued.
+        let mut serving = world
+            .host_channel("verdictceiling")
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the host's channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(
+            stdin,
+            r#"{{"kind":"planner-question","message":"anything for me?","blocking":false}}"#
+        )
+        .expect("the frame is written");
+        stdin.flush().expect("the frame flushes");
+        world.until("the question to reach the planner", |world| {
+            world.queued_surfaces("verdictceiling").len() > nth
+        });
+
         let before = std::fs::read_to_string(&journal).expect("the journal reads");
         // The envelope is a file rather than stdin because the ceiling is set on a
         // child this harness starts for it.
@@ -557,29 +578,18 @@ fn a_verdict_whose_record_will_not_fit_is_refused_with_the_ruling_still_owed() {
 
         // The ruling is owed to a reader all the same, which is what the refusal
         // is about: the record of it is what would not fit. Read the way a reader
-        // reads one — through a serving session, which claims it.
-        let mut serving = world
-            .cmd(&["channel", "serve", "verdictceiling"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("the channel server starts");
-        let mut stdin = serving.stdin.take().expect("stdin is piped");
-        writeln!(
-            stdin,
-            r#"{{"kind":"planner-question","message":"anything for me?","blocking":false}}"#
-        )
-        .expect("the frame is written");
-        stdin.flush().expect("the frame flushes");
-        // Closed, so the session ends once it has relayed what it claimed.
-        drop(stdin);
-        let read = serving.wait_with_output().expect("the session ends");
-        let claimed = String::from_utf8_lossy(&read.stdout);
+        // reads one — through the session that asked, which is handed it.
+        let claimed = BufReader::new(serving.stdout.take().expect("stdout is piped"))
+            .lines()
+            .next()
+            .expect("the session answered")
+            .expect("the answer reads");
         assert!(
             claimed.contains(&ruling(nth + 1)),
             "{shape}: the refusal took the ruling with it, and a reader was handed: {claimed}"
         );
+        drop(stdin);
+        crate::harness::ended(serving);
 
         // And the journal the loop is still writing is on a record boundary, with
         // no fragment of the record that would not fit left in it.
