@@ -140,6 +140,9 @@ if [ -f "$record/$run.linger" ]; then
   case "$seconds" in
     '' | *[!0-9]*) broke "$record/$run.linger holds '$seconds', which is not a number of seconds" ;;
   esac
+  # A background start answers nothing about how it went, so what can be checked
+  # is checked before it: that there is a `sleep` to linger with.
+  command -v sleep >/dev/null 2>&1 || broke "no sleep on PATH to linger with, so $record/$run.linger cannot be honoured"
   sleep "$seconds" &
 fi
 
@@ -148,13 +151,13 @@ fi
 if [ -f "$record/$run.oversize" ]; then
   # A well-formed document around one value of over a mebibyte: the size, and
   # nothing else about it, is what makes it no environment.
-  printf '{"version":1,"env":{"OVERSIZE":"'
-  dd if=/dev/zero bs=1024 count=1100 2>/dev/null | tr '\0' 'x'
-  printf '"}}\n'
+  printf '{"version":1,"env":{"OVERSIZE":"' || broke "cannot print the oversized document's head"
+  dd if=/dev/zero bs=1024 count=1100 2>/dev/null | tr '\0' 'x' || broke "cannot print the oversized document's value; dd and tr are what print it"
+  printf '"}}\n' || broke "cannot print the oversized document's tail"
 elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || broke "cannot read $record/$run.stdout"
 else
-  printf '{"version":1,"env":{}}\n'
+  printf '{"version":1,"env":{}}\n' || broke "cannot print the default document; the engine reads this hook's stdout"
 fi
 if [ "$status" -ne 0 ]; then
   echo "dispatch_env_hook: exiting $status, as $record/$run.exit scripts for invocation $nth; remove that file, or raise $record/$run.exit-from-nth, for this hook to admit the launch" >&2
