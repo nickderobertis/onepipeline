@@ -1609,6 +1609,108 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
     );
 }
 
+/// A worker turn that writes what the base already carries leaves a level
+/// branch, and the node fails naming the comparison rather than publishing.
+///
+/// The one lifecycle shape the worlds here could not reach on their own: every
+/// repository a journey seeds is fresh, so a worker that writes is a worker
+/// that leaves a diff. A repository that has already landed a run's work is
+/// not. The smoke's scratch repository keeps what every run merged, and when a
+/// hosted runner reissued a pid the branch derived from it came round again —
+/// `onepipeline-smoke` PR #170 from run 35282039766, then run 35286719909's
+/// smoke — and with it the body derived from the branch: the turn rewrote
+/// `work.md` byte for byte, `git status` saw nothing, and the merge path
+/// answered `empty-branch`. That answer is the engine's and it is right: the
+/// branch *is* level with its base, and the detail says what it was compared
+/// against. Held here through the real siblings with the turn's own record
+/// proving that it wrote, so the answer cannot be mistaken for a turn that
+/// never ran or a dispatch whose work was lost after its stream drained.
+#[test]
+fn a_worker_that_rewrites_what_the_base_carries_settles_empty_branch_naming_the_comparison() {
+    let world = World::new("real-rewrite-level");
+    world.write_graphs();
+    let repo = world.repository("local-direct", &[]);
+    // The base already carries the file the turn is about to write, with the
+    // very content it will write — as the scratch repository did after #170.
+    let body = "the worker wrote this";
+    std::fs::write(repo.checkout.join("work.md"), format!("{body}\n"))
+        .expect("the base's copy of the worker's file is written");
+    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["commit", "-q", "-m", "feat: an earlier run's work"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "-q", "origin", "main"]);
+    world.script("harness.work", body);
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land what the base already has",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("rewritten", &plan_of("rewritten", vec![node]));
+    let launched = world.run_on_agentgraph(&["start", &path, "--attach"]);
+    launched.settled();
+
+    // The turn ran and wrote, into the worktree the dispatch was given: the
+    // double records the file it left, and it is the one the base carries.
+    let turns = world.turns();
+    assert_eq!(turns.len(), 1, "{turns:?}\n{}", world.dump());
+    let wrote = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"]
+                .as_str()
+                .is_some_and(|tool| tool.ends_with("-work"))
+        })
+        .unwrap_or_else(|| panic!("the worker turn recorded no write:\n{}", world.dump()));
+    let written = std::path::PathBuf::from(
+        wrote["args"][0]
+            .as_str()
+            .expect("the double records the path it wrote"),
+    );
+    assert_eq!(
+        written.parent().map(std::path::Path::to_path_buf),
+        Some(std::path::PathBuf::from(&turns[0].cwd)),
+        "the turn wrote outside the worktree it was given: {wrote}"
+    );
+    assert_eq!(
+        written.file_name().and_then(|name| name.to_str()),
+        Some("work.md"),
+        "the double now writes a file the base was not seeded with: {wrote}"
+    );
+
+    // And the branch it left is level with its base, which the node says in
+    // the merge path's own words: what was compared, and that this dispatch
+    // committed nothing — not `done` under the no-change word, which is for a
+    // node that declared it expects none.
+    let node = world.run_json("rewritten", "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    let detail = world.events_of("rewritten", "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("compared against origin/main"), "{detail}");
+    assert!(detail.contains("committed nothing"), "{detail}");
+    assert!(
+        !detail.contains("already carries what this dispatch committed"),
+        "a turn that wrote a tracked file's own content was read as a commit: {detail}"
+    );
+    // Nothing was published: the branch never left the session.
+    let spent: Vec<String> = world
+        .journal("rewritten")
+        .iter()
+        .filter(|event| event["source"] == "vcs")
+        .filter_map(|event| event["kind"].as_str().map(str::to_string))
+        .filter(|kind| ["push", "published", "change-opened"].contains(&kind.as_str()))
+        .collect();
+    assert!(spent.is_empty(), "a level branch was published: {spent:?}");
+}
+
 /// The tools a real dispatched turn used, read back off the CLI.
 ///
 /// There was no transcript verb at all: the evidence was retained — the
