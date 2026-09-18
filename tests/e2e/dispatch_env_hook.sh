@@ -15,6 +15,13 @@
 #                                              dispatches are accepted
 #   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.hold    present: wait for <run>.go before
 #                                              printing, for up to 300 seconds
+#   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.linger  a number of seconds: leave a child
+#                                              behind for that long, holding this
+#                                              hook's stdout open past its exit
+#   $ONEPIPELINE_E2E_HOOK_RECORD/<run>.oversize
+#                                              present: print a document larger
+#                                              than any environment, in place of
+#                                              <run>.stdout
 #
 # and what it was handed is recorded under
 # $ONEPIPELINE_E2E_HOOK_RECORD/<run>/<n>/, one directory per invocation:
@@ -125,11 +132,31 @@ if [ "$status" -gt 255 ]; then
   broke "$record/$run.exit holds '$status', which is not an exit status from 0 to 255"
 fi
 
+# A child that outlives this hook with its stdout: what a hook that started a
+# daemon without redirecting it leaves behind. Not on Windows, whose half does
+# not answer this file, so the journey that scripts it runs on unix alone.
+if [ -f "$record/$run.linger" ]; then
+  seconds=$(cat "$record/$run.linger") || broke "cannot read $record/$run.linger"
+  case "$seconds" in
+    '' | *[!0-9]*) broke "$record/$run.linger holds '$seconds', which is not a number of seconds" ;;
+  esac
+  sleep "$seconds" &
+fi
+
 # The document, last: a hook that fails may still have printed one, which the
 # engine must not read.
-if [ -f "$record/$run.stdout" ]; then
+if [ -f "$record/$run.oversize" ]; then
+  # A well-formed document around one value of over a mebibyte: the size, and
+  # nothing else about it, is what makes it no environment.
+  printf '{"version":1,"env":{"OVERSIZE":"'
+  dd if=/dev/zero bs=1024 count=1100 2>/dev/null | tr '\0' 'x'
+  printf '"}}\n'
+elif [ -f "$record/$run.stdout" ]; then
   cat "$record/$run.stdout" || broke "cannot read $record/$run.stdout"
 else
   printf '{"version":1,"env":{}}\n'
+fi
+if [ "$status" -ne 0 ]; then
+  echo "dispatch_env_hook: exiting $status, as $record/$run.exit scripts for invocation $nth; remove that file, or raise $record/$run.exit-from-nth, for this hook to admit the launch" >&2
 fi
 exit "$status"

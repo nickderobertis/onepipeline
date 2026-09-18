@@ -68,6 +68,11 @@ pub(crate) struct Launching<'a> {
     pub graph: &'a ConfigRef,
     /// The overrides that launch applies to the graph, in order.
     pub sets: &'a [String],
+    /// The names of the variables this crate itself sets on the child launch,
+    /// beside the hook's: they are composed after the hook runs — one of them
+    /// makes a directory the launch owns — so the check counts them present by
+    /// name rather than refusing a config that sources one of this crate's own.
+    pub own: &'a [&'a str],
 }
 
 /// Run the hook the launch names — spawned in the launch directory, its stderr
@@ -95,11 +100,14 @@ pub(crate) fn run_and_check(launching: &Launching<'_>) -> Result<Vec<(String, St
             hooks::hook_log(launching.paths, HOOK).display()
         ))
     })?;
-    // The environment the child would be launched with: this process's own, with
-    // the hook's members over it. This crate's own per-dispatch keys are set
-    // beside both by the executor and name no `env_from` source.
+    // The environment the child would be launched with: this process's own, the
+    // hook's members over it, and this crate's own per-dispatch variables — by
+    // name, since their values are composed only once the launch goes ahead.
     let mut refreshed = process_env();
     refreshed.extend(added.iter().cloned());
+    for name in launching.own {
+        refreshed.entry((*name).to_string()).or_default();
+    }
     validate(launching.graph, launching.sets, &refreshed).map_err(|why| {
         Error::Refused(format!(
             "the launch of node '{node}' was refused after the {HOOK} hook '{command}' ran: \
@@ -183,6 +191,10 @@ fn run(
     // Read on a thread of its own, so a hook that prints more than a pipe holds
     // cannot deadlock against a wait that only looks at its exit — and bounded,
     // so a hook that never stops printing cannot hold this process's memory.
+    // What it prints past the bound is drained and dropped rather than left
+    // unread: a pipe closed under a hook ends it with a signal, and what this
+    // owes the refusal is that the document was too large, not that the hook
+    // died — a hook that never stops is the timeout's to end.
     let (printed_tx, printed_rx) = mpsc::channel();
     let mut stdout = child.stdout.take();
     std::thread::spawn(move || {
@@ -191,6 +203,7 @@ fn run(
             Some(stdout) => stdout
                 .take(MAX_STDOUT_BYTES + 1)
                 .read_to_end(&mut printed)
+                .and_then(|_| std::io::copy(stdout, &mut std::io::sink()))
                 .map(|_| ()),
             None => Ok(()),
         };
@@ -697,6 +710,7 @@ mod tests {
             node: "build",
             graph: &graph_at(&root.join("no-such-graph.yaml")),
             sets: &[],
+            own: &[],
         })
         .expect("a launch naming no hook is not refused");
         assert!(added.is_empty());

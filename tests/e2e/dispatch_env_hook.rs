@@ -537,7 +537,22 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         "{\"version\":1,\"env\":{}}\n{\"version\":1,\"env\":{}}\n",
     )
     .expect("two documents are scripted");
-    for (run, command, timeout, names) in [
+    prints(&world, "array", &json!([1]));
+    prints(&world, "noversion", &json!({"env": {}}));
+    prints(&world, "badversion", &json!({"version": 2, "env": {}}));
+    prints(&world, "noenv", &json!({"version": 1, "env": ["A=b"]}));
+    prints(
+        &world,
+        "badname",
+        &json!({"version": 1, "env": {"1BAD": "x"}}),
+    );
+    // The escape as JSON spells it, so the value carries a NUL when read.
+    std::fs::write(
+        record.join("nulvalue.stdout"),
+        "{\"version\":1,\"env\":{\"A\":\"x\\u0000y\"}}\n",
+    )
+    .expect("a NUL-bearing document is scripted");
+    let mut endings_scripted = vec![
         ("exits", hook.as_str(), None, vec!["exit 7"]),
         (
             "unstartable",
@@ -559,7 +574,57 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
             None,
             vec!["malformed", "not one JSON document"],
         ),
-    ] {
+        (
+            "array",
+            hook.as_str(),
+            None,
+            vec!["malformed", "not a JSON object"],
+        ),
+        (
+            "noversion",
+            hook.as_str(),
+            None,
+            vec!["malformed", "no `version`"],
+        ),
+        (
+            "badversion",
+            hook.as_str(),
+            None,
+            vec!["malformed", "version 2"],
+        ),
+        (
+            "noenv",
+            hook.as_str(),
+            None,
+            vec!["malformed", "`env` is not an object"],
+        ),
+        ("badname", hook.as_str(), None, vec!["malformed", "`1BAD`"]),
+        (
+            "nulvalue",
+            hook.as_str(),
+            None,
+            vec!["malformed", "`env.A`", "NUL"],
+        ),
+    ];
+    // A child left behind holding the hook's stdout, and a document too large to
+    // be an environment: unix alone, for the reason `dispatch_env_hook.bat` gives.
+    if cfg!(unix) {
+        std::fs::write(record.join("lingers.linger"), "20").expect("the linger is scripted");
+        std::fs::write(record.join("oversize.oversize"), "").expect("the oversize is scripted");
+        endings_scripted.push((
+            "lingers",
+            hook.as_str(),
+            None,
+            vec!["malformed", "still held open"],
+        ));
+        endings_scripted.push((
+            "oversize",
+            hook.as_str(),
+            None,
+            vec!["malformed", "more than"],
+        ));
+    }
+    for (run, command, timeout, names) in endings_scripted {
         let mut extra = vec!["--dispatch-env-hook", command];
         if let Some(seconds) = timeout {
             extra.extend(["--dispatch-env-hook-timeout", seconds]);
@@ -626,6 +691,29 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         "{}",
         world.dump()
     );
+
+    // A hook whose log cannot be opened could not be started, and says so: the
+    // run's `hooks/` is taken by a file while the run waits on a human gate, so
+    // the dispatch the adopting driver makes finds nowhere to keep its stderr.
+    let run = "unloggable";
+    attached(
+        &world,
+        run,
+        vec![human("approve", &[]), agent("build", &["approve"])],
+        &["--dispatch-env-hook", &hook],
+    )
+    .settled();
+    std::fs::write(world.runs.join(run).join("hooks"), "in the way").expect("a file in the way");
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).settled();
+    let settled = settlement(&world, run, "build");
+    assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("could-not-start") && detail.contains("could not be opened"),
+        "the refusal does not name the log that could not be opened: {detail}"
+    );
+    assert!(invocations(&world, run).is_empty(), "{}", world.dump());
 }
 
 /// A node parked and **requeued**, and the replacement node a **retry** puts in
@@ -837,6 +925,80 @@ fn a_missing_env_from_source_refuses_the_launch_naming_the_file_the_variant_and_
         "the refusal names a source the hook supplied: {detail}"
     );
 
+    // A config the launch would read and cannot, and one oneharness does not
+    // read as its own, refuse the launch naming the file.
+    std::fs::write(
+        world.graphs().join("oneharness-bad.toml"),
+        "harnesses = [\"no-such-harness\"]\n",
+    )
+    .expect("the bad config is written");
+    prints(&world, "absentconfig", &adding(SUPPLIED, "supplied"));
+    prints(&world, "badconfig", &adding(SUPPLIED, "supplied"));
+    for (run, config, names) in [
+        (
+            "absentconfig",
+            "./nowhere.toml",
+            vec!["nowhere.toml", "could not be read"],
+        ),
+        (
+            "badconfig",
+            "./oneharness-bad.toml",
+            vec!["oneharness-bad.toml", "not an oneharness config"],
+        ),
+    ] {
+        attached(
+            &world,
+            run,
+            vec![agent("build", &[])],
+            &[
+                "--dispatch-env-hook",
+                &hook,
+                "--node-set",
+                &format!("members.worker.oneharness_config={config}"),
+            ],
+        )
+        .settled();
+        let settled = settlement(&world, run, "build");
+        assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
+        let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+        for named in &names {
+            assert!(
+                detail.contains(named),
+                "the {run} refusal does not name {named:?}: {detail}"
+            );
+        }
+    }
+
+    // A source that is one of this crate's own per-dispatch variables is one the
+    // launch will have, and is never what refuses it.
+    std::fs::write(
+        &worker,
+        hooked_worker_config().replace(
+            &format!("{HANDED} = \"{SUPPLIED}\"\n"),
+            &format!(
+                "{HANDED} = \"{SUPPLIED}\"\nONEPIPELINE_E2E_RUN_COPY = \"ONEPIPELINE_RUN_ID\"\n\
+                 ONEPIPELINE_E2E_SCRATCH_COPY = \"ONEPIPELINE_NODE_SCRATCH_DIR\"\n"
+            ),
+        ),
+    )
+    .expect("the worker config sources this crate's own variables");
+    prints(&world, "owned", &adding(SUPPLIED, "supplied"));
+    attached(
+        &world,
+        "owned",
+        vec![agent("build", &[])],
+        &["--dispatch-env-hook", &hook],
+    )
+    .exited(0)
+    .settled();
+    assert_eq!(
+        settlement(&world, "owned", "build")["payload"]["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+    std::fs::write(&worker, hooked_worker_config()).expect("the worker config is restored");
+
     // Supplied by the hook, the launch goes ahead and the child holds it.
     let sentinel = "supplied-sentinel-5c0e4a";
     prints(&world, "supplied", &adding(SUPPLIED, sentinel));
@@ -862,6 +1024,45 @@ fn a_missing_env_from_source_refuses_the_launch_naming_the_file_the_variant_and_
         dispatch_env(&world)
     );
     nothing_kept_holds(&world, "supplied", sentinel);
+
+    // A two-party member's sides are read too — here the judge side, moved by a
+    // `--node-set` onto a config whose variant sources what nothing supplies —
+    // and the refusal names that side's file, variant and key.
+    world.write_supervised_node_graph();
+    let judge = world.graphs().join("oneharness-judge.toml");
+    std::fs::write(
+        &judge,
+        "harnesses = [\"claude-code:reviewing\"]\n\n\
+         [harness.claude-code.variant.reviewing.env_from]\n\
+         ONEPIPELINE_E2E_JUDGED = \"ONEPIPELINE_E2E_JUDGE_SOURCE\"\n",
+    )
+    .expect("the judge config is written");
+    prints(&world, "judged", &adding(SUPPLIED, "supplied"));
+    attached(
+        &world,
+        "judged",
+        vec![agent("build", &[])],
+        &[
+            "--dispatch-env-hook",
+            &hook,
+            "--node-set",
+            "members.worker.judge.oneharness_config=./oneharness-judge.toml",
+        ],
+    )
+    .settled();
+    let settled = settlement(&world, "judged", "build");
+    assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    for named in [
+        judge.to_string_lossy().as_ref(),
+        "claude-code:reviewing",
+        "ONEPIPELINE_E2E_JUDGE_SOURCE",
+    ] {
+        assert!(
+            detail.contains(named),
+            "the refusal does not name {named:?}: {detail}"
+        );
+    }
 }
 
 /// Against the **real** `oneagentgraph`: a node whose oneharness config names an

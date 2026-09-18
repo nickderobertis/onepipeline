@@ -4,6 +4,11 @@ rem `dispatch_env_hook.rs` name. `dispatch_env_hook.sh` is where what it records
 rem what it reads, what it says, and why a record it cannot write is refused out
 rem loud are written down; this answers the same way. What is written down here is
 rem what cmd makes different.
+rem
+rem `<run>.linger` and `<run>.oversize` are the two files this half does not answer:
+rem a child cmd starts inherits no pipe it can be told to hold, and a mebibyte is
+rem nothing cmd can print in bounded time, so the journeys that script either run
+rem on unix alone.
 setlocal enabledelayedexpansion
 
 if not defined ONEPIPELINE_E2E_HOOK_RECORD (
@@ -91,6 +96,7 @@ if exist "%record%\%run%.stdout" (
 ) else (
   echo {"version":1,"env":{}}
 )
+if not "%status%"=="0" echo dispatch_env_hook: exiting %status%, as %record%\%run%.exit scripts for invocation !nth!; remove that file, or raise %record%\%run%.exit-from-nth, for this hook to admit the launch 1>&2
 exit /b %status%
 
 rem Nothing under %record%\%run% could be claimed, told apart by whether the last

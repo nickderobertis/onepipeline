@@ -241,6 +241,7 @@ impl Executor for LocalExecutor {
                     node,
                     graph: &req.graph,
                     sets: &node_sets,
+                    own: &own_dispatch_variables(&req.workspace),
                 })?
             }
             _ => Vec::new(),
@@ -374,6 +375,34 @@ fn remember_worktree(session: &onevcs::Session) {
 
 fn session_of_worktree(worktree: &Path) -> Option<String> {
     opened_worktrees().get(worktree).cloned()
+}
+
+/// The names of the variables [`prepare_dispatch_env`] will set on a dispatch in
+/// `workspace`, known before any of their values are.
+///
+/// What the dispatch-env hook's check is told is present by name: the pairs
+/// themselves are composed only once the launch goes ahead — the scratch
+/// directory is made, and a session's token exists once the session is open —
+/// and a config that sources one of this crate's own variables through
+/// `env_from` is a launch that will have it. The session is the one variable
+/// not every dispatch carries, and whether this one will is decided here the
+/// way [`dispatch`](LocalExecutor::dispatch) decides it: a session it opens, or
+/// one already opened on the worktree it names.
+fn own_dispatch_variables(workspace: &WorkspaceSpec) -> Vec<&'static str> {
+    let mut names = vec![
+        crate::agentgraph::RUN_ID_ENV,
+        crate::agentgraph::RUNS_DIR_ENV,
+        crate::channel::ASKER_ENV,
+        NODE_SCRATCH_DIR_ENV,
+    ];
+    let in_session = match workspace {
+        WorkspaceSpec::VcsSession(_) => true,
+        WorkspaceSpec::Path(path) => session_of_worktree(path).is_some(),
+    };
+    if in_session {
+        names.push(crate::agentgraph::SESSION_ENV);
+    }
+    names
 }
 
 /// Compose what every dispatch this executor makes carries in its own
