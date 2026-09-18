@@ -153,6 +153,11 @@ if [ -f "$record/$run.linger" ]; then
   # child this hook waited on would not outlive it — so what can be checked is
   # checked before it: that there is a `sleep` to linger with.
   command -v sleep >/dev/null 2>&1 || broke "no sleep on PATH to linger with; put one on the PATH the journey runs under, or remove $record/$run.linger"
+  # llmlint: ignore[tool_output_is_signal] unwaited on purpose, and not observable by
+  # design: the scenario is a hook that leaves a child behind holding its stdout after
+  # the hook itself has exited, which is exactly what waiting on it — or reading its
+  # status — would turn into a different scenario. How it went is what the engine reads
+  # off the pipe it holds, and the journey asserts that reading.
   sleep "$seconds" &
 fi
 
