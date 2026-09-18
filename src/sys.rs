@@ -544,13 +544,16 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 ///
 /// The tree is then **enumerated**, as the Unix arm enumerates it, and what
 /// comes back is the set the caller is handed. `taskkill /T` walks descent
-/// itself and still does — this does not replace it — but that walk is the
-/// program's and its result is never reported back, so a set built from the
-/// roots alone leaves [`stop_and_confirm`] watching the pids a run's records
-/// name and nothing under them: a teardown that answers while a descendant is
-/// still running, which here is a process still holding every inheritable handle
-/// its parent held. Asking each of them separately also reaches a subtree
-/// orphaned while `taskkill` was walking, which its own snapshot cannot.
+/// itself and still does under each descendant — this does not replace it — but
+/// that walk is the program's and its result is never reported back, so a set
+/// built from the roots alone leaves [`stop_and_confirm`] watching the pids a
+/// run's records name and nothing under them: a teardown that answers while a
+/// descendant is still running, which here is a process still holding every
+/// inheritable handle its parent held. Asking each of them separately also
+/// reaches a subtree orphaned while `taskkill` was walking, which its own
+/// snapshot cannot. The roots themselves are asked **alone**, and the note
+/// beside the asks says why: a `/T` ends the leaves first, and the driver is a
+/// root that must not outlive the work it started.
 ///
 /// Read **before** anything is asked to end, for the reason the Unix arm gives:
 /// a process whose parent has gone is beyond descent from the root.
@@ -592,11 +595,25 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
     // tree untouched beside one that was signalled is a run that is neither
     // intact nor ended, which is what [`Teardown::PartlySignalled`] says. The
     // roots come first, so what is left has stopped growing while its members are
-    // taken down.
+    // taken down — and each root is asked **alone**, because `taskkill /T` ends
+    // a tree from the leaves up and a root asked that way is the last of its
+    // tree to go. The run's driver is a root, and a driver that outlives the
+    // dispatch it started by even a moment sees that dispatch end and drops the
+    // registry entry it held for it: the one record a view reads a stopped
+    // run's work off, left behind on Unix by a `SIGTERM` the driver takes first
+    // and taken away here by a driver still standing over a dispatch `taskkill`
+    // had already ended. What descends from a root is in `aimed` already, off
+    // the listing above, and keeps the tree ask: a leaf under it that started
+    // since the listing is what `/T` still reaches there.
     let mut walked = true;
     let mut attempted = false;
     for pid in &aimed {
-        match taskkill_established(taskkill(*pid), || platform_process_may_be_live(*pid)) {
+        let reach = if aimed_roots.contains(pid) {
+            Reach::Alone
+        } else {
+            Reach::Tree
+        };
+        match taskkill_established(taskkill(*pid, reach), || platform_process_may_be_live(*pid)) {
             Teardown::Signalled => attempted = true,
             Teardown::PartlySignalled => {
                 attempted = true;
@@ -621,15 +638,31 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// Ask this platform to end one tree.
+/// How far one `taskkill` reaches.
+///
+/// The roots a teardown aims at are asked alone and their descendants as trees;
+/// [`platform_stop`] says why the two differ.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The one process, and nothing under it.
+    Alone,
+    /// The process and every descendant `taskkill` finds under it.
+    Tree,
+}
+
+/// Ask this platform to end one process, or one tree.
 ///
 /// Split out of [`platform_stop`] so that the fold over several roots above
 /// reads as the fold it is: this is the one ask, and everything about *how* it
-/// asks — `/T`, and `/F` in both modes — is the note inside it.
+/// asks — `/T` where the caller asks for a tree, and `/F` in both modes — is the
+/// note inside it.
 #[cfg(windows)]
-fn taskkill(pid: u32) -> std::io::Result<std::process::ExitStatus> {
+fn taskkill(pid: u32, reach: Reach) -> std::io::Result<std::process::ExitStatus> {
     // `/T` for the tree — the same boundary the Unix arm walks the process table
-    // for, which this platform offers outright.
+    // for, which this platform offers outright — and only where the caller asks
+    // for it: `/T` ends the leaves first, and the note on the roots in
+    // [`platform_stop`] is why a root must not be asked that way.
     //
     // `/F` in **both** modes, which is not the distinction the other platform
     // draws, and the reason is a property of this one. Without `/F` `taskkill`
@@ -650,9 +683,12 @@ fn taskkill(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     // nothing in this crate installs a handler for. So the grace this drops is
     // grace no process here was taking.
     crate::rendercost::process_spawned("taskkill");
-    std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdout(std::process::Stdio::null())
+    let mut ask = std::process::Command::new("taskkill");
+    ask.args(["/PID", &pid.to_string(), "/F"]);
+    if reach == Reach::Tree {
+        ask.arg("/T");
+    }
+    ask.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
 }

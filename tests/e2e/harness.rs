@@ -800,6 +800,7 @@ impl World {
         let mut command = Command::new(onetaskgraph_binary());
         command
             .args(args)
+            .env_remove(STORE_BINARY_ENV)
             .env("XDG_CONFIG_HOME", self.root.join("xdg"))
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .env(
