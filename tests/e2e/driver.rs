@@ -3518,7 +3518,7 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
     // returned, so the double can be at its hold a moment before its entry is in
     // place — and a registry broken in that moment refuses the control too, which
     // is then taken down like the dispatch under test and the two are
-    // indistinguishable. Run 35295126586's gate lost the control that way.
+    // indistinguishable.
     world.until(
         "the held dispatch to be recorded in the registry",
         |world| held.iter().all(|pid| world.registered(&run, *pid)),

@@ -295,15 +295,13 @@ fn why(world: &World, run: &str) -> String {
 /// repository, beside the pid.
 ///
 /// A hosted runner is a fresh machine whose process numbering starts over, so
-/// two runs an hour apart on two runners handed this process the same pid: 30863
-/// opened `onepipeline-smoke` PR #170 from run 35282039766's smoke and then, in
-/// run 35286719909's, named the same branch again — and with it, because the
-/// worker's body is derived from the branch, the same `work.md` the scratch
-/// repository's `main` already carried from the first. The worker's write left
-/// a clean tree, the merge path proved the branch level with `origin/main`, and
-/// the node settled `empty-branch` on a lifecycle this crate had run correctly.
-/// The workflow run and attempt are what no other runner shares; off GitHub, the
-/// clock is.
+/// two runs an hour apart on two runners can hand this process the same pid and
+/// so the same branch — and with it, because the worker's body is derived from
+/// the branch, the same `work.md` the scratch repository's `main` already
+/// carries from the first. The worker's write leaves a clean tree, the merge
+/// path proves the branch level with `origin/main`, and the node settles
+/// `empty-branch` on a lifecycle this crate ran correctly. The workflow run and
+/// attempt are what no other runner shares; off GitHub, the clock is.
 fn run_stamp() -> String {
     let github = |name: &str| {
         std::env::var(name)

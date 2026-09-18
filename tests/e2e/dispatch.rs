@@ -1617,10 +1617,9 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
 /// that leaves a diff. A repository that has already landed a run's work is
 /// not. The smoke's scratch repository keeps what every run merged, and when a
 /// hosted runner reissued a pid the branch derived from it came round again —
-/// `onepipeline-smoke` PR #170 from run 35282039766, then run 35286719909's
-/// smoke — and with it the body derived from the branch: the turn rewrote
-/// `work.md` byte for byte, `git status` saw nothing, and the merge path
-/// answered `empty-branch`. That answer is the engine's and it is right: the
+/// and with it the body derived from the branch: the turn rewrote `work.md`
+/// byte for byte, `git status` saw nothing, and the merge path answered
+/// `empty-branch`. That answer is the engine's and it is right: the
 /// branch *is* level with its base, and the detail says what it was compared
 /// against. Held here through the real siblings with the turn's own record
 /// proving that it wrote, so the answer cannot be mistaken for a turn that
