@@ -485,6 +485,31 @@ hundred seconds when unnamed, zero refused), its output is kept in
 after the driver has let go of the run, so the run reads as undriven while it runs,
 and **a hook never changes how the run settled**.
 
+A launch may also name a **dispatch-env hook**: `--dispatch-env-hook COMMAND`, or
+a launch config's `dispatch_env_hook`, run immediately before **every** node-scope
+dispatch — a first dispatch, a re-asked one, a retry, a requeue, a lifecycle
+node's worker launch and its drafting dispatch alike, and never the dag-scope
+observer — so a run supervised for hours picks up the environment a harness
+routing change merged since the driver started, instead of failing its next
+dispatch on an `env_from` source the driver never inherited. It runs in the launch
+directory with `ONEPIPELINE_HOOK=dispatch-env`, `ONEPIPELINE_RUN_ID`,
+`ONEPIPELINE_RUN_ROOT` and `ONEPIPELINE_NODE_ID` in its environment, prints exactly
+one JSON document, `{"version": 1, "env": {"NAME": "value", ...}}`, and is awaited
+for up to `--dispatch-env-hook-timeout SECONDS` (or `dispatch_env_hook_timeout`,
+sixty seconds when unnamed, zero refused). Its `env` is overlaid on the driver's
+environment **for that one child launch only** — the driver's own environment is
+unchanged — and then every `env_from` source the launch's oneharness configs name
+is checked for in the refreshed environment, reading each config as it is on disk
+at that moment. A hook that exits non-zero, cannot start, times out or prints a
+malformed document, or an `env_from` source still missing, **refuses the launch**:
+nothing is dispatched and the node settles `infrastructure-failure`, retried as
+that outcome always is, with a detail naming either how the hook ended or the
+config file, the harness variant and the missing key. Its stderr is kept in
+`hooks/dispatch-env.log` under the run; **no value it prints is written anywhere the
+run keeps**. The host's own composition — which helpers produce the variables —
+lives in the hook: this crate never sources or names a host variable. Naming no
+hook dispatches exactly as before.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

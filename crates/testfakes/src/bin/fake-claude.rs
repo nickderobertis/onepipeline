@@ -230,6 +230,12 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             scratch.clone(),
         ],
     );
+    // What this turn's own environment holds, where a journey asks
+    // (`turn.report-env`): the harness process is where an `env_from` target
+    // lands, so what the dispatch-env hook supplied is read off the turn that
+    // was handed it. Keyed by the prompt, which is what tells one node's turn
+    // from another's.
+    fake::report_env(dir, "turn", &prompt);
 
     // `turn.concurrent` holds every worker turn until the number of them it names
     // are all inside their own dispatch, and then makes each one look again. A

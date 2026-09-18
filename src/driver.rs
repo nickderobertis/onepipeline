@@ -519,6 +519,17 @@ fn start(args: &StartArgs) -> Result<i32> {
         .hook_timeout
         .or(declared.hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_HOOK_TIMEOUT_SECONDS);
+    // The dispatch-env hook and its timeout, by the same two rungs and on the
+    // same terms: a blank rung names none, and a zero timeout was refused by the
+    // spelling that carried it before reaching here.
+    let dispatch_env_hook = crate::hooks::named(
+        args.dispatch_env_hook.as_deref(),
+        declared.dispatch_env_hook.as_deref(),
+    );
+    let dispatch_env_hook_timeout: NonZeroU64 = args
+        .dispatch_env_hook_timeout
+        .or(declared.dispatch_env_hook_timeout)
+        .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -627,6 +638,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         },
         success_hook: success_hook.unwrap_or_default(),
         failure_hook: failure_hook.unwrap_or_default(),
+        // Beside the hook it bounds, for the run-end timeout's reason.
+        dispatch_env_hook_timeout: if dispatch_env_hook.is_some() {
+            dispatch_env_hook_timeout.get()
+        } else {
+            0
+        },
+        dispatch_env_hook: dispatch_env_hook.unwrap_or_default(),
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
         adoptions: 0,
@@ -3575,6 +3593,8 @@ mod tests {
             success_hook: String::new(),
             failure_hook: String::new(),
             hook_timeout: 0,
+            dispatch_env_hook: String::new(),
+            dispatch_env_hook_timeout: 0,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,

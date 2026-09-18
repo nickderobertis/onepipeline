@@ -234,6 +234,33 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
+/// Record what this process's own environment holds for each variable a
+/// `report-env` script names, one name per line, under `who`.
+///
+/// The record a journey about the dispatch-env hook reads: the hook's additions
+/// reach the child launch and nothing else, and the child is the double that
+/// runs this. Each row is `[who, name, "set" | "unset", value]`, in the script
+/// directory beside every other invocation — never on the run's own stream,
+/// because a value the hook printed must never reach the run's storage, and a
+/// double that put it there would fail the very journey proving that. Whether
+/// `who` is a node key, an observer, or a member's turn is the caller's to say.
+pub fn report_env(dir: &Path, script: &str, who: &str) {
+    let Some(names) = node_script(dir, script, "report-env") else {
+        return;
+    };
+    for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        let (state, value) = match std::env::var(name) {
+            Ok(value) => ("set", value),
+            Err(_) => ("unset", String::new()),
+        };
+        record(
+            dir,
+            &format!("{script}-env"),
+            &[who.to_string(), name.to_string(), state.to_string(), value],
+        );
+    }
+}
+
 /// Keep working through the ask to stop, as a wedged worker does.
 ///
 /// The one dispatch behaviour a rendezvous cannot act out. A teardown's polite
