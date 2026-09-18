@@ -2383,36 +2383,49 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
 /// Held, and then released the only way a release hold is: the document is
 /// repaired, a later pass resolves the dependency, the probe runs and answers, and
 /// nothing but an answer of released starts the node.
+///
+/// Two releasing repositories rather than one, because the hold names **every**
+/// dependency it could not describe rather than the first it met: a reader of
+/// the wait sees all of what the node is held on, and one that stopped at the
+/// first would have a second appear only once the first was fixed.
 #[test]
 fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be() {
     let world = watching("adoption-unresolved");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
+    let tool_repo = world.extra_repository("tool");
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    let readable = two_that_release(&script, "tool", &tool_script);
+    world.releases(&readable);
     releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "1.0.0");
 
-    // The consumer is ready only once a person has acted, so the engine lands
-    // and settles under a document this host can read — its release baseline is
-    // captured at that landing — and the moment the consumer becomes ready is one
-    // this journey chooses.
+    // The consumer is ready only once a person has acted, so both dependencies
+    // land and settle under a document this host can read — each release
+    // baseline is captured at its landing — and the moment the consumer becomes
+    // ready is one this journey chooses.
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
     let mut consumer = consumer(Some("published"));
-    consumer["deps"] = json!([ENGINE, "approve"]);
+    consumer["deps"] = json!([ENGINE, "packager", "approve"]);
     let run = start_attached(
         &world,
         "adoption-unresolved",
-        vec![engine(), human("approve", &[]), consumer],
+        vec![engine(), packager, human("approve", &[]), consumer],
     );
-    assert_eq!(
-        settled_status(&world, &run, ENGINE).as_deref(),
-        Some("done")
-    );
+    for landed in [ENGINE, "packager"] {
+        assert_eq!(
+            settled_status(&world, &run, landed).as_deref(),
+            Some("done")
+        );
+    }
     assert!(!dispatched(&world, &run, "consumer"));
     assert!(
         world.events_of(&run, "release-wait").is_empty(),
         "a node that was not ready was reported waiting on a release"
     );
-    let baselined = world.probe_runs(ENGINE);
+    let baselined = (world.probe_runs(ENGINE), world.probe_runs("tool"));
 
     // The document stops being readable — a rewrite caught halfway — and the
     // consumer becomes ready to a driver that has never read it.
@@ -2420,68 +2433,81 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
     world.run(&["attest", &run, "approve"]).exited(0);
     world.run(&["adopt", &run, "--detach"]).exited(0);
 
-    world.until("the unresolved dependency to hold the consumer", |world| {
-        answered(world, &run, "consumer") == Some("unresolved".to_owned())
-    });
+    world.until(
+        "the unresolved dependencies to hold the consumer",
+        |world| answered(world, &run, "consumer") == Some("unresolved".to_owned()),
+    );
     // Held, and not dispatched: a dependency the run could not describe is not a
     // dependency the node does not have.
     assert!(
         !dispatched(&world, &run, "consumer"),
-        "a published node was dispatched with its dependency unresolved:\n{}",
+        "a published node was dispatched with its dependencies unresolved:\n{}",
         world.dump()
     );
     assert_eq!(
-        world.probe_runs(ENGINE),
+        (world.probe_runs(ENGINE), world.probe_runs("tool")),
         baselined,
         "a probe was run for a dependency the run could not yet describe"
     );
-    // The wait names the dependency it could not resolve and says why, in the
-    // sibling's own words about the document; what it could not read — the
+    // The wait names **both** dependencies it could not resolve and says why, in
+    // the sibling's own words about the document; what it could not read — the
     // identity, the target, the style — it does not invent.
     let entries = awaiting(&world, &run, "consumer");
-    assert_eq!(entries.len(), 1, "{entries:?}");
-    assert_eq!(entries[0]["dep"], json!(ENGINE));
-    assert_eq!(entries[0]["last_answer"], json!("unresolved"));
-    assert!(
-        entries[0]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("malformed")),
-        "the wait does not say why the dependency could not be resolved: {entries:?}"
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["dep"].clone())
+            .collect::<Vec<Value>>(),
+        vec![json!(ENGINE), json!("packager")],
+        "the wait does not name every dependency it could not resolve: {entries:?}"
     );
-    for absent in ["identity", "target", "style"] {
+    for entry in &entries {
+        assert_eq!(entry["last_answer"], json!("unresolved"), "{entry}");
         assert!(
-            entries[0][absent].is_null(),
-            "the wait invented a `{absent}` for a dependency it could not read: {entries:?}"
+            entry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("malformed")),
+            "the wait does not say why the dependency could not be resolved: {entry}"
+        );
+        for absent in ["identity", "target", "style"] {
+            assert!(
+                entry[absent].is_null(),
+                "the wait invented a `{absent}` for a dependency it could not read: {entry}"
+            );
+        }
+        assert!(
+            entry["waited_seconds"].is_number() && entry["since"].is_string(),
+            "the wait does not say how long it has been: {entry}"
         );
     }
-    assert!(
-        entries[0]["waited_seconds"].is_number() && entries[0]["since"].is_string(),
-        "the wait does not say how long it has been: {entries:?}"
-    );
-    // The hold on the run's own record names it, exactly as a hold on an
+    // The hold on the run's own record names them, exactly as a hold on an
     // unreleased dependency does. The wait is recorded ahead of the hold within
     // a pass, so the hold is waited for rather than read off the pass that
     // recorded the wait.
+    let release_hold = json!([{ "kind": "release", "awaiting": [ENGINE, "packager"] }]);
     world.until("the hold to reach the record", |world| {
         world
             .events_of(&run, "node-held")
             .into_iter()
             .rfind(|event| event["labels"]["node"] == "consumer")
-            .is_some_and(|hold| {
-                hold["payload"]["reasons"] == json!([{ "kind": "release", "awaiting": [ENGINE] }])
-            })
+            .is_some_and(|hold| hold["payload"]["reasons"] == release_hold)
     });
     assert!(!dispatched(&world, &run, "consumer"));
-    // And the surface a person reads names it and says why.
+    // And the surface a person reads names each and says why.
     let surface = wait_surface(&world, &run, "consumer");
+    for dep in [ENGINE, "packager"] {
+        assert!(
+            surface.contains(&format!("- {dep} — not yet resolved (")),
+            "the surface does not name the unresolved dependency '{dep}':\n{surface}"
+        );
+    }
     assert!(
-        surface.contains(&format!("- {ENGINE} — not yet resolved ("))
-            && surface.contains("malformed"),
-        "the surface does not name the unresolved dependency or why:\n{surface}"
+        surface.contains("malformed") && surface.contains("waiting on 2 release(s)"),
+        "the surface does not say why or how many:\n{surface}"
     );
 
-    // The wait is surfaced again while the dependency stays unresolved, still
-    // naming it: an unreadable document does not go quiet.
+    // The wait is surfaced again while the dependencies stay unresolved, still
+    // naming them: an unreadable document does not go quiet.
     let surfaced = wait_surfaces_of(&world, &run, "consumer").len();
     world.until("the wait to be surfaced again", |world| {
         wait_surfaces_of(world, &run, "consumer").len() > surfaced
@@ -2493,30 +2519,52 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
     assert!(wait_surface(&world, &run, "consumer").contains("not yet resolved"));
     assert!(!dispatched(&world, &run, "consumer"));
 
-    // The operator finishes the rewrite. A later pass describes the dependency,
-    // the probe runs, and it answers — and the answer is that nothing has been
-    // released since the baseline, which is still not a release.
-    world.releases(&automated(&script));
-    world.until("the resolved dependency to be probed", |world| {
-        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    // The operator finishes the rewrite. A later pass describes both
+    // dependencies, each probe runs, and each answers — and the answer is that
+    // nothing has been released since the baseline, which is still not a release.
+    world.releases(&readable);
+    world.until("both resolved dependencies to be probed", |world| {
+        awaiting(world, &run, "consumer")
+            .iter()
+            .filter(|entry| entry["last_answer"] == json!("not-released"))
+            .count()
+            == 2
     });
     assert!(
-        world.probe_runs(ENGINE) > baselined,
-        "no probe ran once the dependency resolved"
+        world.probe_runs(ENGINE) > baselined.0 && world.probe_runs("tool") > baselined.1,
+        "a probe did not run once its dependency resolved"
     );
     assert!(
         !dispatched(&world, &run, "consumer"),
-        "resolving the dependency is what started a held node"
+        "resolving the dependencies is what started a held node"
     );
     let entries = awaiting(&world, &run, "consumer");
-    assert_eq!(entries.len(), 1, "{entries:?}");
-    assert_eq!(entries[0]["dep"], json!(ENGINE));
-    assert_eq!(entries[0]["identity"], json!("github.com/owner/engine"));
-    assert_eq!(entries[0]["target"], json!("crate"));
-    assert_eq!(entries[0]["style"], json!("automated"));
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    for (entry, (dep, identity)) in entries.iter().zip([
+        (ENGINE, "github.com/owner/engine"),
+        ("packager", "github.com/owner/tool"),
+    ]) {
+        assert_eq!(entry["dep"], json!(dep), "{entry}");
+        assert_eq!(entry["identity"], json!(identity), "{entry}");
+        assert_eq!(entry["target"], json!("crate"), "{entry}");
+        assert_eq!(entry["style"], json!("automated"), "{entry}");
+    }
 
-    // Only the release starts it.
+    // One release is not both: the node stays held on the other.
     releases_at(&answer, "0.2.0");
+    world.until("the engine's release to arrive", |world| {
+        world
+            .events_of(&run, "release-arrived")
+            .iter()
+            .any(|event| event["payload"]["dep"] == json!(ENGINE))
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "one of two releases started a node held on both"
+    );
+
+    // Only both releases start it.
+    releases_at(&tool_answer, "3.4.0");
     world.until("the held node to settle", |world| {
         settled_status(world, &run, "consumer").is_some()
     });
@@ -2534,18 +2582,20 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
         unheld
             .last()
             .map(|event| event["payload"]["released"].clone()),
-        Some(json!([{ "kind": "release", "awaiting": [ENGINE] }])),
-        "{unheld:?}"
+        Some(json!([{ "kind": "release", "awaiting": ["packager"] }])),
+        "the hold cleared carrying something other than the last thing holding it: {unheld:?}"
     );
     let task = task_of(&world, "consumer");
-    let row = task
-        .lines()
-        .find(|line| line.starts_with("| engine |"))
-        .unwrap_or_else(|| panic!("no row for the engine dependency:\n{task}"));
-    assert!(
-        row.contains("| 0.2.0 |"),
-        "a node that waited for the release was not told the version it got: {row}"
-    );
+    for (dependency, version) in [(ENGINE, "0.2.0"), ("packager", "3.4.0")] {
+        let row = task
+            .lines()
+            .find(|line| line.starts_with(&format!("| {dependency} |")))
+            .unwrap_or_else(|| panic!("no row for {dependency}:\n{task}"));
+        assert!(
+            row.contains(&format!("| {version} |")),
+            "a node that waited for the release was not told the version it got: {row}"
+        );
+    }
 }
 
 /// A `published` node depending on a node a `retry` replaced is held and probed
