@@ -22,7 +22,7 @@ use crate::channel::SurfaceKind;
 /// at all, and deterministic code alone drives the run.
 pub const DAG_GRAPH_OFF: &str = "off";
 
-/// The planner-update pacemaker interval, in seconds, when `start` is given
+/// The planner-update check-in interval, in seconds, when `start` is given
 /// none.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
 
@@ -339,7 +339,7 @@ pub struct StartArgs {
     /// beats the launch config's own field.
     #[arg(long, value_name = "PATH")]
     pub bus_config: Option<PathBuf>,
-    /// How often the durable planner-update pacemaker comes due, in seconds.
+    /// How often the durable planner-update check-in comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,
     /// How long the settlement write-back allows its store's `project copy` per
@@ -436,7 +436,7 @@ pub struct StartArgs {
     #[arg(long, value_name = "SPEC")]
     pub filter_vcs: Option<String>,
     /// Define or override one named read-time profile, as `NAME=SPEC`.
-    /// Repeatable. `planner` and `monitor` ship and are overridden by name.
+    /// Repeatable. `planner` and `detailed` ship and are overridden by name.
     #[arg(long = "filter-profile", value_name = "NAME=SPEC")]
     pub filter_profiles: Vec<String>,
 }
@@ -725,7 +725,7 @@ pub struct WatchArgs {
     ///
     /// **The stream's** interval, and deliberately not spelled
     /// `--heartbeat-interval`: that one is `start`'s, and it sets how often the
-    /// pacemaker agent surfaces a planner update. The two are different clocks
+    /// scheduled member surfaces a planner update. The two are different clocks
     /// on different verbs, and neither verb accepts the other's flag.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WATCH_TICK_SECONDS)]
     pub tick_interval: u64,

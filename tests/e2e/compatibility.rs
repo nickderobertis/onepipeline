@@ -599,3 +599,67 @@ fn this_build_reads_a_journal_the_release_before_the_bus_wrote_as_it_did() {
         "this build renders a journal the release before the bus wrote differently from that release"
     );
 }
+
+/// A settled run the build before the engine-raised edit kind was renamed wrote:
+/// an author named `monitor` under the launch's bus configuration applied an
+/// `add` beside a `finding`, and that build queued the applied edit as a
+/// `monitor-edit` surface and journalled the planner reading it. Host paths and
+/// stream names are stood in for. Committed and never regenerated.
+const BEFORE_EDIT_APPLIED: &str = include_str!("../golden/journal-before-edit-applied.jsonl");
+
+/// What that build's `results` rendered the journal as.
+const BEFORE_EDIT_APPLIED_RENDERED: &str =
+    include_str!("../golden/journal-before-edit-applied.rendered");
+
+/// **The `edit-applied` rename.** A journal carrying a `monitor-edit` surface —
+/// queued and consumed — still folds and renders: `results` says what the build
+/// that wrote it said, and `monitor` shows the recorded surface under the kind
+/// and source it was written with, which nothing rewrites.
+#[test]
+fn this_build_reads_a_journal_carrying_a_monitor_edit_surface_as_the_build_that_wrote_it_did() {
+    let world = World::new("compat-before-edit-applied");
+    let root = world.fakes.join("before-edit-applied-root");
+    // llmlint: ignore[tests_mirror_real_usage] the journal is the committed recording of
+    // the build **before** the rename, and no invocation of this build writes a
+    // `monitor-edit` surface — which is the whole of what this journey proves. `run_of`
+    // carries the argument for laying it down; everything asserted below is the compiled
+    // binary reading that store.
+    run_of(&root, "before-edit-applied", BEFORE_EDIT_APPLIED);
+    assert!(
+        BEFORE_EDIT_APPLIED.contains("\"kind\":\"monitor-edit\""),
+        "the fixture carries no surface of the kind this journey is about"
+    );
+
+    let read = |verb: &str| {
+        let rendered = world
+            .cmd(&[verb, "before-edit-applied"])
+            .env("ONEPIPELINE_RUNS_DIR", &root)
+            .output()
+            .expect("the view runs");
+        assert!(
+            rendered.status.success(),
+            "`onepipeline {verb}` refused the run: {}",
+            String::from_utf8_lossy(&rendered.stderr)
+        );
+        String::from_utf8_lossy(&rendered.stdout).into_owned()
+    };
+    assert_eq!(
+        read("results"),
+        BEFORE_EDIT_APPLIED_RENDERED,
+        "this build renders the journal differently from the build that wrote it"
+    );
+    let stream = read("monitor");
+    for line in [
+        "planner-surface-queued kind=\"monitor-edit\" message=\"monitor applied an edit:",
+        "planner-surfaced kind=\"monitor-edit\"",
+    ] {
+        assert!(
+            stream.contains(line),
+            "the recorded surface is not rendered as it was written: {stream}"
+        );
+    }
+    assert!(
+        stream.contains("2/2 done  SETTLED  complete"),
+        "the fold does not reach the settlement the journal recorded: {stream}"
+    );
+}

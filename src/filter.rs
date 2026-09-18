@@ -35,8 +35,9 @@ pub use onemessagebus_agent::event::{EventFilter, Matcher};
 /// The profile `next` and `monitor` read through when a caller names none.
 pub const DEFAULT_PROFILE: &str = "planner";
 
-/// The profile that shows the detailed activity the default one leaves out.
-pub const MONITOR_PROFILE: &str = "monitor";
+/// The profile that shows the detailed activity the default one leaves out:
+/// the whole merged stream, which is what an observer of a run reads.
+pub const DETAILED_PROFILE: &str = "detailed";
 
 /// The launch-config schema version this build **writes**.
 ///
@@ -689,7 +690,7 @@ impl Filters {
     /// The profile a reader named, or the reason there is none.
     ///
     /// A launch's own profile of that name wins over the shipped one, so both
-    /// `planner` and `monitor` are overridable without being special-cased here:
+    /// `planner` and `detailed` are overridable without being special-cased here:
     /// the launch's map is consulted first and the shipped defaults are the
     /// fallback.
     ///
@@ -707,7 +708,7 @@ impl Filters {
             return Ok(filter);
         }
         let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
-        for shipped in [DEFAULT_PROFILE, MONITOR_PROFILE] {
+        for shipped in [DEFAULT_PROFILE, DETAILED_PROFILE] {
             if !names.contains(&shipped) {
                 names.push(shipped);
             }
@@ -725,8 +726,8 @@ impl Filters {
 /// `planner` is every pipeline-level event and nothing else — node dispatch,
 /// settlement and failure, decisions, surfaces, edits, attestations, stop and
 /// adopt — with the detailed `agentgraph` and `vcs` activity behind them left
-/// out, because planner attention is the scarce resource. `monitor` is
-/// unfiltered: the observer's whole job is to read the detail.
+/// out, because planner attention is the scarce resource. `detailed` is
+/// unfiltered: an observer's whole job is to read the detail.
 fn shipped_profile(name: &str) -> Option<EventFilter> {
     match name {
         DEFAULT_PROFILE => Some(EventFilter {
@@ -736,7 +737,7 @@ fn shipped_profile(name: &str) -> Option<EventFilter> {
             }],
             exclude: Vec::new(),
         }),
-        MONITOR_PROFILE => Some(EventFilter::default()),
+        DETAILED_PROFILE => Some(EventFilter::default()),
         _ => None,
     }
 }
@@ -769,13 +770,42 @@ mod tests {
         (1, include_str!("../tests/golden/launch-config-v1.json")),
     ];
 
+    /// The name every golden records its unfiltered override under.
+    ///
+    /// The goldens are recordings, written when the unfiltered profile shipped
+    /// under another name, and a recording is never renamed: what they pin is
+    /// that each still loads as the document it is, override and all. The name
+    /// is read off the newest golden rather than restated, so the retired word
+    /// lives in the recordings alone — and that it is *not* the name the
+    /// profile ships under now is asserted, so a golden regenerated under the
+    /// current name would be noticed here rather than quietly accepted.
+    fn recorded_override() -> String {
+        let value: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        let mut names: Vec<String> = value["filters"]["profiles"]
+            .as_object()
+            .expect("the golden declares profiles")
+            .keys()
+            .filter(|name| name.as_str() != DEFAULT_PROFILE)
+            .cloned()
+            .collect();
+        let [name] = &mut names[..] else {
+            panic!("the golden declares one override beside `planner`: {names:?}");
+        };
+        assert_ne!(
+            name.as_str(),
+            DETAILED_PROFILE,
+            "the golden was regenerated under the current shipped name"
+        );
+        std::mem::take(name)
+    }
+
     /// The filters both goldens carry.
     ///
-    /// Both source filters and both shipped profile names, because each is a
-    /// distinct shape on the wire — an `exclude`-only filter, an `include` of
-    /// several matchers, an overridden profile, and the empty filter that means
-    /// "unfiltered" — and a golden carrying one of them would pin a quarter of
-    /// the document.
+    /// Both source filters, the shipped `planner` profile and the recorded
+    /// override, because each is a distinct shape on the wire — an
+    /// `exclude`-only filter, an `include` of several matchers, an overridden
+    /// profile, and the empty filter that means "unfiltered" — and a golden
+    /// carrying one of them would pin a quarter of the document.
     fn pinned_filters() -> Filters {
         let kind = |glob: &str| Matcher {
             kind: Some(glob.to_string()),
@@ -796,8 +826,8 @@ mod tests {
                     shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
                 ),
                 (
-                    MONITOR_PROFILE.to_string(),
-                    shipped_profile(MONITOR_PROFILE).expect("monitor ships"),
+                    recorded_override(),
+                    shipped_profile(DETAILED_PROFILE).expect("detailed ships"),
                 ),
             ]
             .into_iter()
@@ -1007,12 +1037,75 @@ mod tests {
         // profile that was never declared.
         let value: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
         assert_eq!(
-            value["filters"]["profiles"]["monitor"],
+            value["filters"]["profiles"][recorded_override()],
             serde_json::json!({})
         );
         assert!(
             value["filters"]["agentgraph"].get("include").is_none(),
             "an empty include was written out: {value}"
+        );
+    }
+
+    /// Every golden's recorded override — under the name the unfiltered profile
+    /// shipped as when it was written — still loads as the profile it declared,
+    /// and is what a reader naming it is served; and a launch declaring
+    /// `detailed` overrides the profile that ships under that name now.
+    ///
+    /// Two halves of one promise: a launch configuration already on disk keeps
+    /// meaning what it meant, and the shipped name is overridable like the one
+    /// before it was.
+    #[test]
+    fn a_recorded_override_still_loads_by_its_name_and_detailed_overrides_the_shipped_profile() {
+        let retired = recorded_override();
+        for (version, golden) in GOLDEN_EARLIER
+            .iter()
+            .copied()
+            .chain(std::iter::once((LAUNCH_CONFIG_SCHEMA_VERSION, GOLDEN)))
+        {
+            let config: LaunchConfig = serde_json::from_str(golden)
+                .unwrap_or_else(|why| panic!("the schema-{version} golden no longer loads: {why}"));
+            assert_eq!(
+                config
+                    .filters
+                    .profile(&retired)
+                    .unwrap_or_else(|why| panic!(
+                        "the schema-{version} golden's `{retired}` override is not a profile the \
+                     run has: {why}"
+                    )),
+                EventFilter::default(),
+                "the schema-{version} golden's `{retired}` override is not the profile it declared"
+            );
+            // And it is the launch's own, not a shipped one wearing that name.
+            assert!(
+                Filters::default().profile(&retired).is_err(),
+                "`{retired}` reads as a shipped profile, so the golden's override proved nothing"
+            );
+        }
+
+        let mine = EventFilter {
+            include: vec![Matcher {
+                kind: Some("node-*".to_string()),
+                ..Matcher::default()
+            }],
+            exclude: Vec::new(),
+        };
+        let launch = Filters {
+            profiles: [(DETAILED_PROFILE.to_string(), mine.clone())]
+                .into_iter()
+                .collect(),
+            ..Filters::default()
+        };
+        assert_eq!(
+            launch.profile(DETAILED_PROFILE).expect("the launch's own"),
+            mine,
+            "the shipped `detailed` profile was read instead of the launch's override"
+        );
+        assert_eq!(
+            Filters::default()
+                .profile(DETAILED_PROFILE)
+                .expect("detailed ships"),
+            EventFilter::default(),
+            "a launch declaring nothing is not served the shipped `detailed` profile"
         );
     }
 

@@ -1609,6 +1609,163 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
     );
 }
 
+/// A worker turn that writes what the base already carries leaves a level
+/// branch, and the node fails naming the comparison rather than publishing.
+///
+/// The one lifecycle shape the worlds here could not reach on their own: every
+/// repository a journey seeds is fresh, so a worker that writes is a worker
+/// that leaves a diff. A repository that has already landed a run's work is
+/// not. The smoke's scratch repository keeps what every run merged, and when a
+/// hosted runner reissued a pid the branch derived from it came round again —
+/// and with it the body derived from the branch: the turn rewrote `work.md`
+/// byte for byte, `git status` saw nothing, and the merge path answered
+/// `empty-branch`. That answer is the engine's and it is right: the
+/// branch *is* level with its base, and the detail says what it was compared
+/// against. Held here through the real siblings with the turn's own record
+/// proving that it wrote, so the answer cannot be mistaken for a turn that
+/// never ran or a dispatch whose work was lost after its stream drained.
+#[test]
+fn a_worker_that_rewrites_what_the_base_carries_settles_empty_branch_naming_the_comparison() {
+    let world = World::new("real-rewrite-level");
+    a_worker_rewrites_what_the_base_carries(&world);
+}
+
+/// The same rewrite under `core.autocrlf=true`, which is what the hosted
+/// Windows leg runs the journey above under: Git for Windows sets it in its
+/// system config, below the global one the world redirects.
+///
+/// There the journey above settled `publication-failed`. A checkout under that
+/// option writes `work.md` with CRLF, the double rewrites it with LF, and `git
+/// status --porcelain` — which reads the stat cache before any byte — calls it
+/// modified on the size alone. The engine's level-branch read took that as a
+/// tree the sibling was about to commit, the sibling's `git commit` of it was
+/// refused as nothing to commit, and a failure nobody caused settled the node.
+/// The read now compares content, and asks for the untracked files separately.
+/// Set in the world's git config so the shape is driven on every platform, and
+/// the option is read back off the checkout so a git that ignored it — or a
+/// world that stopped redirecting the global config — cannot pass this vacuously.
+#[test]
+fn a_worker_that_rewrites_what_the_base_carries_under_autocrlf_still_settles_empty_branch() {
+    let world = World::new("real-rewrite-level-crlf");
+    let gitconfig = world.gitconfig();
+    let mut config = std::fs::read_to_string(&gitconfig).expect("the world's git config");
+    config.push_str("[core]\n\tautocrlf = true\n");
+    std::fs::write(&gitconfig, config).expect("the world's git config is written");
+    let repo = a_worker_rewrites_what_the_base_carries(&world);
+    assert_eq!(
+        crate::harness::git(
+            &world,
+            &repo.checkout,
+            &["config", "--get", "core.autocrlf"]
+        )
+        .trim(),
+        "true",
+        "the checkout does not read the option, so the shape was not driven"
+    );
+}
+
+/// Seed a base that already carries the worker's file, run one lifecycle node
+/// whose worker turn rewrites it with the same content, and hold the node to
+/// `empty-branch` naming the comparison.
+fn a_worker_rewrites_what_the_base_carries(world: &World) -> crate::harness::Repository {
+    world.write_graphs();
+    let repo = world.repository("local-direct", &[]);
+    // The base already carries the file the turn is about to write, with the
+    // very content it will write — as the scratch repository did after #170.
+    let body = "the worker wrote this";
+    std::fs::write(repo.checkout.join("work.md"), format!("{body}\n"))
+        .expect("the base's copy of the worker's file is written");
+    crate::harness::git(world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        world,
+        &repo.checkout,
+        &["commit", "-q", "-m", "feat: an earlier run's work"],
+    );
+    crate::harness::git(world, &repo.checkout, &["push", "-q", "origin", "main"]);
+    world.script("harness.work", body);
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land what the base already has",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("rewritten", &plan_of("rewritten", vec![node]));
+    let launched = world.run_on_agentgraph(&["start", &path, "--attach"]);
+    launched.settled();
+
+    // The turn ran and wrote, into the worktree the dispatch was given: the
+    // double records the file it left, and it is the one the base carries.
+    // llmlint: ignore-block[tests_mirror_real_usage] the write is the *arrangement*, and
+    // the double's own record is the only place it is observable: what the turn wrote is
+    // byte for byte what the base already carries, so a read of the worktree shows the
+    // file whether or not the turn wrote it, and the tree the sibling disposes of when
+    // the node settles holds no diff to publish or view. What the journey proves — the
+    // settlement, its words, and that nothing was published — is read below through
+    // `results` and the run's own recorded journal, as every level-branch journey does.
+    let turns = world.turns();
+    assert_eq!(turns.len(), 1, "{turns:?}\n{}", world.dump());
+    let wrote = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"]
+                .as_str()
+                .is_some_and(|tool| tool.ends_with("-work"))
+        })
+        .unwrap_or_else(|| panic!("the worker turn recorded no write:\n{}", world.dump()));
+    let written = std::path::PathBuf::from(
+        wrote["args"][0]
+            .as_str()
+            .expect("the double records the path it wrote"),
+    );
+    assert_eq!(
+        written.parent().map(std::path::Path::to_path_buf),
+        Some(std::path::PathBuf::from(&turns[0].cwd)),
+        "the turn wrote outside the worktree it was given: {wrote}"
+    );
+    assert_eq!(
+        written.file_name().and_then(|name| name.to_str()),
+        Some("work.md"),
+        "the double now writes a file the base was not seeded with: {wrote}"
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // And the branch it left is level with its base, which the node says in
+    // the merge path's own words: what was compared, and that this dispatch
+    // committed nothing — not `done` under the no-change word, which is for a
+    // node that declared it expects none.
+    let node = world.run_json("rewritten", "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", world.dump());
+    assert_eq!(node["outcome"], "empty-branch", "{node}");
+    let detail = world.events_of("rewritten", "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(detail.contains("compared against origin/main"), "{detail}");
+    assert!(detail.contains("committed nothing"), "{detail}");
+    assert!(
+        !detail.contains("already carries what this dispatch committed"),
+        "a turn that wrote a tracked file's own content was read as a commit: {detail}"
+    );
+    // Nothing was published: the branch never left the session.
+    let spent: Vec<String> = world
+        .journal("rewritten")
+        .iter()
+        .filter(|event| event["source"] == "vcs")
+        .filter_map(|event| event["kind"].as_str().map(str::to_string))
+        .filter(|kind| ["push", "published", "change-opened"].contains(&kind.as_str()))
+        .collect();
+    assert!(spent.is_empty(), "a level branch was published: {spent:?}");
+    // And `results` shows a reader the same word and the same comparison.
+    world
+        .run(&["results", "rewritten"])
+        .exited(0)
+        .out_has("empty-branch")
+        .out_has("compared against origin/main");
+    repo
+}
+
 /// The tools a real dispatched turn used, read back off the CLI.
 ///
 /// There was no transcript verb at all: the evidence was retained — the
@@ -2254,13 +2411,16 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
     world.release("turn.settle");
 }
 
-/// Consuming a planner surface restarts the **real** pacemaker's clock.
+/// Consuming a planner surface restarts the **real** check-in clock of the
+/// shipped example graph.
 ///
-/// `next` is the channel's only consumer, and consumption is what resets the
-/// pacemaker — so this is the one journey that reaches
+/// `next` is the channel's only consumer, and consumption is what restarts the
+/// clock — so this is one of the journeys that reach
 /// `oneagentgraph::run::signal` on the default path rather than through the
 /// override, against a real graph that really declares a resettable `check-in`
-/// member.
+/// member. The engine names no member: which clock restarts is the graph's
+/// own `resettable` saying so, and the journey below with several clocks holds
+/// that rule member by member.
 ///
 /// The address is what this crate owns, and it is what a real sibling can
 /// judge: `oneagentgraph::run::signal` reads the run's record, refuses a member
@@ -2315,9 +2475,7 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let read = world.run_on(world.agentgraph_cmd(&["next", "paced"]), "next paced");
     read.exited(0).out_has("\"surface\"");
     assert!(
-        !read
-            .stderr
-            .contains("could not reset the check-in pacemaker"),
+        !read.stderr.contains("could not restart the check-in clock"),
         "the real sibling refused the reset: {}",
         read.stderr
     );
@@ -2367,6 +2525,192 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
         },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
+}
+
+/// The members of one graph run that recorded a `cron-reset`, off the sibling's
+/// own event log for it.
+fn members_reset_in(world: &World, graph_run: &str) -> std::collections::BTreeSet<String> {
+    world
+        .graph_journal(graph_run)
+        .iter()
+        .filter(|event| event["kind"] == "cron-reset")
+        .filter_map(|event| event["labels"]["member"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// One observed launch of an observer graph of this world's own, with the
+/// observer held so the graph run the record names stays the one every clock
+/// below belongs to. Answers the graph run's id.
+fn observed_by_clocks(world: &World, run: &str, graph: &str) -> String {
+    world.script("observer.wait", "hold");
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", graph])
+        .exited(0);
+    world.until("the observer to be watching the run", |world| {
+        world.observer_saw().len() == 1
+    });
+    let graph_run = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(graph_run, run);
+    graph_run
+}
+
+/// Which clocks a planner's reading restarts is the observer graph's own to
+/// say, and the engine names none of them.
+///
+/// A real graph whose members are named by nothing built in — an observer
+/// beside **two** resettable clocks and one that declared its cadence fixed —
+/// and one surface consumed through `next`: the sibling records a `cron-reset`
+/// on each resettable member and on no other, and the fixed member's signal
+/// sits where the sibling left it, unread, because a schedule that is not
+/// `resettable` takes no reset. An engine restarting only the first resettable
+/// member, or one still naming a member of its own, leaves a different set.
+#[test]
+fn consuming_a_surface_restarts_every_resettable_clock_the_observer_graph_declares() {
+    let world = World::new("real-resettable-clocks");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[
+        ("pulse", true),
+        ("second-pulse", true),
+        ("fixed-cadence", false),
+    ]);
+    let graph_run = observed_by_clocks(&world, "clocks", &graph);
+
+    world
+        .run_on_agentgraph(&[
+            "surface",
+            "clocks",
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+    let read = world.run_on(world.agentgraph_cmd(&["next", "clocks"]), "next clocks");
+    read.exited(0).out_has("\"surface\"");
+    assert!(
+        !read.stderr.contains("could not restart"),
+        "the reset was reported as a failure: {}",
+        read.stderr
+    );
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a clock restarting has no
+    // product-facing result — `next` hands the surface over either way, by design — and
+    // the sibling's own event log and signal directory, both derived from the graph
+    // run's id, are where what became of each member's reset *is*.
+    let signals = world
+        .graph_state()
+        .join(&graph_run)
+        .join(oneagentgraph::run::SIGNAL_DIR);
+    // On a timeout, the evidence is the sibling's and not the runs root's: what
+    // the graph run recorded, and which signals still sit unread beside it.
+    // Once, on a hosted runner, this wait ran out with the runs root saying only
+    // that the surface had been consumed, which is every reader's view but the
+    // clocks' own.
+    if !crate::harness::waited(|| {
+        let reset = members_reset_in(&world, &graph_run);
+        reset.contains("pulse") && reset.contains("second-pulse")
+    }) {
+        let recorded: Vec<String> = world
+            .graph_journal(&graph_run)
+            .iter()
+            .map(|event| {
+                format!(
+                    "{} {}",
+                    event["kind"].as_str().unwrap_or_default(),
+                    event["labels"]["member"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let unread: Vec<String> = std::fs::read_dir(&signals)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        panic!(
+            "timed out waiting for every resettable clock to record its reset; the graph run \
+             {graph_run} recorded {recorded:?} and its signal directory holds {unread:?}\n{}",
+            world.dump()
+        );
+    }
+    assert_eq!(
+        members_reset_in(&world, &graph_run),
+        ["pulse", "second-pulse"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "a clock that is not resettable, or a member with no clock, recorded a reset"
+    );
+    assert!(
+        signals.join("fixed-cadence.reset").is_file(),
+        "the fixed-cadence member's signal is not where the sibling leaves one it ignores"
+    );
+    for consumed in ["pulse", "second-pulse"] {
+        assert!(
+            !signals.join(format!("{consumed}.reset")).is_file(),
+            "{consumed}'s reset was recorded and its signal left behind"
+        );
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(
+        world.observer_saw().len(),
+        1,
+        "the observer was replaced mid-journey, so the clocks above are another run's"
+    );
+    world.release("observer.go");
+}
+
+/// An observer graph that declares no resettable member is a graph nothing
+/// restarts, and that is not a failure: the surface is delivered and `next`
+/// reports nothing on stderr.
+#[test]
+fn consuming_a_surface_under_an_observer_graph_with_no_resettable_clock_reports_no_failure() {
+    let world = World::new("real-fixed-clock");
+    world.write_graphs();
+    let graph = world.write_observer_graph_with_clocks(&[("fixed-cadence", false)]);
+    let graph_run = observed_by_clocks(&world, "fixed", &graph);
+
+    world
+        .run_on_agentgraph(&[
+            "surface",
+            "fixed",
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+    let read = world.run_on(world.agentgraph_cmd(&["next", "fixed"]), "next fixed");
+    read.exited(0).out_has("steady");
+    assert!(
+        !read.stderr.contains("could not restart"),
+        "a graph with no resettable clock was reported as a reset failure: {}",
+        read.stderr
+    );
+    assert_eq!(world.events_of("fixed", "planner-surfaced").len(), 1);
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: what the sibling did with
+    // the signal is in its own log and signal directory and nowhere on a product surface.
+    assert!(
+        members_reset_in(&world, &graph_run).is_empty(),
+        "a clock that declared its cadence fixed recorded a reset"
+    );
+    assert!(
+        world
+            .graph_state()
+            .join(&graph_run)
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("fixed-cadence.reset")
+            .is_file(),
+        "the signal is not where the sibling leaves one it ignores"
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
 }
 
 /// A view still renders when the provider-health block comes from the library.

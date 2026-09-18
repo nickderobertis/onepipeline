@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74 and 75** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78 and 79** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -1009,6 +1009,63 @@ them. `SurfaceKind` now carries every word matching
 and relays all others unchanged. Reply authors likewise carry open words, with
 the launch configuration's `planner-channel` allowlist enforced at offer and
 apply time; replay remains configuration-independent.
+
+## 79. The engine names no member of the observer graph: `monitor-edit` is `edit-applied`, the reset follows `resettable`, and the profile is `detailed` — RESOLVED
+
+**Ruling: the engine stays agnostic to the structure of the agent graphs a host
+runs. Ruled by the planner over the ask seam, on the user's constraint that
+`onepipeline` may not know what a monitor, a pacemaker, or a judge seat is: the
+engine-raised kind is `edit-applied`, with `source` the applying author's word
+and no new stored field; the check-in reset follows the recorded observer graph's
+own `resettable` flag, with no new configuration key anywhere and no member named
+by the engine; the shipped read-time profile is `detailed`, with no alias.
+`docs/contract.md` carries each ruling.**
+
+What moved, and what a recorded run still reads:
+
+- **`monitor-edit` is `edit-applied`.** An edit applied by any author other than
+  the planner is surfaced once, non-blocking, as `edit-applied`, with `source`
+  that author's word and the message `<author> applied an edit: <command>`; a
+  `finding` still raises none. The stored surface shape gained no field. A
+  journal recorded under the earlier kind still reads: its `monitor-edit`
+  surfaces fold and render under the kind and source they were written with,
+  which `tests/golden/journal-before-edit-applied.jsonl` holds through the
+  compiled binary.
+- **The member-named reset is gone.** Consuming a surface through `next` used to
+  run `oneagentgraph reset-timer RUN check-in`, naming one host's member. It now
+  restarts the clock of every member the run's recorded observer graph declares
+  `resettable` in its `schedule` — `reset-timer` to each member the graph run's
+  record declares, which the sibling honours only on a schedule that declared
+  itself `resettable` and ignores on every other, so a non-resettable member
+  keeps its cadence. A launch with no observer graph resets nothing and reports
+  nothing; a launch whose record names an observer graph but no graph run still
+  says why the clock was not reset. A launch record's `heartbeat_interval` keeps
+  its spelling.
+- **The shipped profile `monitor` is `detailed`.** `next --filter detailed` and
+  `monitor --filter detailed` read the whole merged stream, and
+  `filters.profiles.detailed` overrides it by that name. `--filter monitor` now
+  names no shipped profile and is refused naming the ones the run has — unless
+  the launch configuration declares a profile of that name, which it may under
+  any name: a launch configuration already on disk declaring a `monitor` profile
+  still loads as the profile it declared, and `--filter monitor` then reads it.
+  The launch-config schema is unchanged — a profile's name is the operator's —
+  so its version is not bumped, and the recorded goldens
+  `tests/golden/launch-config-v1.json` to `v7.json` keep the `monitor` override
+  they were written with, byte for byte: `src/filter.rs` holds each to loading
+  as the document it is, and `tests/contract.rs` holds the contract's example to
+  the schema-2 golden in every respect but that recorded name.
+- **The refusal examples name an author nothing built in knows.** The contract's
+  refusal block reads `observer` where it read the retired built-in author, and
+  its reasons are the words the linked bus answers an author granted nothing
+  with — `nothing grants it to this author` — rather than the per-op reasons the
+  retired author carried, which no linked release states any more; a launch's
+  bus configuration states its own under an author's `refusals`. The block is
+  driven through the channel's own `allows` and `allows_completion` by
+  `tests/contract.rs`, so it cannot drift again.
+- **The words.** The shipped example graph and personas under `graphs/` and
+  `personas/` keep their member and author names as examples a host may copy,
+  and the engine reads none of them at runtime. The `onepipeline monitor` view
+  verb keeps its name: it means "watch a run" and names no member.
 
 ## 33. A view reports a node's landing from a read taken when it renders, and the contract does not say so — OPEN
 

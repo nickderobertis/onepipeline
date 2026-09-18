@@ -389,7 +389,7 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     for selection in [
         vec!["watch", &run],
         vec!["watch", &run, "--all"],
-        vec!["watch", &run, "--filter", "monitor"],
+        vec!["watch", &run, "--filter", "detailed"],
     ] {
         let again = world.run(&selection);
         agreed(&again, "settled", 0);
@@ -1215,7 +1215,7 @@ fn a_cursor_from_another_run_is_refused_rather_than_resumed_from() {
         .exited(REFUSED)
         // The refusal is *this* one, and not the length or boundary refusal
         // standing in for it: those two cannot see this token at all.
-        .err_has("was printed by a watch or monitor of run")
+        .err_has("was printed by a `watch` or `monitor` of run")
         .err_has(&mine)
         .err_has(&theirs);
 
@@ -2174,7 +2174,7 @@ fn every_cursor_a_monitor_cannot_place_is_refused_before_it_renders_anything() {
     }
     refused(
         "1:someotherrun:0",
-        "was printed by a watch or monitor of run",
+        "was printed by a `watch` or `monitor` of run",
     );
     refused("1:monitorrefusals:99999999", "whose store holds");
     refused("1:monitorrefusals:3", "inside a record");
@@ -2251,7 +2251,7 @@ fn every_refusal_a_watch_makes_is_made_before_it_blocks() {
             "600",
         ])
         .exited(REFUSED)
-        .err_has("was printed by a watch or monitor of run");
+        .err_has("was printed by a `watch` or `monitor` of run");
     world
         .run(&[
             "watch",

@@ -15,11 +15,9 @@
 // names, and this suite supplies a real one. `harness.rs` carries the same suppression and
 // the full rationale.
 
-use std::io::Write;
-
 use serde_json::{json, Value};
 
-use crate::harness::{agent, double, plan_of, World, REFUSED};
+use crate::harness::{agent, double, human, plan_of, World, REFUSED};
 
 /// A configuration narrowing the monitor to `retry` alone, taking away the
 /// `cancel` the profile grants it beside `retry`.
@@ -58,6 +56,45 @@ fn launched(world: &World, path: &str, run: &str, extra: &[&str]) {
     world.until("the held node to be running", |world| {
         world.run(&["status", run]).stdout.contains("slow: running")
     });
+}
+
+/// Every surface waiting for the planner, read the way a planner reads them:
+/// `next` until it answers with none. What is asserted about a surface is
+/// asserted on what `next` handed over.
+fn surfaces_read(world: &World, run: &str) -> Vec<Value> {
+    let mut read = Vec::new();
+    loop {
+        let next = world.run(&["next", run]);
+        next.exited(0);
+        let answer = next.json();
+        if answer["surface"].is_null() {
+            return read;
+        }
+        read.push(answer["surface"].clone());
+    }
+}
+
+/// The one `edit-applied` surface among `surfaces`, held to what the contract
+/// says of it: non-blocking, sourced from `author`, and naming that author and
+/// the `add` it reports.
+fn the_edit_applied(surfaces: &[Value], author: &str) -> Value {
+    let edits: Vec<&Value> = surfaces
+        .iter()
+        .filter(|surface| surface["kind"] == "edit-applied")
+        .collect();
+    let [edit] = &edits[..] else {
+        panic!("one applied edit is one `edit-applied` surface, and a finding none: {surfaces:?}");
+    };
+    assert_eq!(edit["source"], author, "{edit}");
+    assert_eq!(edit["blocking"], json!(false), "{edit}");
+    assert!(
+        edit["message"].as_str().is_some_and(|message| {
+            message.starts_with(&format!("{author} applied an edit: "))
+                && message.contains("\"add\"")
+        }),
+        "the surface does not name the author and the edit: {edit}"
+    );
+    (*edit).clone()
 }
 
 fn channel_file(world: &World, run: &str, file: &str) -> String {
@@ -271,12 +308,19 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
                 event["payload"]["kind"] == "finding" && event["payload"]["source"] == AUTHOR
             })
     });
-    let edit_surface = world
-        .events_of(RUN, "planner-surface-queued")
-        .into_iter()
-        .find(|event| event["payload"]["kind"] == "monitor-edit")
-        .expect("the non-planner edit is surfaced");
-    assert_eq!(edit_surface["payload"]["source"], AUTHOR);
+    // The applied edit is reported once, as what it is: a non-blocking
+    // `edit-applied` from the author that applied it, naming that author — a
+    // word nothing built in knows — and the edit. The finding beside it raised
+    // no second surface: it has already said its piece. Read as the planner
+    // reads them.
+    let surfaces = surfaces_read(&world, RUN);
+    the_edit_applied(&surfaces, AUTHOR);
+    assert!(
+        surfaces
+            .iter()
+            .any(|surface| surface["kind"] == "finding" && surface["source"] == AUTHOR),
+        "the finding itself was not handed over under its author: {surfaces:?}"
+    );
 
     for (command, refusal) in [
         (
@@ -309,13 +353,20 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
     assert_eq!(world.events_of(RUN, "edit-committed").len(), before);
 
     // llmlint: ignore-block[tests_mirror_real_usage] Deliberately bypasses
-    // `reply` to prove the driver's independent trust-boundary check; appending
-    // is the real local bus transport boundary.
+    // `reply` to prove the driver's independent trust-boundary check; the local
+    // transport's own append is the real host-bus boundary. It takes the
+    // queue's lock and lands each record in one write, which a bare file append
+    // does not: that tears a record across writes, and a reconciler claiming
+    // between two of them heals the fragment away as a dead writer's tail.
     // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the
     // envelopes are spelled by hand because bypassing `reply` is the point, and
     // the gate on their spelling is the driver reading them back below: it
     // records each as rejected by *author*, which a record it could not read
     // would never reach.
+    let bus = onemessagebus::LocalTransport::open(world.run_file(RUN, "channel"))
+        .expect("the host bus opens the channel");
+    let commands = onemessagebus::QueueName::try_from(onemessagebus_agent::channel::COMMANDS)
+        .expect("the command queue's name");
     for payload in [
         json!({"id": 900, "author": "stranger", "commands": [
             {"op": "add", "node": agent("also-never", &[])}
@@ -324,18 +375,22 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
             {"op": "complete", "reason": "looks done"}
         ]}),
     ] {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(world.run_file(RUN, "channel/commands.jsonl"))
-            .expect("the host bus opens the command queue");
-        writeln!(file, "{payload}").expect("the host bus appends the envelope");
+        onemessagebus::Transport::append(&bus, &commands, payload.to_string().as_bytes())
+            .expect("the host bus appends the envelope");
     }
     // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the direct envelopes to be rejected", |world| {
         world.events_of(RUN, "edit-rejected").len() >= 2
     });
+    // Both landed whole: a reconciler that healed a fragment away would have
+    // recorded it here, and the envelope it belonged to would never be judged.
+    assert!(
+        !world.run_file(RUN, "channel/commands.jsonl.torn").exists(),
+        "the host bus's append was torn: {}",
+        std::fs::read_to_string(world.run_file(RUN, "channel/commands.jsonl.torn"))
+            .unwrap_or_default()
+    );
     let rejected = world.events_of(RUN, "edit-rejected");
     assert!(rejected.iter().any(|event| {
         event["payload"]["author"] == "stranger"
@@ -384,6 +439,63 @@ fn a_host_named_author_is_enforced_at_reply_and_at_driver_apply() {
         )
         .exited(0);
     world.release("slow.go");
+}
+
+/// An edit applied by `reply` while nothing is driving the run is reported the
+/// same way the loop reports one: one non-blocking `edit-applied` surface from
+/// the author that applied it, and none for a `finding`.
+///
+/// Which side applies an edit is an accident of whether a driver happened to be
+/// alive, and the planner reads the same report either way — through `next`,
+/// which is where a planner away from a parked run meets it.
+#[test]
+fn an_edit_applied_with_nothing_driving_is_surfaced_as_edit_applied_by_its_author() {
+    const RUN: &str = "bus-undriven-edit";
+    const AUTHOR: &str = "sentinel";
+    let world = World::new(RUN);
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel:\n    capabilities: [add, finding]\n",
+    );
+    // A human node: the attached launch returns awaiting the planner, and
+    // nothing is driving the run when the replies below arrive.
+    let path = world.plan(RUN, &plan_of(RUN, vec![human("approve", &[])]));
+    world
+        .run(&["start", &path, "--attach", "--bus-config", &file])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+
+    let applied = world.run_with_stdin(
+        &["reply", RUN],
+        &json!({"version": 3, "author": AUTHOR, "commands": [
+            {"op": "finding", "id": "approve", "message": "the approval has waited a while"},
+            {"op": "add", "node": agent("extra", &["approve"])}
+        ]})
+        .to_string(),
+    );
+    applied.exited(0);
+    assert_eq!(applied.json()["commands"], "applied", "{}", applied.stdout);
+
+    // The planner reads exactly two surfaces — the finding and the report of
+    // the applied `add` — both under the author's own word.
+    let surfaces = surfaces_read(&world, RUN);
+    the_edit_applied(&surfaces, AUTHOR);
+    let mut kinds: Vec<&str> = surfaces
+        .iter()
+        .map(|surface| surface["kind"].as_str().unwrap_or_default())
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["edit-applied", "finding"], "{surfaces:?}");
+    assert!(
+        surfaces.iter().all(|surface| surface["source"] == AUTHOR),
+        "{surfaces:?}"
+    );
+    // And the stream a supervisor watches shows the report handed over.
+    world
+        .run(&["monitor", RUN])
+        .exited(0)
+        .out_has("planner-surfaced kind=\"edit-applied\"");
 }
 
 /// Recorded identity is data, not fresh authority: removing the launch grant

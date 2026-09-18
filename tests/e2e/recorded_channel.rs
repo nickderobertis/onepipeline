@@ -128,6 +128,22 @@ fn recorded_driver_pid(record: &str) -> u64 {
         .expect("the recorded launch record names a driver pid")
 }
 
+/// The line 0.28.2 wrote on `next`'s stderr for a run that launched no observer
+/// graph: it sent a check-in reset to a graph run the record did not name, and
+/// said so. This build sends none for such a run and says nothing — a launch
+/// with no observer graph has no clock to restart, and entry 79 of
+/// `docs/contract-divergences.md` records the ruling — so the report is taken
+/// out of both answers before they are compared. It is the whole of that line
+/// and nothing else on stderr: any other word either binary writes there is
+/// still held.
+const RESET_REPORT_OF_0_28_2: &str = "onepipeline: could not reset the check-in pacemaker: \
+                                     invalid: run 'onemessagebus-repair-2' records no \
+                                     agent-graph run to address it by\n";
+
+fn without_the_reset_report(text: &str) -> String {
+    text.replace(RESET_REPORT_OF_0_28_2, "")
+}
+
 /// `text` with how long each update has been unread taken out: a view counts
 /// what is unread and says for how long, and the second half is wall-clock.
 fn aged(text: &str) -> String {
@@ -219,7 +235,7 @@ fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
         "args": args,
         "exit": output.status.code(),
         "stdout": scrubbed(&output.stdout),
-        "stderr": scrubbed(&output.stderr),
+        "stderr": without_the_reset_report(&scrubbed(&output.stderr)),
     })
 }
 
@@ -336,8 +352,15 @@ fn held_to_the_release(fixture: &str) {
     );
     for (want, got) in want.iter().zip(got) {
         for part in ["exit", "stdout", "stderr"] {
+            // The recorded answer is 0.28.2's as captured; the one report this
+            // build deliberately no longer writes is taken out of it here, as
+            // it is out of every answer produced now.
+            let want_part = match (part, want[part].as_str()) {
+                ("stderr", Some(recorded)) => json!(without_the_reset_report(recorded)),
+                _ => want[part].clone(),
+            };
             assert_eq!(
-                got[part], want[part],
+                got[part], want_part,
                 "{fixture}: `onepipeline {}` answered a different {part} than 0.28.2 did",
                 want["args"]
             );

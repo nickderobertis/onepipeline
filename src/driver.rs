@@ -755,7 +755,7 @@ fn start(args: &StartArgs) -> Result<i32> {
 /// Launch the run's observer graph, when it was launched with one.
 ///
 /// Records the graph run it minted, which is what a later `next` addresses the
-/// pacemaker by. `output` is the caller's promise about itself: an attaching
+/// check-in clocks by. `output` is the caller's promise about itself: an attaching
 /// launcher stays and relays what the observer says into the merged store, and
 /// a retained driver hands it the run's own driver log instead.
 fn observe(
@@ -997,7 +997,7 @@ fn keep_the_run_watched(
     // A retained driver's observer logs rather than relays, so what it says
     // reaches no reader but this one. Its log is read here for the one thing a
     // supervisor has to be told out of it — a member whose identity chain
-    // stopped — which for a pacemaker that dies every interval on one identity
+    // stopped — which for a scheduled member that dies every interval on one identity
     // is otherwise a payload repeated in a file nobody opens. A raise the ledger
     // refuses is said on this driver's own log rather than ending the watch:
     // the run is still being driven, and an unwatched run is the worse failure.
@@ -1091,9 +1091,9 @@ fn observer_restart_limit() -> u32 {
 /// *launch* — the graph reference, the directory, the overrides and the source
 /// filter the run was launched with — and the launch record is where all of that
 /// is. It carries the record because this process is that record's single
-/// writer: a restart moves the graph run a later `next` addresses the pacemaker
-/// by, and a reader that went on addressing the graph that died would reset a
-/// pacemaker nothing is running.
+/// writer: a restart moves the graph run a later `next` addresses the check-in
+/// clocks by, and a reader that went on addressing the graph that died would
+/// restart a clock nothing is running.
 struct ObserverWatch<'a> {
     paths: &'a RunPaths,
     /// The run's launch record, as this driver holds it.
@@ -1193,7 +1193,7 @@ impl<'a> ObserverWatch<'a> {
     /// Put what this watch has just recorded onto the run.
     ///
     /// Best effort, and the same answer either way: a record this driver could
-    /// not write leaves a later `next` addressing the pacemaker of a graph that
+    /// not write leaves a later `next` addressing the clocks of a graph that
     /// is gone, or a view reading a watch that is over as one still going. Both
     /// are worth saying out loud on the driver's own log, and neither is worth
     /// ending a working observer over.
@@ -1269,10 +1269,10 @@ fn launch_graph(
 ///
 /// **Role-neutral on purpose:** `oneagentgraph` hands this to every member of
 /// the graph carrying none of its own, so a role stated here is stated to
-/// members whose job is not the driver's — and the shipped pacemaker once acted
-/// on one. Which member drives is the consuming graph's to say, in that member's
-/// persona or in its own `task` composed from `{task}`, which expands to this
-/// text from graph schema
+/// members whose job is not the driver's — and the shipped example's scheduled
+/// member once acted on one. Which member drives is the consuming graph's to
+/// say, in that member's persona or in its own `task` composed from `{task}`,
+/// which expands to this text from graph schema
 /// [`FIRST_TASK_TOKEN_VERSION`](oneagentgraph::config::FIRST_TASK_TOKEN_VERSION)
 /// onwards.
 fn run_description(run: &str, goal: Option<&str>) -> String {
@@ -1568,7 +1568,7 @@ fn adopt(args: &AdoptArgs) -> Result<i32> {
     // The observer only, and only when the run was launched with one: what
     // adoption is *for* is the loop below, which this process runs itself. A
     // fresh observer is a fresh graph run with an id of its own, and the
-    // pacemaker is addressed by that id — so [`observe`] is what records it,
+    // clocks are addressed by that id — so [`observe`] is what records it,
     // exactly as it does for a launch, and the run names what is watching it now
     // rather than the graph that died.
     let goal = view
@@ -2110,7 +2110,8 @@ fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
 /// `onepipeline next` — the channel's only consumer.
 ///
 /// Rendering is not reading: `monitor` shows a pending surface without
-/// consuming it, and this is what advances the queue and resets the pacemaker.
+/// consuming it, and this is what advances the queue and restarts the check-in
+/// clock.
 fn next(args: &ReadArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     let view = RunView::open(&paths)?;
@@ -2147,16 +2148,20 @@ fn next(args: &ReadArgs) -> Result<i32> {
         ]),
     )?;
 
-    // Consumption is what restarts the check-in clock — the whole pacemaker
-    // reset contract. Addressed by the **graph** run's id, which is what the
-    // sibling minted and the only id its signals answer to; this run's id names
-    // a run `oneagentgraph` has never heard of. A failure to reach the sibling
-    // is reported and does not fail the read: the planner has the surface either
-    // way.
-    if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
-        .and_then(|graph_run| agentgraph::reset_timer(&graph_run, agentgraph::CHECK_IN_MEMBER))
-    {
-        eprintln!("onepipeline: could not reset the check-in pacemaker: {error}");
+    // Consumption is what restarts the check-in clock — the whole reset
+    // contract. Which clocks is the observer graph's own to say: every member it
+    // declared `resettable`, and the engine names none. Addressed by the
+    // **graph** run's id, which is what the sibling minted and the only id its
+    // signals answer to; this run's id names a run `oneagentgraph` has never
+    // heard of. A run that launched no observer graph has no clock to restart
+    // and nothing to report. A failure to reach the sibling is reported and does
+    // not fail the read: the planner has the surface either way.
+    if view.launch.observer_graph().is_some() {
+        if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
+            .and_then(|graph_run| agentgraph::reset_resettable(&graph_run))
+        {
+            eprintln!("onepipeline: could not restart the check-in clock: {error}");
+        }
     }
 
     // The surface is delivered whatever the profile said. A profile shapes the
@@ -2209,7 +2214,7 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
     // stdin refuses the command rather than queuing a surface with nothing in it.
     let message = surface_message(args)?;
     // What it is about, and what raised it, are two facts: a check-in is the
-    // pacemaker's own, and a finding typed here is advice like any other.
+    // scheduled member's own, and a finding typed here is advice like any other.
     let source = if args.kind.as_str() == SurfaceKind::CHECK_IN {
         crate::channel::source::CHECK_IN
     } else {
@@ -2220,7 +2225,7 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
         kind: args.kind.as_str().to_string(),
         message,
         source: source.to_string(),
-        // Neither is a request: a pacemaker update and a finding typed at this
+        // Neither is a request: a check-in update and a finding typed at this
         // verb are reports, and never hold a subtree back waiting for a
         // decision. A finding that means to stop one says so through the
         // envelope's `finding` op, which carries `blocking`.
@@ -2731,8 +2736,8 @@ fn deliver_verdict_half(
 
 /// Validate a reply and queue it, or apply it, and say which happened.
 ///
-/// The author's op allowlist is enforced here, before anything is queued: a
-/// monitor that asks for an op it may not issue is refused with the reason, and
+/// The author's op allowlist is enforced here, before anything is queued: an
+/// author that asks for an op it may not issue is refused with the reason, and
 /// nothing durable is written on its behalf.
 fn submit_envelope(
     paths: &RunPaths,
@@ -2823,7 +2828,7 @@ fn submit_envelope(
         ..view.state.frontier()
     };
     // Advanced as it goes, and on a **copy**, because two of the facts an edit is
-    // judged against move *within* an envelope: a monitor that parks a node and
+    // judged against move *within* an envelope: an observer that parks a node and
     // requeues it in one reply is undoing its own park, and a frontier held still
     // for the whole envelope would tell it the planner had made that park. The
     // copy is what keeps this a check: the applying pass below judges the same

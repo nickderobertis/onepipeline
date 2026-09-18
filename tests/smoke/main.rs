@@ -291,6 +291,41 @@ fn why(world: &World, run: &str) -> String {
     )
 }
 
+/// What tells this run's branch apart from every other run's on the scratch
+/// repository, beside the pid.
+///
+/// A hosted runner is a fresh machine whose process numbering starts over, so
+/// two runs an hour apart on two runners can hand this process the same pid and
+/// so the same branch — and with it, because the worker's body is derived from
+/// the branch, the same `work.md` the scratch repository's `main` already
+/// carries from the first. The worker's write leaves a clean tree, the merge
+/// path proves the branch level with `origin/main`, and the node settles
+/// `empty-branch` on a lifecycle this crate ran correctly. The workflow run and
+/// attempt are what no other runner shares; off GitHub, the clock is.
+///
+/// Both are read as the numbers GitHub issues and nothing else: what is taken
+/// from the environment goes into a branch name, so a value that is not all
+/// digits is treated as unset rather than spelled into a ref.
+fn run_stamp() -> String {
+    let github = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    match (github("GITHUB_RUN_ID"), github("GITHUB_RUN_ATTEMPT")) {
+        (Some(run), Some(attempt)) => format!("run-{run}-{attempt}"),
+        (Some(run), None) => format!("run-{run}"),
+        (None, _) => format!(
+            "at-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis())
+                .unwrap_or_default()
+        ),
+    }
+}
+
 /// One lifecycle, end to end, against the real world.
 ///
 /// Open a session, do work in it, verify it, open a pull request on GitHub,
@@ -331,15 +366,16 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
 
     // A branch per run: several pull requests may be in flight on one scratch
     // repository at once, and two runs sharing a branch name would each publish
-    // the other's work.
+    // the other's work. The pid alone does not make one — see [`run_stamp`].
     let branch = format!(
-        "onepipeline-smoke/{}-{}",
+        "onepipeline-smoke/{}-{}-{}",
         std::process::id(),
         world
             .root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        run_stamp()
     );
     let title = format!("feat: smoke {branch}");
     let _scratch = Scratch {

@@ -85,6 +85,7 @@ pub fn execute(
     references: &[crate::plan::CrossRepoReference],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
 ) -> Settlement {
     let attempts = engine::publication_attempts();
     // What each attempt's publication ended with, in order, for the settlement
@@ -107,7 +108,7 @@ pub fn execute(
     let mut notes: Vec<crate::note::RecordedNote> = Vec::new();
     loop {
         let preserved = match attempt_once(
-            executor, paths, launch, &node, references, &notes, cancel, tx,
+            executor, paths, launch, &node, references, &notes, cancel, tx, ended,
         ) {
             Attempt::Settled(settlement) => return *settlement,
             Attempt::Preserving(preserved) => preserved,
@@ -199,6 +200,7 @@ fn attempt_once(
     notes: &[crate::note::RecordedNote],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
@@ -335,7 +337,7 @@ fn attempt_once(
         if worktree.is_none() {
             crate::vcs::wait_out_the_second(began);
         }
-        let drained = engine::attempt(executor, node, cancel, tx, &build);
+        let drained = engine::attempt(executor, node, cancel, tx, &build, ended);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -397,6 +399,7 @@ fn attempt_once(
         began,
         cancel,
         tx,
+        ended,
         &token,
         branch,
     );
@@ -465,6 +468,7 @@ fn publish(
     began: std::time::SystemTime,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
     token: &onevcs::SessionToken,
     branch: Option<String>,
 ) -> Attempt {
@@ -521,6 +525,7 @@ fn publish(
             held.as_ref(),
             cancel,
             tx,
+            ended,
         ) {
             None => (None, None),
             Some(Drafted::Body(body)) => (Some(body), None),
@@ -1486,6 +1491,7 @@ fn drafted(
     held: Option<&onevcs::SessionChange>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
 ) -> Option<Drafted> {
     let graph = launch.pr_author_graph.as_deref()?;
     let Some(worktree) = worktree else {
@@ -1557,7 +1563,11 @@ fn drafted(
     // being torn down has no publication left to protect, so a journey claiming "it
     // published anyway" would be asserting the opposite of what a stop means. Deleting the
     // arm is not the alternative either: it is the same `_` a failed settlement takes.
-    match handle.wait() {
+    let waited = handle.wait();
+    // Kept until the node settles, for the reason `EndedDispatches` gives: this
+    // dispatch registered itself under the node like any other.
+    ended.keep(handle);
+    match waited {
         Ok(outcome) if outcome.succeeded => {
             // Every report the dispatch retained, read as **one** answer: a
             // fallback chain records a candidate per identity it tried, and
@@ -2327,6 +2337,7 @@ mod tests {
             &[],
             &crate::executor::CancellationToken::new(),
             &tx,
+            &engine::EndedDispatches::none(),
         );
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));

@@ -523,7 +523,54 @@ pub(crate) enum Message {
     /// no usable result.
     ChainStopped(Box<ChainStopped>),
     /// The dispatch settled.
-    Settled(Box<Settlement>),
+    Settled(Box<Settled>),
+}
+
+/// A node's settlement, and the thread that is waiting to hear it was recorded.
+///
+/// The dispatch thread sends this while it still holds every dispatch its node
+/// ended — see [`EndedDispatches`] — and lets go of them only once `recorded`
+/// has been signalled, which the loop does after `node-settled` is on the
+/// journal. Nothing else is asked of the loop: a thread whose loop has gone
+/// finds the sender dropped and lets go then.
+pub(crate) struct Settled {
+    pub settlement: Settlement,
+    /// Signalled once the settlement is on the record; dropped unsignalled where
+    /// the loop ended before it could be.
+    pub recorded: Sender<()>,
+}
+
+/// The dispatches of one node that have ended and whose node has not settled.
+///
+/// A dispatch's handle owns its entry in the run's registry — dropping the
+/// handle removes the entry — and the node it ran for settles later, on the
+/// loop's thread, once `Message::Settled` has crossed the channel and been
+/// journaled. Dropping the handle the moment its stream drained put the
+/// registry ahead of the record: between the two, the run said the node was
+/// running and no process claimed it, and a reader in that window — `host`,
+/// or a `stop` whose `taskkill /T` ends a dispatch before the driver holding
+/// it — met a running node with nothing behind it and could prove nothing.
+///
+/// So every handle a dispatch thread ends is kept here, by the thread that
+/// ended it, until the loop says the settlement is written. The entries it keeps
+/// are for processes that have exited, which is exactly what the registry's
+/// readers already know how to read: a `host` row proves such an entry stale
+/// and counts it, and a `stop` finds nothing live behind it. The handle cannot
+/// cross to the loop instead — the seam's `DispatchHandle` is not `Send` — so
+/// the thread that owns it waits for the loop's word.
+pub(crate) struct EndedDispatches(std::cell::RefCell<Vec<Box<dyn DispatchHandle>>>);
+
+impl EndedDispatches {
+    /// One per dispatch thread, made before its first dispatch: the holder
+    /// belongs to the thread that will end the dispatches, not to any of them.
+    pub(crate) fn none() -> Self {
+        Self(std::cell::RefCell::new(Vec::new()))
+    }
+
+    /// Keep one ended dispatch, and its registry entry, until the node settles.
+    pub(crate) fn keep(&self, handle: Box<dyn DispatchHandle>) {
+        self.0.borrow_mut().push(handle);
+    }
 }
 
 /// One acceptance criterion, read against the branch the node settled on.
@@ -1443,9 +1490,15 @@ fn converge(
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
                 }
-                Message::Settled(settlement) => {
+                Message::Settled(settled) => {
+                    let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
-                    settle(paths, journal, &settlement)?;
+                    settle(paths, journal, settlement)?;
+                    // Only now may the dispatch thread let go of the registry
+                    // entries its node's dispatches held: the settlement is on
+                    // the record, so no reader finds a running node no process
+                    // claims. A thread that stopped waiting is not an error.
+                    let _ = settled.recorded.send(());
                     state.refresh(paths);
                     // A node that settled may have readied its dependents, and a
                     // node that is ready again — a requeue, a retry — is announced
@@ -2746,7 +2799,7 @@ fn commit_command(
 /// **report** — a `finding` that went to the planner's surface queue, a
 /// `complete` journalled as its own `completion-requested` — changed nothing a
 /// reader folds, and calling it a committed edit made one kind carry two
-/// meanings. A correct monitor raised that as a defect twice.
+/// meanings. A correct observer raised that as a defect twice.
 ///
 /// The question is [`edits::Operation::commits_a_change`]'s, and it is
 /// deliberately wider than the desired graph: an operation that moves only the
@@ -3542,6 +3595,7 @@ fn spawn(
         .name(format!("dispatch-{}", node.id))
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
+            let ended = EndedDispatches::none();
             let settlement = if node.repo.is_some() {
                 crate::lifecycle::execute(
                     executor.as_ref(),
@@ -3551,6 +3605,7 @@ fn spawn(
                     &references,
                     &cancel,
                     &tx,
+                    &ended,
                 )
             } else {
                 execute_direct(
@@ -3561,15 +3616,31 @@ fn spawn(
                     &references,
                     &cancel,
                     &tx,
+                    &ended,
                 )
             };
-            let _ = tx.send(Message::Settled(Box::new(settlement)));
+            let (recorded, on_record) = mpsc::channel();
+            let _ = tx.send(Message::Settled(Box::new(Settled {
+                settlement,
+                recorded,
+            })));
+            // Held until the loop has journaled the settlement, or has gone:
+            // `EndedDispatches` says why the registry may not run ahead of the
+            // record. Either answer ends the wait, and then the entries go.
+            let _ = on_record.recv();
+            drop(ended);
         })
         .map_err(|e| Error::Invalid(format!("cannot start a dispatch thread: {e}")))?;
     Ok(())
 }
 
 /// Run one direct agent node: one dispatch in the selected project directory.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one dispatch's whole context, which is `spawn`'s own — the run, the graph, \
+              the node, its cross-repository references, its cancellation, where to report, \
+              and what it holds until the settlement is recorded"
+)]
 fn execute_direct(
     executor: &dyn Executor,
     run: &str,
@@ -3578,6 +3649,7 @@ fn execute_direct(
     references: &[crate::plan::CrossRepoReference],
     cancel: &CancellationToken,
     tx: &Sender<Message>,
+    ended: &EndedDispatches,
 ) -> Settlement {
     let graph = node_graph(node.agent_graph.as_ref(), default_graph);
     // The node's controls are narrowed *before* a dispatch is composed, and a
@@ -3611,7 +3683,7 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, node, cancel, tx, &request).settlement
+    attempt(executor, node, cancel, tx, &request, ended).settlement
 }
 
 /// How far one attempt got.
@@ -3659,6 +3731,7 @@ pub(crate) fn attempt(
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
+    ended: &EndedDispatches,
 ) -> Drained {
     // The node itself and not its id alone, because the one message this raises
     // crosses a thread boundary and carries the identity rather than borrowing
@@ -3681,7 +3754,13 @@ pub(crate) fn attempt(
         // says about itself.
         let mut conflicted = false;
         let drained = match executor.dispatch(request()) {
-            Ok(mut handle) => drain(handle.as_mut(), tx, id, cancel),
+            Ok(mut handle) => {
+                let drained = drain(handle.as_mut(), tx, id, cancel);
+                // Kept, not dropped: its registry entry outlives it until the
+                // node's settlement is on the record.
+                ended.keep(handle);
+                drained
+            }
             Err(error) => {
                 conflicted = crate::vcs::session_open_conflicted(&error);
                 Drained {
@@ -5212,10 +5291,7 @@ pub(crate) fn non_planner_edit(
     }
     Some(Surface {
         id: 0,
-        // llmlint: ignore[names_match_behavior] the kind keeps its word although any
-        // author but the planner raises it now: renaming it is the next node's
-        // (`onepipeline-no-member-names`), and this node was told to leave it spelled so.
-        kind: "monitor-edit".into(),
+        kind: crate::channel::SurfaceKind::EDIT_APPLIED.into(),
         message: format!(
             "{} applied an edit: {}",
             author.as_str(),
@@ -5235,7 +5311,7 @@ pub(crate) fn non_planner_edit(
 ///
 /// Its source is the envelope's author, so the journal keeps a watcher's finding
 /// and a worker's proposal apart — the same reason [`source`] separates a
-/// pacemaker update from advice.
+/// check-in update from advice.
 ///
 /// [`source`]: crate::channel::source
 pub(crate) fn finding_surface(
@@ -6438,7 +6514,7 @@ mod tests {
             stepped_past("check-in", Some((Role::Judge, 2)), "j/first", "quota"),
             served("check-in", Role::Judge, 2, "j/second"),
             // Another member's chain, which must not be read into this one's.
-            stepped_past("monitor", Some((Role::Agent, 2)), "m/first", "spawn"),
+            stepped_past("watcher", Some((Role::Agent, 2)), "m/first", "spawn"),
         ] {
             chains.read(&envelope);
             assert!(
@@ -7039,6 +7115,7 @@ mod tests {
             &[],
             &CancellationToken::new(),
             &tx,
+            &EndedDispatches::none(),
         );
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
