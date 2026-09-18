@@ -49,6 +49,7 @@ mod crossdag;
 mod delivers;
 mod destination;
 mod dispatch;
+mod dispatch_env_hook;
 mod driver;
 mod envelope_reviewer;
 mod filter;
