@@ -2926,7 +2926,10 @@ fn dirty_bytes() -> Option<u64> {
 /// rather than panicking.
 ///
 /// `ready` reads files and nothing else; `tests/AGENTS.md` says why.
-fn waited(ready: impl FnMut() -> bool) -> bool {
+///
+/// Public for the journey whose evidence on a timeout is not the runs root —
+/// [`World::until`] prints that — but a sibling's own state beside it.
+pub fn waited(ready: impl FnMut() -> bool) -> bool {
     waited_every(std::time::Duration::from_millis(20), ready)
 }
 

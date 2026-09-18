@@ -2546,10 +2546,44 @@ fn consuming_a_surface_restarts_every_resettable_clock_the_observer_graph_declar
     // product-facing result — `next` hands the surface over either way, by design — and
     // the sibling's own event log and signal directory, both derived from the graph
     // run's id, are where what became of each member's reset *is*.
-    world.until("every resettable clock to record its reset", |world| {
-        let reset = members_reset_in(world, &graph_run);
+    let signals = world
+        .graph_state()
+        .join(&graph_run)
+        .join(oneagentgraph::run::SIGNAL_DIR);
+    // On a timeout, the evidence is the sibling's and not the runs root's: what
+    // the graph run recorded, and which signals still sit unread beside it.
+    // Once, on a hosted runner, this wait ran out with the runs root saying only
+    // that the surface had been consumed, which is every reader's view but the
+    // clocks' own.
+    if !crate::harness::waited(|| {
+        let reset = members_reset_in(&world, &graph_run);
         reset.contains("pulse") && reset.contains("second-pulse")
-    });
+    }) {
+        let recorded: Vec<String> = world
+            .graph_journal(&graph_run)
+            .iter()
+            .map(|event| {
+                format!(
+                    "{} {}",
+                    event["kind"].as_str().unwrap_or_default(),
+                    event["labels"]["member"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let unread: Vec<String> = std::fs::read_dir(&signals)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        panic!(
+            "timed out waiting for every resettable clock to record its reset; the graph run \
+             {graph_run} recorded {recorded:?} and its signal directory holds {unread:?}\n{}",
+            world.dump()
+        );
+    }
     assert_eq!(
         members_reset_in(&world, &graph_run),
         ["pulse", "second-pulse"]
@@ -2558,10 +2592,6 @@ fn consuming_a_surface_restarts_every_resettable_clock_the_observer_graph_declar
             .collect(),
         "a clock that is not resettable, or a member with no clock, recorded a reset"
     );
-    let signals = world
-        .graph_state()
-        .join(&graph_run)
-        .join(oneagentgraph::run::SIGNAL_DIR);
     assert!(
         signals.join("fixed-cadence.reset").is_file(),
         "the fixed-cadence member's signal is not where the sibling leaves one it ignores"
