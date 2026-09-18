@@ -1914,14 +1914,21 @@ pub fn status(survey: &Survey) -> String {
         // while a supervisor looked for a wedge that was not there. So the two
         // are separate lines: what it is waiting for, or that it is waiting for
         // nothing but a slot.
+        //
+        // A node the driver holds for a release is neither: it is waiting on
+        // something outside the run altogether, for as long as that takes, so it
+        // says so first and the other two answers are not asked.
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            out.push_str(&format!(
-                "  {id}: ready — {}\n",
-                waiting_on(&view.state, id)
-            ));
+            match held_for_release(view, id) {
+                Some(held) => out.push_str(&format!("  {id}: {held}\n")),
+                None => out.push_str(&format!(
+                    "  {id}: ready — {}\n",
+                    waiting_on(&view.state, id)
+                )),
+            }
         }
         // What each amended node is currently judged against. Rendered whatever
         // that node's status is, because the reader this line is for is a
@@ -2439,6 +2446,95 @@ fn settled_detail(view: &RunView, node: &str) -> Option<String> {
         .and_then(|event| event.payload.get("detail"))
         .and_then(|detail| detail.as_str())
         .map(str::to_owned)
+}
+
+/// What a ready node reads as while the driver holds it for published releases,
+/// or `None` for a node no release holds.
+///
+/// Read off the run's own record rather than off the driver: the hold is the
+/// `node-held` the driver journalled with a `release` reason, which the fold keeps
+/// in [`RunState::holds`] until a `node-unheld` or the release's adoption clears
+/// it, so a view in another process reads exactly what the driver decided. The
+/// dependencies it awaits are named with the release target the node consumes of
+/// each, where it states one, and the wait is timed from the record that opened
+/// it.
+fn held_for_release(view: &RunView, id: &str) -> Option<String> {
+    let releases: Vec<&serde_json::Value> = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .filter(|reason| is_release(reason))
+        .collect();
+    if releases.is_empty() {
+        return None;
+    }
+    let consumes = view.state.graph.get(id).map(|node| &node.consumes);
+    let awaited: Vec<String> = releases
+        .iter()
+        .filter_map(|reason| reason.get("awaiting").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(
+            |dependency| match consumes.and_then(|consumes| consumes.get(dependency)) {
+                Some(target) => format!(
+                    "{} ({})",
+                    one_line(dependency),
+                    one_line(&target.to_string())
+                ),
+                None => one_line(dependency),
+            },
+        )
+        .collect();
+    let awaited = if awaited.is_empty() {
+        "a published release".to_owned()
+    } else {
+        format!("the published release of {}", awaited.join(", "))
+    };
+    let waited = release_hold_since(&view.events, id).map_or_else(String::new, |since| {
+        format!(
+            ", waited {}",
+            crate::telemetry::duration(sys::now_millis().saturating_sub(since))
+        )
+    });
+    Some(format!("held — awaiting {awaited}{waited}"))
+}
+
+/// Whether one recorded hold reason is a release hold.
+fn is_release(reason: &serde_json::Value) -> bool {
+    reason.get("kind").and_then(serde_json::Value::as_str) == Some("release")
+}
+
+/// When the release hold a node is under began: the first `node-held` naming a
+/// release since the node was last unheld, dispatched, or held for anything else.
+///
+/// A driver restates a hold as what it awaits shrinks, and an adopting driver
+/// restates the hold it inherits; neither is a new wait, so each keeps the time
+/// the first one opened.
+fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
+    let mut since = None;
+    for event in events
+        .iter()
+        .filter(|event| event.labels.node.as_deref() == Some(id))
+    {
+        match PipelineKind::from_wire(&event.kind) {
+            Some(PipelineKind::NodeHeld) => {
+                let released = event
+                    .payload
+                    .get("reasons")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|reasons| reasons.iter().any(is_release));
+                if released {
+                    since = since.or_else(|| crate::projection::millis_of(&event.ts));
+                } else {
+                    since = None;
+                }
+            }
+            Some(PipelineKind::NodeUnheld | PipelineKind::NodeDispatched) => since = None,
+            _ => {}
+        }
+    }
+    since
 }
 
 /// What a ready node is waiting on, as far as this host can tell.
