@@ -2072,6 +2072,17 @@ fn declared_members(run: &GraphRunId) -> Result<Vec<String>> {
     })
 }
 
+/// The arguments that ask the sibling's executable for one run's record.
+///
+/// Spelled once, here, and held to the sibling's own command definition by
+/// `history_show_is_spelled_as_the_sibling_parses_it` below: the executable is
+/// the sibling's and changes on its own cadence, so the spelling this crate
+/// sends is parsed through [`oneagentgraph::cli::Cli`] of the release the lock
+/// links rather than trusted.
+fn history_show_args(run: &GraphRunId) -> [&str; 3] {
+    ["history", "show", run.as_str()]
+}
+
 /// The same record, through an executable an operator named at [`BINARY_ENV`].
 ///
 /// Read into the sibling's own [`Record`](oneagentgraph::run::Record), which
@@ -2079,9 +2090,7 @@ fn declared_members(run: &GraphRunId) -> Result<Vec<String>> {
 /// run it cannot read.
 fn record_by_process(run: &GraphRunId) -> Result<oneagentgraph::run::Record> {
     let output = Command::new(binary())
-        .arg("history")
-        .arg("show")
-        .arg(run.as_str())
+        .args(history_show_args(run))
         .stdin(Stdio::null())
         .output()
         .map_err(|e| sibling(format!("cannot start `{} history show`: {e}", binary())))?;
@@ -2575,6 +2584,37 @@ pub fn health() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spelling `record_by_process` sends is the one the linked sibling's
+    /// executable parses as `history show RUN`.
+    ///
+    /// The sibling's [`Cli`](oneagentgraph::cli::Cli) is the definition its
+    /// binary is built from, so parsing this crate's arguments through it is the
+    /// drift gate on a verb this crate cannot type-check: a release that renamed
+    /// or restructured `history show` fails here, not in an operator's run.
+    #[test]
+    fn history_show_is_spelled_as_the_sibling_parses_it() {
+        use clap::Parser;
+        use oneagentgraph::cli::{Cli, Command, HistoryCommand};
+
+        let run = GraphRunId::parse("graph-run-1").expect("a run id");
+        let parsed =
+            Cli::try_parse_from(std::iter::once("oneagentgraph").chain(history_show_args(&run)))
+                .expect("the sibling parses what this crate sends it");
+        let Command::History(history) = parsed.command else {
+            panic!(
+                "`history show` parsed as another verb: {:?}",
+                parsed.command
+            );
+        };
+        assert_eq!(
+            history.command,
+            Some(HistoryCommand::Show {
+                id: run.as_str().to_string()
+            }),
+            "`history show RUN` did not parse as showing that run's record"
+        );
+    }
 
     /// Serialises every test below that reads or writes one of this module's
     /// process-global variables — `STATE_DIR_ENV`, `BINARY_ENV`, and
