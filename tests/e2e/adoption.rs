@@ -2728,6 +2728,137 @@ fn a_published_node_depending_on_a_retried_node_is_held_and_probed_on_the_replac
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+}
+
+/// A `published` node made ready **later in the same pass** than the release
+/// watch looked is held and probed before it is dispatched, not launched on the
+/// strength of a watch that never saw it ready.
+///
+/// The other shape the defect was found in. A dependency whose work reached the
+/// origin with its merge path unread holds its dependents, and what lifts that is
+/// the loop reading the host again — after the release watch has already decided
+/// what it holds this pass. The dependent it readies then reached the start of
+/// that same pass with no hold, no probe and no wait on the record. Here the
+/// engine's publication meets a host that goes dark, the landing is made with
+/// git, and the loop finds it for itself.
+#[test]
+fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_first() {
+    let world = watching("adoption-samepass")
+        // One read inside the publication, so the engine settles unverified on
+        // the host's outage rather than reading past it, and the loop's own
+        // re-read is a second apart.
+        .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: engine}\n\
+         \x20   publication: change-auto\n\
+         \x20   approvals: none\n\
+         default:\n\
+         \x20 publication: local-direct\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
+    // The closeout's read and the publication's own are refused; every read
+    // after them meets a host that answers.
+    world.script("gh.outage", "2");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-samepass",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the engine to settle unverified", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["payload"]["outcome"] == "pushed-unverified")
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+    let asked = world.probe_runs(ENGINE);
+
+    // The landing, made with git under the trailer one leaves, and onto the
+    // origin the loop reads it from.
+    let branch = branch_of(&world, &run, ENGINE);
+    let tip = crate::harness::git(&world, &engine_repo.checkout, &["rev-parse", &branch])
+        .trim()
+        .to_owned();
+    crate::harness::git(
+        &world,
+        &engine_repo.checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land {branch}\n\nOnevcs-Landed-Commit: {tip}\n"),
+            &branch,
+        ],
+    );
+    crate::harness::git(&world, &engine_repo.checkout, &["push", "origin", "main"]);
+
+    // Held or started, whichever the run does first: a hold recorded only after
+    // the dispatch it should have prevented is the failure this is about.
+    let held = |world: &World| {
+        world.events_of(&run, "node-held").iter().any(|event| {
+            event["labels"]["node"] == "consumer"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| {
+                        reasons.contains(&json!({ "kind": "release", "awaiting": [ENGINE] }))
+                    })
+        })
+    };
+    world.until("the readied consumer to be held or started", |world| {
+        held(world) || dispatched(world, &run, "consumer")
+    });
+    assert!(
+        held(&world) && !dispatched(&world, &run, "consumer"),
+        "a published node readied mid-pass was started without a release hold:\n{}",
+        world.dump()
+    );
+    world.until("the consumer's release to be asked about", |world| {
+        world.probe_runs(ENGINE) > asked
+            && answered(world, &run, "consumer").is_some_and(|said| said != "no-answer-yet")
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a published node readied mid-pass was dispatched before its release answered:\n{}",
+        world.dump()
+    );
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["dep"], json!(ENGINE));
+    assert_eq!(entries[0]["identity"], json!("github.com/owner/engine"));
+
+    // What the probe can say of a landing nobody watched land is not a release,
+    // so the person who can see one records it — and that is what starts it.
+    releases_at(&answer, "0.2.0");
+    onevcs_release(
+        &world,
+        &[
+            "acknowledge",
+            &branch,
+            "--target",
+            "crate",
+            "--version",
+            "0.2.0",
+        ],
+    );
+    world.until("the held node to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    assert_eq!(
+        settled_status(&world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    held_before_dispatched(&world, &run, "consumer");
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The release hold on one node was recorded **before** its dispatch was.
