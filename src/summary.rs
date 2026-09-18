@@ -93,7 +93,13 @@ use crate::telemetry::{self, RunTelemetry};
 /// [`NodeLanding`] keeps its shape, but a version-3 document written over a
 /// journal holding one says what a build that did not read it made of that node —
 /// work nobody landed — and serving it would contradict every view beside it.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 4;
+///
+/// **5** since `driver-adopted` clears the run's recorded stop in the fold
+/// (`RunState::stop`): `stop_recorded` keeps its name, but a version-4 document
+/// written over a journal holding a stop and then an adoption says the run is
+/// stopped, and serving it would report the adopting driver dead and the run
+/// settled — the reading the fold change exists to end.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 5;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -214,7 +220,9 @@ pub struct RunSummary {
     /// different graphs. A word no node carries is absent rather than present
     /// and zero.
     pub node_counts: BTreeMap<String, u64>,
-    /// Whether a stop has been recorded at all, however it went.
+    /// Whether a stop has been recorded at all, however it went — and no
+    /// adoption has driven the run since, which is what the fold's
+    /// [`RunState::stop`] answers.
     pub stop_recorded: bool,
     /// Whether every node of the graph reached a state the loop is finished
     /// with, so no further pass is coming.
@@ -1618,20 +1626,23 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v4.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v5.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
     /// What proves each growth is a version and not a quiet widening: a real
     /// schema 1 document, which the bounded listing's build grew five fields past,
     /// and a real schema 2 document, which carries no answer to whether a driver
-    /// let go of its run — and a real schema 3 document, written by a build that
-    /// did not read a stated landing as the node's landing. The reader below has
-    /// to refuse all three rather than read any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 3] = [
+    /// let go of its run — a real schema 3 document, written by a build that did
+    /// not read a stated landing as the node's landing — and a real schema 4
+    /// document, written by a build whose `stop_recorded` outlived the adoption
+    /// that answered it. The reader below has to refuse all four rather than read
+    /// any as one of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 4] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
+        (4, include_str!("../tests/golden/run-summary-v4.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1702,13 +1713,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_4_document_is_the_shape_the_golden_pins() {
+    fn a_schema_5_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v4.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v5.json together"
         );
     }
 
@@ -1734,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_4_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_5_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

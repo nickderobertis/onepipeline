@@ -331,6 +331,84 @@ fn a_run_a_live_watch_holds_is_not_reported_and_reads_unwatched_once_it_returns(
     world.release("docs.go");
 }
 
+/// A stopped run is settled until a driver adopts it, and live from then on.
+///
+/// The settlement this verb decides reads the run's own `stop_recorded`, and the
+/// defect this states is that the record outlived the adoption that answered it:
+/// a run stopped and then adopted — the documented way back from a driver that is
+/// not working — went on reading as settled, so the one verb meant to find a live
+/// run nobody is watching excluded it for good. The stop stays on the journal;
+/// what it no longer does is settle a run a fresh driver is driving.
+#[test]
+fn a_stopped_run_is_settled_until_it_is_adopted_and_then_reads_as_the_live_run_it_is() {
+    let world = World::new("unwatched-stopped-adopted");
+    let meeting = world.rendezvous("build");
+    let run = "unwatchedretaken";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    // The preconditions are read as `views.rs`'s takeover journeys read them:
+    // off the double's own announcement and the run's own records, because the
+    // surfaces that would say the same decide settlement through the code the
+    // defect was in.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] "the registry holds this dispatch" and
+    // "the run recorded the adoption" are said only by `host`, `status` and this verb, so
+    // polling any of them for a precondition would pass at the instant the assertion
+    // would; every claim afterwards is read off the CLI.
+    let stopped = meeting.arrived();
+    world.until("the dispatch to record its place", |world| {
+        world.registered(run, stopped.pid)
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run(&["stop", run]).exited(0);
+
+    // Stopped and not adopted: settled, so excluded however long it goes unwatched.
+    let asked = world.run(&["unwatched"]);
+    asked.exited(SUCCESS);
+    assert!(
+        asked.stdout.is_empty() && asked.stderr.is_empty(),
+        "a stopped run nobody adopted was reported: stdout {:?}, stderr {:?}",
+        asked.stdout,
+        asked.stderr
+    );
+
+    let mut adopting = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same preconditions as above, for
+    // the same reason.
+    world.until("the adoption to be recorded", |world| {
+        !world.events_of(run, "driver-adopted").is_empty()
+    });
+    let retaken = meeting.arrived();
+    assert_ne!(
+        retaken.pid, stopped.pid,
+        "the takeover's arrival is the dispatch the stop was aimed at"
+    );
+    world.until(
+        "the adopted driver's dispatch to record its place",
+        |world| world.registered(run, retaken.pid),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // Adopted: a live run nothing is watching, which is what this verb exists to
+    // find, under the word the listing gives a driven run.
+    world
+        .run(&["unwatched"])
+        .exited(RUNS_UNWATCHED)
+        .out_has(run)
+        .out_has("ACTIVE")
+        .out_has("nothing has recorded a watch on it");
+
+    let _ = adopting.kill();
+    let _ = adopting.wait();
+    stopped.release();
+    retaken.release();
+}
+
 /// A watch killed and **left unreaped by its parent** is not a live watch on the
 /// very next invocation, with nothing having cleaned up and no interval having
 /// elapsed.

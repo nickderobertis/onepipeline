@@ -3233,7 +3233,12 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   again — and so is one an operator settled at a stated landing, which the fold
   records as `landed` (entry 57). The document moved to version 4 for that: its
   shape is version 3's, but a version-3 document over a journal holding a stated
-  landing carries the answer of a build that did not read one.
+  landing carries the answer of a build that did not read one. It moved to
+  version 5 when `driver-adopted` started clearing the run's recorded stop in the
+  fold (onepipeline issue #328), on the same terms: `stop_recorded` keeps its
+  name, but a version-4 document over a journal holding a stop and then an
+  adoption says the run is stopped, and the unwatched reader would settle a run
+  a live driver had just taken over on it.
 - **`views::{RunTelemetry, Bucket, BucketName, Party, Usage}`**, re-exported
   because `RunSummary::timing` **is** the telemetry document whose shape the
   Views paragraph already fixes — eight buckets that sum exactly, per-party
@@ -3250,7 +3255,7 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "fields": [
     "schema_version",
     "run_id",
